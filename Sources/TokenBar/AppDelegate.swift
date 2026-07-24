@@ -38,6 +38,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+#if DEBUG
+        if TrayAnimationCPUTestConfiguration.current != nil {
+            startTrayAnimationCPUTest()
+            return
+        }
+#endif
         BetaMigration.runIfNeeded() // before anything reads defaults
         ClientRegistry.migrateLegacyOrderKey() // fold the old limits order into the shared tab order, likewise before reads
         // refreshIntervalMin's initializer ran at AppDelegate construction in
@@ -105,6 +111,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
     }
+
+#if DEBUG
+    /// Hermetic tray-rendering benchmark path. It intentionally skips migrations,
+    /// updater startup, defaults observers, and all polling while preserving the
+    /// shipping status-item controller, assets, renderer, and teardown ownership.
+    private func startTrayAnimationCPUTest() {
+        let controller = StatusItemController()
+        statusController = controller
+        let animator = TrayAnimator(controller: controller, source: usageSource)
+        trayAnimator = animator
+        controller.updateTitle("1.0M/min")
+        animator.start()
+    }
+#endif
 
     func applicationWillTerminate(_ notification: Notification) {
         titleRefreshTask?.cancel()

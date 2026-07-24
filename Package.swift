@@ -32,6 +32,7 @@ let package = Package(
                 .copy("Resources/anim-cat2-light"),
                 .copy("Resources/anim-parrot"),
                 .copy("Resources/anim-parrot-light"),
+                .copy("Resources/third-party"),
             ],
             linkerSettings: rustLinkerSettings
         ),

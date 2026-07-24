@@ -1,6 +1,29 @@
 import AppKit
 import TokenBarCore
 
+#if DEBUG
+struct TrayAnimationCPUTestConfiguration {
+    let style: String
+    let animated: Bool
+    let tokensPerMinute = 1_000_000.0
+
+    static let current: TrayAnimationCPUTestConfiguration? = {
+        let prefix = "--tray-animation-cpu-test="
+        guard let argument = CommandLine.arguments.first(where: { $0.hasPrefix(prefix) })
+        else { return nil }
+        let value = String(argument.dropFirst(prefix.count))
+        switch value {
+        case "cat", "parrot":
+            return TrayAnimationCPUTestConfiguration(style: value, animated: true)
+        case "static":
+            return TrayAnimationCPUTestConfiguration(style: "cat", animated: false)
+        default:
+            return nil
+        }
+    }()
+}
+#endif
+
 /// RunCat-style menu-bar animation, port of src-tauri's animation.rs: the
 /// cat (or parrot) spins faster as the live token rate climbs. Frame sets
 /// come in dark/light pairs and follow the menu bar's effective appearance —
@@ -15,11 +38,15 @@ final class TrayAnimator {
 
     private weak var controller: StatusItemController?
     private let source: any UsageDataSource
+#if DEBUG
+    private let cpuTest = TrayAnimationCPUTestConfiguration.current
+#endif
     /// Frame sets keyed by "<style>|<dark|light>".
     private let frames: [String: [NSImage]]
-    private var animationTask: Task<Void, Never>?
     private var loadTask: Task<Void, Never>?
     private var quotaTask: Task<Void, Never>?
+    private var presentedAnimationKey: String?
+    private var isStopped = true
     /// RunCat load signal in [0, 100]: tokens/min ÷ 10K, so 1M tok/min = 100.
     private var load: Double = 0
     /// Latest snapshot returned by this poller. A newer payload accepted by a
@@ -67,7 +94,6 @@ final class TrayAnimator {
     }
 
     private var defaultsObserver: NSObjectProtocol?
-    private var appearanceObserver: NSKeyValueObservation?
     /// Snapshot of the icon-affecting defaults the observer reacts to. The
     /// global didChangeNotification carries no key and fires for every write
     /// (popover height, active tab, year, quota cache…), so we compare this
@@ -95,15 +121,20 @@ final class TrayAnimator {
     }
 
     func start() {
-        startAnimationLoop()
-        startLoadPolling()
-        startQuotaPolling()
+        isStopped = false
+#if DEBUG
+        if let cpuTest {
+            load = Self.animationLoad(tokensPerMinute: cpuTest.tokensPerMinute)
+            tokensPerMinRate = cpuTest.tokensPerMinute
+            refreshIcon()
+            reportCPUTestReady(cpuTest)
+            return
+        }
+#endif
         iconSettingsSignature = Self.currentIconSignature()
-        // Re-render the gauge and restart the animation loop the moment an
-        // icon setting changes (style, animate, quota source, coloring) — the
-        // 30s gauge loop alone is too slow, and a gauge→cat/parrot switch
-        // would otherwise stall until the sleep finishes. Gated on a signature
-        // compare so unrelated defaults writes don't churn the loop.
+        controller?.setAppearanceChangeHandler { [weak self] in
+            self?.refreshIcon()
+        }
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -115,41 +146,48 @@ final class TrayAnimator {
                 if let payload = self.quota {
                     self.reconcileQuotaRemaining(with: payload)
                 }
-                self.renderGaugeIcon()
-                self.animationTask?.cancel()
-                self.startAnimationLoop()
+                self.refreshIcon()
             }
         }
-        // Re-render on dark/light mode flip so gauge icons don't show the
-        // wrong color scheme for up to 30s (the gauge loop's sleep interval).
-        appearanceObserver = NSApp.observe(
-            \.effectiveAppearance, options: [.new]
-        ) { [weak self] _, _ in
-            MainActor.assumeIsolated { self?.renderGaugeIcon() }
-        }
+        refreshIcon()
+        startLoadPolling()
+        startQuotaPolling()
     }
 
     func stop() {
-        animationTask?.cancel()
+        isStopped = true
         loadTask?.cancel()
         quotaTask?.cancel()
+        loadTask = nil
+        quotaTask = nil
         if let defaultsObserver { NotificationCenter.default.removeObserver(defaultsObserver) }
-        appearanceObserver?.invalidate()
+        defaultsObserver = nil
+        controller?.setAppearanceChangeHandler(nil)
+        controller?.stopTrayAnimation()
+        presentedAnimationKey = nil
     }
 
-    /// Draws the current gauge style immediately (no-op for cat/parrot,
-    /// whose frames the animation loop owns).
+    private var currentStyle: String {
+#if DEBUG
+        if let cpuTest { return cpuTest.style }
+#endif
+        return UserDefaults.standard.string(forKey: Self.styleKey) ?? "cat"
+    }
+
+    /// Draws the current gauge style immediately (no-op for cat/parrot).
     private func renderGaugeIcon() {
-        let style = UserDefaults.standard.string(forKey: Self.styleKey) ?? "cat"
+        let style = currentStyle
         guard let gaugeStyle = QuotaIconStyle(rawValue: style) else { return }
         let coloring = IconColoring(
             rawValue: UserDefaults.standard.string(forKey: IconColoring.storageKey) ?? ""
         ) ?? .warningOnly
-        controller?.setFrame(
+        presentedAnimationKey = nil
+        controller?.setStaticIcon(
             TrayIcons.image(
                 style: gaugeStyle, remaining: quotaRemaining,
                 dark: controller?.isDarkAppearance ?? true,
-                coloring: coloring))
+                coloring: coloring),
+            isTemplate: false)
     }
 
     /// Internal so the settings window's preview can use the same last-good
@@ -241,60 +279,92 @@ final class TrayAnimator {
     }
 
     private func currentFrames() -> [NSImage] {
-        let style = UserDefaults.standard.string(forKey: Self.styleKey) ?? "cat"
         let dark = controller?.isDarkAppearance ?? true
-        return frames["\(style)|\(dark ? "dark" : "light")"]
+        return frames["\(currentStyle)|\(dark ? "dark" : "light")"]
             ?? frames["cat|dark"] ?? []
     }
 
     private var animateEnabled: Bool {
-        UserDefaults.standard.object(forKey: Self.animateKey) == nil
+#if DEBUG
+        if let cpuTest { return cpuTest.animated }
+#endif
+        return UserDefaults.standard.object(forKey: Self.animateKey) == nil
             || UserDefaults.standard.bool(forKey: Self.animateKey)
     }
 
-    /// animation.rs: `speed = max(1, load/5)`, `interval = 500ms / speed` —
-    /// idle 2 fps, full load 40 fps.
-    private var frameInterval: Duration {
-        .milliseconds(Int(500.0 / max(1.0, load / 5.0)))
+    nonisolated static func animationLoad(tokensPerMinute: Double) -> Double {
+        min(max(0, tokensPerMinute) / 10_000.0, 100.0)
     }
 
-    private func startAnimationLoop() {
-        animationTask = Task { [weak self] in
-            var index = 0
-            var lastKey = ""
-            while !Task.isCancelled {
-                guard let self else { break }
-                let style = UserDefaults.standard.string(forKey: Self.styleKey) ?? "cat"
-                // Gauge styles: event-driven renders happen on quota
-                // changes (onQuotaUpdated) and settings changes (defaults
-                // observer). This loop only catches appearance flips (light/
-                // dark mode), so a long sleep is fine.
-                if QuotaIconStyle(rawValue: style) != nil {
-                    self.renderGaugeIcon()
-                    try? await Task.sleep(for: .seconds(30))
-                    continue
-                }
-                let set = self.currentFrames()
-                if style != lastKey {
-                    index = 0
-                    lastKey = style
-                }
-                guard !set.isEmpty else {
-                    try? await Task.sleep(for: .seconds(2))
-                    continue
-                }
-                if !self.animateEnabled {
-                    index = 0
-                    self.controller?.setFrame(set[0])
-                    try? await Task.sleep(for: .seconds(2))
-                    continue
-                }
-                self.controller?.setFrame(set[index % set.count])
-                index = (index + 1) % set.count
-                try? await Task.sleep(for: self.frameInterval)
-            }
+    nonisolated static func animationIntervalMilliseconds(load: Double) -> Int {
+        Int(500.0 / max(1.0, load / 5.0))
+    }
+
+    nonisolated static func animationLayerSpeed(load: Double) -> Double {
+        500.0 / Double(animationIntervalMilliseconds(load: load))
+    }
+
+    nonisolated static func effectiveAnimationFPS(load: Double) -> Double {
+        2.0 * animationLayerSpeed(load: load)
+    }
+
+    nonisolated static func baseAnimationDuration(frameCount: Int) -> Double {
+        Double(frameCount) / 2.0
+    }
+
+    private var animationSpeed: Float {
+        Float(Self.animationLayerSpeed(load: load))
+    }
+
+    private func refreshIcon() {
+        guard !isStopped else { return }
+        let style = currentStyle
+        if QuotaIconStyle(rawValue: style) != nil {
+            renderGaugeIcon()
+            return
+        }
+
+        let dark = controller?.isDarkAppearance ?? true
+        let frameKey = "\(style)|\(dark ? "dark" : "light")"
+        let set = frames[frameKey] ?? frames["cat|dark"] ?? []
+        guard let first = set.first else {
+            controller?.setAnimatedFrames([], speed: animationSpeed)
+            return
+        }
+
+        guard animateEnabled else {
+            presentedAnimationKey = nil
+            controller?.setStaticIcon(first, isTemplate: true)
+            return
+        }
+
+        if presentedAnimationKey != frameKey {
+            presentedAnimationKey = frameKey
+            controller?.setAnimatedFrames(set, speed: animationSpeed)
+        } else {
+            controller?.setAnimationSpeed(animationSpeed)
         }
     }
+
+    private func updateAnimationSpeedIfPresented() {
+        guard QuotaIconStyle(rawValue: currentStyle) == nil, animateEnabled,
+              presentedAnimationKey != nil
+        else { return }
+        controller?.setAnimationSpeed(animationSpeed)
+    }
+
+#if DEBUG
+    private func reportCPUTestReady(_ test: TrayAnimationCPUTestConfiguration) {
+        let frameCount = currentFrames().count
+        let duration = Self.baseAnimationDuration(frameCount: frameCount)
+        let speed = test.animated ? Self.animationLayerSpeed(load: load) : 0
+        let fps = test.animated ? Self.effectiveAnimationFPS(load: load) : 0
+        print(String(
+            format: "TRAY_CPU_TEST_READY style=%@ animated=%@ frames=%d base_duration=%.3f speed=%.3f fps=%.3f",
+            test.style, test.animated.description, frameCount, duration, speed, fps))
+        fflush(stdout)
+    }
+#endif
 
     /// OAuth quota fetch is network-bound (~30s worst case across four
     /// providers), so refresh on a 5-minute cadence — quota windows move
@@ -345,10 +415,11 @@ final class TrayAnimator {
     /// token reserved at that fetch's start; a stale (superseded) result is
     /// dropped.
     func applyRate(_ rate: Double, generation: Int) {
-        guard generation >= lastAppliedRateGen else { return }
+        guard !isStopped, generation >= lastAppliedRateGen else { return }
         lastAppliedRateGen = generation
-        load = min(rate / 10_000.0, 100.0)
+        load = Self.animationLoad(tokensPerMinute: rate)
         tokensPerMinRate = rate
+        updateAnimationSpeedIfPresented()
         onQuotaUpdated?()
     }
 
