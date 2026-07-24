@@ -25,30 +25,67 @@ import AppKit
 import CoreImage.CIFilterBuiltins
 import QuartzCore
 
-private let tokenBarStatusButtonMarker = 0x5442_4152 // "TBAR"
-
 @MainActor
 final class StatusItemAnimationSurface {
     private weak var button: NSStatusBarButton?
     private let cutoutLayer = StatusItemStaticCutoutLayer()
     private let runnerLayer = StatusItemRunnerLayer()
     private var layoutTask: Task<Void, Never>?
+    private var appearanceObservation: NSKeyValueObservation?
+    private var backingObserver: NSObjectProtocol?
+    private weak var backingWindow: NSWindow?
     private var layoutGeneration = 0
-    private var appearanceRegistration = 0
     private var isAnimated = false
     private var tornDown = false
 
     var onAppearanceChange: (() -> Void)?
 
+#if DEBUG
+    nonisolated static func rasterizedFrameMetricsForTesting(
+        _ source: NSImage,
+        scale: CGFloat
+    ) -> (pixelSize: CGSize, alphaBounds: CGRect)? {
+        guard let mask = StatusItemRunnerLayer.rasterizedFrame(
+            source,
+            scale: scale
+        ), let frame = StatusItemRunnerLayer.tintedFrame(
+            mask,
+            color: NSColor.white.cgColor
+        ) else { return nil }
+
+        let rep = NSBitmapImageRep(cgImage: frame)
+        var alphaBounds = CGRect.null
+        for y in 0 ..< rep.pixelsHigh {
+            for x in 0 ..< rep.pixelsWide
+            where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.01 {
+                alphaBounds = alphaBounds.union(
+                    CGRect(x: x, y: y, width: 1, height: 1)
+                )
+            }
+        }
+        guard !alphaBounds.isNull else { return nil }
+        return (
+            CGSize(width: frame.width, height: frame.height),
+            alphaBounds
+        )
+    }
+#endif
+
     init(button: NSStatusBarButton) {
         self.button = button
         button.wantsLayer = true
+        button.layerUsesCoreImageFilters = true
         cutoutLayer.isHidden = true
         runnerLayer.isHidden = true
         button.layer?.addSublayer(cutoutLayer)
         button.layer?.addSublayer(runnerLayer)
-        appearanceRegistration = StatusButtonAppearanceRouter.shared.register(
-            button: button, surface: self)
+        appearanceObservation = button.observe(
+            \.effectiveAppearance, options: [.new]
+        ) { [weak self] button, _ in
+            MainActor.assumeIsolated {
+                self?.buttonAppearanceDidChange(button)
+            }
+        }
         updateAppearance(button.effectiveAppearance)
     }
 
@@ -111,6 +148,25 @@ final class StatusItemAnimationSurface {
         cutoutLayer.isHidden = true
     }
 
+    private func observeBackingChanges(for window: NSWindow?) {
+        guard backingWindow !== window else { return }
+        if let backingObserver {
+            NotificationCenter.default.removeObserver(backingObserver)
+        }
+        backingObserver = nil
+        backingWindow = window
+        guard let window else { return }
+        backingObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeBackingPropertiesNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.scheduleLayout()
+            }
+        }
+    }
+
     func scheduleLayout() {
         guard !tornDown, isAnimated else { return }
         layoutGeneration += 1
@@ -124,13 +180,14 @@ final class StatusItemAnimationSurface {
                   let button = self.button
             else { return }
             button.layoutSubtreeIfNeeded()
+            self.observeBackingChanges(for: button.window)
             guard let rect = button.cell?.imageRect(forBounds: button.bounds),
                   rect.width > 0, rect.height > 0
             else { return }
             let scale = button.window?.backingScaleFactor
                 ?? NSScreen.main?.backingScaleFactor ?? 2
             self.cutoutLayer.update(frame: rect, contentsScale: scale)
-            self.runnerLayer.update(frame: rect)
+            self.runnerLayer.update(frame: rect, contentsScale: scale)
             self.cutoutLayer.isHidden = false
             self.runnerLayer.isHidden = false
         }
@@ -153,18 +210,20 @@ final class StatusItemAnimationSurface {
         layoutTask?.cancel()
         layoutTask = nil
         onAppearanceChange = nil
-        if let button {
-            StatusButtonAppearanceRouter.shared.unregister(
-                button: button, generation: appearanceRegistration)
+        appearanceObservation?.invalidate()
+        appearanceObservation = nil
+        if let backingObserver {
+            NotificationCenter.default.removeObserver(backingObserver)
         }
-        appearanceRegistration = 0
+        backingObserver = nil
+        backingWindow = nil
         runnerLayer.stop()
         runnerLayer.removeFromSuperlayer()
         cutoutLayer.backgroundFilters = nil
         cutoutLayer.removeFromSuperlayer()
     }
 
-    fileprivate func buttonAppearanceDidChange(_ button: NSStatusBarButton) {
+    private func buttonAppearanceDidChange(_ button: NSStatusBarButton) {
         guard !tornDown, self.button === button else { return }
         updateAppearance(button.effectiveAppearance)
         scheduleLayout()
@@ -200,9 +259,11 @@ private final class StatusItemStaticCutoutLayer: CALayer {
 private final class StatusItemRunnerLayer: CALayer {
     private static let frameSize = NSSize(width: 18, height: 18)
 
+    private var sourceImages: [NSImage] = []
     private var frameMasks: [CGImage] = []
     private var frames: [CGImage] = []
     private var frameIndex = 0
+    private var rasterScale: CGFloat = 1
     private var frameTimer: DispatchSourceTimer?
     private var frameInterval = 0.5
     private var tintColor = NSColor.textColor.cgColor
@@ -218,8 +279,13 @@ private final class StatusItemRunnerLayer: CALayer {
         fatalError("init(coder:) has not been implemented")
     }
 
-    private static func rasterizedFrame(_ source: NSImage) -> CGImage? {
-        let canvasSize = frameSize
+    fileprivate static func rasterizedFrame(
+        _ source: NSImage,
+        scale: CGFloat
+    ) -> CGImage? {
+        let pixelSize = NSSize(
+            width: frameSize.width * scale,
+            height: frameSize.height * scale)
         guard let sourceRep = source.representations.max(by: {
             $0.pixelsWide * $0.pixelsHigh < $1.pixelsWide * $1.pixelsHigh
         }), sourceRep.pixelsWide > 0, sourceRep.pixelsHigh > 0 else { return nil }
@@ -227,21 +293,21 @@ private final class StatusItemRunnerLayer: CALayer {
             width: sourceRep.pixelsWide,
             height: sourceRep.pixelsHigh)
         let fit = min(
-            canvasSize.width / sourceSize.width,
-            canvasSize.height / sourceSize.height)
+            frameSize.width / sourceSize.width,
+            frameSize.height / sourceSize.height)
         let drawSize = NSSize(
-            width: (sourceSize.width * fit).rounded(),
-            height: (sourceSize.height * fit).rounded())
+            width: sourceSize.width * fit,
+            height: sourceSize.height * fit)
         let drawRect = NSRect(
-            x: ((canvasSize.width - drawSize.width) / 2).rounded(.down),
-            y: ((canvasSize.height - drawSize.height) / 2).rounded(.down),
+            x: (frameSize.width - drawSize.width) / 2,
+            y: (frameSize.height - drawSize.height) / 2,
             width: drawSize.width,
             height: drawSize.height)
 
         guard let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil,
-            pixelsWide: Int(canvasSize.width),
-            pixelsHigh: Int(canvasSize.height),
+            pixelsWide: Int(pixelSize.width.rounded()),
+            pixelsHigh: Int(pixelSize.height.rounded()),
             bitsPerSample: 8,
             samplesPerPixel: 4,
             hasAlpha: true,
@@ -250,9 +316,10 @@ private final class StatusItemRunnerLayer: CALayer {
             bitmapFormat: [],
             bytesPerRow: 0,
             bitsPerPixel: 0
-        ), let context = NSGraphicsContext(bitmapImageRep: rep)
+        ) else { return nil }
+        rep.size = frameSize
+        guard let context = NSGraphicsContext(bitmapImageRep: rep)
         else { return nil }
-        rep.size = canvasSize
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = context
         context.imageInterpolation = .high
@@ -268,12 +335,11 @@ private final class StatusItemRunnerLayer: CALayer {
         return rep.cgImage
     }
 
-    private static func tintedFrame(_ mask: CGImage, color: CGColor) -> CGImage? {
-        let size = frameSize
+    fileprivate static func tintedFrame(_ mask: CGImage, color: CGColor) -> CGImage? {
         guard let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil,
-            pixelsWide: Int(size.width),
-            pixelsHigh: Int(size.height),
+            pixelsWide: mask.width,
+            pixelsHigh: mask.height,
             bitsPerSample: 8,
             samplesPerPixel: 4,
             hasAlpha: true,
@@ -282,16 +348,33 @@ private final class StatusItemRunnerLayer: CALayer {
             bitmapFormat: [],
             bytesPerRow: 0,
             bitsPerPixel: 0
-        ), let context = NSGraphicsContext(bitmapImageRep: rep)
+        ) else { return nil }
+        rep.size = frameSize
+        guard let context = NSGraphicsContext(bitmapImageRep: rep)
         else { return nil }
-        rep.size = size
+        let rect = CGRect(origin: .zero, size: frameSize)
         let cgContext = context.cgContext
         cgContext.setFillColor(color)
-        cgContext.fill(CGRect(origin: .zero, size: size))
+        cgContext.fill(rect)
         cgContext.setBlendMode(.destinationIn)
-        cgContext.draw(mask, in: CGRect(origin: .zero, size: size))
+        cgContext.draw(mask, in: rect)
         context.flushGraphics()
         return rep.cgImage
+    }
+
+    private func rebuildFrames(scale: CGFloat) {
+        let normalizedScale = max(1, scale)
+        let masks = sourceImages.compactMap {
+            Self.rasterizedFrame($0, scale: normalizedScale)
+        }
+        guard masks.count == sourceImages.count else { return }
+        rasterScale = normalizedScale
+        frameMasks = masks
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        contentsScale = normalizedScale
+        CATransaction.commit()
+        applyTint()
     }
 
     private func applyTint() {
@@ -309,11 +392,9 @@ private final class StatusItemRunnerLayer: CALayer {
 
     func setFrames(_ images: [NSImage], speed: Float) {
         guard !images.isEmpty else { return }
-        let values = images.compactMap(Self.rasterizedFrame)
-        guard values.count == images.count else { return }
-        frameMasks = values
+        sourceImages = images
         frameIndex = 0
-        applyTint()
+        rebuildFrames(scale: rasterScale)
         setSpeed(speed)
     }
 
@@ -345,17 +426,21 @@ private final class StatusItemRunnerLayer: CALayer {
         applyTint()
     }
 
-    func update(frame: CGRect) {
+    func update(frame: CGRect, contentsScale: CGFloat) {
+        if abs(contentsScale - rasterScale) > 0.01 {
+            rebuildFrames(scale: contentsScale)
+        }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         self.frame = frame
-        contentsScale = 1
+        self.contentsScale = rasterScale
         CATransaction.commit()
     }
 
     func stop() {
         frameTimer?.cancel()
         frameTimer = nil
+        sourceImages = []
         frameMasks = []
         frames = []
         frameIndex = 0
@@ -363,50 +448,5 @@ private final class StatusItemRunnerLayer: CALayer {
         CATransaction.setDisableActions(true)
         contents = nil
         CATransaction.commit()
-    }
-}
-
-@MainActor
-private final class StatusButtonAppearanceRouter {
-    static let shared = StatusButtonAppearanceRouter()
-
-    private weak var button: NSStatusBarButton?
-    private weak var surface: StatusItemAnimationSurface?
-    private var generation = 0
-
-    func register(
-        button: NSStatusBarButton,
-        surface: StatusItemAnimationSurface
-    ) -> Int {
-        generation += 1
-        self.button = button
-        self.surface = surface
-        button.tag = tokenBarStatusButtonMarker
-        return generation
-    }
-
-    func unregister(button: NSStatusBarButton, generation: Int) {
-        guard self.button === button, self.generation == generation else { return }
-        button.tag = 0
-        self.button = nil
-        surface = nil
-    }
-
-    func send(_ button: NSStatusBarButton) {
-        guard button.tag == tokenBarStatusButtonMarker,
-              self.button === button,
-              let surface
-        else { return }
-        surface.buttonAppearanceDidChange(button)
-    }
-}
-
-extension NSStatusBarButton {
-    open override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        guard tag == tokenBarStatusButtonMarker else { return }
-        MainActor.assumeIsolated {
-            StatusButtonAppearanceRouter.shared.send(self)
-        }
     }
 }

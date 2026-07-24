@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import TokenBarCore
 
@@ -56,6 +57,43 @@ enum SelfTest {
         expect(TrayAnimator.effectiveAnimationFPS(load: clampedLoad) == 40, "tray speed clamps at 40 fps")
         expect(TrayAnimator.baseAnimationDuration(frameCount: 5) == 2.5, "tray five-frame base duration")
         expect(TrayAnimator.baseAnimationDuration(frameCount: 10) == 5, "tray ten-frame base duration")
+
+#if DEBUG
+        let trayFrameURL = Bundle.tokenBarResources.url(
+            forResource: "frame-00",
+            withExtension: "png",
+            subdirectory: "anim-cat2"
+        )
+        let trayFrame = trayFrameURL.flatMap(NSImage.init(contentsOf:))
+        trayFrame?.size = NSSize(width: 18, height: 18)
+        let oneX = trayFrame.flatMap {
+            StatusItemAnimationSurface.rasterizedFrameMetricsForTesting(
+                $0,
+                scale: 1
+            )
+        }
+        let twoX = trayFrame.flatMap {
+            StatusItemAnimationSurface.rasterizedFrameMetricsForTesting(
+                $0,
+                scale: 2
+            )
+        }
+        expect(
+            oneX?.pixelSize == CGSize(width: 18, height: 18),
+            "tray 1x raster is 18 pixels"
+        )
+        expect(
+            twoX?.pixelSize == CGSize(width: 36, height: 36),
+            "tray 2x raster is 36 pixels"
+        )
+        expect(
+            twoX.map { $0.alphaBounds.width } ?? 0
+                >= (oneX.map { $0.alphaBounds.width } ?? .infinity) * 1.8
+                && (twoX.map { $0.alphaBounds.height } ?? 0)
+                    >= (oneX.map { $0.alphaBounds.height } ?? .infinity) * 1.8,
+            "tray 2x raster preserves logical alpha coverage"
+        )
+#endif
 
         // ModelColors: provider inference + shade math.
         expect(ModelColors.providerFromModel("claude-sonnet-4-6") == "anthropic", "provider claude")
