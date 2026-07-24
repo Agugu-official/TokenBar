@@ -14,6 +14,8 @@ final class StatusItemController: NSObject {
     private var defaultsObserver: NSObjectProtocol?
     private var closeObserver: NSObjectProtocol?
     private var host: NSHostingController<AnyView>?
+    private var animationSurface: StatusItemAnimationSurface?
+    private var hasPresentedIcon = false
 
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -75,16 +77,18 @@ final class StatusItemController: NSObject {
         }
 
         if let button = statusItem.button {
-            button.image = NSImage(
-                systemSymbolName: "chart.bar.fill",
-                accessibilityDescription: "TokenBar")
-            button.image?.isTemplate = true
+            let placeholder = NSImage(size: .zero)
+            placeholder.isTemplate = true
+            placeholder.accessibilityDescription = "TokenBar"
+            button.image = placeholder
             button.imagePosition = .imageLeft
             button.toolTip = "TokenBar"
+            button.setAccessibilityLabel("TokenBar")
             button.target = self
             button.action = #selector(togglePopover(_:))
             // Right-click opens the quota-source menu (battery-icon pattern).
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            animationSurface = StatusItemAnimationSurface(button: button)
         }
     }
 
@@ -92,9 +96,39 @@ final class StatusItemController: NSObject {
     /// (AppDelegate wires this to the tray animator's cache).
     var quotaPayloadProvider: (() -> AgentUsagePayload?)?
 
-    /// Swaps the menu-bar icon image (an animation frame).
-    func setFrame(_ image: NSImage) {
-        statusItem.button?.image = image
+    func setAnimatedFrames(_ frames: [NSImage], speed: Float) {
+        guard !frames.isEmpty else {
+            showFallbackIconIfNeeded()
+            return
+        }
+        hasPresentedIcon = true
+        animationSurface?.showAnimated(frames: frames, speed: speed)
+    }
+
+    func setAnimationSpeed(_ speed: Float) {
+        animationSurface?.setSpeed(speed)
+    }
+
+    func setStaticIcon(_ image: NSImage, isTemplate: Bool) {
+        hasPresentedIcon = true
+        animationSurface?.showStatic(image, isTemplate: isTemplate)
+    }
+
+    func stopTrayAnimation() {
+        animationSurface?.stopAnimation()
+    }
+
+    func setAppearanceChangeHandler(_ handler: (() -> Void)?) {
+        animationSurface?.onAppearanceChange = handler
+    }
+
+    private func showFallbackIconIfNeeded() {
+        guard !hasPresentedIcon,
+              let image = NSImage(
+                  systemSymbolName: "chart.bar.fill",
+                  accessibilityDescription: "TokenBar")
+        else { return }
+        setStaticIcon(image, isTemplate: true)
     }
 
     /// Whether the menu bar around the item renders dark (picks the white
@@ -129,6 +163,7 @@ final class StatusItemController: NSObject {
             }
         }
         button.imagePosition = value.isEmpty ? .imageOnly : .imageLeft
+        animationSurface?.scheduleLayout()
     }
 
     func showPopover() {
@@ -162,6 +197,8 @@ final class StatusItemController: NSObject {
         closeObserver = nil
         if popover.isShown { popover.performClose(nil) }
         popover.contentViewController = nil
+        animationSurface?.tearDown()
+        animationSurface = nil
         NSStatusBar.system.removeStatusItem(statusItem)
     }
 

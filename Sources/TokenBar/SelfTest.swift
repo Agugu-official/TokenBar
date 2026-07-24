@@ -38,6 +38,25 @@ enum SelfTest {
             return try? box.result?.get()
         }
 
+        // Tray animation timing: preserve the shipping integer-millisecond
+        // cadence while mapping the runner rate from 2 to 40 fps.
+        let idleLoad = TrayAnimator.animationLoad(tokensPerMinute: 0)
+        let thresholdLoad = TrayAnimator.animationLoad(tokensPerMinute: 50_000)
+        let mediumLoad = TrayAnimator.animationLoad(tokensPerMinute: 100_000)
+        let quantizedLoad = TrayAnimator.animationLoad(tokensPerMinute: 333_000)
+        let fullLoad = TrayAnimator.animationLoad(tokensPerMinute: 1_000_000)
+        let clampedLoad = TrayAnimator.animationLoad(tokensPerMinute: 2_000_000)
+        expect(TrayAnimator.effectiveAnimationFPS(load: idleLoad) == 2, "tray idle is 2 fps")
+        expect(TrayAnimator.effectiveAnimationFPS(load: thresholdLoad) == 2, "tray 50K threshold is 2 fps")
+        expect(TrayAnimator.effectiveAnimationFPS(load: mediumLoad) == 4, "tray 100K is 4 fps")
+        expect(
+            TrayAnimator.animationIntervalMilliseconds(load: quantizedLoad) == 75,
+            "tray cadence preserves integer-ms quantization")
+        expect(TrayAnimator.effectiveAnimationFPS(load: fullLoad) == 40, "tray 1M is 40 fps")
+        expect(TrayAnimator.effectiveAnimationFPS(load: clampedLoad) == 40, "tray speed clamps at 40 fps")
+        expect(TrayAnimator.baseAnimationDuration(frameCount: 5) == 2.5, "tray five-frame base duration")
+        expect(TrayAnimator.baseAnimationDuration(frameCount: 10) == 5, "tray ten-frame base duration")
+
         // ModelColors: provider inference + shade math.
         expect(ModelColors.providerFromModel("claude-sonnet-4-6") == "anthropic", "provider claude")
         expect(ModelColors.providerFromModel("gpt-5.5") == "openai", "provider gpt")
