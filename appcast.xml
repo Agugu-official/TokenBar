@@ -3,6 +3,29 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>1.8.1</title>
+            <pubDate>Fri, 24 Jul 2026 16:23:12 +0000</pubDate>
+            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.8.1</link>
+            <sparkle:version>409</sparkle:version>
+            <sparkle:shortVersionString>1.8.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>Improved:</b>
+<ul>
+<li>Animated Cat and Parrot icons now use a dedicated AppKit rendering surface. In controlled 40 FPS benchmarks, TokenBar process CPU fell from 14.938% to 0.458% for Cat and from 10.287% to 0.462% for Parrot while preserving the configured cadence; visible animation still carries WindowServer composition cost.</li>
+<li>Usage cache validation now notices related files moving, appearing, or disappearing. The first scan after updating starts cold, then later refreshes use the rebuilt cache.</li>
+</ul>
+<b>Fixes:</b>
+<ul>
+<li>Quota cards keep the last known windows during transient same-account provider failures and show the current Error. Sign-outs, account changes, authentication failures, and invalid responses still clear stale data.</li>
+<li>Local data discovery remains reliable when GUI launches lack a full shell environment.</li>
+<li>Configured roots now cover the affected default local sources and credentials. OpenCode's default usage data and OAuth credentials use XDG_DATA_HOME, with an empty value falling back to $HOME/.local/share; Gemini CLI and Antigravity CLI data, plus Antigravity OAuth credentials, use GEMINI_CLI_HOME, falling back to $HOME/.gemini.</li>
+<li>Claude version detection now runs at most once per TokenBar launch, avoiding repeated CLI starts during quota refreshes.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.8.1/TokenBar.app.tar.gz" length="8054494" type="application/octet-stream" sparkle:edSignature="hOtwEBwCATG6bwc5X8NWUWp9BADbfkWaVB1gdc/bUKPDpGREBC350SkGtlm28QHqhFFe37px7u90lyrfiMLQBA=="/>
+        </item>
+        <item>
             <title>1.7.0</title>
             <pubDate>Wed, 22 Jul 2026 20:25:01 +0000</pubDate>
             <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.7.0</link>
@@ -96,31 +119,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.6.0/TokenBar.app.tar.gz" length="7842236" type="application/octet-stream" sparkle:edSignature="fHiR6/RyKJpZDYuA2GWour0Ood72DXJQwFjRaW+41zUDvmf5AkW6cuL6ua9+g6mcYNqeVu5XYPNrNjJbngp2Aw=="/>
-        </item>
-        <item>
-            <title>1.5.0</title>
-            <pubDate>Thu, 16 Jul 2026 19:21:13 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.5.0</link>
-            <sparkle:version>299</sparkle:version>
-            <sparkle:shortVersionString>1.5.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>New:</b>
-<ul>
-<li>Browse spending by month, drill into each month's per-model usage, and choose which optional dashboard views appear.</li>
-</ul>
-<b>Improved:</b>
-<ul>
-<li>Codex Weekly historical pace now learns from a clean, account-scoped history so expected usage, run-out timing, and risk stay consistent. Learning starts fresh after this update; Linear pace is used until enough complete weeks are available.</li>
-<li>Quota cards keep pace, ETA, and risk readable by moving projection details to a second line when space is tight.</li>
-</ul>
-<b>Fixes:</b>
-<ul>
-<li>Monthly keeps message-only activity visible even when its token and cost totals are zero.</li>
-</ul>
-<p>Thanks: @yiskang</p>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.5.0/TokenBar.app.tar.gz" length="7513984" type="application/octet-stream" sparkle:edSignature="KbHPCM6RFWGztVKe5K8IA/g/LBImAgN1BRfl7ZpkvtN7oJCNENEnHgsK5SX9xsUkhSoiT/7UHIgbIg2w7a/lBw=="/>
         </item>
         <item>
             <title>1.1.1</title>
