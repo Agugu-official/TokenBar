@@ -3,6 +3,27 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>1.9.0</title>
+            <pubDate>Mon, 27 Jul 2026 17:54:23 +0000</pubDate>
+            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.9.0</link>
+            <sparkle:version>435</sparkle:version>
+            <sparkle:shortVersionString>1.9.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>New:</b>
+<ul>
+<li>TokenBar now includes Traditional Chinese. Choose System, English, or Traditional Chinese in Settings; when the selection changes, TokenBar offers to restart immediately so the new preference can take effect. Dashboards, settings, menus, charts, quota reset countdowns, usage pace and risk text, and graph controls are localized, with English fallback for missing entries.</li>
+</ul>
+<b>Fixes:</b>
+<ul>
+<li>Copilot quota windows survive optional reset dates with unexpected types, and duplicate OTEL spans keep the full observed activity duration without adding replayed token usage.</li>
+<li>Empty KIMI_CODE_HOME values fall back to the default Kimi Code directory; non-empty overrides keep their existing behavior.</li>
+<li>Provider connection errors retain typed DNS and TLS diagnostics without exposing raw transport text.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.9.0/TokenBar.app.tar.gz" length="8100448" type="application/octet-stream" sparkle:edSignature="GM1JnVY0Kudj7VWoX4VR97Zd2KiJz56/p4Fj7HeTl8V5H5pTUIjN/7IWJDwGv5RMQoWxID9GU7j/cR8jXRczAg=="/>
+        </item>
+        <item>
             <title>1.8.1</title>
             <pubDate>Fri, 24 Jul 2026 16:23:12 +0000</pubDate>
             <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.8.1</link>
@@ -84,41 +105,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.6.1/TokenBar.app.tar.gz" length="7853465" type="application/octet-stream" sparkle:edSignature="+pN1rgOr5UEmXoz3PBMdFtkjmtBsS2Zt18zvdyljE+cndNSH471lZJ9fnInTIOMtjVT19XLvKSABUJOep3XgDA=="/>
-        </item>
-        <item>
-            <title>1.6.0</title>
-            <pubDate>Tue, 21 Jul 2026 06:32:08 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.6.0</link>
-            <sparkle:version>379</sparkle:version>
-            <sparkle:shortVersionString>1.6.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>New:</b>
-<ul>
-<li>Count more local usage: expanded sources on existing clients (OpenCode v2 databases, Kiro IDE globalStorage and structured sessions, Kimi Code beside legacy Kimi) plus new first-class clients Junie and OpenCodeReview.</li>
-<li>Grok Agent Limits shows weekly SuperGrok credits and, best-effort, monthly included allowance only when the API returns used/limit; a monthly miss does not sink weekly.</li>
-<li>Historical quota pace can learn on eligible recurring windows for Codex, Claude, Grok, Antigravity, and Copilot (not every % card; not only Codex Weekly).</li>
-</ul>
-<b>Improved:</b>
-<ul>
-<li>Grok Build multi-turn usage now follows real turn_completed API usage and unified logs when present, so totals match the product more closely than context counters did. Totals may rise versus 1.5.0 — accuracy correction, not new spend.</li>
-<li>Long-context and routed pricing paths resolve cost more carefully for verified Sakana and LiteLLM-style requests.</li>
-<li>Usage cache schema advances 29→32 (via 30/31); first launch after this update rebuilds the local usage cache once so new parsers and Grok fixes are not mixed with stale rows; later refreshes stay fast.</li>
-</ul>
-<b>Fixes:</b>
-<ul>
-<li>Grok weekly quota no longer fails the whole card right after a weekly reset when percent fields are omitted.</li>
-<li>Quota card selections keep internal "|" characters so model-scoped windows are not mis-parsed.</li>
-<li>Existing Codex, Claude, Copilot, and related parsers tighten duration anchoring and dedup so shared sessions are less likely to double-count.</li>
-</ul>
-<b>Not in this release:</b>
-<ul>
-<li>Copilot Desktop / VS Code chatSessions / Hermes Windows (still in progress)</li>
-<li>Zcode</li>
-<li>Model-alias settings UI</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.6.0/TokenBar.app.tar.gz" length="7842236" type="application/octet-stream" sparkle:edSignature="fHiR6/RyKJpZDYuA2GWour0Ood72DXJQwFjRaW+41zUDvmf5AkW6cuL6ua9+g6mcYNqeVu5XYPNrNjJbngp2Aw=="/>
         </item>
         <item>
             <title>1.1.1</title>
