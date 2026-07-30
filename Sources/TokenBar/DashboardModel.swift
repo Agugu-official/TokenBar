@@ -130,10 +130,10 @@ private struct DashboardSnapshot {
     private static let yearKey = "tokenbar.dashboard.year"
 
     /// Resolve the active year filter: the `--year=` debug flag wins, else the
-    /// persisted selection. Shared by `init()`'s snapshot guard and the `year`
-    /// property initializer so the two can never drift (the guard MUST compute
-    /// the same value the property does, or it would mis-classify a consistent
-    /// snapshot as stale). nil = all time.
+    /// persisted selection. Used as `init()`'s default so the snapshot guard and
+    /// the model's `year` can never drift (the guard MUST compare the same value
+    /// the model fetches, or it would mis-classify a consistent snapshot as stale).
+    /// Callers that own process-wide settings may explicitly pass nil for all time.
     private static func resolveYear() -> String? {
         CommandLine.arguments
             .first(where: { $0.hasPrefix("--year=") })
@@ -146,19 +146,19 @@ private struct DashboardSnapshot {
     /// settings window passes false so it never writes the shared snapshot.
     init(
         cachesSnapshot: Bool = false,
-        source: any UsageDataSource = UsageDataSources.current
+        source: any UsageDataSource = UsageDataSources.current,
+        initialYear: String? = DashboardModel.resolveYear()
     ) {
         self.cachesSnapshot = cachesSnapshot
         self.source = source
+        self.year = initialYear
         // Guard snapshot restore on year-consistency: if the user changed the
         // year filter after the snapshot was written (e.g. setYear() persisted
         // the new year but reload() failed before apply() ran), the cached
         // payload is for the wrong slice — fall through to .loading so load()
-        // fetches fresh. resolveYear() is a static (no `self`); @Observable
-        // turns `year` into a computed accessor that touches self, so it is not
-        // readable here until `phase` is set — hence the shared static helper,
-        // which mirrors the `year` property initializer exactly.
-        if let snap = Self.lastSnapshot, snap.year == Self.resolveYear() {
+        // fetches fresh. Settings passes nil explicitly because its client-item
+        // controls must use the same all-time graph universe as AppDelegate.
+        if let snap = Self.lastSnapshot, snap.year == initialYear {
             payload = snap.payload
             stats = snap.stats
             modelReport = snap.modelReport
@@ -178,7 +178,7 @@ private struct DashboardSnapshot {
     /// nil = all time. Persisted so the selection survives the popover's
     /// rootView teardown/rebuild cycle.
     /// `--year=<yyyy>` preselects a year (debug/screenshot aid).
-    private(set) var year: String? = DashboardModel.resolveYear()
+    private(set) var year: String?
     /// Union of `payload.years` across loads — a year-filtered payload only
     /// reports the selected year, so remember the rest for the picker.
     private(set) var knownYears: [String] = []
@@ -189,6 +189,10 @@ private struct DashboardSnapshot {
     private(set) var hourly: HourlyReport?
     private(set) var agents: AgentsReport?
     private(set) var agentUsage: AgentUsagePayload?
+    /// True once the first `pollAgentUsage()` attempt has finished, whether it
+    /// succeeded or not. Lets a view show a terminal state instead of waiting on
+    /// a payload that may never arrive.
+    private(set) var agentUsageAttempted = false
     private(set) var trace: [TraceBucket] = []
 
     // Memo for the hidden-client Overview slice: lensContent re-evals on every
@@ -299,7 +303,21 @@ private struct DashboardSnapshot {
             ? source.refreshGraph(year: year, priority: .userInitiated)
             : source.graph(year: year, priority: .userInitiated)
         async let reportTask = source.modelReport(year: year, priority: .userInitiated)
-        guard let payload = try? await payloadTask else { return }
+        let payload: UsagePayload
+        do {
+            payload = try await payloadTask
+        } catch {
+            // A model that has never reached `.ready` must still settle. apply()
+            // spawns this reload for an emptied year filter and returns BEFORE
+            // setting `.ready`, so a failure here would otherwise strand phase on
+            // `.loading` forever — the dashboard spins and Settings keeps
+            // "looking for clients". Once ready, keep the stale-data-over-error
+            // behavior a manual refresh relies on.
+            if case .loading = phase {
+                phase = .failed("Failed to load usage: \(error)")
+            }
+            return
+        }
         let report = try? await reportTask
         apply(payload: payload, report: report)
         // If apply() cleared a now-empty year filter, it spawned its own
@@ -454,6 +472,11 @@ private struct DashboardSnapshot {
                 reconcileQuotaRemaining(with: resolved)
                 refreshSnapshotLiveData() // keep the reopen cache's quota cards current
             }
+            // Set on failure too: `agentUsage == nil` alone cannot distinguish
+            // "the first attempt is still in flight" from "the attempt finished
+            // and produced nothing", and UI that waits on the payload would spin
+            // forever against a persistent failure.
+            agentUsageAttempted = true
             try? await Task.sleep(for: .seconds(60))
         }
     }
