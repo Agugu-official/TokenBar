@@ -2081,20 +2081,35 @@ async fn claude_live_plan(
         Err(stale) => stale,
     };
 
-    let plan = tokio::time::timeout(
+    let completed = tokio::time::timeout(
         std::time::Duration::from_secs(CLAUDE_PROFILE_TIMEOUT_SECS),
         claude_profile_request(client, &credentials.access_token),
     )
     .await
     .ok()
-    .flatten()
-    .or(last_known);
+    .flatten();
+    let plan = claude_plan_or_last_known(completed, last_known);
 
     *CLAUDE_PROFILE_CACHE
         .lock()
         .unwrap_or_else(|e| e.into_inner()) =
         Some((now, account.as_str().to_string(), plan.clone()));
     plan
+}
+
+/// `completed` is `None` when the lookup timed out or failed, and `Some` when the
+/// endpoint answered — including an answer that names no plan. Only the former
+/// reuses `last_known`: resurrecting it for a live empty answer would re-stamp an
+/// obsolete label with a fresh timestamp on every poll instead of letting the
+/// caller fall back to the credential snapshot.
+fn claude_plan_or_last_known(
+    completed: Option<Option<String>>,
+    last_known: Option<String>,
+) -> Option<String> {
+    match completed {
+        Some(live) => live,
+        None => last_known,
+    }
 }
 
 /// `Ok` is a fresh hit to use as-is; `Err` carries the last known live plan for
@@ -2119,7 +2134,12 @@ fn claude_cached_plan(
     }
 }
 
-async fn claude_profile_request(client: &reqwest::Client, access_token: &str) -> Option<String> {
+/// `None` is a failed lookup; `Some(None)` is a live answer that names no plan.
+/// The caller must not treat the second as the first.
+async fn claude_profile_request(
+    client: &reqwest::Client,
+    access_token: &str,
+) -> Option<Option<String>> {
     let response = client
         .get(CLAUDE_PROFILE_URL)
         .bearer_auth(access_token)
@@ -2133,7 +2153,7 @@ async fn claude_profile_request(client: &reqwest::Client, access_token: &str) ->
         return None;
     }
     let profile: ClaudeProfileResponse = response.json().await.ok()?;
-    profile.organization.as_ref().and_then(claude_profile_plan)
+    Some(profile.organization.as_ref().and_then(claude_profile_plan))
 }
 
 /// `claude_max` + `default_claude_max_5x` -> `Max 5x`; `claude_pro` -> `Pro`.
@@ -6207,6 +6227,28 @@ mod tests {
         scope.cleanup();
     }
 
+    /// Both cache tests write the same process-wide static, and Cargo runs tests
+    /// in parallel by default.
+    static CLAUDE_PROFILE_CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn claude_plan_keeps_the_last_known_only_when_the_lookup_did_not_answer() {
+        let known = || Some("Max 5x".to_string());
+
+        // Timed out or failed -> keep the last known live plan.
+        assert_eq!(claude_plan_or_last_known(None, known()), known());
+        // Answered with a plan -> use it, even when it differs from the cache.
+        assert_eq!(
+            claude_plan_or_last_known(Some(Some("Max 20x".into())), known()),
+            Some("Max 20x".into())
+        );
+        // Answered with no plan -> a live empty answer is not a failure; the
+        // caller falls back to the credential snapshot rather than re-stamping
+        // an obsolete label.
+        assert_eq!(claude_plan_or_last_known(Some(None), known()), None);
+        assert_eq!(claude_plan_or_last_known(None, None), None);
+    }
+
     #[test]
     fn claude_profile_plan_reports_the_live_subscription() {
         let profile = |body: &str| {
@@ -6239,6 +6281,9 @@ mod tests {
 
     #[test]
     fn claude_cached_plan_separates_fresh_hits_from_fallback_values() {
+        let _cache_guard = CLAUDE_PROFILE_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let now = Utc::now();
         let set = |entry| {
             *CLAUDE_PROFILE_CACHE
@@ -6302,6 +6347,9 @@ mod tests {
     /// timeout, once per poll.
     #[tokio::test]
     async fn claude_live_plan_is_bounded_and_caches_its_failure() {
+        let _cache_guard = CLAUDE_PROFILE_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
