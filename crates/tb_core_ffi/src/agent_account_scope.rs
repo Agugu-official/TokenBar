@@ -44,6 +44,12 @@ impl AccountScope {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Distinct scopes for tests that only need identity, not a real lineage.
+    #[cfg(test)]
+    pub(crate) fn for_test(value: &str) -> Self {
+        Self(value.to_string())
+    }
 }
 
 impl std::fmt::Debug for AccountScope {

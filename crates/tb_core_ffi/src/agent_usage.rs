@@ -27,6 +27,8 @@ const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_REFRESH_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+// The live subscription plan; the usage payload carries none.
+const CLAUDE_PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 const CLAUDE_REFRESH_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const CLAUDE_KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
@@ -1111,6 +1113,39 @@ struct ClaudeExtraUsage {
 }
 
 #[derive(Debug, Deserialize)]
+struct ClaudeProfileResponse {
+    #[serde(default)]
+    organization: Option<ClaudeProfileOrganization>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeProfileOrganization {
+    #[serde(default)]
+    organization_type: Option<String>,
+    #[serde(default)]
+    rate_limit_tier: Option<String>,
+}
+
+/// `(fetched_at, account_scope, plan)` — keyed on the verified account scope, not
+/// the access token: the scope survives a token refresh (which happens far more
+/// often than a plan change) while still refusing to serve another account's plan.
+//
+// ponytail: a rotation the Claude CLI performs itself fragments the scope by
+// design (an external marker replacement is indistinguishable from an account
+// switch), so the retained plan is dropped and a profile failure in that same
+// window shows the stale Keychain label for up to the TTL — the behavior that
+// predates this cache. Fixing it needs an account identity stable across
+// external rotations, and the only authoritative source for one is the endpoint
+// that just failed.
+type ClaudeProfileCacheEntry = (DateTime<Utc>, String, Option<String>);
+static CLAUDE_PROFILE_CACHE: Mutex<Option<ClaudeProfileCacheEntry>> = Mutex::new(None);
+/// A subscription changes far more slowly than the 60s/300s quota polls.
+const CLAUDE_PROFILE_TTL_SECS: i64 = 3600;
+/// Short next to the 30s usage timeout: a slow profile endpoint costs a stale
+/// plan label, never a delayed quota payload.
+const CLAUDE_PROFILE_TIMEOUT_SECS: u64 = 5;
+
+#[derive(Debug, Deserialize)]
 struct ClaudeRefreshResponse {
     access_token: String,
     #[serde(default, deserialize_with = "deserialize_optional_non_empty_string")]
@@ -2001,11 +2036,15 @@ async fn fetch_claude_oauth_usage_request(
                 updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
                 identity: Some(AgentIdentity {
                     email: None,
-                    plan: first_non_empty([
-                        credentials.subscription_type.as_deref(),
-                        credentials.rate_limit_tier.as_deref(),
-                    ])
-                    .map(clean_plan),
+                    plan: claude_live_plan(&client, credentials, &account_scope)
+                        .await
+                        .or_else(|| {
+                            first_non_empty([
+                                credentials.subscription_type.as_deref(),
+                                credentials.rate_limit_tier.as_deref(),
+                            ])
+                            .map(clean_plan)
+                        }),
                 }),
                 account_scope: Ok(account_scope),
                 windows,
@@ -2016,6 +2055,110 @@ async fn fetch_claude_oauth_usage_request(
             cache_binding,
         },
     )
+}
+
+/// Live plan label from `/api/oauth/profile`.
+///
+/// The Keychain's `subscriptionType` is a snapshot written at login: upgrading a
+/// subscription never rewrites it, so it keeps claiming Pro on a Max account.
+/// The usage JSON carries no plan at all, and the profile endpoint is the only
+/// live source. It needs `user:profile`, which the caller already proved by
+/// getting a usable usage response. Failures fall back to the stored snapshot.
+///
+/// This is optional enrichment on a path every provider's snapshot waits for, so
+/// it is bounded well inside the usage request's own 30s timeout and its result
+/// is cached even when it fails — an unreachable endpoint must not re-cost a
+/// request on every 60s/300s poll, nor stretch the expired-token path (refresh +
+/// usage, ~60s) any further.
+async fn claude_live_plan(
+    client: &reqwest::Client,
+    credentials: &ClaudeCredentials,
+    account: &AccountScope,
+) -> Option<String> {
+    let now = Utc::now();
+    let last_known = match claude_cached_plan(now, account) {
+        Ok(fresh) => return fresh,
+        Err(stale) => stale,
+    };
+
+    let plan = tokio::time::timeout(
+        std::time::Duration::from_secs(CLAUDE_PROFILE_TIMEOUT_SECS),
+        claude_profile_request(client, &credentials.access_token),
+    )
+    .await
+    .ok()
+    .flatten()
+    .or(last_known);
+
+    *CLAUDE_PROFILE_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) =
+        Some((now, account.as_str().to_string(), plan.clone()));
+    plan
+}
+
+/// `Ok` is a fresh hit to use as-is; `Err` carries the last known live plan for
+/// this account (if any), which a failed request falls back on before the caller
+/// drops to the stale Keychain snapshot.
+fn claude_cached_plan(
+    now: DateTime<Utc>,
+    account: &AccountScope,
+) -> Result<Option<String>, Option<String>> {
+    let guard = CLAUDE_PROFILE_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    match guard.as_ref() {
+        Some((fetched_at, cached_account, plan)) if cached_account == account.as_str() => {
+            if (now - *fetched_at).num_seconds() < CLAUDE_PROFILE_TTL_SECS {
+                Ok(plan.clone())
+            } else {
+                Err(plan.clone())
+            }
+        }
+        _ => Err(None),
+    }
+}
+
+async fn claude_profile_request(client: &reqwest::Client, access_token: &str) -> Option<String> {
+    let response = client
+        .get(CLAUDE_PROFILE_URL)
+        .bearer_auth(access_token)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header(reqwest::header::USER_AGENT, claude_user_agent())
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let profile: ClaudeProfileResponse = response.json().await.ok()?;
+    profile.organization.as_ref().and_then(claude_profile_plan)
+}
+
+/// `claude_max` + `default_claude_max_5x` -> `Max 5x`; `claude_pro` -> `Pro`.
+/// The multiplier only exists on the rate-limit tier, so it is appended when the
+/// tier ends in one.
+fn claude_profile_plan(org: &ClaudeProfileOrganization) -> Option<String> {
+    let kind = org
+        .organization_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let base = clean_plan(kind.strip_prefix("claude_").unwrap_or(kind));
+    let multiplier = org
+        .rate_limit_tier
+        .as_deref()
+        .and_then(|tier| tier.rsplit('_').next())
+        .filter(|part| {
+            part.len() > 1
+                && part.ends_with('x')
+                && part[..part.len() - 1].chars().all(|c| c.is_ascii_digit())
+        });
+    Some(match multiplier {
+        Some(multiplier) => format!("{base} {multiplier}"),
+        None => base,
+    })
 }
 
 /// Fallback for inference-only tokens (`claude setup-token`): the oauth/usage
@@ -6062,6 +6205,171 @@ mod tests {
             assert_eq!(row["paceStatus"]["reason"], "windowIdentity");
         }
         scope.cleanup();
+    }
+
+    #[test]
+    fn claude_profile_plan_reports_the_live_subscription() {
+        let profile = |body: &str| {
+            let parsed: ClaudeProfileResponse = serde_json::from_str(body).unwrap();
+            parsed.organization.as_ref().and_then(claude_profile_plan)
+        };
+
+        // The account this endpoint was added for: Keychain still says "pro".
+        assert_eq!(
+            profile(
+                r#"{"organization":{"organization_type":"claude_max","rate_limit_tier":"default_claude_max_5x"}}"#
+            )
+            .as_deref(),
+            Some("Max 5x")
+        );
+        assert_eq!(
+            profile(
+                r#"{"organization":{"organization_type":"claude_pro","rate_limit_tier":"default_claude_ai"}}"#
+            )
+            .as_deref(),
+            Some("Pro")
+        );
+        // No organization type -> nothing to report, so the caller keeps its fallback.
+        assert_eq!(
+            profile(r#"{"organization":{"rate_limit_tier":"default_claude_max_20x"}}"#),
+            None
+        );
+        assert_eq!(profile(r#"{}"#), None);
+    }
+
+    #[test]
+    fn claude_cached_plan_separates_fresh_hits_from_fallback_values() {
+        let now = Utc::now();
+        let set = |entry| {
+            *CLAUDE_PROFILE_CACHE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = entry;
+        };
+
+        // Fresh: serve it without spending a request on the 60s/300s poll.
+        set(Some((
+            now,
+            "scope-a".to_string(),
+            Some("Max 5x".to_string()),
+        )));
+        assert_eq!(
+            claude_cached_plan(now, &AccountScope::for_test("scope-a")),
+            Ok(Some("Max 5x".into()))
+        );
+
+        // Expired: not a hit, but still the value a failed request falls back on
+        // instead of dropping to the stale Keychain snapshot. The key is the
+        // account scope, so this survives the token refresh that happens far more
+        // often than a plan change.
+        let old = now - chrono::Duration::seconds(CLAUDE_PROFILE_TTL_SECS + 1);
+        set(Some((
+            old,
+            "scope-a".to_string(),
+            Some("Max 5x".to_string()),
+        )));
+        assert_eq!(
+            claude_cached_plan(now, &AccountScope::for_test("scope-a")),
+            Err(Some("Max 5x".into()))
+        );
+
+        // Another account's entry is never served or fallen back on.
+        set(Some((
+            now,
+            "scope-b".to_string(),
+            Some("Max 5x".to_string()),
+        )));
+        assert_eq!(
+            claude_cached_plan(now, &AccountScope::for_test("scope-a")),
+            Err(None)
+        );
+
+        // A cached failure is a real hit: it is what stops the retry every poll.
+        set(Some((now, "scope-a".to_string(), None)));
+        assert_eq!(
+            claude_cached_plan(now, &AccountScope::for_test("scope-a")),
+            Ok(None)
+        );
+
+        set(None);
+        assert_eq!(
+            claude_cached_plan(now, &AccountScope::for_test("scope-a")),
+            Err(None)
+        );
+    }
+
+    /// A profile endpoint that accepts the connection and then says nothing —
+    /// the shape that would otherwise sit on the usage request's full 30s
+    /// timeout, once per poll.
+    #[tokio::test]
+    async fn claude_live_plan_is_bounded_and_caches_its_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _accepted = listener.accept().await;
+            std::future::pending::<()>().await;
+        });
+
+        // Entry written before a token refresh: same account scope, and the
+        // credentials now carry the rotated token.
+        let credentials = claude_test_login_credentials();
+        let expired = Utc::now() - chrono::Duration::seconds(CLAUDE_PROFILE_TTL_SECS + 1);
+        *CLAUDE_PROFILE_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) =
+            Some((expired, "scope-a".to_string(), Some("Max 5x".to_string())));
+
+        let client = provider_http_client_builder()
+            .no_proxy()
+            .resolve("api.anthropic.com", address)
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let plan =
+            claude_live_plan(&client, &credentials, &AccountScope::for_test("scope-a")).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(CLAUDE_PROFILE_TIMEOUT_SECS + 5),
+            "profile lookup rode the usage timeout instead of its own: {elapsed:?}"
+        );
+        // The last known live plan survives both the failed request and the token
+        // rotation; only a cold cache drops to the Keychain snapshot.
+        assert_eq!(plan.as_deref(), Some("Max 5x"));
+        // Cached despite failing, so the next poll does not pay for it again.
+        assert_eq!(
+            claude_cached_plan(Utc::now(), &AccountScope::for_test("scope-a")),
+            Ok(Some("Max 5x".into()))
+        );
+
+        // A different account with the cache still warm: it must neither serve nor
+        // fall back on scope-a's plan, and its own failure has to be cached too —
+        // otherwise every poll re-pays for the same refusal.
+        let refused = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let client = provider_http_client_builder()
+            .no_proxy()
+            .resolve("api.anthropic.com", refused)
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            claude_live_plan(&client, &credentials, &AccountScope::for_test("scope-b")).await,
+            None
+        );
+        assert_eq!(
+            claude_cached_plan(Utc::now(), &AccountScope::for_test("scope-b")),
+            Ok(None)
+        );
+
+        *CLAUDE_PROFILE_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     #[test]
