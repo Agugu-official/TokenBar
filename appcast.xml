@@ -3,6 +3,34 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>1.10.0</title>
+            <pubDate>Sun, 02 Aug 2026 14:39:54 +0000</pubDate>
+            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.10.0</link>
+            <sparkle:version>461</sparkle:version>
+            <sparkle:shortVersionString>1.10.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>New:</b>
+<ul>
+<li>Add optional menu bar items for individual clients, showing a brand icon and remaining quota for Auto or a selected window; clicking one opens TokenBar on that client.</li>
+<li>Settings now uses native sidebar navigation for Menu Bar, Dashboard, General, and About, with the live preview kept visible.</li>
+<li>Drag client tabs to reorder them directly in the popover; Overview stays first and hidden clients keep their saved positions.</li>
+</ul>
+<b>Improved:</b>
+<ul>
+<li>Historical quota pace can start once current-cycle evidence passes quality checks; insufficient history remains in learning mode and unvalidated risk stays hidden.</li>
+</ul>
+<b>Fixes:</b>
+<ul>
+<li>Claude quota cards reflect live Pro and Max plan changes instead of a stale login-time label.</li>
+<li>Grok usage is attributed more safely across process restarts and subagents; ambiguous evidence stays unattributed.</li>
+<li>Popover height dragging remains responsive, and Settings and Quit continue responding normally after resizing.</li>
+</ul>
+<p>Thanks: @amikai</p>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.10.0/TokenBar.app.tar.gz" length="8299789" type="application/octet-stream" sparkle:edSignature="7xZZTZq4NbzYQAIHhdmKXbR1LJTgOPbKzcJ3gxG87Ll1HE3suCv8vTPqf3ru+v/ajwcoa+ey9gaQO9sX0nDPBw=="/>
+        </item>
+        <item>
             <title>1.9.0</title>
             <pubDate>Mon, 27 Jul 2026 17:54:23 +0000</pubDate>
             <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.9.0</link>
@@ -85,26 +113,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.6.2/TokenBar.app.tar.gz" length="7854734" type="application/octet-stream" sparkle:edSignature="EIj9p7XLYTP9JIBoseiX/Dsb+rpF09FFlqNvAMGnCxEX3Se0L7XWuAdluxINTOrjre3gtJOEQ1NSQZLURGlrDQ=="/>
-        </item>
-        <item>
-            <title>1.6.1</title>
-            <pubDate>Tue, 21 Jul 2026 12:42:52 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.6.1</link>
-            <sparkle:version>382</sparkle:version>
-            <sparkle:shortVersionString>1.6.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>Improved:</b>
-<ul>
-<li>Token Usage (2D) and Models popover tooltips clamp inside the visible scroll area, dodge the cursor again, and stay above liquid-glass cards so they no longer hide under the footer or neighboring cards.</li>
-</ul>
-<b>Fixes:</b>
-<ul>
-<li>Resizing the popover height then hovering no longer leaves a fake tooltip dodge from a stale viewport.</li>
-<li>Models tooltip overlay no longer steals hover from the row underneath.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.6.1/TokenBar.app.tar.gz" length="7853465" type="application/octet-stream" sparkle:edSignature="+pN1rgOr5UEmXoz3PBMdFtkjmtBsS2Zt18zvdyljE+cndNSH471lZJ9fnInTIOMtjVT19XLvKSABUJOep3XgDA=="/>
         </item>
         <item>
             <title>1.1.1</title>
