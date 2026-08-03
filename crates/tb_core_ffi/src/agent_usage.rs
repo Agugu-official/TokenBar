@@ -4064,12 +4064,18 @@ fn append_claude_scoped_windows(
         if flat_model_slugs.contains(&display_name_slug) {
             continue;
         }
-        let Some(slug) = model_id_slug
-            .filter(|slug| !slug.is_empty())
-            .or_else(|| (!display_name_slug.is_empty()).then_some(display_name_slug.clone()))
-        else {
+        // Identity comes from the display name, never the model id, even though
+        // the id looks like the more stable choice. The live payload reports
+        // `scope.model.id: null` while the field exists, so Anthropic populating
+        // it later would silently move this window's `card_id` and window key —
+        // dropping the user's persisted gauge selection (Swift matches
+        // `clientId|cardId` exactly) and restarting its quota-history series —
+        // with no visible change to the label. A display-name rename is the only
+        // way identity moves now, and that one is at least visible to the user.
+        if display_name_slug.is_empty() {
             continue;
-        };
+        }
+        let slug = display_name_slug;
         if !emitted_slugs.insert(slug.clone()) {
             continue;
         }
@@ -6851,7 +6857,7 @@ mod tests {
         let windows = claude_windows(&usage, now);
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].label, "Fable only");
-        assert_eq!(windows[0].card_id, "weekly_scoped.claude-fable-5-promo.v1");
+        assert_eq!(windows[0].card_id, "weekly_scoped.fable.v1");
         assert_eq!(windows[0].used_percent, 12.5);
         assert_eq!(
             windows[0].resets_at.as_deref(),
@@ -6940,7 +6946,7 @@ mod tests {
         let windows = claude_windows(&usage, now);
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].label, "Opus only");
-        assert_eq!(windows[0].card_id, "weekly_scoped.claude-opus-5.v1");
+        assert_eq!(windows[0].card_id, "weekly_scoped.opus.v1");
         assert_eq!(windows[0].used_percent, 80.0);
     }
 
@@ -7069,7 +7075,7 @@ mod tests {
                  }}},
                 {"kind": "weekly_scoped", "group": "weekly", "percent": 99,
                  "scope": {"model": {
-                    "id": "claude/fable.5:promo", "display_name": "Fable Promo"
+                    "id": "claude/fable.5:promo-v2", "display_name": "Fable"
                  }}}
             ]
         }"#;
@@ -7079,6 +7085,41 @@ mod tests {
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].used_percent, 12.0);
         assert_eq!(windows[0].label, "Fable only");
+    }
+
+    /// Regression: `scope.model.id` is null in the live payload but the field
+    /// exists, so Anthropic populating it later must not move the window's
+    /// identity. A moved `card_id` silently drops the user's persisted gauge
+    /// selection (Swift matches `clientId|cardId` exactly) and restarts the
+    /// quota-history series, with no visible change to the label.
+    #[test]
+    fn claude_scoped_identity_survives_model_id_appearing() {
+        let with_null_id = r#"{
+            "limits": [{"kind": "weekly_scoped", "group": "weekly", "percent": 7,
+                        "scope": {"model": {"id": null, "display_name": "Fable"}}}]
+        }"#;
+        let with_populated_id = r#"{
+            "limits": [{"kind": "weekly_scoped", "group": "weekly", "percent": 7,
+                        "scope": {"model": {
+                            "id": "claude/fable.5:promo", "display_name": "Fable"
+                        }}}]
+        }"#;
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+
+        let before = claude_windows(
+            &serde_json::from_str::<ClaudeUsageResponse>(with_null_id).unwrap(),
+            now,
+        );
+        let after = claude_windows(
+            &serde_json::from_str::<ClaudeUsageResponse>(with_populated_id).unwrap(),
+            now,
+        );
+
+        assert_eq!(before.len(), 1);
+        assert_eq!(after.len(), 1);
+        assert_eq!(before[0].card_id, "weekly_scoped.fable.v1");
+        assert_eq!(after[0].card_id, before[0].card_id);
+        assert_eq!(after[0].window_key, before[0].window_key);
     }
 
     #[test]
