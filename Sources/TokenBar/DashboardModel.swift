@@ -80,11 +80,9 @@ enum AgentUsagePublicationCoordinator {
 /// load so a fresh DashboardModel can start in `.ready` state instead of
 /// flashing "Loading usage…" every time the popover reopens.
 ///
-/// Only `hourly`/`agents` are excluded: they are the lazy lenses that
-/// `ensureData(for:)` refetches *solely when nil*, so restoring stale non-nil
-/// values would strand them on a previous year's slice (Codex P2-1/P2-3)
-/// until the 60s pollGraph tick. `agentUsage`/`trace` are NOT lazy lenses —
-/// their pollers (`pollAgentUsage`/`pollTrace`) fetch-first and overwrite
+/// `hourly` is excluded because it has its own year/client-keyed process cache;
+/// `agents` remains uncached. `agentUsage`/`trace` are NOT lazy lenses — their
+/// pollers (`pollAgentUsage`/`pollTrace`) fetch-first and overwrite
 /// unconditionally — so caching them is staleness-free and keeps the Overview
 /// tab's live/quota cards populated on reopen instead of flashing placeholders.
 private struct DashboardSnapshot {
@@ -103,6 +101,11 @@ private struct DashboardSnapshot {
 /// first time their lens becomes active, mirroring the Tauri app's
 /// empty-year short-circuit hooks.
 @MainActor @Observable final class DashboardModel {
+    private struct HourlyCacheKey: Hashable {
+        let year: String
+        let clients: Set<String>
+    }
+
     /// Survives the model's deallocation so the next PopoverView starts with
     /// cached data instead of `.loading`. A deliberate process-lifetime cache
     /// (one COW-shared value snapshot, never invalidated). Every model may
@@ -116,6 +119,12 @@ private struct DashboardSnapshot {
     /// popover open/close — that deletes this static, DashboardSnapshot, and
     /// the year guard while preserving the Phase B CPU win.
     private static var lastSnapshot: DashboardSnapshot?
+    /// Reopen cache for the expensive hourly fold. Multiple slices coexist so
+    /// Daily/Monthly's Codex+Claude report cannot evict Hourly's all-client one.
+    // ponytail: FIFO at eight slices bounds memory; use LRU only if churn shows misses.
+    private static let hourlyCacheLimit = 8
+    private static var hourlyCache: [HourlyCacheKey: HourlyReport] = [:]
+    private static var hourlyCacheOrder: [HourlyCacheKey] = []
     /// Whether this model owns the shared `lastSnapshot` (true only for the
     /// popover's model, whose teardown/rebuild is what the cache speeds up).
     private let cachesSnapshot: Bool
@@ -340,6 +349,25 @@ private struct DashboardSnapshot {
         _ = beginHourlyRequest()
     }
 
+    private func publishHourly(
+        _ report: HourlyReport, year: String?, clients: Set<String>
+    ) {
+        let yearKey = Self.identityYear(year)
+        hourly = report
+        hourlyClients = clients
+        hourlyYear = yearKey
+        if cachesSnapshot {
+            let cacheKey = HourlyCacheKey(year: yearKey, clients: clients)
+            if Self.hourlyCache[cacheKey] == nil {
+                Self.hourlyCacheOrder.append(cacheKey)
+                if Self.hourlyCacheOrder.count > Self.hourlyCacheLimit {
+                    Self.hourlyCache.removeValue(forKey: Self.hourlyCacheOrder.removeFirst())
+                }
+            }
+            Self.hourlyCache[cacheKey] = report
+        }
+    }
+
     private func reload(force: Bool) async {
         let year = self.year
         async let payloadTask = force
@@ -386,10 +414,10 @@ private struct DashboardSnapshot {
                self.hourlyClients == captured,
                self.hourlyYear == Self.identityYear(year),
                hourlyRequestToken == requestToken,
-               let report
+               let report,
+               let captured
             {
-                hourly = report
-                hourlyYear = Self.identityYear(year)
+                publishHourly(report, year: year, clients: captured)
             }
         }
         if agents != nil {
@@ -502,10 +530,10 @@ private struct DashboardSnapshot {
                    self.hourlyClients == captured,
                    self.hourlyYear == Self.identityYear(year),
                    hourlyRequestToken == requestToken,
-                   let report
+                   let report,
+                   let captured
                 {
-                    hourly = report
-                    hourlyYear = Self.identityYear(year)
+                    publishHourly(report, year: year, clients: captured)
                 }
             }
             if agents != nil {
@@ -590,10 +618,13 @@ private struct DashboardSnapshot {
         let yearKey = Self.identityYear(year)
         guard hourly == nil || hourlyClients != selection || hourlyYear != yearKey else { return }
 
-        // Suppress a prior report immediately while the new request is in
-        // flight. The request token additionally rejects a source completion
-        // that outlives the cancelled SwiftUI task.
-        if hourly != nil {
+        // Restore the exact slice before refreshing so reopen and lens switches
+        // do not flash a loading state. Non-popover models neither read nor
+        // write this process cache.
+        let cacheKey = HourlyCacheKey(year: yearKey, clients: selection)
+        if cachesSnapshot, let cached = Self.hourlyCache[cacheKey] {
+            publishHourly(cached, year: year, clients: selection)
+        } else if hourly != nil {
             hourly = nil
             hourlyClients = nil
             hourlyYear = nil
@@ -606,9 +637,7 @@ private struct DashboardSnapshot {
               hourlyRequestToken == requestToken,
               let report
         else { return }
-        hourly = report
-        hourlyClients = selection
-        hourlyYear = yearKey
+        publishHourly(report, year: year, clients: selection)
     }
 
     func ensureData(for view: AppView, clients: [String]) async {
