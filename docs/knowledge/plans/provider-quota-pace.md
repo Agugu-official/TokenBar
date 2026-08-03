@@ -412,6 +412,8 @@ Migration fixtures 必須包含 empty／existing／corrupt v3、valid／corrupt 
 | Claude `seven_day_opus` | Opus | `opus.weekly.v1` | Contract 10,080 minutes |
 | Claude design aliases | Designs | `design.weekly.v1` | Contract 10,080 minutes |
 | Claude routines aliases | Daily Routines | `routines.weekly.v1` | Contract 10,080 minutes |
+| Claude `limits[]` model-scoped weekly（已知 flat 前身） | 沿用該 flat lane 的 card | 沿用該 flat lane 的 key | Contract 10,080 minutes |
+| Claude `limits[]` model-scoped weekly（其他） | `<model> only` | `weekly_scoped.<modelSlug>.v1` | Contract 10,080 minutes |
 | Claude `extra_usage` | Extra usage | `extra_usage.v1` | `unavailable(missingReset)` |
 
 Codex main mapping retains the current role normalization：18,000 seconds always maps Session and 604,800 seconds always maps Weekly，regardless of primary／secondary order。An unrecognized main duration may still render，但 its pace is `unavailable(windowIdentity)` until a semantic key fixture is added。
@@ -419,6 +421,20 @@ Codex main mapping retains the current role normalization：18,000 seconds alway
 For Codex additional limits，`sourceDigest` is lowercase hex SHA-256 of trimmed `metered_feature` when present，otherwise trimmed `limit_name`；`slot` is `primary` or `secondary` before selection。Both identity fields missing means typed `unavailable(windowIdentity)`，not the shared `Codex extra limit` label。Digesting avoids persisting provider display text；different raw identities safely fragment rather than collide。
 
 Claude design aliases are frozen in current first-match order：`seven_day_design`、`seven_day_claude_design`、`claude_design`、`design`、`seven_day_omelette`、`omelette`、`omelette_promotional`。Routines aliases are `seven_day_routines`、`seven_day_claude_routines`、`claude_routines`、`routines`、`routine`、`seven_day_cowork`、`cowork`。Every alias in each group maps to the one semantic key shown above；alias source and display label never enter history。
+
+#### Claude `limits[]` model-scoped weekly windows
+
+Anthropic 的 `oauth/usage` 除了上述 flat 欄位，另有一個 `limits[]` 陣列承載 model-scoped weekly 額度。促銷型模型（2026-08 起的 Fable 5）**只**出現在這裡，沒有對應 flat 欄位；長期而言 Opus／Sonnet 等既有 lane 也可能遷入此處。Flat 欄位是 `Option`，缺席不會報錯，因此不解析 `limits[]` 的話這類 window 會靜默消失。
+
+Eligibility：一筆 entry 必須同時滿足 `group == "weekly"`、`kind == "weekly_scoped"`、`percent` 為有限值且落在 `0..=100`（與 flat 欄位的 `utilization` 同尺度、同為 used percent）、`scope.model.display_name` 去空白後非空，且 scope 不是 account-wide。Account-wide 的排除同時比對 model id slug 與 display-name slug 的 `all-models`／`-all-models` 後綴。陣列以 element-wise 解析，單一 entry 格式錯誤只丟棄該 entry，不影響同陣列的其他 entry。
+
+`is_active` **不解析也不過濾**。2026-08-04 實際 payload 中，真正生效的 Fable window 回報 `is_active: false`；[steipete/codexbar](https://github.com/steipete/codexbar) 與 [stablyai/orca](https://github.com/stablyai/orca)（其 issue #8979）各自獨立踩過同一顆雷。以該欄位過濾會隱藏實際生效的額度。
+
+Identity 來源是 `scope.model.display_name` 的 slug，**不使用 `scope.model.id`**。這是本 lane 對「stable schema key 優先於 display 文字」通則的一項 documented exception，理由是 schema 目前沒有提供可用的 stable id：實際 payload 的 `scope.model.id` 為 `null`，而欄位本身存在。若採 id 優先，Anthropic 日後填入該欄位就會在 label 完全不變的情況下搬移 `cardId` 與 `windowKey`，使 Swift 的 `clientId|cardId` 精確比對失效、既有 history series 中斷。與 Codex additional limits 的 `sourceDigest` 不同的是，那裡 digest 的目的是避免持久化 `metered_feature`／`limit_name` 這類可能夾帶使用者或組織資訊的任意 provider 文字；Claude 這裡的來源是封閉集合中的模型名稱，不含使用者資料，因此保留明文 slug 以維持 history 與診斷的可讀性。Display name 改名仍會搬移 identity，但那一次搬移對使用者是可見的，因為 card label 同時改變。
+
+Flat lane 已擁有的模型不另立 identity。`sonnet`、`opus`、`designs`、`daily-routines` 四個 model slug 凍結對應到既有的 `sonnet.weekly.v1`、`opus.weekly.v1`、`design.weekly.v1`、`routines.weekly.v1` 與其原 label；當 Anthropic 移除 flat 欄位而同一額度改由 `limits[]` 提供時，card 與 history 原地延續。反向的重複則由 flat-window 去重擋下：scoped entry 的 display-name slug 若命中本次已產生的 window label，直接跳過，因此 flat 欄位仍存在時它保有優先權。該去重集合由實際產生的 window 推導，不是硬編碼模型清單，才不會隨 flat 欄位增減而漂移。
+
+Scoped window 一律使用 contract 10,080 minutes；`resets_at` 可能為 `null`（實際 Fable entry 即如此），此時 window 照常產生，只是沒有 reset 時間。
 
 ### Grok, Antigravity, and Copilot mappings
 
