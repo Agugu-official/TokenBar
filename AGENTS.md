@@ -31,10 +31,6 @@ Read [`docs/knowledge/README.md`](docs/knowledge/README.md) for every task befor
 
 A plan approval authorizes implementation, not integration. Do not push, merge, tag, publish, or release without a separate explicit user instruction. Do not modify a dirty main checkout. A local `.agent-local/` overlay may hold machine-specific instructions and is intentionally outside the public knowledge base.
 
-## Codex pull request review
-
-Mark a draft pull request ready for review before starting `codex-review-wait`; Codex auto-review does not start while the pull request remains a draft.
-
 ## Handoff
 
 Before reporting completion, name the canonical files changed, run the relevant repository checks, and state any private material intentionally retained outside the repository. Use repository-relative links in documentation.
