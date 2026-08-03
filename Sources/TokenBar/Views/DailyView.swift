@@ -1,6 +1,62 @@
 import SwiftUI
 import TokenBarCore
 
+/// Fold the shared hourly report into the calendar keys used by Daily and
+/// Monthly. Hour keys are local YYYY-MM-DD HH:00; malformed slots are
+/// ignored before the saturating turn-count fold.
+enum TurnCountBuckets {
+    static func byDay(_ report: HourlyReport?) -> [String: Int64] {
+        fold(report) { String($0.prefix(10)) }
+    }
+
+    static func byMonth(_ report: HourlyReport?) -> [String: Int64] {
+        fold(report) { String($0.prefix(7)) }
+    }
+
+    static func scope(_ clientIds: [String]) -> String? {
+        let names = clientIds.map(ClientRegistry.shortName)
+        switch names.count {
+        case 0: return nil
+        case 1: return "Turns · %@ only".localized(names[0])
+        default: return "Turns · %@ + %@ only".localized(names[0], names[1])
+        }
+    }
+
+    private static func fold(
+        _ report: HourlyReport?, key: (String) -> String
+    ) -> [String: Int64] {
+        var result: [String: Int64] = [:]
+        for entry in report?.entries ?? [] {
+            guard let valid = validHour(entry.hour), entry.turnCount >= 0 else { continue }
+            result[key(valid)] = (result[key(valid)] ?? 0)
+                .saturatingAdding(Int64(entry.turnCount))
+        }
+        return result
+    }
+
+    private static func validHour(_ raw: String) -> String? {
+        let bytes = Array(raw.utf8)
+        guard bytes.count == 16,
+              bytes[4] == 45, bytes[7] == 45, bytes[10] == 32,
+              bytes[13] == 58, bytes[14] == 48, bytes[15] == 48
+        else { return nil }
+        for index in [0, 1, 2, 3, 5, 6, 8, 9, 11, 12] {
+            guard bytes[index] >= 48, bytes[index] <= 57 else { return nil }
+        }
+        let year = Int(raw.prefix(4)) ?? 0
+        let month = Int(raw.dropFirst(5).prefix(2)) ?? 0
+        let day = Int(raw.dropFirst(8).prefix(2)) ?? 0
+        let hour = Int(raw.dropFirst(11).prefix(2)) ?? 0
+        guard year > 0, (1...12).contains(month), (0...23).contains(hour) else {
+            return nil
+        }
+        let leap = year.isMultiple(of: 4) && (!year.isMultiple(of: 100) || year.isMultiple(of: 400))
+        let daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]
+        guard (1...daysInMonth).contains(day) else { return nil }
+        return raw
+    }
+}
+
 /// "Daily" lens, port of DailyView.tsx: one row per active day (most recent
 /// first) with msgs / tokens / cost. Selecting a day drills into that day's
 /// per-model split — the same provider-tinted breakdown the Models view uses,
@@ -11,6 +67,8 @@ struct DailyView: View {
     /// consistent with the day rows and DayBars/UsageStats — so an all-hidden
     /// slice can't leak the drill-down.
     var clientIds: [String] = []
+    let hourlyReport: HourlyReport?
+    var turnClientIds: [String] = []
     let colors: ModelColorMap
 
     @State private var openDate: String?
@@ -23,6 +81,7 @@ struct DailyView: View {
         let tokens: Int64
         let cost: Double
         let messages: Int
+        let turns: Int64?
         let contribution: Contribution
     }
 
@@ -54,6 +113,7 @@ struct DailyView: View {
 
     private var rows: [DayRow] {
         let allow = Set(clientIds)
+        let turnsByDay = TurnCountBuckets.byDay(hourlyReport)
         return payload.contributions.compactMap { c -> DayRow? in
             var tokens: Int64 = 0
             var cost = 0.0
@@ -65,7 +125,10 @@ struct DailyView: View {
                 messages += cc.messages
             }
             guard tokens > 0 || cost > 0 else { return nil }
-            return DayRow(date: c.date, tokens: tokens, cost: cost, messages: messages, contribution: c)
+            let turns = hourlyReport == nil ? nil : turnsByDay[c.date] ?? 0
+            return DayRow(
+                date: c.date, tokens: tokens, cost: cost, messages: messages,
+                turns: turns, contribution: c)
         }
         .sorted { $0.date > $1.date }
     }
@@ -102,6 +165,7 @@ struct DailyView: View {
         let rows = self.rows
         DashCard(
             "Daily",
+            subtitle: hourlyReport == nil ? nil : TurnCountBuckets.scope(turnClientIds),
             trailing: {
                 Text((rows.count == 1 ? "%lld active day" : "%lld active days")
                     .localized(rows.count))
@@ -143,6 +207,11 @@ struct DailyView: View {
                     Text("%@ msgs".localized(row.messages.formatted()))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                    if let turns = row.turns {
+                        Text("%@ turns".localized(turns.formatted()))
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
                     Spacer()
                     Text(Format.compactTokens(row.tokens))
                         .font(.caption.monospacedDigit())

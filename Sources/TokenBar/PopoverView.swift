@@ -7,6 +7,11 @@ import TokenBarCore
 struct PopoverView: View {
     private let routeMemory: StatusItemRouteMemory
 
+    static func supportedTurnClients(_ ids: [String]) -> [String] {
+        let supported = Set(["codex", "claude"])
+        return ids.filter { supported.contains($0) }
+    }
+
     init(routeMemory: StatusItemRouteMemory) {
         self.routeMemory = routeMemory
     }
@@ -110,6 +115,19 @@ struct PopoverView: View {
         activeTab == ClientTray.overviewTab ? displayClients : [activeTab]
     }
 
+    /// Daily/Monthly request turns only for visible canonical clients, keeping
+    /// the incoming display order and never passing an empty all-client filter.
+    private var turnClientIds: [String] {
+        Self.supportedTurnClients(lensClientIds)
+    }
+
+    private var lazyClientIds: [String] {
+        switch activeView.wrappedValue {
+        case .daily, .monthly: return turnClientIds
+        default: return lensClientIds
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -175,8 +193,8 @@ struct PopoverView: View {
         // "overview" (same onChange pass), which changes this task's id and
         // cancels the in-flight fetch before it commits. Self-correcting;
         // switching to effectiveView here isn't needed for correctness.
-        .task(id: "\(activeViewRaw)|\(model.year ?? "")|\(lensClientIds.joined(separator: ","))") {
-            await model.ensureData(for: activeView.wrappedValue, clients: lensClientIds)
+        .task(id: "\(activeViewRaw)|\(model.year ?? "")|\(lazyClientIds.joined(separator: ","))") {
+            await model.ensureData(for: activeView.wrappedValue, clients: lazyClientIds)
         }
         // Auto-clear a year filter scoped to a year only hidden clients used —
         // re-checked on a live hide toggle (hiddenRaw) and on each payload load
@@ -439,6 +457,7 @@ struct PopoverView: View {
             // slice, so this hot path (re-evals every ~10s trace poll) doesn't
             // re-aggregate UsageStats on every body eval.
             let activeStats = model.stats(selecting: Set(clientIds)) ?? stats
+            let turnClientIds = Self.supportedTurnClients(clientIds)
             switch effectiveView {
             case .overview:
                 OverviewView(
@@ -451,11 +470,17 @@ struct PopoverView: View {
                 ModelsView(
                     report: model.modelReport, clientIds: clientIds, colors: model.colors)
             case .daily:
-                DailyView(payload: payload, clientIds: clientIds, colors: model.colors)
+                DailyView(
+                    payload: payload, clientIds: clientIds,
+                    hourlyReport: model.turnsReport(for: turnClientIds),
+                    turnClientIds: turnClientIds, colors: model.colors)
             case .monthly:
-                MonthlyView(payload: payload, clientIds: clientIds, colors: model.colors)
+                MonthlyView(
+                    payload: payload, clientIds: clientIds,
+                    hourlyReport: model.turnsReport(for: turnClientIds),
+                    turnClientIds: turnClientIds, colors: model.colors)
             case .hourly:
-                HourlyView(report: model.hourly, clientIds: clientIds)
+                HourlyView(report: model.hourlyReport(for: clientIds), clientIds: clientIds)
             case .stats:
                 StatsView(
                     payload: payload, clientIds: clientIds, stats: activeStats,

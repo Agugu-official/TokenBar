@@ -14,6 +14,8 @@ struct MonthlyView: View {
     /// consistent with DailyView/DayBars/UsageStats — so an all-hidden slice
     /// can't leak the drill-down.
     var clientIds: [String] = []
+    let hourlyReport: HourlyReport?
+    var turnClientIds: [String] = []
     let colors: ModelColorMap
 
     @State private var openMonth: String?
@@ -26,6 +28,7 @@ struct MonthlyView: View {
         var tokens: Int64
         var cost: Double
         var messages: Int
+        var turns: Int64?
         var contributions: [Contribution]
     }
 
@@ -51,8 +54,11 @@ struct MonthlyView: View {
     private static let rowsSpace = "monthly-model-rows"
 
     /// Pure bucketing, internal (not private) so SelfTest can pin it.
-    static func monthRows(payload: UsagePayload, clientIds: [String]) -> [MonthRow] {
+    static func monthRows(
+        payload: UsagePayload, clientIds: [String], hourlyReport: HourlyReport? = nil
+    ) -> [MonthRow] {
         let allow = Set(clientIds)
+        let turnsByMonth = TurnCountBuckets.byMonth(hourlyReport)
         var grouped: [String: MonthRow] = [:]
         for c in payload.contributions {
             var tokens: Int64 = 0
@@ -67,10 +73,16 @@ struct MonthlyView: View {
             guard tokens > 0 || cost > 0 || messages > 0 else { continue }
             let month = String(c.date.prefix(7))
             var slot = grouped[month]
-                ?? MonthRow(month: month, tokens: 0, cost: 0, messages: 0, contributions: [])
+                ?? MonthRow(
+                    month: month, tokens: 0, cost: 0, messages: 0,
+                    turns: hourlyReport == nil ? nil : turnsByMonth[month] ?? 0,
+                    contributions: [])
             slot.tokens = slot.tokens.saturatingAdding(tokens)
             slot.cost += cost
             slot.messages += messages
+            if hourlyReport != nil {
+                slot.turns = turnsByMonth[month] ?? 0
+            }
             slot.contributions.append(c)
             grouped[month] = slot
         }
@@ -112,9 +124,11 @@ struct MonthlyView: View {
     }
 
     var body: some View {
-        let rows = Self.monthRows(payload: payload, clientIds: clientIds)
+        let rows = Self.monthRows(
+            payload: payload, clientIds: clientIds, hourlyReport: hourlyReport)
         DashCard(
             "Monthly",
+            subtitle: hourlyReport == nil ? nil : TurnCountBuckets.scope(turnClientIds),
             trailing: {
                 Text((rows.count == 1 ? "%lld active month" : "%lld active months")
                     .localized(rows.count))
@@ -156,6 +170,11 @@ struct MonthlyView: View {
                     Text("%@ msgs".localized(row.messages.formatted()))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                    if let turns = row.turns {
+                        Text("%@ turns".localized(turns.formatted()))
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
                     Spacer()
                     Text(Format.compactTokens(row.tokens))
                         .font(.caption.monospacedDigit())

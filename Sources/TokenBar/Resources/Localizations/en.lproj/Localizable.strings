@@ -18,3 +18,6 @@
 "duration.now" = "now";
 "Resets now" = "Resets now";
 "Resets in %@" = "Resets in %@";
+"%@ turns" = "%@ turns";
+"Turns · %@ only" = "Turns · %@ only";
+"Turns · %@ + %@ only" = "Turns · %@ + %@ only";
