@@ -1,10 +1,4 @@
 New:
-- Add optional menu bar items for individual clients, showing a brand icon and remaining quota for Auto or a selected window; clicking one opens TokenBar on that client.
-- Settings now uses native sidebar navigation for Menu Bar, Dashboard, General, and About, with the live preview kept visible.
-- Drag client tabs to reorder them directly in the popover; Overview stays first and hidden clients keep their saved positions.
-Improved:
-- Historical quota pace can start once current-cycle evidence passes quality checks; insufficient history remains in learning mode and unvalidated risk stays hidden.
+- Daily and Monthly usage now show Codex and Claude turn counts alongside message totals, making human interactions easier to distinguish from agent and tool-loop activity.
 Fixes:
-- Claude quota cards reflect live Pro and Max plan changes instead of a stale login-time label.
-- Grok usage is attributed more safely across process restarts and subagents; ambiguous evidence stays unattributed.
-- Popover height dragging remains responsive, and Settings and Quit continue responding normally after resizing.
+- Message-only activity remains visible in Daily and Monthly history, drill-downs, active-day counts, streaks, and year visibility without distorting token or cost charts.
