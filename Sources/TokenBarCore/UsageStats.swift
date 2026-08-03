@@ -85,6 +85,7 @@ public struct UsageStats: Sendable {
         for c in payload.contributions {
             var dayTokens: Int64 = 0
             var dayCost = 0.0
+            var hasMessages = false
             for cc in c.clients {
                 present.insert(cc.client)
                 guard selectedClients.contains(cc.client) else { continue }
@@ -93,8 +94,9 @@ public struct UsageStats: Sendable {
                 // folds these here — a trapping `+=` would crash the dashboard.
                 dayTokens = dayTokens.saturatingAdding(cc.tokens.total)
                 dayCost += cc.cost
+                hasMessages = hasMessages || cc.messages > 0
             }
-            if dayTokens == 0 && dayCost == 0 { continue }
+            if dayTokens == 0 && dayCost == 0 && !hasMessages { continue }
             let entry = PerDay(date: c.date, tokens: dayTokens, cost: dayCost, intensity: c.intensity)
             perDay.append(entry)
             perDayMap[c.date] = entry

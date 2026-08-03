@@ -2150,6 +2150,16 @@ enum SelfTest {
                 contributions: messageOnlyPayload.contributions, hidden: []
             ) == ["2026"],
             "message-only activity keeps its selected year visible")
+        let messageOnlyStats = UsageStats(
+            payload: messageOnlyPayload, selectedClients: ["codex"])
+        expect(
+            messageOnlyStats.activeDays == 1
+                && messageOnlyStats.perDayMap["2026-01-01"]?.tokens == 0
+                && messageOnlyStats.totalTokens == 0 && messageOnlyStats.totalCost == 0,
+            "shared usage stats count a selected message-only day as active")
+        expect(
+            UsageStats(payload: messageOnlyPayload, selectedClients: []).activeDays == 0,
+            "shared usage stats do not count an unselected message-only day")
 
         // Daily/Monthly turn counts reuse the existing local-hour report, but
         // only after strict calendar-key validation and only for Codex/Claude.
