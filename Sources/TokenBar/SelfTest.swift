@@ -2118,20 +2118,20 @@ enum SelfTest {
         // some parsers emit message-count-only rows. Prior guard was
         // `tokens > 0 || cost > 0`, which dropped this month entirely.
         let messageOnlyJSON = """
-        {"meta":{"generatedAt":"now","version":"1","dateRange":{"start":"2026-02-01","end":"2026-02-01"}},
+        {"meta":{"generatedAt":"now","version":"1","dateRange":{"start":"2026-01-01","end":"2026-01-01"}},
          "summary":{"totalTokens":0,"totalCost":0,"totalDays":1,"activeDays":1,"averagePerDay":0,
-                    "maxCostInSingleDay":0,"clients":["a"],"models":[]},
+                    "maxCostInSingleDay":0,"clients":["codex"],"models":[]},
          "years":[],
          "contributions":[
-           {"date":"2026-02-01","totals":{"tokens":0,"cost":0,"messages":5},"intensity":0,
+           {"date":"2026-01-01","totals":{"tokens":0,"cost":0,"messages":5},"intensity":0,
             "tokenBreakdown":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0},
             "clients":[
-              {"client":"a","modelId":"m1","providerId":"p","cost":0,"messages":5,
+              {"client":"codex","modelId":"m1","providerId":"p","cost":0,"messages":5,
                "tokens":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0}}]}
          ]}
         """
         let messageOnlyPayload = try! JSONDecoder().decode(UsagePayload.self, from: Data(messageOnlyJSON.utf8))
-        let moRows = MonthlyView.monthRows(payload: messageOnlyPayload, clientIds: ["a"])
+        let moRows = MonthlyView.monthRows(payload: messageOnlyPayload, clientIds: ["codex"])
         expect(moRows.count == 1 && moRows[0].messages == 5 && moRows[0].tokens == 0 && moRows[0].cost == 0,
             "a message-only month (zero tokens, zero cost) still surfaces in the Monthly lens")
 
@@ -2181,6 +2181,15 @@ enum SelfTest {
             ) == ["claude", "codex"]
                 && PopoverView.supportedTurnClients(["gemini", "opencode"]).isEmpty,
             "turn scope preserves display order and excludes unsupported clients")
+        let dailyMessageOnlyRows = DailyView(
+            payload: messageOnlyPayload, clientIds: ["codex"], hourlyReport: turnReport,
+            turnClientIds: ["codex", "claude"], colors: ModelColorMap(report: nil)
+        ).rows
+        expect(
+            dailyMessageOnlyRows.count == 1 && dailyMessageOnlyRows[0].messages == 5
+                && dailyMessageOnlyRows[0].tokens == 0 && dailyMessageOnlyRows[0].cost == 0
+                && dailyMessageOnlyRows[0].turns == 7,
+            "Daily retains a message-only day and attaches its positive turn count")
 
         let dashboardYearDefaultsKey = "tokenbar.dashboard.year"
         let savedDashboardYear = UserDefaults.standard.object(forKey: dashboardYearDefaultsKey)

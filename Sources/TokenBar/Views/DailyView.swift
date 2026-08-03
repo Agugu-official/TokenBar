@@ -76,7 +76,7 @@ struct DailyView: View {
     @State private var tooltipSize: CGSize = .zero
     @Environment(\.popoverScrollViewport) private var popoverScrollViewport
 
-    private struct DayRow {
+    struct DayRow {
         let date: String
         let tokens: Int64
         let cost: Double
@@ -111,7 +111,7 @@ struct DailyView: View {
         t.total
     }
 
-    private var rows: [DayRow] {
+    var rows: [DayRow] {
         let allow = Set(clientIds)
         let turnsByDay = TurnCountBuckets.byDay(hourlyReport)
         return payload.contributions.compactMap { c -> DayRow? in
@@ -124,7 +124,7 @@ struct DailyView: View {
                 cost += cc.cost
                 messages += cc.messages
             }
-            guard tokens > 0 || cost > 0 else { return nil }
+            guard tokens > 0 || cost > 0 || messages > 0 else { return nil }
             let turns = hourlyReport == nil ? nil : turnsByDay[c.date] ?? 0
             return DayRow(
                 date: c.date, tokens: tokens, cost: cost, messages: messages,
