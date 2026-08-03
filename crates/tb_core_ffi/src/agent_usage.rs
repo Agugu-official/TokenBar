@@ -4079,13 +4079,28 @@ fn append_claude_scoped_windows(
         if !emitted_slugs.insert(slug.clone()) {
             continue;
         }
-        let window_key = format!("weekly_scoped.{slug}.v1");
+        // A scoped entry that succeeds a legacy flat field inherits that
+        // field's semantic key and label. Anthropic moving a quota out of
+        // `seven_day_*` and into `limits[]` is the migration this mapper exists
+        // to support, and minting a new identity for it would cost the user the
+        // same persisted selection and history the flat lane already owns —
+        // for an otherwise unchanged quota. The flat-window guard above means
+        // this branch only runs once the flat field is actually gone.
+        let (window_key, label) = CLAUDE_SCOPED_FLAT_SUCCESSORS
+            .iter()
+            .find(|(model_slug, _, _)| *model_slug == slug)
+            .map_or_else(
+                || {
+                    (
+                        format!("weekly_scoped.{slug}.v1"),
+                        format!("{display_name} only"),
+                    )
+                },
+                |(_, key, label)| ((*key).to_string(), (*label).to_string()),
+            );
         let resets_at = entry.resets_at.as_deref().and_then(parse_datetime);
         if let Some(window) = UsageWindow::try_from_provider_used_percent(
-            format!("{display_name} only"),
-            percent,
-            resets_at,
-            now,
+            label, percent, resets_at, now,
         )
         .map(|window| {
             window.with_identity(
@@ -4099,6 +4114,18 @@ fn append_claude_scoped_windows(
         }
     }
 }
+
+/// Model-name slugs that already have a flat-field lane, paired with the
+/// semantic key and label that lane owns. Keeping these frozen is what lets a
+/// quota move from `seven_day_*` into `limits[]` without the user losing a
+/// pinned gauge or its learned pace. Entries here must match the identities
+/// emitted by `claude_windows()` for the corresponding flat fields.
+const CLAUDE_SCOPED_FLAT_SUCCESSORS: &[(&str, &str, &str)] = &[
+    ("sonnet", "sonnet.weekly.v1", "Sonnet"),
+    ("opus", "opus.weekly.v1", "Opus"),
+    ("designs", "design.weekly.v1", "Designs"),
+    ("daily-routines", "routines.weekly.v1", "Daily Routines"),
+];
 
 fn claude_is_all_models_slug(slug: &str) -> bool {
     slug == "all-models" || slug.ends_with("-all-models")
@@ -6927,7 +6954,10 @@ mod tests {
     }
 
     /// The migration case: once Anthropic drops a flat field, the scoped entry
-    /// must take over rather than leaving the model with no window at all.
+    /// must take over rather than leaving the model with no window at all — and
+    /// it must inherit the flat lane's identity, or the handover costs the user
+    /// their pinned gauge and the window's learned pace for a quota that never
+    /// actually changed.
     #[test]
     fn maps_claude_scoped_opus_when_flat_window_absent() {
         let raw = r#"{
@@ -6945,9 +6975,62 @@ mod tests {
         let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
         let windows = claude_windows(&usage, now);
         assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0].label, "Opus only");
-        assert_eq!(windows[0].card_id, "weekly_scoped.opus.v1");
+        // Identical to what the flat `seven_day_opus` lane emits, so a pinned
+        // gauge and its history survive the handover untouched.
+        assert_eq!(windows[0].label, "Opus");
+        assert_eq!(windows[0].card_id, "opus.weekly.v1");
+        assert_eq!(windows[0].window_key.as_deref(), Some("opus.weekly.v1"));
         assert_eq!(windows[0].used_percent, 80.0);
+    }
+
+    /// `CLAUDE_SCOPED_FLAT_SUCCESSORS` is hand-written, so it can drift from the
+    /// identities `claude_windows()` actually emits for the flat fields. Drive
+    /// both lanes with the same quota and require the identity to be identical:
+    /// if either side is renamed or re-keyed without the other, this fails.
+    #[test]
+    fn claude_scoped_successors_match_their_flat_lane_identities() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let cases = [
+            ("seven_day_sonnet", "Sonnet"),
+            ("seven_day_opus", "Opus"),
+            ("seven_day_design", "Designs"),
+            ("seven_day_routines", "Daily Routines"),
+        ];
+
+        for (flat_field, display_name) in cases {
+            let flat = claude_windows(
+                &serde_json::from_str::<ClaudeUsageResponse>(&format!(
+                    r#"{{"{flat_field}": {{"utilization": 40}}}}"#
+                ))
+                .unwrap(),
+                now,
+            );
+            let scoped = claude_windows(
+                &serde_json::from_str::<ClaudeUsageResponse>(&format!(
+                    r#"{{"limits": [{{"kind": "weekly_scoped", "group": "weekly",
+                         "percent": 40,
+                         "scope": {{"model": {{"id": null,
+                                               "display_name": "{display_name}"}}}}}}]}}"#
+                ))
+                .unwrap(),
+                now,
+            );
+
+            assert_eq!(flat.len(), 1, "flat lane for {flat_field}");
+            assert_eq!(scoped.len(), 1, "scoped lane for {display_name}");
+            assert_eq!(
+                scoped[0].card_id, flat[0].card_id,
+                "card id drifted for {display_name}"
+            );
+            assert_eq!(
+                scoped[0].window_key, flat[0].window_key,
+                "window key drifted for {display_name}"
+            );
+            assert_eq!(
+                scoped[0].label, flat[0].label,
+                "label drifted for {display_name}"
+            );
+        }
     }
 
     /// End-to-end shape check against a real `oauth/usage` response captured
