@@ -3,6 +3,25 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>1.11.0</title>
+            <pubDate>Mon, 03 Aug 2026 18:10:16 +0000</pubDate>
+            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.11.0</link>
+            <sparkle:version>473</sparkle:version>
+            <sparkle:shortVersionString>1.11.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>New:</b>
+<ul>
+<li>Daily and Monthly usage now show Codex and Claude turn counts alongside message totals, making human interactions easier to distinguish from agent and tool-loop activity.</li>
+</ul>
+<b>Fixes:</b>
+<ul>
+<li>Message-only activity remains visible in Daily and Monthly history, drill-downs, active-day counts, streaks, and year visibility without distorting token or cost charts.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.11.0/TokenBar.app.tar.gz" length="8326011" type="application/octet-stream" sparkle:edSignature="FpmXhLgz1Pv7rKx9butUTLM2g97D7/djuJC2imvb4nyA1NxTk950CUuB7GMo6k/72IDFT81fobDn77a+LaZ5Cg=="/>
+        </item>
+        <item>
             <title>1.10.0</title>
             <pubDate>Sun, 02 Aug 2026 14:39:54 +0000</pubDate>
             <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.10.0</link>
@@ -97,22 +116,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.7.0/TokenBar.app.tar.gz" length="7931247" type="application/octet-stream" sparkle:edSignature="5klKHNy8+0H5PlrDqZsMQ+prDZYiWABSsG+j6SFSsX+BeIZm/hPiax4B1dBc3zzmmhNpIecr92DPlTp58Kc5Ag=="/>
-        </item>
-        <item>
-            <title>1.6.2</title>
-            <pubDate>Tue, 21 Jul 2026 14:07:22 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.6.2</link>
-            <sparkle:version>386</sparkle:version>
-            <sparkle:shortVersionString>1.6.2</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>Fixes:</b>
-<ul>
-<li>Opening the popover no longer causes TokenBar to quit on some installations after v1.6.1.</li>
-<li>Quota bars now keep a consistent thickness whether or not a pace marker is available.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.6.2/TokenBar.app.tar.gz" length="7854734" type="application/octet-stream" sparkle:edSignature="EIj9p7XLYTP9JIBoseiX/Dsb+rpF09FFlqNvAMGnCxEX3Se0L7XWuAdluxINTOrjre3gtJOEQ1NSQZLURGlrDQ=="/>
         </item>
         <item>
             <title>1.1.1</title>
