@@ -100,7 +100,7 @@ struct MonthlyView: View {
             for cc in c.clients {
                 if !allow.contains(cc.client) { continue }
                 let tokens = cc.tokens.total
-                if tokens <= 0 && cc.cost <= 0 { continue }
+                if tokens <= 0 && cc.cost <= 0 && cc.messages <= 0 { continue }
                 let model = cc.modelId.isEmpty ? "unknown" : cc.modelId
                 let key = "\(model)|\(cc.providerId)"
                 var slot = grouped[key] ?? ModelSlice(

@@ -2118,22 +2118,49 @@ enum SelfTest {
         // some parsers emit message-count-only rows. Prior guard was
         // `tokens > 0 || cost > 0`, which dropped this month entirely.
         let messageOnlyJSON = """
-        {"meta":{"generatedAt":"now","version":"1","dateRange":{"start":"2026-02-01","end":"2026-02-01"}},
+        {"meta":{"generatedAt":"now","version":"1","dateRange":{"start":"2026-01-01","end":"2026-01-01"}},
          "summary":{"totalTokens":0,"totalCost":0,"totalDays":1,"activeDays":1,"averagePerDay":0,
-                    "maxCostInSingleDay":0,"clients":["a"],"models":[]},
+                    "maxCostInSingleDay":0,"clients":["codex"],"models":[]},
          "years":[],
          "contributions":[
-           {"date":"2026-02-01","totals":{"tokens":0,"cost":0,"messages":5},"intensity":0,
+           {"date":"2026-01-01","totals":{"tokens":0,"cost":0,"messages":5},"intensity":0,
             "tokenBreakdown":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0},
             "clients":[
-              {"client":"a","modelId":"m1","providerId":"p","cost":0,"messages":5,
+              {"client":"codex","modelId":"m1","providerId":"p","cost":0,"messages":5,
                "tokens":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0}}]}
          ]}
         """
         let messageOnlyPayload = try! JSONDecoder().decode(UsagePayload.self, from: Data(messageOnlyJSON.utf8))
-        let moRows = MonthlyView.monthRows(payload: messageOnlyPayload, clientIds: ["a"])
+        let moRows = MonthlyView.monthRows(payload: messageOnlyPayload, clientIds: ["codex"])
         expect(moRows.count == 1 && moRows[0].messages == 5 && moRows[0].tokens == 0 && moRows[0].cost == 0,
             "a message-only month (zero tokens, zero cost) still surfaces in the Monthly lens")
+        let monthlyMessageOnlySlice = moRows.first.flatMap {
+            MonthlyView.modelSlices(
+                for: $0, clientIds: ["codex"], colors: ModelColorMap(report: nil)
+            ).first
+        }
+        expect(
+            monthlyMessageOnlySlice?.key == "m1|p" && monthlyMessageOnlySlice?.tokens == 0
+                && monthlyMessageOnlySlice?.cost == 0,
+            "a message-only month retains its model drill-down")
+        expect(
+            UsageStats.hasVisibleActivity(
+                contributions: messageOnlyPayload.contributions, hidden: []
+            ) && UsageStats.yearsWithVisibleActivity(
+                contributions: messageOnlyPayload.contributions, hidden: []
+            ) == ["2026"],
+            "message-only activity keeps its selected year visible")
+        let messageOnlyStats = UsageStats(
+            payload: messageOnlyPayload, selectedClients: ["codex"])
+        expect(
+            messageOnlyStats.activeDays == 1
+                && messageOnlyStats.perDayMap["2026-01-01"]?.tokens == 0
+                && messageOnlyStats.perDayMap["2026-01-01"]?.hasMessages == true
+                && messageOnlyStats.totalTokens == 0 && messageOnlyStats.totalCost == 0,
+            "shared usage stats count a selected message-only day as active")
+        expect(
+            UsageStats(payload: messageOnlyPayload, selectedClients: []).activeDays == 0,
+            "shared usage stats do not count an unselected message-only day")
 
         // Daily/Monthly turn counts reuse the existing local-hour report, but
         // only after strict calendar-key validation and only for Codex/Claude.
@@ -2181,6 +2208,23 @@ enum SelfTest {
             ) == ["claude", "codex"]
                 && PopoverView.supportedTurnClients(["gemini", "opencode"]).isEmpty,
             "turn scope preserves display order and excludes unsupported clients")
+        let dailyMessageOnlyView = DailyView(
+            payload: messageOnlyPayload, clientIds: ["codex"], hourlyReport: turnReport,
+            turnClientIds: ["codex", "claude"], colors: ModelColorMap(report: nil)
+        )
+        let dailyMessageOnlyRows = dailyMessageOnlyView.rows
+        expect(
+            dailyMessageOnlyRows.count == 1 && dailyMessageOnlyRows[0].messages == 5
+                && dailyMessageOnlyRows[0].tokens == 0 && dailyMessageOnlyRows[0].cost == 0
+                && dailyMessageOnlyRows[0].turns == 7,
+            "Daily retains a message-only day and attaches its positive turn count")
+        let dailyMessageOnlySlice = dailyMessageOnlyRows.first.flatMap {
+            dailyMessageOnlyView.models(for: $0.contribution).first
+        }
+        expect(
+            dailyMessageOnlySlice?.key == "m1|p" && dailyMessageOnlySlice?.tokens == 0
+                && dailyMessageOnlySlice?.cost == 0,
+            "a message-only Daily row retains its model drill-down")
 
         let dashboardYearDefaultsKey = "tokenbar.dashboard.year"
         let savedDashboardYear = UserDefaults.standard.object(forKey: dashboardYearDefaultsKey)
@@ -2314,6 +2358,14 @@ enum SelfTest {
               "tokens":{"input":10,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0}}]}
             """
         }
+        func messageOnlyDaily(_ client: String, _ date: String) -> String {
+            """
+            {"date":"\(date)","totals":{"tokens":0,"cost":0,"messages":1},"intensity":0,
+             "tokenBreakdown":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0},
+             "clients":[{"client":"\(client)","modelId":"m","providerId":"p","cost":0,"messages":1,
+              "tokens":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0}}]}
+            """
+        }
         func rangeStatsPayload(end: String, days: [String]) -> UsagePayload {
             let json = """
             {"meta":{"generatedAt":"now","version":"1","dateRange":{"start":"2026-07-01","end":"\(end)"}},
@@ -2348,6 +2400,15 @@ enum SelfTest {
             && visFiltered.dateRange.end == visAlone.dateRange.end,
             "filtered stats equal a payload without the hidden client")
 
+        let messageTailPayload = rangeStatsPayload(end: "2026-07-31", days: [
+            daily("vis", "2026-07-01", 1), messageOnlyDaily("vis", "2026-07-31"),
+        ])
+        let messageTailStats = UsageStats(payload: messageTailPayload, selectedClients: ["vis"])
+        expect(
+            messageTailStats.dateRange.end == "2026-07-31"
+                && messageTailStats.streaks.current == 1,
+            "a trailing message-only day remains current activity instead of resetting the streak")
+
         // DayBars trailing window anchors to the passed range end, not the
         // unfiltered payload range (issue #36 Fix, round 6): the caller passes
         // the selection-derived stats.dateRange.end, so a hidden client active
@@ -2364,13 +2425,21 @@ enum SelfTest {
             "chart window anchors to the filtered range end")
         expect((visBars.last?.totalTokens ?? 0) > 0,
             "visible client's last active day is the last (in-window) bar")
-        // The old unfiltered anchor (meta.dateRange.end = the hidden client's
-        // later day) shifts the window forward, stranding an empty trailing bar.
+        // DayBars derives its token/cost anchor from the selected series, so a
+        // later non-metric range end cannot shift visible usage out of view.
         let shiftedBars = DayBars.build(
             payload: chartPayload, clientIds: ["vis"], stackBy: .agent,
             colors: chartColors, rangeEnd: "2026-07-05", endFallback: "2026-07-09")
-        expect(shiftedBars.last?.date == "2026-07-05" && (shiftedBars.last?.totalTokens ?? 0) == 0,
-            "unfiltered anchor would shift the window past the visible activity")
+        expect(shiftedBars.last?.date == "2026-07-03" && (shiftedBars.last?.totalTokens ?? 0) > 0,
+            "chart derives its range end from selected token/cost activity")
+        let messageTailBars = DayBars.build(
+            payload: messageTailPayload, clientIds: ["vis"], stackBy: .agent,
+            colors: chartColors, rangeEnd: messageTailStats.dateRange.end,
+            endFallback: "2026-07-31")
+        expect(
+            messageTailBars.last?.date == "2026-07-01"
+                && (messageTailBars.last?.totalTokens ?? 0) > 0,
+            "a later message-only day does not shift the token/cost chart window")
 
         // Tooltip placement stays inside the visible ScrollView viewport, not
         // merely inside the source card. Region-dodge (container 0.45) prefers

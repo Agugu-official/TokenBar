@@ -43,12 +43,18 @@ public struct PerDay: Sendable {
     public let tokens: Int64
     public let cost: Double
     public let intensity: Int
+    public let hasMessages: Bool
+    public var isActive: Bool { tokens > 0 || hasMessages }
 
-    public init(date: String, tokens: Int64, cost: Double, intensity: Int) {
+    public init(
+        date: String, tokens: Int64, cost: Double, intensity: Int,
+        hasMessages: Bool = false
+    ) {
         self.date = date
         self.tokens = tokens
         self.cost = cost
         self.intensity = intensity
+        self.hasMessages = hasMessages
     }
 }
 
@@ -85,6 +91,7 @@ public struct UsageStats: Sendable {
         for c in payload.contributions {
             var dayTokens: Int64 = 0
             var dayCost = 0.0
+            var hasMessages = false
             for cc in c.clients {
                 present.insert(cc.client)
                 guard selectedClients.contains(cc.client) else { continue }
@@ -93,9 +100,12 @@ public struct UsageStats: Sendable {
                 // folds these here — a trapping `+=` would crash the dashboard.
                 dayTokens = dayTokens.saturatingAdding(cc.tokens.total)
                 dayCost += cc.cost
+                hasMessages = hasMessages || cc.messages > 0
             }
-            if dayTokens == 0 && dayCost == 0 { continue }
-            let entry = PerDay(date: c.date, tokens: dayTokens, cost: dayCost, intensity: c.intensity)
+            if dayTokens == 0 && dayCost == 0 && !hasMessages { continue }
+            let entry = PerDay(
+                date: c.date, tokens: dayTokens, cost: dayCost,
+                intensity: c.intensity, hasMessages: hasMessages)
             perDay.append(entry)
             perDayMap[c.date] = entry
             totalTokens = totalTokens.saturatingAdding(dayTokens)
@@ -138,13 +148,13 @@ public struct UsageStats: Sendable {
 
 extension UsageStats {
     /// A contribution stripe is "visible activity" when its client isn't hidden
-    /// and it carries tokens or cost.
+    /// and it carries tokens, cost, or messages.
     private static func isVisible(_ cc: ContributionClient, hidden: Set<String>) -> Bool {
-        !hidden.contains(cc.client) && (cc.tokens.total > 0 || cc.cost > 0)
+        !hidden.contains(cc.client) && (cc.tokens.total > 0 || cc.cost > 0 || cc.messages > 0)
     }
 
     /// The set of `YYYY` years in which at least one NON-hidden client had
-    /// activity (tokens or cost), derived from a payload's contributions. Used
+    /// activity (tokens, cost, or messages), derived from a payload's contributions. Used
     /// to drop from the year picker years that only hidden clients used. Only
     /// meaningful over an all-time payload (contributions spanning every year);
     /// callers fall back to the unfiltered known-year list when the payload is
@@ -178,7 +188,7 @@ extension UsageStats {
 
 extension Streaks {
     /// Port of computeStreaks: walk every calendar day in the range; a day is
-    /// active when it has tokens. Current counts back from the range end.
+    /// active when it has tokens or messages. Current counts back from the range end.
     public static func compute(
         perDayMap: [String: PerDay], rangeStart: String, rangeEnd: String
     ) -> Streaks {
@@ -190,7 +200,7 @@ extension Streaks {
         var run = 0
         var current = 0
         for n in start.number...end.number {
-            let active = (perDayMap[ISODay(number: n).iso]?.tokens ?? 0) > 0
+            let active = perDayMap[ISODay(number: n).iso]?.isActive ?? false
             if active {
                 run += 1
                 longest = max(longest, run)
@@ -199,7 +209,7 @@ extension Streaks {
             }
         }
         for n in stride(from: end.number, through: start.number, by: -1) {
-            if (perDayMap[ISODay(number: n).iso]?.tokens ?? 0) > 0 { current += 1 } else { break }
+            if perDayMap[ISODay(number: n).iso]?.isActive == true { current += 1 } else { break }
         }
         return Streaks(longest: longest, current: current)
     }
