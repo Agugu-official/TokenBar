@@ -1079,6 +1079,8 @@ struct ClaudeUsageResponse {
     seven_day_cowork: Option<ClaudeWindow>,
     #[serde(default, deserialize_with = "deserialize_optional_raw")]
     cowork: Option<ClaudeWindow>,
+    #[serde(default, deserialize_with = "deserialize_optional_claude_limits")]
+    limits: Option<Vec<ClaudeLimitEntry>>,
     #[serde(default, deserialize_with = "deserialize_optional_raw")]
     extra_usage: Option<ClaudeExtraUsage>,
 }
@@ -1096,6 +1098,34 @@ impl ClaudeWindow {
         self.utilization
             .is_some_and(|used| used.is_finite() && (0.0..=100.0).contains(&used))
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeLimitEntry {
+    #[serde(default, deserialize_with = "deserialize_optional_non_empty_string")]
+    kind: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_empty_string")]
+    group: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
+    percent: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_empty_string")]
+    resets_at: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_raw")]
+    scope: Option<ClaudeLimitScope>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeLimitScope {
+    #[serde(default, deserialize_with = "deserialize_optional_raw")]
+    model: Option<ClaudeLimitModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeLimitModel {
+    #[serde(default, deserialize_with = "deserialize_optional_non_empty_string")]
+    id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_empty_string")]
+    display_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3905,6 +3935,7 @@ fn claude_windows(usage: &ClaudeUsageResponse, now: DateTime<Utc>) -> Vec<UsageW
         usage.routines_window(),
         now,
     );
+    append_claude_scoped_windows(&mut windows, usage.limits.as_deref(), now);
     if let Some(extra) = claude_extra_usage_window(usage.extra_usage.as_ref()) {
         windows.push(extra);
     }
@@ -3977,6 +4008,111 @@ fn map_claude_window(
             )
         },
     )
+}
+
+fn append_claude_scoped_windows(
+    windows: &mut Vec<UsageWindow>,
+    limits: Option<&[ClaudeLimitEntry]>,
+    now: DateTime<Utc>,
+) {
+    // Flat labels are the provider's human model names; compare them with the
+    // scoped display name rather than the id slug, which may include a
+    // namespace or version.
+    let flat_model_slugs = windows
+        .iter()
+        .map(|window| claude_slug(&window.label))
+        .collect::<HashSet<_>>();
+    let mut emitted_slugs = HashSet::new();
+    for entry in limits.unwrap_or(&[]) {
+        // Do not filter on `is_active`: live enforceable limits can report false.
+        if entry.group.as_deref() != Some("weekly")
+            || entry.kind.as_deref() != Some("weekly_scoped")
+        {
+            continue;
+        }
+        let Some(percent) = entry
+            .percent
+            .filter(|percent| percent.is_finite() && (0.0..=100.0).contains(percent))
+        else {
+            continue;
+        };
+        let Some(model) = entry.scope.as_ref().and_then(|scope| scope.model.as_ref()) else {
+            continue;
+        };
+        let Some(display_name) = model
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|display_name| !display_name.is_empty())
+        else {
+            continue;
+        };
+        let display_name_slug = claude_slug(display_name);
+        let model_id_slug = model
+            .id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(claude_slug);
+        if model_id_slug
+            .as_deref()
+            .is_some_and(claude_is_all_models_slug)
+            || claude_is_all_models_slug(&display_name_slug)
+        {
+            continue;
+        }
+        if flat_model_slugs.contains(&display_name_slug) {
+            continue;
+        }
+        let Some(slug) = model_id_slug
+            .filter(|slug| !slug.is_empty())
+            .or_else(|| (!display_name_slug.is_empty()).then_some(display_name_slug.clone()))
+        else {
+            continue;
+        };
+        if !emitted_slugs.insert(slug.clone()) {
+            continue;
+        }
+        let window_key = format!("weekly_scoped.{slug}.v1");
+        let resets_at = entry.resets_at.as_deref().and_then(parse_datetime);
+        if let Some(window) = UsageWindow::try_from_provider_used_percent(
+            format!("{display_name} only"),
+            percent,
+            resets_at,
+            now,
+        )
+        .map(|window| {
+            window.with_identity(
+                window_key.clone(),
+                Some(window_key),
+                None,
+                Some(DurationEvidence::contract(7 * 24 * 60 * 60)),
+            )
+        }) {
+            windows.push(window);
+        }
+    }
+}
+
+fn claude_is_all_models_slug(slug: &str) -> bool {
+    slug == "all-models" || slug.ends_with("-all-models")
+}
+
+fn claude_slug(value: &str) -> String {
+    let mut slug = String::new();
+    let mut pending_separator = false;
+    for character in value.chars() {
+        if character.is_alphanumeric() {
+            if pending_separator && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.extend(character.to_lowercase());
+            pending_separator = false;
+        } else if !slug.is_empty() {
+            pending_separator = true;
+        }
+    }
+    slug
 }
 
 /// Parse the `anthropic-ratelimit-unified-{5h,7d}-{utilization,reset}` response
@@ -4432,6 +4568,23 @@ where
         Some(Value::String(s)) => s.parse::<f64>().ok(),
         _ => None,
     })
+}
+
+fn deserialize_optional_claude_limits<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<ClaudeLimitEntry>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| {
+        value.as_array().map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| serde_json::from_value(entry.clone()).ok())
+                .collect()
+        })
+    }))
 }
 
 #[cfg(test)]
@@ -6677,6 +6830,255 @@ mod tests {
         assert_eq!(windows[2].remaining_percent, 97.0);
         assert_eq!(windows[3].label, "Designs");
         assert_eq!(windows[3].remaining_percent, 100.0);
+    }
+
+    #[test]
+    fn maps_claude_fable_scoped_weekly_limit() {
+        let raw = r#"{
+            "limits": [{
+                "kind": "weekly_scoped",
+                "group": "weekly",
+                "percent": 12.5,
+                "resets_at": "2026-08-10T00:00:00Z",
+                "scope": {"model": {
+                    "id": "claude/fable.5:promo",
+                    "display_name": "Fable"
+                }}
+            }]
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let windows = claude_windows(&usage, now);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Fable only");
+        assert_eq!(windows[0].card_id, "weekly_scoped.claude-fable-5-promo.v1");
+        assert_eq!(windows[0].used_percent, 12.5);
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2026-08-10T00:00:00.000Z")
+        );
+    }
+
+    #[test]
+    fn maps_claude_scoped_limit_even_when_inactive() {
+        let raw = r#"{
+            "limits": [{
+                "kind": "weekly_scoped",
+                "group": "weekly",
+                "percent": 12.5,
+                "resets_at": "2026-08-10T00:00:00Z",
+                "is_active": false,
+                "scope": {"model": {
+                    "id": "claude/fable.5:promo",
+                    "display_name": "Fable"
+                }}
+            }]
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        assert_eq!(claude_windows(&usage, now).len(), 1);
+    }
+
+    #[test]
+    fn skips_claude_scoped_all_models_limit() {
+        let raw = r#"{
+            "limits": [{
+                "kind": "weekly_scoped",
+                "group": "weekly",
+                "percent": 12.5,
+                "scope": {"model": {
+                    "id": "claude/all-models",
+                    "display_name": "All Models"
+                }}
+            }]
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        assert!(claude_windows(&usage, now).is_empty());
+    }
+
+    #[test]
+    fn deduplicates_claude_scoped_opus_against_flat_window() {
+        let raw = r#"{
+            "seven_day_opus": {"utilization": 25},
+            "limits": [{
+                "kind": "weekly_scoped",
+                "group": "weekly",
+                "percent": 80,
+                "scope": {"model": {
+                    "id": "claude/opus.5",
+                    "display_name": "Opus"
+                }}
+            }]
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let windows = claude_windows(&usage, now);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Opus");
+        assert!(!windows[0].label.ends_with(" only"));
+        assert_eq!(windows[0].used_percent, 25.0);
+    }
+
+    /// The migration case: once Anthropic drops a flat field, the scoped entry
+    /// must take over rather than leaving the model with no window at all.
+    #[test]
+    fn maps_claude_scoped_opus_when_flat_window_absent() {
+        let raw = r#"{
+            "limits": [{
+                "kind": "weekly_scoped",
+                "group": "weekly",
+                "percent": 80,
+                "scope": {"model": {
+                    "id": "claude/opus.5",
+                    "display_name": "Opus"
+                }}
+            }]
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let windows = claude_windows(&usage, now);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Opus only");
+        assert_eq!(windows[0].card_id, "weekly_scoped.claude-opus-5.v1");
+        assert_eq!(windows[0].used_percent, 80.0);
+    }
+
+    /// End-to-end shape check against a real `oauth/usage` response captured
+    /// 2026-08-04 (percentages and timestamps replaced with neutral test
+    /// values; every field, including the ones we do not parse, kept verbatim).
+    ///
+    /// This pins three things the synthetic fixtures above cannot, because the
+    /// live payload differs from what the reference implementations led us to
+    /// expect:
+    ///   - the account-wide weekly entry is `kind: "weekly_all"` with a null
+    ///     scope, not an all-models scope, so `kind` is what actually keeps it
+    ///     out of the scoped lane;
+    ///   - the real Fable entry carries `scope.model.id: null`, so identity
+    ///     falls back to the display name;
+    ///   - the real Fable entry carries `resets_at: null` and must still
+    ///     produce a window.
+    #[test]
+    fn maps_live_claude_usage_payload_shape() {
+        let raw = r#"{
+            "five_hour": {"utilization": 55.0, "resets_at": "2026-08-10T20:40:00.197695+00:00",
+                          "limit_dollars": null, "used_dollars": null, "remaining_dollars": null},
+            "seven_day": {"utilization": 33.0, "resets_at": "2026-08-12T10:00:00.197716+00:00",
+                          "limit_dollars": null, "used_dollars": null, "remaining_dollars": null},
+            "seven_day_oauth_apps": null, "seven_day_opus": null, "seven_day_sonnet": null,
+            "seven_day_cowork": null, "seven_day_omelette": null, "tangelo": null,
+            "iguana_necktie": null, "omelette_promotional": null, "nimbus_quill": null,
+            "cinder_cove": null, "amber_ladder": null,
+            "extra_usage": {"is_enabled": false, "monthly_limit": null, "used_credits": null,
+                            "utilization": null, "currency": null, "decimal_places": null,
+                            "disabled_reason": null, "user_disabled": true,
+                            "spend_limit_reached": false, "credits_ever_enabled": true,
+                            "daily": null, "weekly": null},
+            "limits": [
+                {"kind": "session", "group": "session", "percent": 55, "severity": "normal",
+                 "resets_at": "2026-08-10T20:40:00.197695+00:00", "scope": null, "is_active": true},
+                {"kind": "weekly_all", "group": "weekly", "percent": 33, "severity": "normal",
+                 "resets_at": "2026-08-12T10:00:00.197716+00:00", "scope": null, "is_active": false},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 0, "severity": "normal",
+                 "resets_at": null,
+                 "scope": {"model": {"id": null, "display_name": "Fable"}, "surface": null},
+                 "is_active": false}
+            ],
+            "spend": {"used": {"amount_minor": 0, "currency": "USD", "exponent": 2},
+                      "limit": null, "percent": 0, "severity": "normal", "enabled": false,
+                      "disabled_reason": null, "cap": null, "balance": null, "auto_reload": null,
+                      "disclaimer": "Usage credits cover you when you hit your plan limits.",
+                      "can_purchase_credits": false, "can_toggle": false},
+            "member_dashboard_available": false
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let windows = claude_windows(&usage, now);
+
+        // Session and Weekly come from the flat fields; the `session` and
+        // `weekly_all` entries in `limits[]` describe the same two quotas and
+        // must not add duplicates.
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| window.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Session", "Weekly", "Fable only"]
+        );
+        assert_eq!(windows[0].used_percent, 55.0);
+        assert_eq!(windows[1].used_percent, 33.0);
+
+        let fable = &windows[2];
+        assert_eq!(fable.card_id, "weekly_scoped.fable.v1");
+        assert_eq!(fable.used_percent, 0.0);
+        assert_eq!(fable.remaining_percent, 100.0);
+        assert_eq!(fable.resets_at, None);
+    }
+
+    /// Per-entry tolerance: one unusable element must not discard its valid
+    /// siblings, which is what separates element-wise parsing from decoding the
+    /// array as a whole.
+    #[test]
+    fn keeps_valid_claude_scoped_limit_beside_malformed_sibling() {
+        let raw = r#"{
+            "limits": [
+                42,
+                {"kind": "weekly_scoped", "group": "weekly", "percent": "oops",
+                 "scope": {"model": {"display_name": "Broken"}}},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 12.5,
+                 "scope": {"model": {
+                    "id": "claude/fable.5:promo", "display_name": "Fable"
+                 }}}
+            ]
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let windows = claude_windows(&usage, now);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Fable only");
+        assert_eq!(windows[0].used_percent, 12.5);
+    }
+
+    #[test]
+    fn ignores_malformed_claude_scoped_limits() {
+        let raw = r#"{
+            "limits": [
+                42,
+                {"kind": "session", "group": "weekly", "percent": 10,
+                 "scope": {"model": {"display_name": "Session"}}},
+                {"kind": "weekly_scoped", "group": "monthly", "percent": 10,
+                 "scope": {"model": {"display_name": "Monthly"}}},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": "NaN",
+                 "scope": {"model": {"display_name": "Infinite"}}},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 10,
+                 "scope": {"model": {"display_name": "   "}}}
+            ]
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        assert!(claude_windows(&usage, now).is_empty());
+    }
+
+    #[test]
+    fn deduplicates_duplicate_claude_scoped_limit_slugs_first_wins() {
+        let raw = r#"{
+            "limits": [
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 12,
+                 "scope": {"model": {
+                    "id": "claude/fable.5:promo", "display_name": "Fable"
+                 }}},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 99,
+                 "scope": {"model": {
+                    "id": "claude/fable.5:promo", "display_name": "Fable Promo"
+                 }}}
+            ]
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let windows = claude_windows(&usage, now);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].used_percent, 12.0);
+        assert_eq!(windows[0].label, "Fable only");
     }
 
     #[test]
