@@ -12,12 +12,22 @@ private final class AsyncResultBox<Value: Sendable>: @unchecked Sendable {
 }
 
 private actor ControlledTurnUsageDataSource: UsageDataSource {
+    private struct PendingHourly {
+        let clients: [String]?
+        let continuation: CheckedContinuation<HourlyReport, Never>
+    }
+
     nonisolated let allowsQuotaCachePersistence = false
 
+    private let hourlyResponseClients: [String]?
     private var blockedGraphYears: Set<String> = []
     private var blockedHourlyYears: Set<String> = []
     private var pendingGraphs: [String: [CheckedContinuation<UsagePayload, Never>]] = [:]
-    private var pendingHourly: [String: [CheckedContinuation<HourlyReport, Never>]] = [:]
+    private var pendingHourly: [String: [PendingHourly]] = [:]
+
+    init(hourlyResponseClients: [String]? = nil) {
+        self.hourlyResponseClients = hourlyResponseClients
+    }
 
     private static func key(_ year: String?) -> String { year ?? "" }
 
@@ -43,9 +53,12 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
     func releaseHourly(year: String?) {
         let key = Self.key(year)
         blockedHourlyYears.remove(key)
-        let continuations = pendingHourly.removeValue(forKey: key) ?? []
-        let report = DemoData.hourlyReport(for: year, clients: ["codex", "claude"])
-        continuations.forEach { $0.resume(returning: report) }
+        let pending = pendingHourly.removeValue(forKey: key) ?? []
+        pending.forEach {
+            let report = DemoData.hourlyReport(
+                for: year, clients: hourlyResponseClients ?? $0.clients)
+            $0.continuation.resume(returning: report)
+        }
     }
 
     func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
@@ -72,9 +85,13 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
         _ = priority
         let key = Self.key(year)
         if blockedHourlyYears.contains(key) {
-            return await withCheckedContinuation { pendingHourly[key, default: []].append($0) }
+            return await withCheckedContinuation {
+                pendingHourly[key, default: []].append(
+                    PendingHourly(clients: clients, continuation: $0))
+            }
         }
-        return DemoData.hourlyReport(for: year, clients: clients)
+        return DemoData.hourlyReport(
+            for: year, clients: hourlyResponseClients ?? clients)
     }
 
     func agentsReport(
@@ -2311,6 +2328,163 @@ enum SelfTest {
         expect(
             turnTransitionChecks?["emptyDidNotFetch"] == true,
             "an empty supported turn slice does not invoke the all-client hourly API")
+
+        let hourlyCacheChecks = awaitMainActorValue { () async -> [String: Bool] in
+            let year = "2047"
+            let turnClients = ["codex", "claude"]
+            let hourlyClients = ["codex", "claude", "gemini"]
+
+            func fingerprint(_ report: HourlyReport?) -> String? {
+                guard let report else { return nil }
+                let entries = report.entries.map {
+                    "\($0.hour)|\($0.clients.joined(separator: ","))|\($0.total)|"
+                        + "\($0.messageCount)|\($0.turnCount)|\($0.cost)"
+                }.joined(separator: ";")
+                return "\(entries)|\(report.totalCost)"
+            }
+
+            @MainActor func blockedModel(
+                source: ControlledTurnUsageDataSource,
+                cachesSnapshot: Bool = true,
+                view: AppView,
+                clients: [String]
+            ) async -> (DashboardModel, Task<Void, Never>, Bool) {
+                await source.blockHourly(year: year)
+                let model = DashboardModel(
+                    cachesSnapshot: cachesSnapshot, source: source, initialYear: year)
+                await model.load()
+                let task = Task { await model.ensureData(for: view, clients: clients) }
+                let pending = await waitUntil { await source.hasPendingHourly(year: year) }
+                return (model, task, pending)
+            }
+
+            let originalA = DemoData.hourlyReport(for: year, clients: turnClients)
+            let originalB = DemoData.hourlyReport(for: year, clients: hourlyClients)
+            let refreshedA = DemoData.hourlyReport(for: year, clients: ["claude"])
+            let nonOwnerB = DemoData.hourlyReport(for: year, clients: ["codex"])
+            let fixturesDistinct = Set([
+                fingerprint(originalA), fingerprint(originalB), fingerprint(refreshedA),
+                fingerprint(nonOwnerB),
+            ]).count == 4
+
+            // Seed two distinct popover-owned slices under the same year.
+            let seedSource = ControlledTurnUsageDataSource()
+            let seedModel = DashboardModel(
+                cachesSnapshot: true, source: seedSource, initialYear: year)
+            await seedModel.load()
+            await seedModel.ensureData(for: .monthly, clients: turnClients)
+            let seededA = fingerprint(seedModel.turnsReport(for: turnClients))
+                == fingerprint(originalA)
+            await seedModel.ensureData(for: .hourly, clients: hourlyClients)
+            let seededB = fingerprint(seedModel.hourlyReport(for: hourlyClients))
+                == fingerprint(originalB)
+
+            // A fresh popover restores A before its deliberately blocked
+            // refresh completes, then the accepted newer result replaces A.
+            let refreshSource = ControlledTurnUsageDataSource(
+                hourlyResponseClients: ["claude"])
+            let (refreshModel, refreshTask, refreshPending) = await blockedModel(
+                source: refreshSource, view: .monthly, clients: turnClients)
+            let restoredABeforeRefresh =
+                fingerprint(refreshModel.turnsReport(for: turnClients)) == fingerprint(originalA)
+            await refreshSource.releaseHourly(year: year)
+            await refreshTask.value
+            let acceptedRefreshVisible =
+                fingerprint(refreshModel.turnsReport(for: turnClients)) == fingerprint(refreshedA)
+
+            // Fresh owners prove A's replacement did not overwrite sibling B.
+            let verifyASource = ControlledTurnUsageDataSource(
+                hourlyResponseClients: ["claude"])
+            let (verifyAModel, verifyATask, verifyAPending) = await blockedModel(
+                source: verifyASource, view: .monthly, clients: turnClients)
+            let refreshedARestored =
+                fingerprint(verifyAModel.turnsReport(for: turnClients)) == fingerprint(refreshedA)
+            await verifyASource.releaseHourly(year: year)
+            await verifyATask.value
+
+            let verifyBSource = ControlledTurnUsageDataSource()
+            let (verifyBModel, verifyBTask, verifyBPending) = await blockedModel(
+                source: verifyBSource, view: .hourly, clients: hourlyClients)
+            let siblingBPreserved =
+                fingerprint(verifyBModel.hourlyReport(for: hourlyClients)) == fingerprint(originalB)
+            await verifyBSource.releaseHourly(year: year)
+            await verifyBTask.value
+
+            // An unseen client key cannot borrow either cached slice.
+            let unseenClients = ["codex"]
+            let unseenSource = ControlledTurnUsageDataSource()
+            let (unseenModel, unseenTask, unseenPending) = await blockedModel(
+                source: unseenSource, view: .hourly, clients: unseenClients)
+            let unseenStayedEmpty = unseenModel.hourlyReport(for: unseenClients) == nil
+            await unseenSource.releaseHourly(year: year)
+            await unseenTask.value
+
+            // Non-owners neither read A nor replace it with their local B.
+            let nonOwnerSource = ControlledTurnUsageDataSource(
+                hourlyResponseClients: ["codex"])
+            let (nonOwnerModel, nonOwnerTask, nonOwnerPending) = await blockedModel(
+                source: nonOwnerSource, cachesSnapshot: false,
+                view: .monthly, clients: turnClients)
+            let nonOwnerDidNotRead = nonOwnerModel.turnsReport(for: turnClients) == nil
+            await nonOwnerSource.releaseHourly(year: year)
+            await nonOwnerTask.value
+            let nonOwnerReceivedLocalB =
+                fingerprint(nonOwnerModel.turnsReport(for: turnClients)) == fingerprint(nonOwnerB)
+
+            let ownerAfterSource = ControlledTurnUsageDataSource(
+                hourlyResponseClients: ["claude"])
+            let (ownerAfterModel, ownerAfterTask, ownerAfterPending) = await blockedModel(
+                source: ownerAfterSource, view: .monthly, clients: turnClients)
+            let nonOwnerDidNotWrite =
+                fingerprint(ownerAfterModel.turnsReport(for: turnClients)) == fingerprint(refreshedA)
+            await ownerAfterSource.releaseHourly(year: year)
+            await ownerAfterTask.value
+
+            return [
+                "fixturesDistinct": fixturesDistinct,
+                "seededA": seededA,
+                "seededB": seededB,
+                "refreshPending": refreshPending,
+                "restoredABeforeRefresh": restoredABeforeRefresh,
+                "acceptedRefreshVisible": acceptedRefreshVisible,
+                "verifyAPending": verifyAPending,
+                "refreshedARestored": refreshedARestored,
+                "verifyBPending": verifyBPending,
+                "siblingBPreserved": siblingBPreserved,
+                "unseenPending": unseenPending,
+                "unseenStayedEmpty": unseenStayedEmpty,
+                "nonOwnerPending": nonOwnerPending,
+                "nonOwnerDidNotRead": nonOwnerDidNotRead,
+                "nonOwnerReceivedLocalB": nonOwnerReceivedLocalB,
+                "ownerAfterPending": ownerAfterPending,
+                "nonOwnerDidNotWrite": nonOwnerDidNotWrite,
+            ]
+        }
+        expect(
+            hourlyCacheChecks?["fixturesDistinct"] == true
+                && hourlyCacheChecks?["seededA"] == true
+                && hourlyCacheChecks?["seededB"] == true
+                && hourlyCacheChecks?["refreshPending"] == true
+                && hourlyCacheChecks?["restoredABeforeRefresh"] == true
+                && hourlyCacheChecks?["acceptedRefreshVisible"] == true,
+            "hourly cache restores immediately and an accepted refresh replaces its exact key")
+        expect(
+            hourlyCacheChecks?["verifyAPending"] == true
+                && hourlyCacheChecks?["refreshedARestored"] == true
+                && hourlyCacheChecks?["verifyBPending"] == true
+                && hourlyCacheChecks?["siblingBPreserved"] == true,
+            "hourly cache keeps refreshed turn and all-client slices independent")
+        expect(
+            hourlyCacheChecks?["unseenPending"] == true
+                && hourlyCacheChecks?["unseenStayedEmpty"] == true,
+            "hourly cache never restores a report under an unseen client key")
+        expect(
+            hourlyCacheChecks?["nonOwnerPending"] == true
+                && hourlyCacheChecks?["nonOwnerDidNotRead"] == true
+                && hourlyCacheChecks?["nonOwnerReceivedLocalB"] == true
+                && hourlyCacheChecks?["ownerAfterPending"] == true
+                && hourlyCacheChecks?["nonOwnerDidNotWrite"] == true,
+            "non-owning dashboard models neither read nor replace the popover hourly cache")
 
         // Tab order (plan 2026-07-16): Monthly leads Daily in the tab row.
         expect(AppView.allCases.map(\.rawValue) ==
