@@ -85,7 +85,7 @@ struct DailyView: View {
         let contribution: Contribution
     }
 
-    private struct ModelSlice {
+    struct ModelSlice {
         let key: String
         let model: String
         let provider: String
@@ -133,13 +133,13 @@ struct DailyView: View {
         .sorted { $0.date > $1.date }
     }
 
-    private func models(for c: Contribution) -> [ModelSlice] {
+    func models(for c: Contribution) -> [ModelSlice] {
         let allow = Set(clientIds)
         var grouped: [String: ModelSlice] = [:]
         for cc in c.clients {
             if !allow.contains(cc.client) { continue }
             let tokens = Self.tokenTotal(cc.tokens)
-            if tokens <= 0 && cc.cost <= 0 { continue }
+            if tokens <= 0 && cc.cost <= 0 && cc.messages <= 0 { continue }
             let model = cc.modelId.isEmpty ? "unknown" : cc.modelId
             let key = "\(model)|\(cc.providerId)"
             var slot = grouped[key] ?? ModelSlice(

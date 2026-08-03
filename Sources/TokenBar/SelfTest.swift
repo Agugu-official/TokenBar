@@ -2134,6 +2134,22 @@ enum SelfTest {
         let moRows = MonthlyView.monthRows(payload: messageOnlyPayload, clientIds: ["codex"])
         expect(moRows.count == 1 && moRows[0].messages == 5 && moRows[0].tokens == 0 && moRows[0].cost == 0,
             "a message-only month (zero tokens, zero cost) still surfaces in the Monthly lens")
+        let monthlyMessageOnlySlice = moRows.first.flatMap {
+            MonthlyView.modelSlices(
+                for: $0, clientIds: ["codex"], colors: ModelColorMap(report: nil)
+            ).first
+        }
+        expect(
+            monthlyMessageOnlySlice?.key == "m1|p" && monthlyMessageOnlySlice?.tokens == 0
+                && monthlyMessageOnlySlice?.cost == 0,
+            "a message-only month retains its model drill-down")
+        expect(
+            UsageStats.hasVisibleActivity(
+                contributions: messageOnlyPayload.contributions, hidden: []
+            ) && UsageStats.yearsWithVisibleActivity(
+                contributions: messageOnlyPayload.contributions, hidden: []
+            ) == ["2026"],
+            "message-only activity keeps its selected year visible")
 
         // Daily/Monthly turn counts reuse the existing local-hour report, but
         // only after strict calendar-key validation and only for Codex/Claude.
@@ -2181,15 +2197,23 @@ enum SelfTest {
             ) == ["claude", "codex"]
                 && PopoverView.supportedTurnClients(["gemini", "opencode"]).isEmpty,
             "turn scope preserves display order and excludes unsupported clients")
-        let dailyMessageOnlyRows = DailyView(
+        let dailyMessageOnlyView = DailyView(
             payload: messageOnlyPayload, clientIds: ["codex"], hourlyReport: turnReport,
             turnClientIds: ["codex", "claude"], colors: ModelColorMap(report: nil)
-        ).rows
+        )
+        let dailyMessageOnlyRows = dailyMessageOnlyView.rows
         expect(
             dailyMessageOnlyRows.count == 1 && dailyMessageOnlyRows[0].messages == 5
                 && dailyMessageOnlyRows[0].tokens == 0 && dailyMessageOnlyRows[0].cost == 0
                 && dailyMessageOnlyRows[0].turns == 7,
             "Daily retains a message-only day and attaches its positive turn count")
+        let dailyMessageOnlySlice = dailyMessageOnlyRows.first.flatMap {
+            dailyMessageOnlyView.models(for: $0.contribution).first
+        }
+        expect(
+            dailyMessageOnlySlice?.key == "m1|p" && dailyMessageOnlySlice?.tokens == 0
+                && dailyMessageOnlySlice?.cost == 0,
+            "a message-only Daily row retains its model drill-down")
 
         let dashboardYearDefaultsKey = "tokenbar.dashboard.year"
         let savedDashboardYear = UserDefaults.standard.object(forKey: dashboardYearDefaultsKey)

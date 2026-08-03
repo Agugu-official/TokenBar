@@ -138,13 +138,13 @@ public struct UsageStats: Sendable {
 
 extension UsageStats {
     /// A contribution stripe is "visible activity" when its client isn't hidden
-    /// and it carries tokens or cost.
+    /// and it carries tokens, cost, or messages.
     private static func isVisible(_ cc: ContributionClient, hidden: Set<String>) -> Bool {
-        !hidden.contains(cc.client) && (cc.tokens.total > 0 || cc.cost > 0)
+        !hidden.contains(cc.client) && (cc.tokens.total > 0 || cc.cost > 0 || cc.messages > 0)
     }
 
     /// The set of `YYYY` years in which at least one NON-hidden client had
-    /// activity (tokens or cost), derived from a payload's contributions. Used
+    /// activity (tokens, cost, or messages), derived from a payload's contributions. Used
     /// to drop from the year picker years that only hidden clients used. Only
     /// meaningful over an all-time payload (contributions spanning every year);
     /// callers fall back to the unfiltered known-year list when the payload is
