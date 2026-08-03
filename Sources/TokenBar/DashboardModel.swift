@@ -121,7 +121,10 @@ private struct DashboardSnapshot {
     private static var lastSnapshot: DashboardSnapshot?
     /// Reopen cache for the expensive hourly fold. Multiple slices coexist so
     /// Daily/Monthly's Codex+Claude report cannot evict Hourly's all-client one.
+    // ponytail: FIFO at eight slices bounds memory; use LRU only if churn shows misses.
+    private static let hourlyCacheLimit = 8
     private static var hourlyCache: [HourlyCacheKey: HourlyReport] = [:]
+    private static var hourlyCacheOrder: [HourlyCacheKey] = []
     /// Whether this model owns the shared `lastSnapshot` (true only for the
     /// popover's model, whose teardown/rebuild is what the cache speeds up).
     private let cachesSnapshot: Bool
@@ -354,7 +357,14 @@ private struct DashboardSnapshot {
         hourlyClients = clients
         hourlyYear = yearKey
         if cachesSnapshot {
-            Self.hourlyCache[HourlyCacheKey(year: yearKey, clients: clients)] = report
+            let cacheKey = HourlyCacheKey(year: yearKey, clients: clients)
+            if Self.hourlyCache[cacheKey] == nil {
+                Self.hourlyCacheOrder.append(cacheKey)
+                if Self.hourlyCacheOrder.count > Self.hourlyCacheLimit {
+                    Self.hourlyCache.removeValue(forKey: Self.hourlyCacheOrder.removeFirst())
+                }
+            }
+            Self.hourlyCache[cacheKey] = report
         }
     }
 
