@@ -129,6 +129,11 @@ private struct DashboardSnapshot {
     private(set) var phase: Phase
     private static let yearKey = "tokenbar.dashboard.year"
 
+    /// Empty is the explicit identity for an all-time slice; nil below means
+    /// that no accepted payload/report exists yet, so it cannot masquerade as
+    /// all-time.
+    private static func identityYear(_ year: String?) -> String { year ?? "" }
+
     /// Resolve the active year filter: the `--year=` debug flag wins, else the
     /// persisted selection. Used as `init()`'s default so the snapshot guard and
     /// the model's `year` can never drift (the guard MUST compare the same value
@@ -164,6 +169,7 @@ private struct DashboardSnapshot {
             modelReport = snap.modelReport
             colors = snap.colors
             knownYears = snap.knownYears
+            acceptedPayloadYear = Self.identityYear(initialYear)
             agentUsage = snap.agentUsage.map {
                 AgentUsagePublicationCoordinator.resolve($0)
             }
@@ -213,6 +219,12 @@ private struct DashboardSnapshot {
     // refetch. Background refreshes (reload/pollGraph) reuse the stored slice.
     @ObservationIgnored private var hourlyClients: Set<String>?
     @ObservationIgnored private var agentsClients: Set<String>?
+    /// Identity of the last payload/hourly report that actually committed.
+    /// These are separate from `year`: a newer request may complete in the
+    /// inverse order, and the presentation accessors must stay fail-closed.
+    @ObservationIgnored private var acceptedPayloadYear: String?
+    @ObservationIgnored private var hourlyYear: String?
+    @ObservationIgnored private var hourlyRequestToken = 0
 
     /// UsageStats for a client slice, with hidden clients already removed from
     /// `selected`. Returns the precomputed full `stats` when the slice covers
@@ -233,6 +245,24 @@ private struct DashboardSnapshot {
         return computed
     }
 
+    /// The Hourly lens can render a matching report as soon as it completes;
+    /// unlike Daily/Monthly it intentionally does not wait for the graph
+    /// payload, preserving the existing hourly behavior.
+    func hourlyReport(for clients: [String]) -> HourlyReport? {
+        guard let hourly,
+              hourlyClients == Set(clients),
+              hourlyYear == Self.identityYear(year)
+        else { return nil }
+        return hourly
+    }
+
+    /// Daily/Monthly receive a report only when both sides of the year
+    /// transition have committed the same slice and client set.
+    func turnsReport(for clients: [String]) -> HourlyReport? {
+        guard acceptedPayloadYear == Self.identityYear(year) else { return nil }
+        return hourlyReport(for: clients)
+    }
+
     /// The source owns the blocking FFI hop in live mode; demo mode returns
     /// synthetic values through the same async contract.
     func load() async {
@@ -247,7 +277,7 @@ private struct DashboardSnapshot {
             // so apply() never tags the new year — and the static snapshot —
             // with the old year's payload. Mirrors reload()/pollGraph().
             guard self.year == year else { return }
-            apply(payload: payload, report: report)
+            apply(payload: payload, report: report, expectedYear: year)
         } catch {
             // Keep showing stale data over an error screen when a previous
             // load succeeded — a transient failure must not blank the UI.
@@ -274,6 +304,7 @@ private struct DashboardSnapshot {
     func setYear(_ newYear: String?) async {
         guard newYear != year, !refreshing else { return }
         year = newYear
+        invalidateHourly()
         UserDefaults.standard.set(newYear, forKey: Self.yearKey)
         refreshing = true
         defer { refreshing = false }
@@ -295,6 +326,18 @@ private struct DashboardSnapshot {
         if !UsageStats.hasVisibleActivity(contributions: payload.contributions, hidden: hidden) {
             await setYear(nil)
         }
+    }
+
+    private func beginHourlyRequest() -> Int {
+        hourlyRequestToken += 1
+        return hourlyRequestToken
+    }
+
+    private func invalidateHourly() {
+        hourly = nil
+        hourlyClients = nil
+        hourlyYear = nil
+        _ = beginHourlyRequest()
     }
 
     private func reload(force: Bool) async {
@@ -319,12 +362,13 @@ private struct DashboardSnapshot {
             return
         }
         let report = try? await reportTask
-        apply(payload: payload, report: report)
+        guard !Task.isCancelled, self.year == year else { return }
+        apply(payload: payload, report: report, expectedYear: year)
         // If apply() cleared a now-empty year filter, it spawned its own
         // unfiltered reload that re-fetches the lazy lenses for the new (nil)
         // year — skip the stale-`year` re-fetch here, or an empty year-filtered
         // hourly/agents could land after it and blank those lenses.
-        guard self.year == year else { return }
+        guard self.year == year, !Task.isCancelled else { return }
         // Re-fetch the lazy lenses that were already loaded, keeping the slice
         // they were last fetched for (an ordered array of the stored Set — the
         // FFI filter is membership-based, so order is irrelevant). Re-check the
@@ -334,9 +378,19 @@ private struct DashboardSnapshot {
         // strand the wrong slice on the lens.
         if hourly != nil {
             let captured = hourlyClients
+            let requestToken = beginHourlyRequest()
             let report = try? await source.hourlyReport(
                 year: year, clients: captured.map(Array.init), priority: .userInitiated)
-            if self.year == year, self.hourlyClients == captured { hourly = report }
+            if !Task.isCancelled,
+               self.year == year,
+               self.hourlyClients == captured,
+               self.hourlyYear == Self.identityYear(year),
+               hourlyRequestToken == requestToken,
+               let report
+            {
+                hourly = report
+                hourlyYear = Self.identityYear(year)
+            }
         }
         if agents != nil {
             let captured = agentsClients
@@ -346,7 +400,10 @@ private struct DashboardSnapshot {
         }
     }
 
-    private func apply(payload: UsagePayload, report: ModelReport?) {
+    private func apply(
+        payload: UsagePayload, report: ModelReport?, expectedYear: String? = nil
+    ) {
+        guard expectedYear == nil || self.year == expectedYear else { return }
         // A year-filtered payload reports only the selected year (empty if that
         // year has no data). Validate the filter against THIS fresh payload —
         // not the knownYears union, which never drops a year once seen — so a
@@ -354,12 +411,15 @@ private struct DashboardSnapshot {
         // stays open) clears instead of stranding the dashboard on an empty
         // slice. Re-fetch unfiltered so all data shows immediately.
         if let year, !payload.years.contains(where: { $0.year == year }) {
+            invalidateHourly()
+            acceptedPayloadYear = nil
             self.year = nil
             UserDefaults.standard.removeObject(forKey: Self.yearKey)
             Task { [weak self] in await self?.reload(force: false) }
             return
         }
         self.payload = payload
+        acceptedPayloadYear = Self.identityYear(year)
         stats = UsageStats(payload: payload, selectedClients: Set(payload.summary.clients))
         modelReport = report
         colors = ModelColorMap(report: report)
@@ -422,11 +482,11 @@ private struct DashboardSnapshot {
             // The year may have changed while we were off-actor; drop a stale
             // slice so the chart never flickers to the wrong year.
             guard self.year == year, let payload = fetched else { continue }
-            apply(payload: payload, report: report)
+            apply(payload: payload, report: report, expectedYear: year)
             // apply() may have cleared a now-empty year filter and spawned an
             // unfiltered reload; skip the stale-`year` lazy re-fetch so it
             // can't blank Hourly/Agents with empty year-filtered reports.
-            guard self.year == year else { continue }
+            guard self.year == year, !Task.isCancelled else { continue }
             // Re-fetch the lazy lenses that were already loaded (mirrors reload),
             // keeping each one's last-fetched client slice.
             // Re-check the stored slice after the await (see reload()): a tab
@@ -434,9 +494,19 @@ private struct DashboardSnapshot {
             // the fresh slice with the stale one.
             if hourly != nil {
                 let captured = hourlyClients
+                let requestToken = beginHourlyRequest()
                 let report = try? await source.hourlyReport(
                     year: year, clients: captured.map(Array.init), priority: .utility)
-                if self.year == year, self.hourlyClients == captured { hourly = report }
+                if !Task.isCancelled,
+                   self.year == year,
+                   self.hourlyClients == captured,
+                   self.hourlyYear == Self.identityYear(year),
+                   hourlyRequestToken == requestToken,
+                   let report
+                {
+                    hourly = report
+                    hourlyYear = Self.identityYear(year)
+                }
             }
             if agents != nil {
                 let captured = agentsClients
@@ -509,28 +579,51 @@ private struct DashboardSnapshot {
     /// when the slice changes, not only when the report is nil — keyed on the
     /// slice as a Set so a reorder does not refetch. The year stale-guard
     /// mirrors reload()/pollGraph().
+    private func ensureHourlyData(
+        year: String?, clients: [String], clearOnEmpty: Bool
+    ) async {
+        let selection = Set(clients)
+        if clearOnEmpty, selection.isEmpty {
+            invalidateHourly()
+            return
+        }
+        let yearKey = Self.identityYear(year)
+        guard hourly == nil || hourlyClients != selection || hourlyYear != yearKey else { return }
+
+        // Suppress a prior report immediately while the new request is in
+        // flight. The request token additionally rejects a source completion
+        // that outlives the cancelled SwiftUI task.
+        if hourly != nil {
+            hourly = nil
+            hourlyClients = nil
+            hourlyYear = nil
+        }
+        let requestToken = beginHourlyRequest()
+        let report = try? await source.hourlyReport(
+            year: year, clients: clients, priority: .userInitiated)
+        guard !Task.isCancelled,
+              self.year == year,
+              hourlyRequestToken == requestToken,
+              let report
+        else { return }
+        hourly = report
+        hourlyClients = selection
+        hourlyYear = yearKey
+    }
+
     func ensureData(for view: AppView, clients: [String]) async {
         let year = self.year
-        let selection = Set(clients)
         switch view {
-        case .hourly where hourly == nil || hourlyClients != selection:
-            // Nil the stale report on a slice change so the view shows its
-            // loading state instead of rendering the OLD mixed-bucket totals
-            // against the NEW clientIds for one FFI latency (a shared hour's
-            // hidden stripe would flash). Also covers plain tab switches.
-            if hourly != nil, hourlyClients != selection { hourly = nil; hourlyClients = selection }
-            let report = try? await source.hourlyReport(
-                year: year, clients: clients, priority: .userInitiated)
-            // The source request may outlive this `.task(id:)`'s cancellation, so a
-            // tab switch or year change during the await must not let this
-            // superseded fetch commit: PopoverView cancels the task on an
-            // activeTab/year change, so isCancelled captures the slice switch
-            // (the model has no "desired selection" to compare against the way
-            // it does for year).
-            guard self.year == year, !Task.isCancelled else { return }
-            hourly = report
-            hourlyClients = selection
-        case .agents where agents == nil || agentsClients != selection:
+        case .hourly:
+            // Preserve the established nil/empty = all-client source behavior
+            // for Hourly; only Daily/Monthly treat an empty supported slice as
+            // an explicit no-data state.
+            await ensureHourlyData(year: year, clients: clients, clearOnEmpty: false)
+        case .daily, .monthly:
+            await ensureHourlyData(year: year, clients: clients, clearOnEmpty: true)
+        case .agents:
+            let selection = Set(clients)
+            guard agents == nil || agentsClients != selection else { return }
             // Nil the stale report on a slice change (see the hourly case).
             if agents != nil, agentsClients != selection { agents = nil; agentsClients = selection }
             let report = try? await source.agentsReport(

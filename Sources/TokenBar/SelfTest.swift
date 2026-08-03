@@ -11,6 +11,98 @@ private final class AsyncResultBox<Value: Sendable>: @unchecked Sendable {
     var result: Result<Value, Error>?
 }
 
+private actor ControlledTurnUsageDataSource: UsageDataSource {
+    nonisolated let allowsQuotaCachePersistence = false
+
+    private var blockedGraphYears: Set<String> = []
+    private var blockedHourlyYears: Set<String> = []
+    private var pendingGraphs: [String: [CheckedContinuation<UsagePayload, Never>]] = [:]
+    private var pendingHourly: [String: [CheckedContinuation<HourlyReport, Never>]] = [:]
+
+    private static func key(_ year: String?) -> String { year ?? "" }
+
+    func blockGraph(year: String?) { blockedGraphYears.insert(Self.key(year)) }
+    func blockHourly(year: String?) { blockedHourlyYears.insert(Self.key(year)) }
+
+    func hasPendingGraph(year: String?) -> Bool {
+        !(pendingGraphs[Self.key(year)] ?? []).isEmpty
+    }
+
+    func hasPendingHourly(year: String?) -> Bool {
+        !(pendingHourly[Self.key(year)] ?? []).isEmpty
+    }
+
+    func releaseGraph(year: String?) {
+        let key = Self.key(year)
+        blockedGraphYears.remove(key)
+        let continuations = pendingGraphs.removeValue(forKey: key) ?? []
+        let payload = DemoData.payload(for: year)
+        continuations.forEach { $0.resume(returning: payload) }
+    }
+
+    func releaseHourly(year: String?) {
+        let key = Self.key(year)
+        blockedHourlyYears.remove(key)
+        let continuations = pendingHourly.removeValue(forKey: key) ?? []
+        let report = DemoData.hourlyReport(for: year, clients: ["codex", "claude"])
+        continuations.forEach { $0.resume(returning: report) }
+    }
+
+    func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        _ = priority
+        let key = Self.key(year)
+        if blockedGraphYears.contains(key) {
+            return await withCheckedContinuation { pendingGraphs[key, default: []].append($0) }
+        }
+        return DemoData.payload(for: year)
+    }
+
+    func refreshGraph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        try await graph(year: year, priority: priority)
+    }
+
+    func modelReport(year: String?, priority: TaskPriority) async throws -> ModelReport {
+        _ = priority
+        return DemoData.modelReport(for: year)
+    }
+
+    func hourlyReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> HourlyReport {
+        _ = priority
+        let key = Self.key(year)
+        if blockedHourlyYears.contains(key) {
+            return await withCheckedContinuation { pendingHourly[key, default: []].append($0) }
+        }
+        return DemoData.hourlyReport(for: year, clients: clients)
+    }
+
+    func agentsReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> AgentsReport {
+        _ = priority
+        return DemoData.agentsReport(for: year, clients: clients)
+    }
+
+    func agentUsage() async throws -> AgentUsagePayload { DemoData.agentUsage }
+
+    func usageTrace(windowSecs: Int64) async throws -> [TraceBucket] {
+        DemoData.trace(windowSecs: windowSecs)
+    }
+
+    func tokensPerMin() async throws -> Double { DemoData.tokensPerMin }
+}
+
+private func waitUntil(
+    _ predicate: @escaping @Sendable () async -> Bool
+) async -> Bool {
+    for _ in 0..<1_000 {
+        if await predicate() { return true }
+        await Task.yield()
+    }
+    return false
+}
+
 enum SelfTest {
     static func run() -> Never {
         var failures = 0
@@ -37,6 +129,23 @@ enum SelfTest {
                 }
             }
             semaphore.wait()
+            return try? box.result?.get()
+        }
+
+        func awaitMainActorValue<Value: Sendable>(
+            _ operation: @escaping @MainActor @Sendable () async throws -> Value
+        ) -> Value? {
+            let box = AsyncResultBox<Value>()
+            Task { @MainActor in
+                do {
+                    box.result = .success(try await operation())
+                } catch {
+                    box.result = .failure(error)
+                }
+            }
+            while box.result == nil {
+                RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.001))
+            }
             return try? box.result?.get()
         }
 
@@ -2025,6 +2134,139 @@ enum SelfTest {
         let moRows = MonthlyView.monthRows(payload: messageOnlyPayload, clientIds: ["a"])
         expect(moRows.count == 1 && moRows[0].messages == 5 && moRows[0].tokens == 0 && moRows[0].cost == 0,
             "a message-only month (zero tokens, zero cost) still surfaces in the Monthly lens")
+
+        // Daily/Monthly turn counts reuse the existing local-hour report, but
+        // only after strict calendar-key validation and only for Codex/Claude.
+        let turnReportJSON = """
+        {"entries":[
+          {"hour":"2025-12-31 23:00","clients":["codex"],"models":["m"],
+           "input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+           "total":0,"messageCount":0,"turnCount":2,"cost":0},
+          {"hour":"2026-01-01 08:00","clients":["codex"],"models":["m"],
+           "input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+           "total":0,"messageCount":0,"turnCount":3,"cost":0},
+          {"hour":"2026-01-01 09:00","clients":["claude"],"models":["m"],
+           "input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+           "total":0,"messageCount":0,"turnCount":4,"cost":0},
+          {"hour":"2026-02-01 00:00","clients":["claude"],"models":["m"],
+           "input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+           "total":0,"messageCount":0,"turnCount":0,"cost":0},
+          {"hour":"2026-02-30 00:00","clients":["codex"],"models":["m"],
+           "input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+           "total":0,"messageCount":0,"turnCount":99,"cost":0},
+          {"hour":"not-an-hour","clients":["codex"],"models":["m"],
+           "input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+           "total":0,"messageCount":0,"turnCount":99,"cost":0}
+        ],"totalCost":0}
+        """
+        let turnReport = try! JSONDecoder().decode(
+            HourlyReport.self, from: Data(turnReportJSON.utf8))
+        let turnsByDay = TurnCountBuckets.byDay(turnReport)
+        let turnsByMonth = TurnCountBuckets.byMonth(turnReport)
+        expect(
+            turnsByDay["2025-12-31"] == 2 && turnsByDay["2026-01-01"] == 7
+                && turnsByDay["2026-02-01"] == 0 && turnsByDay["2026-02-30"] == nil,
+            "turn buckets fold valid local hours by day and retain a loaded zero")
+        expect(
+            turnsByMonth["2025-12"] == 2 && turnsByMonth["2026-01"] == 7
+                && turnsByMonth["2026-02"] == 0 && turnsByMonth.count == 3,
+            "turn buckets do not leak across month or year boundaries")
+        expect(
+            TurnCountBuckets.byDay(nil).isEmpty
+                && TurnCountBuckets.byDay(turnReport)["2026-02-01"] == 0,
+            "a missing turn report stays distinct from a loaded zero")
+        expect(
+            PopoverView.supportedTurnClients(
+                ["gemini", "claude", "codex", "opencode"]
+            ) == ["claude", "codex"]
+                && PopoverView.supportedTurnClients(["gemini", "opencode"]).isEmpty,
+            "turn scope preserves display order and excludes unsupported clients")
+
+        let dashboardYearDefaultsKey = "tokenbar.dashboard.year"
+        let savedDashboardYear = UserDefaults.standard.object(forKey: dashboardYearDefaultsKey)
+        let turnTransitionChecks = awaitMainActorValue { () async -> [String: Bool] in
+            let yearA = "2037"
+            let yearB = "2038"
+            let clients = ["codex", "claude"]
+
+            // A superseded A request must not commit after the model moves to B.
+            let staleSource = ControlledTurnUsageDataSource()
+            let staleModel = DashboardModel(source: staleSource, initialYear: yearA)
+            await staleModel.load()
+            await staleSource.blockHourly(year: yearA)
+            let staleTask = Task {
+                await staleModel.ensureData(for: .monthly, clients: clients)
+            }
+            let stalePending = await waitUntil {
+                await staleSource.hasPendingHourly(year: yearA)
+            }
+            await staleModel.setYear(yearB)
+            await staleSource.releaseHourly(year: yearA)
+            await staleTask.value
+            let staleSuppressed = await staleModel.turnsReport(for: clients) == nil
+            await staleModel.ensureData(for: .monthly, clients: clients)
+            let matchingBAfterStale = await staleModel.turnsReport(for: clients) != nil
+
+            // The inverse ordering is also fail-closed: B's hourly report may
+            // arrive while graph A is still displayed, but remains hidden until
+            // graph B commits.
+            let inverseSource = ControlledTurnUsageDataSource()
+            let inverseModel = DashboardModel(source: inverseSource, initialYear: yearA)
+            await inverseModel.load()
+            await inverseModel.ensureData(for: .monthly, clients: clients)
+            let initialAVisible = await inverseModel.turnsReport(for: clients) != nil
+            await inverseSource.blockGraph(year: yearB)
+            let switchTask = Task { await inverseModel.setYear(yearB) }
+            let graphBPending = await waitUntil {
+                await inverseSource.hasPendingGraph(year: yearB)
+            }
+            let oldReportSuppressed = await inverseModel.turnsReport(for: clients) == nil
+            await inverseModel.ensureData(for: .monthly, clients: clients)
+            let newReportBeforePayloadSuppressed =
+                await inverseModel.turnsReport(for: clients) == nil
+            await inverseSource.releaseGraph(year: yearB)
+            await switchTask.value
+            let matchingBVisible = await inverseModel.turnsReport(for: clients) != nil
+
+            let emptySource = ControlledTurnUsageDataSource()
+            let emptyModel = DashboardModel(source: emptySource, initialYear: yearA)
+            await emptyModel.load()
+            await emptySource.blockHourly(year: yearA)
+            await emptyModel.ensureData(for: .monthly, clients: [])
+            let emptyDidNotFetch = !(await emptySource.hasPendingHourly(year: yearA))
+
+            return [
+                "stalePending": stalePending,
+                "staleSuppressed": staleSuppressed,
+                "matchingBAfterStale": matchingBAfterStale,
+                "initialAVisible": initialAVisible,
+                "graphBPending": graphBPending,
+                "oldReportSuppressed": oldReportSuppressed,
+                "newReportBeforePayloadSuppressed": newReportBeforePayloadSuppressed,
+                "matchingBVisible": matchingBVisible,
+                "emptyDidNotFetch": emptyDidNotFetch,
+            ]
+        }
+        if let savedDashboardYear {
+            UserDefaults.standard.set(savedDashboardYear, forKey: dashboardYearDefaultsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: dashboardYearDefaultsKey)
+        }
+        expect(
+            turnTransitionChecks?["stalePending"] == true
+                && turnTransitionChecks?["staleSuppressed"] == true
+                && turnTransitionChecks?["matchingBAfterStale"] == true,
+            "a superseded old-year hourly request cannot publish into the new year")
+        expect(
+            turnTransitionChecks?["initialAVisible"] == true
+                && turnTransitionChecks?["graphBPending"] == true
+                && turnTransitionChecks?["oldReportSuppressed"] == true
+                && turnTransitionChecks?["newReportBeforePayloadSuppressed"] == true
+                && turnTransitionChecks?["matchingBVisible"] == true,
+            "turns render only when payload and hourly year identities match")
+        expect(
+            turnTransitionChecks?["emptyDidNotFetch"] == true,
+            "an empty supported turn slice does not invoke the all-client hourly API")
 
         // Tab order (plan 2026-07-16): Monthly leads Daily in the tab row.
         expect(AppView.allCases.map(\.rawValue) ==
