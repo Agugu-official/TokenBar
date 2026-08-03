@@ -43,12 +43,18 @@ public struct PerDay: Sendable {
     public let tokens: Int64
     public let cost: Double
     public let intensity: Int
+    public let hasMessages: Bool
+    public var isActive: Bool { tokens > 0 || hasMessages }
 
-    public init(date: String, tokens: Int64, cost: Double, intensity: Int) {
+    public init(
+        date: String, tokens: Int64, cost: Double, intensity: Int,
+        hasMessages: Bool = false
+    ) {
         self.date = date
         self.tokens = tokens
         self.cost = cost
         self.intensity = intensity
+        self.hasMessages = hasMessages
     }
 }
 
@@ -97,7 +103,9 @@ public struct UsageStats: Sendable {
                 hasMessages = hasMessages || cc.messages > 0
             }
             if dayTokens == 0 && dayCost == 0 && !hasMessages { continue }
-            let entry = PerDay(date: c.date, tokens: dayTokens, cost: dayCost, intensity: c.intensity)
+            let entry = PerDay(
+                date: c.date, tokens: dayTokens, cost: dayCost,
+                intensity: c.intensity, hasMessages: hasMessages)
             perDay.append(entry)
             perDayMap[c.date] = entry
             totalTokens = totalTokens.saturatingAdding(dayTokens)
@@ -180,7 +188,7 @@ extension UsageStats {
 
 extension Streaks {
     /// Port of computeStreaks: walk every calendar day in the range; a day is
-    /// active when it has tokens. Current counts back from the range end.
+    /// active when it has tokens or messages. Current counts back from the range end.
     public static func compute(
         perDayMap: [String: PerDay], rangeStart: String, rangeEnd: String
     ) -> Streaks {
@@ -192,7 +200,7 @@ extension Streaks {
         var run = 0
         var current = 0
         for n in start.number...end.number {
-            let active = (perDayMap[ISODay(number: n).iso]?.tokens ?? 0) > 0
+            let active = perDayMap[ISODay(number: n).iso]?.isActive ?? false
             if active {
                 run += 1
                 longest = max(longest, run)
@@ -201,7 +209,7 @@ extension Streaks {
             }
         }
         for n in stride(from: end.number, through: start.number, by: -1) {
-            if (perDayMap[ISODay(number: n).iso]?.tokens ?? 0) > 0 { current += 1 } else { break }
+            if perDayMap[ISODay(number: n).iso]?.isActive == true { current += 1 } else { break }
         }
         return Streaks(longest: longest, current: current)
     }
