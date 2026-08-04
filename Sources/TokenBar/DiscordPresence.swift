@@ -17,9 +17,17 @@ enum DiscordPresence {
         let state: String
         let largeImageKey: String
 
-        /// **The published surface.** The transport must serialize this
-        /// dictionary and nothing else — no field assembled at the transport
-        /// layer, no property of this struct that is not in here.
+        /// **The published surface.** These values, and only these, may leave
+        /// the machine: the transport must not add a field, drop one, or alter
+        /// a value, and no property of this struct that is absent here is
+        /// published.
+        ///
+        /// Key *naming* is the transport's concern, not this struct's. Discord
+        /// nests the asset key as `assets.large_image` rather than carrying it
+        /// at the top level, so the transport renames on the way out; that is
+        /// not an addition and does not weaken anything above. The wire shape
+        /// is deliberately not encoded here — this layer knows what may be
+        /// published, not how Discord spells it.
         ///
         /// It is a dictionary rather than a list of values so that one
         /// assertion can pin the key set, and the same assertion is what the
