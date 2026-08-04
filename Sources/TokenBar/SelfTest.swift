@@ -3493,6 +3493,56 @@ enum SelfTest {
             ContributionHeatmap.shouldClearHoverOnOriginChange(old: r8RelativeBefore, new: r8HScrolledRelative),
             "...and therefore still clears the hover, same as before this round's fix")
 
+        // MARK: - Tray frame aspect (append-only section)
+
+        // `anim-parrot` art is 48x36. `loadFrames` used to assign 18x18
+        // unconditionally, stretching it vertically wherever `NSImage.size`
+        // is what renders — `button.image`, i.e. static tray mode and the
+        // Settings preview. The animation never showed it, because
+        // `rasterizedFrame` fits by the representation's PIXEL size and
+        // ignores the logical size, so the two paths disagreed about the
+        // same asset. These assert the two now agree.
+        func trayArt(_ directory: String) -> NSImage? {
+            Bundle.tokenBarResources.url(
+                forResource: "frame-00", withExtension: "png", subdirectory: directory
+            ).flatMap(NSImage.init(contentsOf:))
+        }
+        let parrotArt = trayArt("anim-parrot")
+        let catArt = trayArt("anim-cat2")
+        expect(parrotArt != nil && catArt != nil, "tray frame art loads")
+
+        if let parrot = parrotArt.map({ art -> NSImage in
+            art.size = TrayAnimator.barSize(for: art)
+            return art
+        }) {
+            // 48x36 fitted into 18x18 is 18x13.5, not 18x18.
+            expect(
+                abs(parrot.size.width - 18) < 0.01 && abs(parrot.size.height - 13.5) < 0.01,
+                "non-square tray art keeps its aspect ratio (mutation: assigning the 18x18 box "
+                    + "unconditionally, as before, makes this 18x18 and fails)")
+            // The distortion this guards against: a stretched frame reports a
+            // 1:1 logical box for art that is 4:3.
+            expect(
+                abs(parrot.size.width / parrot.size.height - 48.0 / 36.0) < 0.01,
+                "the logical box matches the art's own 4:3 ratio")
+        }
+        if let cat = catArt {
+            // Square art is unchanged by the fix — a no-trigger guard case.
+            let size = TrayAnimator.barSize(for: cat)
+            expect(
+                abs(size.width - 18) < 0.01 && abs(size.height - 18) < 0.01,
+                "square tray art still fills the full 18x18 box")
+        }
+        // The raster path must stay driven by pixels, not by the logical size
+        // we just changed — otherwise this fix would silently resize the
+        // animation too.
+        if let parrot = parrotArt {
+            let raster = StatusItemAnimationSurface.rasterizedFrameMetricsForTesting(parrot, scale: 2)
+            expect(
+                raster?.pixelSize == CGSize(width: 36, height: 36),
+                "the animation raster is still a square 18pt box at 2x, unaffected by the logical size")
+        }
+
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
             exit(1)

@@ -78,6 +78,9 @@ final class TrayAnimator {
         frames = sets
     }
 
+    /// The bar's frame box. Art is fitted into it, never stretched to it.
+    nonisolated static let frameBox = NSSize(width: 18, height: 18)
+
     /// PNG frames sorted by name (frame-00 … frame-NN), sized for the bar.
     /// Internal so the settings window's menu-bar mock can render the same
     /// frame sets.
@@ -88,9 +91,32 @@ final class TrayAnimator {
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
             .compactMap { url in
                 guard let image = NSImage(contentsOf: url) else { return nil }
-                image.size = NSSize(width: 18, height: 18)
+                image.size = barSize(for: image)
                 return image
             }
+    }
+
+    /// `frameBox`-bounded logical size preserving the art's own aspect ratio.
+    ///
+    /// This used to assign `frameBox` unconditionally, which is only correct
+    /// for square art. `anim-parrot` is 48x36, so forcing 18x18 stretched it
+    /// vertically — and only on the paths that render `NSImage.size`:
+    /// `button.image` (what static tray mode and the Settings preview show).
+    /// The animation itself was never affected, because
+    /// `StatusItemAnimationSurface.rasterizedFrame` fits by the *pixel*
+    /// dimensions of the representation and ignores the logical size, so the
+    /// two paths disagreed about the same asset.
+    ///
+    /// Pixel data is deliberately untouched: the raster path reads
+    /// `representations`, so re-drawing frames here would change what it
+    /// sees. Only the logical size is corrected.
+    nonisolated static func barSize(for image: NSImage) -> NSSize {
+        let pixels = image.representations
+            .max(by: { $0.pixelsWide * $0.pixelsHigh < $1.pixelsWide * $1.pixelsHigh })
+            .map { NSSize(width: $0.pixelsWide, height: $0.pixelsHigh) } ?? image.size
+        guard pixels.width > 0, pixels.height > 0 else { return frameBox }
+        let fit = min(frameBox.width / pixels.width, frameBox.height / pixels.height)
+        return NSSize(width: pixels.width * fit, height: pixels.height * fit)
     }
 
     private var defaultsObserver: NSObjectProtocol?
