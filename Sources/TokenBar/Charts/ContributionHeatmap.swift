@@ -24,6 +24,13 @@ enum HeatmapLayout {
     /// abbreviation, not just English "Dec" — zh-Hant's "12月" is wider.
     static let lastColumnLabelMargin: CGFloat = 28
 
+    /// Left edge of the grid. The ring reaches `hoverRingReach` outward on
+    /// every side, so the first column needs that much room before x = 0 or
+    /// the ScrollView clips its highlight. `contentWidth` reserves the same
+    /// at the trailing end — which is where it matters most, since the view
+    /// opens scrolled to the most recent day.
+    static var gridLeading: CGFloat { hoverRingReach }
+
     /// Top of the grid. Not `monthLabelHeight`: the content reserves
     /// `hoverRingReach` above the first row (and the same below the last) so a
     /// hover ring on an edge row is not cut off by the content frame. The
@@ -34,7 +41,7 @@ enum HeatmapLayout {
     /// test and the tooltip anchor, so none of them can drift from the others.
     static func rect(col: Int, row: Int) -> CGRect {
         CGRect(
-            x: CGFloat(col) * step,
+            x: gridLeading + CGFloat(col) * step,
             y: gridTop + CGFloat(row) * step,
             width: cell, height: cell)
     }
@@ -216,7 +223,11 @@ struct ContributionHeatmap: View {
     /// the view.
     static func contentWidth(visibleCols: Int, monthLabelCols: [(col: Int, label: String)]) -> CGFloat {
         guard visibleCols > 0 else { return 0 }
-        let base = CGFloat(visibleCols) * HeatmapLayout.step - HeatmapLayout.gap
+        // Derived from the last cell's own rect rather than recomputing the
+        // column arithmetic, so "the content is wide enough for the trailing
+        // ring" holds by construction instead of by two formulas agreeing.
+        let base = HeatmapLayout.rect(col: visibleCols - 1, row: 0).maxX
+            + HeatmapLayout.hoverRingReach
         let lastCol = visibleCols - 1
         return monthLabelCols.contains { $0.col == lastCol }
             ? base + HeatmapLayout.lastColumnLabelMargin
@@ -446,7 +457,9 @@ struct ContributionHeatmap: View {
                 for (col, label) in state.monthLabelCols {
                     context.draw(
                         Text(label).font(.caption2).foregroundStyle(.secondary),
-                        at: CGPoint(x: CGFloat(col) * HeatmapLayout.step, y: HeatmapLayout.monthLabelHeight / 2),
+                        at: CGPoint(
+                            x: HeatmapLayout.gridLeading + CGFloat(col) * HeatmapLayout.step,
+                            y: HeatmapLayout.monthLabelHeight / 2),
                         anchor: .leading)
                 }
                 for cell in grid.cells where Self.isRenderable(cell, cutoff: state.cutoff) {
@@ -525,16 +538,18 @@ struct ContributionHeatmap: View {
     /// nested col/row loop), so direct indexing avoids a lookup dictionary;
     /// the col/row re-check guards against that ordering ever changing.
     private func cellAt(_ point: CGPoint, visibleCols: Int) -> Int? {
-        guard point.x >= 0, point.y >= HeatmapLayout.gridTop else { return nil }
+        guard point.x >= HeatmapLayout.gridLeading, point.y >= HeatmapLayout.gridTop
+        else { return nil }
+        let localX = point.x - HeatmapLayout.gridLeading
         let localY = point.y - HeatmapLayout.gridTop
         // Reject gap coordinates before resolving an index — see
         // `withinCell`'s doc comment for why this differs from the bar chart.
         guard
-            Self.withinCell(offset: point.x, step: HeatmapLayout.step, cell: HeatmapLayout.cell),
+            Self.withinCell(offset: localX, step: HeatmapLayout.step, cell: HeatmapLayout.cell),
             Self.withinCell(offset: localY, step: HeatmapLayout.step, cell: HeatmapLayout.cell)
         else { return nil }
         let row = Int(localY / HeatmapLayout.step)
-        let col = Int(point.x / HeatmapLayout.step)
+        let col = Int(localX / HeatmapLayout.step)
         guard (0..<7).contains(row), (0..<visibleCols).contains(col) else { return nil }
         let index = col * 7 + row
         guard grid.cells.indices.contains(index) else { return nil }
