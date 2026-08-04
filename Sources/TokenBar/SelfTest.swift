@@ -3536,12 +3536,21 @@ enum SelfTest {
         // The raster path must stay driven by pixels, not by the logical size
         // we just changed — otherwise this fix would silently resize the
         // animation too.
+        //
+        // `rasterizedFrameMetricsForTesting` is declared `#if DEBUG`, and
+        // `scripts/bundle.sh` builds with `swift build -c release`, so an
+        // unguarded call here compiles under `make build`/`make selftest`/CI
+        // — all debug — and then fails the release build at tag time. The
+        // older raster assertions above sit in their own `#if DEBUG` block
+        // for exactly this reason.
+#if DEBUG
         if let parrot = parrotArt {
             let raster = StatusItemAnimationSurface.rasterizedFrameMetricsForTesting(parrot, scale: 2)
             expect(
                 raster?.pixelSize == CGSize(width: 36, height: 36),
                 "the animation raster is still a square 18pt box at 2x, unaffected by the logical size")
         }
+#endif
 
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
