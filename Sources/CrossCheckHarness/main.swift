@@ -223,6 +223,22 @@ func runFormat() throws {
         case "todayCost":
             guard let now = nowDate() else { out[c.name] = ["error": "todayCost needs now"]; continue }
             out[c.name] = file.graph.trayTotals(hidden: [], today: Format.todayKey(now: now)).todayCost
+        // The per-client fold, not just the four figures. A C# port that skips
+        // the per-client aggregation and takes the maximum over raw stripes
+        // produces identical `todayTokens`/`todayCost`, so those two cases
+        // cannot detect it — this one can. `NSNull` rather than a sentinel
+        // string because diff.py treats a missing key as null.
+        //
+        // format.json lives in the Windows repo's crosscheck/ directory, so
+        // the fixture case that exercises this arm is added there; this side is
+        // in place so that addition is a one-file change.
+        case "todayTopClient":
+            guard let now = nowDate() else {
+                out[c.name] = ["error": "todayTopClient needs now"]
+                continue
+            }
+            out[c.name] = file.graph.trayTotals(hidden: [], today: Format.todayKey(now: now))
+                .todayTopClient ?? NSNull()
         case "paceDurationText":
             out[c.name] = UsagePace.durationText(c.arg?.asDouble ?? 0)
         default:
