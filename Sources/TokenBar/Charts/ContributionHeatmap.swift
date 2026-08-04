@@ -67,7 +67,16 @@ struct ContributionHeatmap: View {
     /// cutoff (round 2, item 3); `buildGrid` itself is untouched.
     let year: String
 
-    @State private var hoverCell: GridCell?
+    /// The hovered cell's `col * 7 + row` index into `grid.cells` — not the
+    /// `GridCell` value itself. Round 7: `DashboardModel.pollGraph()` re-
+    /// fetches the graph payload every 60s while the popover stays open, so
+    /// `grid` (and the tokens/cost a hovered date carries) can change under
+    /// a mouse that never moves. Storing an index and re-resolving the cell
+    /// fresh on every access (`hoverCell` below) — the same live-lookup shape
+    /// `UsageChartCard`'s own `hoverIndex`-into-`bars` already uses for its
+    /// 2D bar chart — keeps the tooltip's numbers current instead of frozen
+    /// at whatever they were the instant hovering began.
+    @State private var hoverIndex: Int?
     @State private var tooltipSize: CGSize = .zero
     /// The scrolling content's on-screen origin, tracked so the tooltip
     /// (rendered in an overlay *outside* the horizontal ScrollView, see
@@ -197,6 +206,31 @@ struct ContributionHeatmap: View {
         return local >= 0 && local < cell
     }
 
+    /// Round 7: whether a hover should be cleared given the content's old
+    /// and new on-screen origin. True only when it actually moved.
+    ///
+    /// Rejected alternative: re-project the LAST known cursor point through
+    /// the new origin and re-resolve whatever cell now sits under it. That
+    /// needs a second piece of state (the last raw pointer position) and a
+    /// second coordinate-math path alongside `cellAt`'s — one more thing to
+    /// keep in sync and one more place a sign or offset error can hide.
+    /// Clearing is simpler and, for a grid the user is actively scrolling,
+    /// the reasonable behavior anyway: the tooltip disappears while the
+    /// content moves and reappears the instant the pointer moves again
+    /// (which `.onContinuousHover`'s `.active` phase already does).
+    ///
+    /// In production, `onGeometryChange`'s own `action` closure is already
+    /// only invoked when its (`Equatable`) transformed value changes —
+    /// verified against Apple's documentation for `onGeometryChange(for:
+    /// of:action:)`, not assumed — so this is always true whenever that
+    /// action fires at all. It's still factored out and applied explicitly
+    /// (not left as an implicit platform guarantee) so SelfTest can verify
+    /// the "unchanged origin never clears" half on its own, independent of
+    /// that platform behavior.
+    static func shouldClearHoverOnOriginChange(old: CGPoint, new: CGPoint) -> Bool {
+        old != new
+    }
+
     /// Round 2, item 1: the tooltip's anchor in the OUTER (non-scrolling)
     /// container's coordinate space, derived from the hovered cell's
     /// position in the scrolling content plus that content's current
@@ -207,6 +241,18 @@ struct ContributionHeatmap: View {
         CGPoint(
             x: cellCenter.x + contentOrigin.x - containerOrigin.x,
             y: cellCenter.y + contentOrigin.y - containerOrigin.y)
+    }
+
+    /// The hovered cell, resolved fresh from the CURRENT `grid` on every
+    /// access rather than a value snapshotted once at hover-set time — see
+    /// `hoverIndex`'s doc comment. Re-applies `isRenderable`/`hasData` too,
+    /// for the same reason: cheap, and consistent with `cellAt` treating
+    /// them as the one live judgment call for "does this cell count".
+    private var hoverCell: GridCell? {
+        guard let hoverIndex, grid.cells.indices.contains(hoverIndex) else { return nil }
+        let cell = grid.cells[hoverIndex]
+        guard Self.isRenderable(cell, cutoff: cutoff), Self.hasData(cell, metric: metric) else { return nil }
+        return cell
     }
 
     private var metricMax: Double { Self.maxValue(grid, metric: metric, cutoff: cutoff) }
@@ -308,12 +354,27 @@ struct ContributionHeatmap: View {
         .onContinuousHover { phase in
             switch phase {
             case let .active(point):
-                hoverCell = cellAt(point).flatMap { Self.hasData($0, metric: metric) ? $0 : nil }
+                hoverIndex = cellAt(point)
             case .ended:
-                hoverCell = nil
+                hoverIndex = nil
             }
         }
-        .onGeometryChange(for: CGPoint.self) { $0.frame(in: .global).origin } action: { contentOrigin = $0 }
+        // Round 7: clear the hover the instant the content's on-screen
+        // origin actually moves (a redirected mouse-wheel scroll or a
+        // trackpad pan) rather than leaving it pinned to a cell that just
+        // scrolled out from under a stationary cursor — that stale pin was
+        // the actual bug: the tooltip's anchor incorporates `contentOrigin`
+        // (see `tooltipAnchor`), so it kept following the content while
+        // scrolling, landing on screen at a position the cursor was never
+        // over, sometimes naming a date that had scrolled out of view
+        // entirely. `.active` hover events re-populate it the moment the
+        // pointer moves again.
+        .onGeometryChange(for: CGPoint.self) { $0.frame(in: .global).origin } action: { newOrigin in
+            if Self.shouldClearHoverOnOriginChange(old: contentOrigin, new: newOrigin) {
+                hoverIndex = nil
+            }
+            contentOrigin = newOrigin
+        }
         // Round 2, item 2: let a plain vertical mouse wheel scroll this
         // horizontal grid (DashboardTabs.swift's pattern) — placed inside the
         // ScrollView's content, per HorizontalWheelScroll's own doc comment,
@@ -323,10 +384,16 @@ struct ContributionHeatmap: View {
 
     // MARK: - Hit testing
 
+    /// Resolves a screen point to a `grid.cells` index — pure geometry
+    /// (bounds, the gap dead zone, `col * 7 + row` indexing). Whether that
+    /// index is CURRENTLY a countable, renderable, data-bearing cell is
+    /// `hoverCell`'s job, re-checked live on every access rather than baked
+    /// in here at hover-set time (round 7).
+    ///
     /// `grid.cells` is laid out `col * 7 + row` by `buildGrid` (Grid.swift's
     /// nested col/row loop), so direct indexing avoids a lookup dictionary;
     /// the col/row re-check guards against that ordering ever changing.
-    private func cellAt(_ point: CGPoint) -> GridCell? {
+    private func cellAt(_ point: CGPoint) -> Int? {
         guard point.x >= 0, point.y >= HeatmapLayout.monthLabelHeight else { return nil }
         let localY = point.y - HeatmapLayout.monthLabelHeight
         // Reject gap coordinates before resolving an index — see
@@ -341,8 +408,8 @@ struct ContributionHeatmap: View {
         let index = col * 7 + row
         guard grid.cells.indices.contains(index) else { return nil }
         let cell = grid.cells[index]
-        guard cell.col == col, cell.row == row, Self.isRenderable(cell, cutoff: cutoff) else { return nil }
-        return cell
+        guard cell.col == col, cell.row == row else { return nil }
+        return index
     }
 
     private func cellCenter(_ cell: GridCell) -> CGPoint {

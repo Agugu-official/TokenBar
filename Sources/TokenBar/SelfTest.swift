@@ -3420,6 +3420,29 @@ enum SelfTest {
             !ContributionHeatmap.withinCell(offset: r6Step + r6Cell, step: r6Step, cell: r6Cell),
             "the second cell's gap is rejected too")
 
+        // MARK: - FLAT-HEATMAP round 7 (Codex round 4 P2 fix + audit; append-only)
+
+        // FIX: `shouldClearHoverOnOriginChange` is the pure half of "clear
+        // hover when the content actually scrolled, not on every incidental
+        // re-layout". The `onGeometryChange` → `hoverIndex = nil` wiring
+        // itself firing at the right moment during a live scroll has no
+        // headless SwiftUI harness here and is manual-verification-only.
+        expect(
+            !ContributionHeatmap.shouldClearHoverOnOriginChange(
+                old: CGPoint(x: 10, y: 20), new: CGPoint(x: 10, y: 20)),
+            "an unchanged origin never clears the hover (mutation: always returning true here would "
+                + "make hover impossible to establish at all, since the geometry modifier's initial call "
+                + "would immediately clear it)")
+        expect(
+            ContributionHeatmap.shouldClearHoverOnOriginChange(
+                old: CGPoint(x: 10, y: 20), new: CGPoint(x: 40, y: 20)),
+            "a changed origin (e.g. a redirected wheel scroll) clears the hover (mutation: always "
+                + "returning false would leave a stale tooltip pinned through a scroll — the original bug)")
+        expect(
+            ContributionHeatmap.shouldClearHoverOnOriginChange(
+                old: CGPoint(x: 10, y: 20), new: CGPoint(x: 10, y: 5)),
+            "a vertical-only origin change also clears the hover")
+
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
             exit(1)
