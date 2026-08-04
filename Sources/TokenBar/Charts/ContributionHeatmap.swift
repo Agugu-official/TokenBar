@@ -24,6 +24,62 @@ enum HeatmapLayout {
     /// abbreviation, not just English "Dec" — zh-Hant's "12月" is wider.
     static let lastColumnLabelMargin: CGFloat = 28
 
+    /// Left edge of the grid. The ring reaches `hoverRingReach` outward on
+    /// every side, so the first column needs that much room before x = 0 or
+    /// the ScrollView clips its highlight. `contentWidth` reserves the same
+    /// at the trailing end — which is where it matters most, since the view
+    /// opens scrolled to the most recent day.
+    static var gridLeading: CGFloat { hoverRingReach }
+
+    /// Top of the grid. Not `monthLabelHeight`: the content reserves
+    /// `hoverRingReach` above the first row (and the same below the last) so a
+    /// hover ring on an edge row is not cut off by the content frame. The
+    /// month labels keep their own position, above this.
+    static var gridTop: CGFloat { monthLabelHeight + hoverRingReach }
+
+    /// One source of cell geometry for the draw loop, the hover ring, the hit
+    /// test and the tooltip anchor, so none of them can drift from the others.
+    static func rect(col: Int, row: Int) -> CGRect {
+        CGRect(
+            x: gridLeading + CGFloat(col) * step,
+            y: gridTop + CGFloat(row) * step,
+            width: cell, height: cell)
+    }
+
+    /// Hover ring, matching the bar chart's treatment of the hovered bar
+    /// (`UsageChartCard`: a 1pt primary stroke plus a soft primary shadow).
+    ///
+    /// The glow radius is deliberately smaller than the bars' 3. A bar is tall
+    /// and stands alone; a cell is 11pt with only `gap` (3pt) to its
+    /// neighbours, so a 3pt halo reaches every surrounding cell and the
+    /// highlight reads as a blob rather than an edge. 1.5 keeps it inside the
+    /// gap. Scale this with `cell`/`gap`, not with the bars' value.
+    static let hoverStrokeWidth: CGFloat = 1
+    static let hoverStrokeOpacity: Double = 0.85
+    static let hoverGlowRadius: CGFloat = 1.5
+    static let hoverGlowOpacity: Double = 0.65
+
+    /// The ring sits in the gap, not on the cell edge, and this is what makes
+    /// it legible at all. A fixed `Color.primary` ring drawn on the cell has
+    /// no constant backdrop: level 0 is `primary` at 0.05 and level 4 is a
+    /// bright near-white blue, so in dark mode a white ring vanishes on the
+    /// busiest days — the exact days worth pointing at. Pushed into the gap it
+    /// meets the popover background instead, which is the same everywhere.
+    ///
+    /// This is also why the bar chart's ring works without any such trick:
+    /// most of a bar ring's perimeter already runs along the chart background
+    /// rather than across the bar's own fill. Same idea, different geometry.
+    ///
+    /// 1pt out of the 3pt gap, leaving the neighbouring cells untouched.
+    static let hoverRingInset: CGFloat = -1
+
+    /// How far the ring reaches beyond its cell: the outward inset, half the
+    /// stroke straddling the path, and the glow. The content reserves this
+    /// above the first row and below the last, otherwise a ring on an edge row
+    /// is clipped by the content frame (the bottom row's ring landed 1pt past
+    /// it, and the glow 1.5pt past that).
+    static var hoverRingReach: CGFloat { -hoverRingInset + hoverStrokeWidth / 2 + hoverGlowRadius }
+
     /// Five-level intensity ramp. Thresholds ported from token-monitor's
     /// `heatmapIntensity()` (usageCharts.js:60-65: `>=0.75→4`, `>=0.5→3`,
     /// `>=0.25→2`, `>0→1`, else `0`); colors ported from its `.heat.lvl-*`
@@ -167,7 +223,11 @@ struct ContributionHeatmap: View {
     /// the view.
     static func contentWidth(visibleCols: Int, monthLabelCols: [(col: Int, label: String)]) -> CGFloat {
         guard visibleCols > 0 else { return 0 }
-        let base = CGFloat(visibleCols) * HeatmapLayout.step - HeatmapLayout.gap
+        // Derived from the last cell's own rect rather than recomputing the
+        // column arithmetic, so "the content is wide enough for the trailing
+        // ring" holds by construction instead of by two formulas agreeing.
+        let base = HeatmapLayout.rect(col: visibleCols - 1, row: 0).maxX
+            + HeatmapLayout.hoverRingReach
         let lastCol = visibleCols - 1
         return monthLabelCols.contains { $0.col == lastCol }
             ? base + HeatmapLayout.lastColumnLabelMargin
@@ -301,7 +361,9 @@ struct ContributionHeatmap: View {
     }
 
     private var gridHeight: CGFloat { 7 * HeatmapLayout.step - HeatmapLayout.gap }
-    private var contentHeight: CGFloat { HeatmapLayout.monthLabelHeight + gridHeight }
+    private var contentHeight: CGFloat {
+        HeatmapLayout.gridTop + gridHeight + HeatmapLayout.hoverRingReach
+    }
 
     /// Round 8 (perf): named coordinate space anchored to the OUTER
     /// (non-scrolling) container — the same view `outerGeo` describes.
@@ -395,19 +457,37 @@ struct ContributionHeatmap: View {
                 for (col, label) in state.monthLabelCols {
                     context.draw(
                         Text(label).font(.caption2).foregroundStyle(.secondary),
-                        at: CGPoint(x: CGFloat(col) * HeatmapLayout.step, y: HeatmapLayout.monthLabelHeight / 2),
+                        at: CGPoint(
+                            x: HeatmapLayout.gridLeading + CGFloat(col) * HeatmapLayout.step,
+                            y: HeatmapLayout.monthLabelHeight / 2),
                         anchor: .leading)
                 }
                 for cell in grid.cells where Self.isRenderable(cell, cutoff: state.cutoff) {
                     let level = HeatmapLayout.level(value: Self.value(cell, metric: metric), max: state.metricMax)
-                    let rect = CGRect(
-                        x: CGFloat(cell.col) * HeatmapLayout.step,
-                        y: HeatmapLayout.monthLabelHeight + CGFloat(cell.row) * HeatmapLayout.step,
-                        width: HeatmapLayout.cell, height: HeatmapLayout.cell)
+                    let rect = HeatmapLayout.rect(col: cell.col, row: cell.row)
                     context.fill(
                         Path(roundedRect: rect, cornerRadius: HeatmapLayout.cornerRadius),
                         with: .color(HeatmapLayout.fill(level: level)))
                 }
+            }
+            // Outside the Canvas on purpose, mirroring how the bar chart
+            // draws its hovered-bar highlight: a ring drawn inside the
+            // Canvas would make every hover move repaint all ~370 cells,
+            // which is the cascade round 8 removed from the scroll path.
+            if let cell = hoverCell(state) {
+                let rect = HeatmapLayout.rect(col: cell.col, row: cell.row)
+                    .insetBy(dx: HeatmapLayout.hoverRingInset, dy: HeatmapLayout.hoverRingInset)
+                RoundedRectangle(
+                    cornerRadius: HeatmapLayout.cornerRadius - HeatmapLayout.hoverRingInset)
+                    .stroke(
+                        Color.primary.opacity(HeatmapLayout.hoverStrokeOpacity),
+                        lineWidth: HeatmapLayout.hoverStrokeWidth)
+                    .frame(width: rect.width, height: rect.height)
+                    .offset(x: rect.minX, y: rect.minY)
+                    .shadow(
+                        color: Color.primary.opacity(HeatmapLayout.hoverGlowOpacity),
+                        radius: HeatmapLayout.hoverGlowRadius)
+                    .allowsHitTesting(false)
             }
         }
         .frame(width: state.contentWidth, height: contentHeight)
@@ -458,16 +538,18 @@ struct ContributionHeatmap: View {
     /// nested col/row loop), so direct indexing avoids a lookup dictionary;
     /// the col/row re-check guards against that ordering ever changing.
     private func cellAt(_ point: CGPoint, visibleCols: Int) -> Int? {
-        guard point.x >= 0, point.y >= HeatmapLayout.monthLabelHeight else { return nil }
-        let localY = point.y - HeatmapLayout.monthLabelHeight
+        guard point.x >= HeatmapLayout.gridLeading, point.y >= HeatmapLayout.gridTop
+        else { return nil }
+        let localX = point.x - HeatmapLayout.gridLeading
+        let localY = point.y - HeatmapLayout.gridTop
         // Reject gap coordinates before resolving an index — see
         // `withinCell`'s doc comment for why this differs from the bar chart.
         guard
-            Self.withinCell(offset: point.x, step: HeatmapLayout.step, cell: HeatmapLayout.cell),
+            Self.withinCell(offset: localX, step: HeatmapLayout.step, cell: HeatmapLayout.cell),
             Self.withinCell(offset: localY, step: HeatmapLayout.step, cell: HeatmapLayout.cell)
         else { return nil }
         let row = Int(localY / HeatmapLayout.step)
-        let col = Int(point.x / HeatmapLayout.step)
+        let col = Int(localX / HeatmapLayout.step)
         guard (0..<7).contains(row), (0..<visibleCols).contains(col) else { return nil }
         let index = col * 7 + row
         guard grid.cells.indices.contains(index) else { return nil }
@@ -477,9 +559,10 @@ struct ContributionHeatmap: View {
     }
 
     private func cellCenter(_ cell: GridCell) -> CGPoint {
-        CGPoint(
-            x: CGFloat(cell.col) * HeatmapLayout.step + HeatmapLayout.cell / 2,
-            y: HeatmapLayout.monthLabelHeight + CGFloat(cell.row) * HeatmapLayout.step + HeatmapLayout.cell / 2)
+        // Derived, not recomputed: one more copy of the row/col -> point math
+        // is one more place for the tooltip to drift off the cell it describes.
+        let rect = HeatmapLayout.rect(col: cell.col, row: cell.row)
+        return CGPoint(x: rect.midX, y: rect.midY)
     }
 
     // MARK: - Tooltip
