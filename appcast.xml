@@ -3,6 +3,31 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>1.12.0</title>
+            <pubDate>Tue, 04 Aug 2026 09:43:24 +0000</pubDate>
+            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.12.0</link>
+            <sparkle:version>499</sparkle:version>
+            <sparkle:shortVersionString>1.12.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>New:</b>
+<ul>
+<li>A flat contribution heatmap joins the bar and 3D views in the usage chart. Press Command-G to cycle through all three.</li>
+<li>Claude plans that report per-model weekly caps now show those limits alongside the session and weekly windows.</li>
+</ul>
+<b>Improved:</b>
+<ul>
+<li>Reopening the popover no longer recomputes the hourly views, so they appear right away.</li>
+<li>The turn count shows a loading state instead of looking empty while it is still being read.</li>
+</ul>
+<b>Fixes:</b>
+<ul>
+<li>Non-square menu-bar animation art, such as the parrot, is fitted to the bar instead of being stretched to a square.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.12.0/TokenBar.app.tar.gz" length="8421268" type="application/octet-stream" sparkle:edSignature="EavTOPbF+lu7JBSWFaGL0K2f9OljoqYmc5POwLU/eOg0MWi0+sXUmmMvNHj8NKsiRbkmq3ygimTA1YgUBZ1RAg=="/>
+        </item>
+        <item>
             <title>1.11.0</title>
             <pubDate>Mon, 03 Aug 2026 18:10:16 +0000</pubDate>
             <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.11.0</link>
@@ -92,30 +117,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.8.1/TokenBar.app.tar.gz" length="8054494" type="application/octet-stream" sparkle:edSignature="hOtwEBwCATG6bwc5X8NWUWp9BADbfkWaVB1gdc/bUKPDpGREBC350SkGtlm28QHqhFFe37px7u90lyrfiMLQBA=="/>
-        </item>
-        <item>
-            <title>1.7.0</title>
-            <pubDate>Wed, 22 Jul 2026 20:25:01 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.7.0</link>
-            <sparkle:version>398</sparkle:version>
-            <sparkle:shortVersionString>1.7.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>New:</b>
-<ul>
-<li>Copilot Desktop token-bearing local sessions are now counted with model, workspace, and agent details. Copilot OTEL remains authoritative when both sources contain the same session, so overlapping usage is not counted twice. Totals may increase because previously invisible Desktop usage is now included, not because the update created new spend.</li>
-</ul>
-<b>Improved:</b>
-<ul>
-<li>Hovered Token Usage and Models bars now gain adaptive outlines and glow in light and dark appearances. Model markers glow with their rows, and Daily/Monthly drill-downs show detailed Input, Output, Cache read, Cache write, and Reasoning tooltips above neighboring rows.</li>
-</ul>
-<b>Under the hood:</b>
-<ul>
-<li>Usage caching now uses bounded identity-aware shards instead of one message-cache file. The first scan after updating starts cold because the legacy cache is intentionally left untouched; later refreshes use the new cache without changing report semantics.</li>
-<li>Hermes discovery supports native Windows layouts for the downstream Windows build without changing the macOS app.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.7.0/TokenBar.app.tar.gz" length="7931247" type="application/octet-stream" sparkle:edSignature="5klKHNy8+0H5PlrDqZsMQ+prDZYiWABSsG+j6SFSsX+BeIZm/hPiax4B1dBc3zzmmhNpIecr92DPlTp58Kc5Ag=="/>
         </item>
         <item>
             <title>1.1.1</title>
