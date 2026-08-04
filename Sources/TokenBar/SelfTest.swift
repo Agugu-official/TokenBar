@@ -3075,6 +3075,11 @@ enum SelfTest {
             (heatCellA?.tokens ?? 0) != 150 && (heatCellA?.cost ?? 0) != 5,
             "heatmap grid cell for one client is not the two-client total")
 
+        // `maxValue` gained a `cutoff` parameter in round 4 (FIX 3); this
+        // constant preserves every existing A3/A4 fixture's original
+        // semantics (nothing excluded) rather than weakening what they test.
+        let noCutoffFilter = "9999-12-31"
+
         // A3 (invariant 3): a `tokens == 0, cost > 0` day must count as "has
         // data" under the Price metric. This is reachable (UsageStats.swift
         // 105-110) and `cell.active` (Grid.swift:49) is tokens-only — using
@@ -3090,7 +3095,7 @@ enum SelfTest {
         expect(
             ContributionHeatmap.hasData(costOnlyCell, metric: .tokens) == false,
             "Tokens metric still has no data on a cost-only day")
-        let costOnlyMax = ContributionHeatmap.maxValue(costOnlyGrid, metric: .cost)
+        let costOnlyMax = ContributionHeatmap.maxValue(costOnlyGrid, metric: .cost, cutoff: noCutoffFilter)
         expect(
             HeatmapLayout.level(
                 value: ContributionHeatmap.value(costOnlyCell, metric: .cost), max: costOnlyMax) >= 1,
@@ -3108,8 +3113,8 @@ enum SelfTest {
             ])
         let dayHighTokens = dualMetricGrid.cells.first { $0.date == "2026-03-01" }!
         let dayHighCost = dualMetricGrid.cells.first { $0.date == "2026-03-08" }!
-        let dualMaxTokens = ContributionHeatmap.maxValue(dualMetricGrid, metric: .tokens)
-        let dualMaxCost = ContributionHeatmap.maxValue(dualMetricGrid, metric: .cost)
+        let dualMaxTokens = ContributionHeatmap.maxValue(dualMetricGrid, metric: .tokens, cutoff: noCutoffFilter)
+        let dualMaxCost = ContributionHeatmap.maxValue(dualMetricGrid, metric: .cost, cutoff: noCutoffFilter)
         expect(
             dualMaxTokens == 1000 && dualMaxCost == 100,
             "tokens and cost maxima are computed independently, from different days")
@@ -3254,6 +3259,68 @@ enum SelfTest {
             !r3MonthLabelCols.contains(r3SeptemberCell.col),
             "September's label (after the cutoff) is dropped (mutation: skipping the isRenderable filter "
                 + "inside monthLabelCols would fail this)")
+
+        // MARK: - FLAT-HEATMAP round 4 (Codex P2 fixes; append-only)
+
+        // FIX 1: the re-scroll-to-trailing trigger is `cutoff`, which changes
+        // on both a year-filter change and a day rollover — this is the pure,
+        // testable half of the fix. The actual SwiftUI `onChange(of:
+        // cutoff)` → `proxy.scrollTo` wiring firing at the right time needs a
+        // human watching the popover switch years while on the Heatmap tab;
+        // there's no headless SwiftUI view-update harness here to automate
+        // that half.
+        expect(
+            ContributionHeatmap.cutoffDate(year: "2026", today: "2026-07-29")
+                != ContributionHeatmap.cutoffDate(year: "2025", today: "2026-07-29"),
+            "cutoff changes across a year-filter switch (the re-scroll trigger fires)")
+        expect(
+            ContributionHeatmap.cutoffDate(year: "2026", today: "2026-07-29")
+                != ContributionHeatmap.cutoffDate(year: "2026", today: "2026-07-30"),
+            "cutoff also changes across a day rollover while the popover stays open")
+
+        // FIX 2: a horizontal wheel-redirect already parked at an edge must
+        // report "not consumed" so the dashboard's vertical ScrollView still
+        // sees the wheel tick — the pre-fix code clamped and unconditionally
+        // reported the event as handled even when the clamped origin was
+        // identical to the one it started with.
+        let r4RightEdge = HorizontalWheelScroll.clampedScroll(originX: 500, step: -20, maxX: 500)
+        expect(
+            r4RightEdge.newOriginX == 500 && r4RightEdge.moved == false,
+            "already at the trailing edge: origin doesn't move, so the event is not consumed "
+                + "(mutation: always returning moved=true would fail this)")
+        let r4LeftEdge = HorizontalWheelScroll.clampedScroll(originX: 0, step: 20, maxX: 500)
+        expect(
+            r4LeftEdge.newOriginX == 0 && r4LeftEdge.moved == false,
+            "already at the leading edge: origin doesn't move, so the event is not consumed")
+        let r4MidScroll = HorizontalWheelScroll.clampedScroll(originX: 100, step: 20, maxX: 500)
+        expect(
+            r4MidScroll.newOriginX == 80 && r4MidScroll.moved == true,
+            "a scroll that actually changes the origin IS consumed")
+
+        // FIX 3: a hidden future cell (clock skew, an imported session dated
+        // past today) must not sit in either metric's intensity denominator
+        // — the same `isRenderable` cutoff that keeps it from being drawn or
+        // hoverable must also keep it out of `maxValue`.
+        let r4FutureShockGrid = buildGrid(
+            year: "2026",
+            perDayMap: [
+                "2026-07-10": PerDay(date: "2026-07-10", tokens: 100, cost: 5, intensity: 1),
+                "2026-08-15": PerDay(date: "2026-08-15", tokens: 999_999, cost: 9999, intensity: 1),
+            ])
+        let r4Cutoff = "2026-07-29"
+        let r4VisibleCell = r4FutureShockGrid.cells.first { $0.date == "2026-07-10" }!
+        let r4TokensMax = ContributionHeatmap.maxValue(r4FutureShockGrid, metric: .tokens, cutoff: r4Cutoff)
+        let r4CostMax = ContributionHeatmap.maxValue(r4FutureShockGrid, metric: .cost, cutoff: r4Cutoff)
+        expect(
+            r4TokensMax == 100 && r4CostMax == 5,
+            "a hidden future day's huge values don't enter either metric's intensity denominator")
+        expect(
+            HeatmapLayout.level(
+                value: ContributionHeatmap.value(r4VisibleCell, metric: .tokens), max: r4TokensMax) == 4
+                && HeatmapLayout.level(
+                    value: ContributionHeatmap.value(r4VisibleCell, metric: .cost), max: r4CostMax) == 4,
+            "the only visible day still renders at full intensity (mutation: reverting the tokens branch "
+                + "to `grid.maxTokens` or the cost branch to an unfiltered reduce would crush this)")
 
         if failures > 0 {
             print("\(failures) selftest check(s) failed")

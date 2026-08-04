@@ -13,6 +13,21 @@ struct HorizontalWheelScroll: NSViewRepresentable {
     func makeNSView(context: Context) -> WheelRedirectView { WheelRedirectView() }
     func updateNSView(_ view: WheelRedirectView, context: Context) {}
 
+    /// The clamped horizontal origin after stepping by `step`, and whether it
+    /// actually moved. Pure so tests can exercise the boundary case (already
+    /// scrolled all the way to an edge) without simulating an `NSEvent`.
+    ///
+    /// FLAT-HEATMAP round 4, FIX 2: at either scroll edge (e.g. the heatmap's
+    /// default trailing-scrolled position) the old code clamped the origin
+    /// and unconditionally reported the event as consumed, even when the
+    /// clamped value was identical to the current one — swallowing the
+    /// dashboard's *vertical* scroll on the very first wheel tick over a
+    /// heatmap already parked at its right edge.
+    static func clampedScroll(originX: CGFloat, step: CGFloat, maxX: CGFloat) -> (newOriginX: CGFloat, moved: Bool) {
+        let newOriginX = min(max(0, originX - step), maxX)
+        return (newOriginX, newOriginX != originX)
+    }
+
     @MainActor
     final class WheelRedirectView: NSView {
         private var monitor: Any?
@@ -56,8 +71,13 @@ struct HorizontalWheelScroll: NSViewRepresentable {
             // Precise (smooth) deltas are already in points; coarse wheel deltas
             // are in lines and need scaling for a comfortable step.
             let step = event.hasPreciseScrollingDeltas ? dy : dy * 16
+            let (newOriginX, moved) = HorizontalWheelScroll.clampedScroll(
+                originX: clip.bounds.origin.x, step: step, maxX: maxX)
+            // Already at this edge — let the event fall through to the parent
+            // (vertical) scroll view instead of silently eating it.
+            guard moved else { return false }
             var origin = clip.bounds.origin
-            origin.x = min(max(0, origin.x - step), maxX)
+            origin.x = newOriginX
             clip.setBoundsOrigin(origin)
             scroll.reflectScrolledClipView(clip)
             return true

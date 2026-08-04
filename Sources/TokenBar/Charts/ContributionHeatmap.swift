@@ -87,14 +87,20 @@ struct ContributionHeatmap: View {
     }
 
     /// Per-metric intensity denominator, computed here rather than reusing
-    /// `GridLayout.maxTokens` (invariant 4) — `maxTokens` only ever tracks
-    /// tokens, so Price needs its own max over the in-year cells.
-    static func maxValue(_ grid: TokenBarCore.GridLayout, metric: ChartMetric) -> Double {
+    /// `GridLayout.maxTokens` (invariant 4 forbids modifying/extending
+    /// `GridLayout.maxTokens`, not forbids simply not using it) — `maxTokens`
+    /// only ever tracks tokens and never applies the future-day cutoff, so
+    /// Price needs its own max regardless, and round 4's FIX 3 makes tokens
+    /// take the same `cutoff`-filtered path: a hidden future cell (clock
+    /// skew, an imported session dated past today) must not sit in the
+    /// denominator any more than it's drawn or hoverable — the same
+    /// `isRenderable` judgment used everywhere else a cell "counts".
+    static func maxValue(_ grid: TokenBarCore.GridLayout, metric: ChartMetric, cutoff: String) -> Double {
         switch metric {
         case .tokens:
-            return Double(grid.maxTokens)
+            return grid.cells.reduce(0.0) { isRenderable($1, cutoff: cutoff) ? max($0, Double($1.tokens)) : $0 }
         case .cost:
-            return grid.cells.reduce(0.0) { $1.inYear ? max($0, $1.cost) : $0 }
+            return grid.cells.reduce(0.0) { isRenderable($1, cutoff: cutoff) ? max($0, $1.cost) : $0 }
         }
     }
 
@@ -152,7 +158,7 @@ struct ContributionHeatmap: View {
             y: cellCenter.y + contentOrigin.y - containerOrigin.y)
     }
 
-    private var metricMax: Double { Self.maxValue(grid, metric: metric) }
+    private var metricMax: Double { Self.maxValue(grid, metric: metric, cutoff: cutoff) }
     private var cutoff: String { Self.cutoffDate(year: year, today: Format.todayKey()) }
 
     private var monthLabelCols: [(col: Int, label: String)] {
@@ -181,8 +187,20 @@ struct ContributionHeatmap: View {
                                 .id(Self.contentID)
                         }
                         // Round 2, item 3(b): land on the most recent columns
-                        // on open, GitHub-style, instead of Jan 1.
+                        // on open, GitHub-style, instead of Jan 1. Round 4,
+                        // FIX 1: `onAppear` alone only fires once — changing
+                        // the dashboard's year filter while already on the
+                        // Heatmap tab updates this same view in place rather
+                        // than re-inserting it, so a stale horizontal offset
+                        // (e.g. left over from a wider current-year layout)
+                        // stuck around after switching to a narrower or wider
+                        // past year. `cutoff`, not `year`, is the trigger: it
+                        // already covers both a year change AND a day
+                        // rollover while the popover happens to stay open.
                         .onAppear { proxy.scrollTo(Self.contentID, anchor: .trailing) }
+                        .onChange(of: cutoff) { _, _ in
+                            proxy.scrollTo(Self.contentID, anchor: .trailing)
+                        }
                     }
                     // Tooltip lives in the ScrollView's overlay, not its
                     // content — an overlay isn't clipped by the view it
