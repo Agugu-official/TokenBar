@@ -38,3 +38,19 @@ jobs:
 
       - name: FFI smoke test
         run: swift run TokenBar --smoke
+
+      # Every step above compiles the debug configuration, so nothing here can
+      # see a `#if DEBUG` boundary break. The release configuration was first
+      # compiled by scripts/bundle.sh, which only runs from release.yml on a
+      # `v*` tag — so a call to a DEBUG-only symbol stayed green through local
+      # gates, PR CI and merge, and failed only after the tag was already
+      # pushed. PR #137 hit exactly that.
+      #
+      # Push-only, not on pull_request: this class of break needs someone to
+      # touch a conditional-compilation boundary, which is rare, and a release
+      # build is slow enough that paying for it on every PR iteration is a bad
+      # trade. Running it on main still guarantees the tag is never the first
+      # time this configuration is compiled.
+      - name: Build Swift package (release configuration)
+        if: github.event_name == 'push'
+        run: swift build -c release
