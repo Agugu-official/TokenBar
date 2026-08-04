@@ -104,16 +104,68 @@ public struct TrayTotals: Sendable {
     public let todayCost: Double
     public let totalTokens: Int64
     public let totalCost: Double
+    /// Today's visible client with the most tokens, or nil when today has no
+    /// visible stripe. Client **id** only — display labels and the outbound
+    /// allowlist belong to the app layer, not to this cross-platform surface.
+    ///
+    /// Windows port obligation: TokenBar.Core is a file-by-file port of this
+    /// module (docs/knowledge/verification.md "Cross-port fixture cross-check"),
+    /// so this field must be mirrored there on the next sync. The four figures
+    /// above are unchanged, so the existing cross-check cases are unaffected.
+    public let todayTopClient: String?
 
-    public init(todayTokens: Int64, todayCost: Double, totalTokens: Int64, totalCost: Double) {
+    public init(
+        todayTokens: Int64, todayCost: Double, totalTokens: Int64, totalCost: Double,
+        todayTopClient: String?
+    ) {
         self.todayTokens = todayTokens
         self.todayCost = todayCost
         self.totalTokens = totalTokens
         self.totalCost = totalCost
+        self.todayTopClient = todayTopClient
     }
 }
 
 extension UsagePayload {
+    /// Fold per-client×model×provider stripes into per-client totals and return
+    /// the id with the most tokens. `hidden` uses the same membership test as
+    /// `trayTotals`, with no normalization, so both agree by construction.
+    ///
+    /// Two-stage on purpose: taking the max over raw stripes would pick the
+    /// largest single model stripe, not the busiest client — a client that
+    /// spreads its usage across several models would lose to a smaller
+    /// single-model one. This id is displayed publicly, so picking the wrong one
+    /// ships wrong data.
+    ///
+    /// Deterministic tie-break (a wobbling label would flip between publishes):
+    /// tokens, then higher cost, then lexicographically smallest id. The fold
+    /// walks the keys in sorted order because `Dictionary`'s own iteration order
+    /// is unspecified (and per-process seeded).
+    public static func topVisibleClient(
+        in clients: [ContributionClient], hidden: Set<String>
+    ) -> String? {
+        var byClient: [String: (tokens: Int64, cost: Double)] = [:]
+        for cc in clients where !hidden.contains(cc.client) {
+            let prev = byClient[cc.client] ?? (0, 0)
+            byClient[cc.client] = (prev.tokens.saturatingAdding(cc.tokens.total), prev.cost + cc.cost)
+        }
+        var best: (id: String, tokens: Int64, cost: Double)?
+        for id in byClient.keys.sorted() {
+            let entry = byClient[id]!
+            guard let current = best else {
+                best = (id, entry.tokens, entry.cost)
+                continue
+            }
+            // Strict `>` only: on a full tie the earlier (lexicographically
+            // smaller) id already in `best` wins.
+            if entry.tokens > current.tokens
+                || (entry.tokens == current.tokens && entry.cost > current.cost) {
+                best = (id, entry.tokens, entry.cost)
+            }
+        }
+        return best?.id
+    }
+
     /// The four tray-title figures with `hidden` client ids excluded. `today`
     /// is the local-timezone `YYYY-MM-DD` day key (tokscale-core's bucketing).
     ///
@@ -130,13 +182,18 @@ extension UsagePayload {
     /// alone, so we do NOT try to. Smoke's `trayDrift` probe compares the two
     /// on real data every run to catch any vendor-sync regression.
     public func trayTotals(hidden: Set<String>, today: String) -> TrayTotals {
+        let todayEntry = contributions.last(where: { $0.date == today })
+        // Shared by both paths so the published top client can never disagree
+        // with the figures next to it (same stripes, same membership test).
+        let todayTopClient = UsagePayload.topVisibleClient(
+            in: todayEntry?.clients ?? [], hidden: hidden)
         if hidden.isEmpty {
-            let todayEntry = contributions.last(where: { $0.date == today })
             return TrayTotals(
                 todayTokens: todayEntry?.totals.tokens ?? 0,
                 todayCost: todayEntry?.totals.cost ?? 0,
                 totalTokens: summary.totalTokens,
-                totalCost: summary.totalCost)
+                totalCost: summary.totalCost,
+                todayTopClient: todayTopClient)
         }
         var totalTokens: Int64 = 0
         var totalCost = 0.0
@@ -156,6 +213,7 @@ extension UsagePayload {
         }
         return TrayTotals(
             todayTokens: todayTokens, todayCost: todayCost,
-            totalTokens: totalTokens, totalCost: totalCost)
+            totalTokens: totalTokens, totalCost: totalCost,
+            todayTopClient: todayTopClient)
     }
 }

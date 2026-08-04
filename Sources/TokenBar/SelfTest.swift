@@ -3552,6 +3552,209 @@ enum SelfTest {
         }
 #endif
 
+        // MARK: - Discord Rich Presence payload (DISCORD-PRESENCE M1)
+        //
+        // This payload is published to a third party and shown on a public
+        // profile, so these are privacy regression guards, not display tests.
+        // Every assertion goes through `DiscordPresence.payload(...)` — the
+        // published bytes — not through the core fold alone.
+        func dpGraph(_ json: String) -> UsagePayload {
+            try! JSONDecoder().decode(UsagePayload.self, from: Data(json.utf8))
+        }
+        func dpDay(_ date: String, _ tokens: Int64, _ cost: Double, _ stripes: String) -> String {
+            """
+            {"date":"\(date)","totals":{"tokens":\(tokens),"cost":\(cost),"messages":1},
+             "intensity":1,
+             "tokenBreakdown":{"input":\(tokens),"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0},
+             "clients":[\(stripes)]}
+            """
+        }
+        func dpStripe(
+            _ client: String, _ tokens: Int64, _ cost: Double,
+            model: String = "m", provider: String = "p"
+        ) -> String {
+            """
+            {"client":"\(client)","modelId":"\(model)","providerId":"\(provider)",
+             "cost":\(cost),"messages":1,
+             "tokens":{"input":\(tokens),"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0}}
+            """
+        }
+        func dpPayload(_ days: String, summaryTokens: Int64 = 0, summaryCost: Double = 0) -> String {
+            """
+            {"meta":{"generatedAt":"now","version":"1",
+                     "dateRange":{"start":"2026-08-04","end":"2026-08-04"}},
+             "summary":{"totalTokens":\(summaryTokens),"totalCost":\(summaryCost),"totalDays":1,
+                        "activeDays":1,"averagePerDay":0,"maxCostInSingleDay":0,
+                        "clients":[],"models":[]},
+             "years":[],"contributions":[\(days)]}
+            """
+        }
+        let dpToday = "2026-08-04"
+
+        // A3a — the hidden set reaches the published payload. The day-level
+        // `totals` here (1.2M) deliberately differs from the visible-only sum
+        // (200K): a builder that read `Contribution.totals`/`tokenBreakdown`
+        // instead of the surviving stripes cannot subtract a client and would
+        // publish "1.2M".
+        let dpHiddenGraph = dpGraph(dpPayload(dpDay(
+            dpToday, 1_200_000, 6.0,
+            dpStripe("claude", 1_000_000, 5.0) + "," + dpStripe("codex", 200_000, 1.0))))
+        let dpHidden = DiscordPresence.payload(
+            graph: dpHiddenGraph, hidden: ["claude"], today: dpToday)
+        expect(dpHidden?.details == "200K tokens today",
+            "discord payload tokens exclude the hidden client (mutation: reading the day-level "
+                + "totals publishes 1.2M)")
+        expect(dpHidden.map { !$0.fields.values.joined().contains("1.2M") } == true,
+            "discord payload never carries the mixed day-level total")
+        expect(dpHidden?.state.contains("Codex CLI") == true
+            && dpHidden?.state.contains("Claude Code") == false,
+            "discord top client skips the hidden client (mutation: dropping the hidden filter "
+                + "from the fold publishes Claude Code)")
+
+        // A4 — outbound label allowlist. The busiest visible client is an
+        // UNREGISTERED id whose suffix comes from a user's local config file;
+        // a second, hidden client carries a sentinel too. Nothing may escape.
+        let dpSecretGraph = dpGraph(dpPayload(dpDay(
+            dpToday, 1_400_000, 12.0,
+            dpStripe("cc-mirror/SECRET_VARIANT", 500_000, 3.0,
+                model: "SECRET_MODEL", provider: "SECRET_PROVIDER")
+                + "," + dpStripe("SECRET_HIDDEN", 900_000, 9.0,
+                    model: "SECRET_MODEL2", provider: "SECRET_PROVIDER2"))))
+        let dpSecret = DiscordPresence.payload(
+            graph: dpSecretGraph, hidden: ["SECRET_HIDDEN"], today: dpToday)
+        let dpSecretText = (dpSecret?.fields.values ?? [:].values).joined(separator: "|")
+        expect(dpSecret != nil && !dpSecretText.contains("SECRET_"),
+            "discord payload redacts an unregistered client id (mutation: using "
+                + "ClientRegistry.style().displayName without the allowlist gate leaks it)")
+        // Literal, not `DiscordPresence.neutralClientLabel`: an assertion whose
+        // expected value is read out of the constant it guards passes no matter
+        // what that constant becomes.
+        expect(dpSecret?.state.contains("an AI tool") == true,
+            "an unregistered top client publishes the neutral label")
+        // A5 — forbidden fields. modelId/providerId values are covered by the
+        // SECRET_ assertion above; these cover shapes rather than values.
+        expect(!dpSecretText.contains("/"),
+            "discord payload carries no path-like segment (mutation: adding any raw-id or path "
+                + "field to Payload.fields fails here)")
+        // Pinned by KEY on the published surface itself. `fields` is what the
+        // transport serializes, so this covers exactly what leaves the machine:
+        // a new outbound field must add a key here and fails, while a property
+        // that is not in `fields` publishes nothing and correctly does not.
+        // Asserting over anything else — a parallel list of values, or
+        // reflection over the stored properties — reintroduces the gap between
+        // the published surface and the asserted one that let a computed
+        // `startTimestamp` through.
+        expect(dpSecret.map { Set($0.fields.keys) } == ["details", "state", "largeImageKey"],
+            "the discord payload publishes exactly three named fields "
+                + "(mutation: adding a key to Payload.fields, or dropping one, fails here)")
+
+        // A11 — published granularity. Exact figures must not survive: neither
+        // the raw token count nor cent-precision cost.
+        let dpGrainGraph = dpGraph(dpPayload(dpDay(
+            dpToday, 1_234_567, 7.89, dpStripe("claude", 1_234_567, 7.89))))
+        let dpGrain = DiscordPresence.payload(graph: dpGrainGraph, hidden: [], today: dpToday)
+        let dpGrainText = (dpGrain?.fields.values ?? [:].values).joined(separator: "|")
+        expect(dpGrain?.details == "1.2M tokens today",
+            "discord tokens publish as a compact string (mutation: String(todayTokens) fails here)")
+        expect(dpGrain != nil && !dpGrainText.contains("1234567"),
+            "discord payload never carries the raw token count")
+        expect(dpGrain != nil && !dpGrainText.contains("7.89"),
+            "discord payload never carries cent-precision cost (mutation: Format.usd fails here)")
+        expect(dpGrain?.state.hasSuffix("$5-10") == true, "cost publishes as a coarse band")
+        // A11 (cont.) — the two inputs where the SHARED tray formatter would
+        // publish an exact figure. `Format.compactTokens` returns `String(count)`
+        // below 1000 and for every negative value, which is right for the menu
+        // bar and wrong on a public profile.
+        let dpSmall = DiscordPresence.payload(
+            graph: dpGraph(dpPayload(dpDay(dpToday, 850, 0.4, dpStripe("claude", 850, 0.4)))),
+            hidden: [], today: dpToday)
+        expect(dpSmall?.details == "<1K tokens today",
+            "a light day publishes a band, not the exact count (mutation: calling "
+                + "Format.compactTokens directly publishes \"850\")")
+        // Negative day totals are reachable: the aggregator clamps per lane, so
+        // the re-summed slow path can go negative (trayTotals' doc comment).
+        // Hiding a non-existent id forces that slow path.
+        let dpNegative = DiscordPresence.payload(
+            graph: dpGraph(dpPayload(dpDay(
+                dpToday, 0, 1.0,
+                dpStripe("claude", -1_234_567, 0.0) + "," + dpStripe("codex", 1_000, 1.0)))),
+            hidden: ["nobody"], today: dpToday)
+        expect(dpNegative.map { !$0.fields.values.joined().contains("1233567") } ?? true,
+            "a negative day total never publishes its signed digits")
+
+        // A12 — zero usage publishes nothing (no "machine is on" beacon), and a
+        // day absent from the graph publishes nothing either.
+        let dpZeroGraph = dpGraph(dpPayload(dpDay(dpToday, 0, 0, dpStripe("claude", 0, 0))))
+        expect(DiscordPresence.payload(graph: dpZeroGraph, hidden: [], today: dpToday) == nil,
+            "zero usage publishes nothing (mutation: dropping the guard publishes an idle beacon)")
+        expect(DiscordPresence.payload(graph: dpGrainGraph, hidden: [], today: "2099-01-01") == nil,
+            "a day with no contribution publishes nothing")
+        // The isFinite guard, made reachable. JSON cannot express NaN, but the
+        // slow path sums Double costs, so two finite stripes overflow to +inf —
+        // which costBucket would happily publish as "$100+".
+        let dpInfinite = DiscordPresence.payload(
+            graph: dpGraph(dpPayload(dpDay(
+                dpToday, 10, 1e308,
+                dpStripe("claude", 10, 1e308) + "," + dpStripe("codex", 10, 1e308)))),
+            hidden: ["nobody"], today: dpToday)
+        expect(dpInfinite == nil,
+            "an overflowed cost publishes nothing (mutation: dropping the isFinite guard "
+                + "publishes $100+)")
+
+        // A14 — the top client is the busiest CLIENT, not the biggest single
+        // stripe. `Contribution.clients` holds per client×model×provider
+        // stripes, so claude's 30+30 must beat codex's single 50.
+        let dpFoldGraph = dpGraph(dpPayload(dpDay(
+            dpToday, 110, 1.1,
+            dpStripe("claude", 30, 0.3, model: "m1") + ","
+                + dpStripe("claude", 30, 0.3, model: "m2") + ","
+                + dpStripe("codex", 50, 0.5, model: "m1"))))
+        let dpFold = DiscordPresence.payload(graph: dpFoldGraph, hidden: [], today: dpToday)
+        expect(dpFold?.state.hasPrefix("Claude Code") == true,
+            "top client folds stripes per client first (mutation: max over raw stripes picks "
+                + "Codex CLI's single 50 over Claude Code's 30+30)")
+        let dpFoldHidden = DiscordPresence.payload(
+            graph: dpFoldGraph, hidden: ["claude"], today: dpToday)
+        expect(dpFoldHidden?.state.hasPrefix("Codex CLI") == true,
+            "hiding the busiest client promotes the next visible one")
+
+        // A15 — deterministic tie-break: tokens, then higher cost, then the
+        // lexicographically smallest id. A wobbling label would flip between
+        // publishes.
+        let dpTieCost = dpGraph(dpPayload(dpDay(
+            dpToday, 200, 3.0, dpStripe("amp", 100, 1.0) + "," + dpStripe("zed", 100, 2.0))))
+        expect(DiscordPresence.payload(graph: dpTieCost, hidden: [], today: dpToday)?.state
+            == "Zed · $1-5",
+            "equal tokens break to the higher cost")
+        // Six-way tie on purpose, and the fixture lists the ids in REVERSE
+        // order so input order cannot supply the answer.
+        //
+        // Two mutations threaten this, and they are not equally provable:
+        //   `>=` in the fold comparison        → picks Zed, fails every run.
+        //   `keys.sorted()` → `keys`           → PROBABILISTIC. Swift seeds
+        //     Dictionary hashing per process, so an unsorted walk lands on the
+        //     right id by luck roughly 1 run in 6. The pair of assertions below
+        //     feed the SAME six clients in opposite orders — a different
+        //     insertion sequence is a different iteration order — so the
+        //     mutation has to get lucky twice to survive. It is still not a
+        //     hard proof, and no in-process check can make it one: repeatedly
+        //     calling the fold inside one run cannot see the wobble, because
+        //     the seed does not change until the process does.
+        let dpTieIds = ["zed", "warp", "goose", "droid", "codex", "amp"]
+        let dpTieId = dpGraph(dpPayload(dpDay(
+            dpToday, 600, 6.0, dpTieIds.map { dpStripe($0, 100, 1.0) }.joined(separator: ","))))
+        expect(
+            DiscordPresence.payload(graph: dpTieId, hidden: [], today: dpToday)?.state
+                == "Amp · $5-10",
+            "a full tie breaks to the lexicographically smallest id")
+        let dpTieIdReversed = dpGraph(dpPayload(dpDay(
+            dpToday, 600, 6.0,
+            dpTieIds.reversed().map { dpStripe($0, 100, 1.0) }.joined(separator: ","))))
+        expect(
+            DiscordPresence.payload(graph: dpTieIdReversed, hidden: [], today: dpToday)?.state
+                == "Amp · $5-10",
+            "the tie-break does not depend on the order the stripes arrive in")
+
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
             exit(1)
