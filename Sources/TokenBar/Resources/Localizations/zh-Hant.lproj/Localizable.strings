@@ -108,6 +108,8 @@
 "Reasoning" = "推理";
 "Model" = "模型";
 "Agent" = "Agent";
+"Bars" = "長條圖";
+"Heatmap" = "熱點圖";
 "Window" = "時間窗";
 "Price" = "費用";
 "Show less" = "收合";
