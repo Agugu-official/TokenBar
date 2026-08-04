@@ -15,6 +15,14 @@ enum HeatmapLayout {
     static let cornerRadius: CGFloat = 2
     static let monthLabelHeight: CGFloat = 14
     static let step: CGFloat = cell + gap
+    /// Round 6, FIX 2: extra trailing width reserved only when the LAST
+    /// renderable column carries a month label. Labels are leading-aligned
+    /// and wider than an 11pt cell, so a label landing in the very last
+    /// column (any month's first week — happens roughly monthly) would
+    /// otherwise have its trailing half clipped by the ScrollView once
+    /// scrolled to its trailing edge. Sized for the widest localized month
+    /// abbreviation, not just English "Dec" — zh-Hant's "12月" is wider.
+    static let lastColumnLabelMargin: CGFloat = 28
 
     /// Five-level intensity ramp. Thresholds ported from token-monitor's
     /// `heatmapIntensity()` (usageCharts.js:60-65: `>=0.75→4`, `>=0.5→3`,
@@ -142,10 +150,19 @@ struct ContributionHeatmap: View {
     /// Round 5: canvas width for however many columns are actually
     /// renderable — 0 when nothing is (a future selected year now that
     /// `cutoffDate` clips it to today), never a negative width from naively
-    /// computing `0 * step - gap`. Static so SelfTest can exercise this edge
-    /// directly instead of instantiating the view.
-    static func contentWidth(visibleCols: Int) -> CGFloat {
-        visibleCols > 0 ? CGFloat(visibleCols) * HeatmapLayout.step - HeatmapLayout.gap : 0
+    /// computing `0 * step - gap`. Round 6, FIX 2: adds
+    /// `HeatmapLayout.lastColumnLabelMargin` when (and only when) the last
+    /// renderable column itself carries a month label, so that label isn't
+    /// clipped at the trailing edge; every other case is unchanged. Static
+    /// so SelfTest can exercise both edges directly instead of instantiating
+    /// the view.
+    static func contentWidth(visibleCols: Int, monthLabelCols: [(col: Int, label: String)]) -> CGFloat {
+        guard visibleCols > 0 else { return 0 }
+        let base = CGFloat(visibleCols) * HeatmapLayout.step - HeatmapLayout.gap
+        let lastCol = visibleCols - 1
+        return monthLabelCols.contains { $0.col == lastCol }
+            ? base + HeatmapLayout.lastColumnLabelMargin
+            : base
     }
 
     /// The columns that get a month-name header — the same `isRenderable`
@@ -161,6 +178,23 @@ struct ContributionHeatmap: View {
                 guard let month = Int(monthChars), (1...12).contains(month) else { return nil }
                 return (cell.col, monthAbbrev[month - 1].localized)
             }
+    }
+
+    /// Round 6, FIX 3: whether a 1D offset within one column/row's `step`
+    /// (cell + gap) stride lands inside the cell itself rather than the gap
+    /// between cells. Gap coordinates used to fall through to
+    /// `Int(offset / step)`'s floor division, which silently attributed them
+    /// to the PRECEDING cell — putting the cursor on what looks like a blank
+    /// gridline popped a tooltip naming the adjacent day instead. This is
+    /// deliberately different from `UsageChartGeometry.barIndex`, whose doc
+    /// comment says gap pixels attach to the left bar on purpose (a 1D bar
+    /// chart, avoiding a dead zone between tall thin bars); this is a 2D
+    /// discrete date grid where the gaps are visible gridlines and the
+    /// tooltip names one specific date, so the gaps should be dead zones —
+    /// `UsageChartGeometry` itself is untouched.
+    static func withinCell(offset: CGFloat, step: CGFloat, cell: CGFloat) -> Bool {
+        let local = offset.truncatingRemainder(dividingBy: step)
+        return local >= 0 && local < cell
     }
 
     /// Round 2, item 1: the tooltip's anchor in the OUTER (non-scrolling)
@@ -185,7 +219,9 @@ struct ContributionHeatmap: View {
     /// Columns after the last renderable one (round 3) carry no layout width
     /// at all — never derived from `grid.cols`.
     private var visibleCols: Int { max(0, Self.lastRenderableCol(grid, cutoff: cutoff) + 1) }
-    private var contentWidth: CGFloat { Self.contentWidth(visibleCols: visibleCols) }
+    private var contentWidth: CGFloat {
+        Self.contentWidth(visibleCols: visibleCols, monthLabelCols: monthLabelCols)
+    }
     private var gridHeight: CGFloat { 7 * HeatmapLayout.step - HeatmapLayout.gap }
     private var contentHeight: CGFloat { HeatmapLayout.monthLabelHeight + gridHeight }
 
@@ -292,7 +328,14 @@ struct ContributionHeatmap: View {
     /// the col/row re-check guards against that ordering ever changing.
     private func cellAt(_ point: CGPoint) -> GridCell? {
         guard point.x >= 0, point.y >= HeatmapLayout.monthLabelHeight else { return nil }
-        let row = Int((point.y - HeatmapLayout.monthLabelHeight) / HeatmapLayout.step)
+        let localY = point.y - HeatmapLayout.monthLabelHeight
+        // Reject gap coordinates before resolving an index — see
+        // `withinCell`'s doc comment for why this differs from the bar chart.
+        guard
+            Self.withinCell(offset: point.x, step: HeatmapLayout.step, cell: HeatmapLayout.cell),
+            Self.withinCell(offset: localY, step: HeatmapLayout.step, cell: HeatmapLayout.cell)
+        else { return nil }
+        let row = Int(localY / HeatmapLayout.step)
         let col = Int(point.x / HeatmapLayout.step)
         guard (0..<7).contains(row), (0..<visibleCols).contains(col) else { return nil }
         let index = col * 7 + row

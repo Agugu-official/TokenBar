@@ -38,6 +38,23 @@ enum ChartView: String {
     init(raw: String) {
         self = ChartView(rawValue: raw) ?? .bars
     }
+
+    /// ⌘G's cycle order — matches the header picker's left-to-right order
+    /// (bars → heatmap → 3D → bars). Round 6, FIX 1: `PopoverView`'s ⌘G
+    /// handler used to hardcode a binary `"2d" <-> "3d"` toggle; once
+    /// Heatmap became a third state, pressing ⌘G while on Heatmap jumped to
+    /// Bars and then cycled Bars↔3D forever — a keyboard user could never
+    /// get back to Heatmap. `ChartView` is the only place that knows the
+    /// full state set and its order now, so a future fourth view only needs
+    /// one edit here, not a second copy of the cycle logic in the key
+    /// handler.
+    var next: ChartView {
+        switch self {
+        case .bars: return .heatmap
+        case .heatmap: return .threeD
+        case .threeD: return .bars
+        }
+    }
 }
 
 /// The "Token Usage" card, port of UsageBarGraph2D.tsx: trailing-30-day
@@ -56,8 +73,11 @@ struct UsageChartCard: View {
 
     @AppStorage("tokenbar.chart.stackBy") private var stackByRaw = StackBy.model.rawValue
     @AppStorage("tokenbar.chart.metric") private var metricRaw = ChartMetric.tokens.rawValue
-    /// "2d" = trailing-30-day stacked bars, "3d" = full-year contribution grid.
-    @AppStorage("tokenbar.chart.view") private var chartViewRaw = "2d"
+    /// Round 6 audit 2: matches the sibling `stackByRaw`/`metricRaw` defaults
+    /// right above — `ChartView.bars.rawValue`, not the bare "2d" literal
+    /// this used to duplicate (the exact kind of hardcoded state-name string
+    /// this round's audit went looking for).
+    @AppStorage("tokenbar.chart.view") private var chartViewRaw = ChartView.bars.rawValue
     @State private var hoverIndex: Int?
     @State private var hoverPoint: CGPoint = .zero
     @State private var tooltipSize: CGSize = .zero

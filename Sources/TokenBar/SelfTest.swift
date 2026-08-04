@@ -3350,12 +3350,75 @@ enum SelfTest {
         // any grid where nothing passes the cutoff) must not produce a
         // negative canvas width.
         expect(
-            ContributionHeatmap.contentWidth(visibleCols: 0) == 0,
+            ContributionHeatmap.contentWidth(visibleCols: 0, monthLabelCols: []) == 0,
             "zero visible columns is zero width, not a negative width from `0 * step - gap` "
                 + "(mutation: dropping the `visibleCols > 0` guard would fail this)")
         expect(
-            ContributionHeatmap.contentWidth(visibleCols: 3) > 0,
+            ContributionHeatmap.contentWidth(visibleCols: 3, monthLabelCols: []) > 0,
             "sanity: a normal, nonzero column count still produces a positive width")
+
+        // MARK: - FLAT-HEATMAP round 6 (Codex round 3 P2 fixes + audit; append-only)
+
+        // FIX 1: `ChartView.next` owns the ⌘G cycle order. The regression
+        // this guards was specifically that Heatmap couldn't be distinguished
+        // from 3D by the old handler, so it's the heatmap→threeD step (not
+        // just "the cycle eventually returns") that matters most here.
+        expect(ChartView.bars.next == .heatmap, "cycle: Bars -> Heatmap")
+        expect(
+            ChartView.heatmap.next == .threeD,
+            "cycle: Heatmap -> 3D, not back to Bars — this is exactly the regression: the old handler's "
+                + "binary `chartViewRaw == \"2d\" ? \"3d\" : \"2d\"` treated Heatmap the same as \"any "
+                + "non-2d value\" and always landed on 3D, then only ever toggled Bars<->3D afterward, so "
+                + "a keyboard user starting on Heatmap could never cycle back to it")
+        expect(ChartView.threeD.next == .bars, "cycle: 3D -> Bars, closing the loop")
+        expect(
+            ChartView.bars.next.next.next == .bars,
+            "three ⌘G presses from any state return to that same state")
+
+        // FIX 2: contentWidth gains the trailing margin ONLY when the LAST
+        // renderable column itself has a month label.
+        let r6BaseWidth = ContributionHeatmap.contentWidth(visibleCols: 5, monthLabelCols: [])
+        let r6TrailingLabelWidth = ContributionHeatmap.contentWidth(
+            visibleCols: 5, monthLabelCols: [(col: 4, label: "Sep")])
+        expect(
+            r6TrailingLabelWidth == r6BaseWidth + HeatmapLayout.lastColumnLabelMargin,
+            "a label landing in the last renderable column adds exactly the named margin")
+        let r6MidLabelWidth = ContributionHeatmap.contentWidth(
+            visibleCols: 5, monthLabelCols: [(col: 2, label: "Jul")])
+        expect(
+            r6MidLabelWidth == r6BaseWidth,
+            "a label on a column that ISN'T the last one adds no margin (mutation: adding the margin "
+                + "whenever monthLabelCols is merely non-empty, instead of checking the last column "
+                + "specifically, would fail this)")
+
+        // FIX 3: gap coordinates are dead zones (unlike the bar chart's
+        // intentional gap-attaches-to-the-left-bar rule); horizontal and
+        // vertical boundaries both tested at the cell's last valid pixel and
+        // the gap's first pixel.
+        let r6Cell = HeatmapLayout.cell
+        let r6Step = HeatmapLayout.step
+        expect(
+            ContributionHeatmap.withinCell(offset: 0, step: r6Step, cell: r6Cell),
+            "the first pixel of a cell is inside it")
+        expect(
+            ContributionHeatmap.withinCell(offset: r6Cell - 0.1, step: r6Step, cell: r6Cell),
+            "the last valid pixel just before the gap is still inside the cell")
+        expect(
+            !ContributionHeatmap.withinCell(offset: r6Cell, step: r6Step, cell: r6Cell),
+            "the first pixel of the gap is rejected (mutation: dropping the `< cell` check, i.e. always "
+                + "returning true, would fail this)")
+        expect(
+            !ContributionHeatmap.withinCell(offset: r6Step - 0.1, step: r6Step, cell: r6Cell),
+            "the last pixel of the gap, right before the next cell, is still rejected")
+        expect(
+            ContributionHeatmap.withinCell(offset: r6Step, step: r6Step, cell: r6Cell),
+            "the first pixel of the NEXT cell is inside it again")
+        expect(
+            ContributionHeatmap.withinCell(offset: r6Step + r6Cell - 0.1, step: r6Step, cell: r6Cell),
+            "the second cell's last valid pixel is inside it")
+        expect(
+            !ContributionHeatmap.withinCell(offset: r6Step + r6Cell, step: r6Step, cell: r6Cell),
+            "the second cell's gap is rejected too")
 
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
