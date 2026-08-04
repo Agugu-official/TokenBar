@@ -104,12 +104,20 @@ struct ContributionHeatmap: View {
         }
     }
 
-    /// Round 2, item 3(a): the last day this heatmap should draw. Only the
-    /// selected year matching today's year clips to today — any other
-    /// (necessarily past) year still draws through Dec 31. View-level only;
-    /// `buildGrid` still produces the full padded year.
+    /// Round 2, item 3(a): the last day this heatmap should draw. Round 5:
+    /// a single `min` over the ISO date strings (whose lexicographic order
+    /// is chronological order) correctly covers all three year cases at
+    /// once — a past year clips at its own Dec 31, the current year clips at
+    /// today, and a FUTURE year (reachable if clock skew or an imported
+    /// session put data there, making it show up in the year picker) also
+    /// clips at today, i.e. renders nothing. The two-way `year ==
+    /// currentYear ? today : "\(year)-12-31"` this replaced treated any
+    /// non-current year as past, so a future year rendered its entire (blank
+    /// data-wise but still drawn) 12 months — every day of it is, after all,
+    /// still in the future. View-level only; `buildGrid` still produces the
+    /// full padded year.
     static func cutoffDate(year: String, today: String) -> String {
-        year == String(today.prefix(4)) ? today : "\(year)-12-31"
+        min("\(year)-12-31", today)
     }
 
     /// A cell is drawn/hoverable only if it's in-year and on or before the
@@ -129,6 +137,15 @@ struct ContributionHeatmap: View {
     /// separate "visible range" concept.
     static func lastRenderableCol(_ grid: TokenBarCore.GridLayout, cutoff: String) -> Int {
         grid.cells.filter { isRenderable($0, cutoff: cutoff) }.map(\.col).max() ?? -1
+    }
+
+    /// Round 5: canvas width for however many columns are actually
+    /// renderable — 0 when nothing is (a future selected year now that
+    /// `cutoffDate` clips it to today), never a negative width from naively
+    /// computing `0 * step - gap`. Static so SelfTest can exercise this edge
+    /// directly instead of instantiating the view.
+    static func contentWidth(visibleCols: Int) -> CGFloat {
+        visibleCols > 0 ? CGFloat(visibleCols) * HeatmapLayout.step - HeatmapLayout.gap : 0
     }
 
     /// The columns that get a month-name header — the same `isRenderable`
@@ -168,9 +185,7 @@ struct ContributionHeatmap: View {
     /// Columns after the last renderable one (round 3) carry no layout width
     /// at all — never derived from `grid.cols`.
     private var visibleCols: Int { max(0, Self.lastRenderableCol(grid, cutoff: cutoff) + 1) }
-    private var contentWidth: CGFloat {
-        visibleCols > 0 ? CGFloat(visibleCols) * HeatmapLayout.step - HeatmapLayout.gap : 0
-    }
+    private var contentWidth: CGFloat { Self.contentWidth(visibleCols: visibleCols) }
     private var gridHeight: CGFloat { 7 * HeatmapLayout.step - HeatmapLayout.gap }
     private var contentHeight: CGFloat { HeatmapLayout.monthLabelHeight + gridHeight }
 

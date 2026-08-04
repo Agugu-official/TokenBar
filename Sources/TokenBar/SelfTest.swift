@@ -3322,6 +3322,41 @@ enum SelfTest {
             "the only visible day still renders at full intensity (mutation: reverting the tokens branch "
                 + "to `grid.maxTokens` or the cost branch to an unfiltered reduce would crush this)")
 
+        // MARK: - FLAT-HEATMAP round 5 (Codex P2 fix + audit; append-only)
+
+        // FIX: a FUTURE selected year (reachable if clock skew or an
+        // imported session put activity there, so it shows up in the year
+        // picker) must render nothing, not the whole year — the old two-way
+        // `year == currentYear ? today : "\(year)-12-31"` treated every
+        // non-current year as past.
+        expect(
+            ContributionHeatmap.cutoffDate(year: "2026", today: "2026-07-29") == "2026-07-29",
+            "the current year still cuts off at today")
+        expect(
+            ContributionHeatmap.cutoffDate(year: "2025", today: "2026-07-29") == "2025-12-31",
+            "a past year still cuts off at its own Dec 31")
+        expect(
+            ContributionHeatmap.cutoffDate(year: "2027", today: "2026-07-29") == "2026-07-29",
+            "a future year cuts off at today too (mutation: the old `year == currentYear ? today : "
+                + "\"\\(year)-12-31\"` two-way branch would return \"2027-12-31\" here and fail this)")
+
+        let r5FutureYearGrid = buildGrid(year: "2027", perDayMap: [:])
+        let r5FutureCutoff = ContributionHeatmap.cutoffDate(year: "2027", today: "2026-07-29")
+        expect(
+            ContributionHeatmap.lastRenderableCol(r5FutureYearGrid, cutoff: r5FutureCutoff) == -1,
+            "a future year has zero renderable columns")
+
+        // Zero renderable columns (the future-year case just established, or
+        // any grid where nothing passes the cutoff) must not produce a
+        // negative canvas width.
+        expect(
+            ContributionHeatmap.contentWidth(visibleCols: 0) == 0,
+            "zero visible columns is zero width, not a negative width from `0 * step - gap` "
+                + "(mutation: dropping the `visibleCols > 0` guard would fail this)")
+        expect(
+            ContributionHeatmap.contentWidth(visibleCols: 3) > 0,
+            "sanity: a normal, nonzero column count still produces a positive width")
+
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
             exit(1)
