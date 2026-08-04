@@ -30,7 +30,10 @@ struct PopoverView: View {
     @State private var keyMonitor: Any?
     @State private var flagsMonitor: Any?
     @State private var cmdHintTask: Task<Void, Never>?
-    @AppStorage("tokenbar.chart.view") private var chartViewRaw = "2d"
+    // Round 6 audit 2: matches the sibling `activeViewRaw` default below —
+    // `ChartView.bars.rawValue`, not the bare "2d" literal this used to
+    // duplicate.
+    @AppStorage("tokenbar.chart.view") private var chartViewRaw = ChartView.bars.rawValue
     @AppStorage(ClientTray.activeViewKey) private var activeViewRaw = AppView.overview.rawValue
     @AppStorage("tokenbar.views.hidden") private var hiddenViewsRaw = ""
     @AppStorage("tokenbar.bridge.dismissed") private var bridgeDismissed = false
@@ -562,7 +565,8 @@ struct PopoverView: View {
 
     /// The web app's Cmd shortcuts (App.tsx onKeyDown), as local NSEvent
     /// monitors scoped to the popover's key window: ⌘1-9 tabs, ⌘[/⌘] cycle,
-    /// ⌘, settings, ⌘R refresh, ⌘G 2D/3D, ⌘W/Esc close, ⌘Q quit. Holding Cmd
+    /// ⌘, settings, ⌘R refresh, ⌘G cycle chart view (Bars/Heatmap/3D), ⌘W/Esc
+    /// close, ⌘Q quit. Holding Cmd
     /// alone for 400ms reveals the tab pins (system chords like ⌘⇧4 don't).
     private func installKeyMonitors() {
         guard keyMonitor == nil else { return }
@@ -628,7 +632,11 @@ struct PopoverView: View {
         case "r":
             Task { await model.refresh() }
         case "g":
-            chartViewRaw = chartViewRaw == "2d" ? "3d" : "2d"
+            // Round 6, FIX 1: cycle order lives on `ChartView` (bars →
+            // heatmap → 3D → bars) — not hardcoded here — so this handler
+            // never again silently drops a view out of the ⌘G cycle when a
+            // new one is added.
+            chartViewRaw = ChartView(raw: chartViewRaw).next.rawValue
         default:
             return false
         }

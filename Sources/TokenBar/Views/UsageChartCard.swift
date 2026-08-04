@@ -25,9 +25,42 @@ enum UsageChartGeometry {
     }
 }
 
+/// Pure resolution of the stored `chartViewRaw` string into a view case, kept
+/// outside the View body (and outside `@AppStorage`/MainActor state) so
+/// SelfTest can exercise the unknown-value fallback directly
+/// (FLAT-HEATMAP invariant 7: any value besides "heat"/"3d" — including the
+/// legacy "2d" and anything unrecognized — falls back to Bars, no migration).
+enum ChartView: String {
+    case bars = "2d"
+    case heatmap = "heat"
+    case threeD = "3d"
+
+    init(raw: String) {
+        self = ChartView(rawValue: raw) ?? .bars
+    }
+
+    /// ⌘G's cycle order — matches the header picker's left-to-right order
+    /// (bars → heatmap → 3D → bars). Round 6, FIX 1: `PopoverView`'s ⌘G
+    /// handler used to hardcode a binary `"2d" <-> "3d"` toggle; once
+    /// Heatmap became a third state, pressing ⌘G while on Heatmap jumped to
+    /// Bars and then cycled Bars↔3D forever — a keyboard user could never
+    /// get back to Heatmap. `ChartView` is the only place that knows the
+    /// full state set and its order now, so a future fourth view only needs
+    /// one edit here, not a second copy of the cycle logic in the key
+    /// handler.
+    var next: ChartView {
+        switch self {
+        case .bars: return .heatmap
+        case .heatmap: return .threeD
+        case .threeD: return .bars
+        }
+    }
+}
+
 /// The "Token Usage" card, port of UsageBarGraph2D.tsx: trailing-30-day
 /// stacked bars (Model/Agent stacking, Tokens/Price metric, wrapping legend,
-/// rich hover tooltip) toggling with the full-year 3D contribution grid.
+/// rich hover tooltip) toggling with the full-year 3D contribution grid or
+/// the flat year heatmap — the latter two share one `buildGrid` call.
 struct UsageChartCard: View {
     let payload: UsagePayload
     /// Clients included in the stack (the active tab's slice).
@@ -40,8 +73,11 @@ struct UsageChartCard: View {
 
     @AppStorage("tokenbar.chart.stackBy") private var stackByRaw = StackBy.model.rawValue
     @AppStorage("tokenbar.chart.metric") private var metricRaw = ChartMetric.tokens.rawValue
-    /// "2d" = trailing-30-day stacked bars, "3d" = full-year contribution grid.
-    @AppStorage("tokenbar.chart.view") private var chartViewRaw = "2d"
+    /// Round 6 audit 2: matches the sibling `stackByRaw`/`metricRaw` defaults
+    /// right above — `ChartView.bars.rawValue`, not the bare "2d" literal
+    /// this used to duplicate (the exact kind of hardcoded state-name string
+    /// this round's audit went looking for).
+    @AppStorage("tokenbar.chart.view") private var chartViewRaw = ChartView.bars.rawValue
     @State private var hoverIndex: Int?
     @State private var hoverPoint: CGPoint = .zero
     @State private var tooltipSize: CGSize = .zero
@@ -61,7 +97,14 @@ struct UsageChartCard: View {
             colors: colors, rangeEnd: stats.dateRange.end, endFallback: Format.todayKey())
     }
 
-    private var is3D: Bool { chartViewRaw == "3d" }
+    private var chartView: ChartView { ChartView(raw: chartViewRaw) }
+    private var is3D: Bool { chartView == .threeD }
+    private var isHeatmap: Bool { chartView == .heatmap }
+
+    /// Dashboard year filter, falling back to the current year — shared
+    /// verbatim by the 3D grid and the heatmap so they read identical data
+    /// (FLAT-HEATMAP invariant 2).
+    private var gridYear: String { year ?? String(Format.todayKey().prefix(4)) }
 
     var body: some View {
         let bars = self.bars
@@ -71,7 +114,7 @@ struct UsageChartCard: View {
         } ?? false
         DashCard(
             "Token Usage",
-            subtitle: is3D
+            subtitle: (is3D || isHeatmap)
                 ? "Full year"
                 : (stackBy == .model ? "Stacked by model" : "Stacked by agent"),
             trailing: { toggles }
@@ -81,12 +124,17 @@ struct UsageChartCard: View {
             if is3D {
                 // Year grid over the same client slice; sized to match the 2D
                 // legend + chart + axis block so the card doesn't jump.
-                ContributionGraph3D(
-                    grid: buildGrid(
-                        year: year ?? String(Format.todayKey().prefix(4)),
-                        perDayMap: stats.perDayMap)
-                )
-                .frame(height: 196)
+                ContributionGraph3D(grid: buildGrid(year: gridYear, perDayMap: stats.perDayMap))
+                    .frame(height: 196)
+            } else if isHeatmap {
+                // Shorter than the 3D slot (196) — the flat grid's own
+                // content is ~109pt tall; round 2 narrows its top/bottom
+                // whitespace instead of matching 3D's height (design call,
+                // costs a card-height jump when toggling from Bars/3D).
+                ContributionHeatmap(
+                    grid: buildGrid(year: gridYear, perDayMap: stats.perDayMap), metric: metric,
+                    year: gridYear)
+                    .frame(height: 130)
             } else {
                 legendView(legend)
                 chart(bars)
@@ -102,23 +150,32 @@ struct UsageChartCard: View {
 
     // MARK: - Header toggles
 
-    /// The 2D/3D view switch rides the header; the 2D-only group/metric
-    /// toggles get their own slim row below — stacked in the header they made
-    /// it three rows tall and left the card top mostly whitespace, and all
-    /// three don't fit beside the title without wrapping.
+    /// The Bars/Heatmap/3D view switch rides the header; the bar-only
+    /// stacking toggle and the shared metric toggle get their own slim row
+    /// below — stacked in the header they made it three rows tall and left
+    /// the card top mostly whitespace, and all three don't fit beside the
+    /// title without wrapping.
     private var toggles: some View {
-        picker(selection: $chartViewRaw, options: [("2d", "2D"), ("3d", "3D")])
+        picker(selection: $chartViewRaw, options: [
+            (ChartView.bars.rawValue, "Bars"),
+            (ChartView.heatmap.rawValue, "Heatmap"),
+            (ChartView.threeD.rawValue, "3D"),
+        ])
     }
 
     @ViewBuilder private var togglesRow: some View {
-        // Stacking and bar metric are 2D-only concepts — the 3D view is the
-        // year heatmap (web hides these the same way).
+        // Model/Agent stacking only makes sense for stacked bars — a single
+        // color-ramped heatmap cell or a 3D box has nowhere to stack
+        // (FLAT-HEATMAP invariant 8). The Tokens/Price metric still applies
+        // to both Bars and Heatmap; 3D has neither toggle.
         if !is3D {
             HStack(spacing: 4) {
                 Spacer()
-                picker(selection: $stackByRaw, options: [
-                    (StackBy.model.rawValue, "Model"), (StackBy.agent.rawValue, "Agent"),
-                ])
+                if !isHeatmap {
+                    picker(selection: $stackByRaw, options: [
+                        (StackBy.model.rawValue, "Model"), (StackBy.agent.rawValue, "Agent"),
+                    ])
+                }
                 picker(selection: $metricRaw, options: [
                     (ChartMetric.tokens.rawValue, "Tokens"), (ChartMetric.cost.rawValue, "Price"),
                 ])
