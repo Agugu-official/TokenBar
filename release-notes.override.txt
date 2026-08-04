@@ -1,4 +1,10 @@
 New:
-- Daily and Monthly usage now show Codex and Claude turn counts alongside message totals, making human interactions easier to distinguish from agent and tool-loop activity.
+- A flat contribution heatmap joins the bar and 3D views in the usage chart. Press Command-G to cycle through all three.
+- Claude plans that report per-model weekly caps now show those limits alongside the session and weekly windows.
+
+Improved:
+- Reopening the popover no longer recomputes the hourly views, so they appear right away.
+- The turn count shows a loading state instead of looking empty while it is still being read.
+
 Fixes:
-- Message-only activity remains visible in Daily and Monthly history, drill-downs, active-day counts, streaks, and year visibility without distorting token or cost charts.
+- Non-square menu-bar animation art, such as the parrot, is fitted to the bar instead of being stretched to a square.
