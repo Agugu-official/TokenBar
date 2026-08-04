@@ -3197,13 +3197,12 @@ enum SelfTest {
         // is the pure-logic slice of the fix; the actual on-screen clip
         // behavior needs a human looking at the popover (A9-equivalent).
         expect(
-            ContributionHeatmap.tooltipAnchor(
-                cellCenter: CGPoint(x: 50, y: 20), contentOrigin: .zero, containerOrigin: .zero)
+            ContributionHeatmap.tooltipAnchor(cellCenter: CGPoint(x: 50, y: 20), contentOrigin: .zero)
                 == CGPoint(x: 50, y: 20),
             "an unscrolled, unmoved content anchors directly on the cell's own center")
         expect(
             ContributionHeatmap.tooltipAnchor(
-                cellCenter: CGPoint(x: 50, y: 20), contentOrigin: CGPoint(x: -300, y: 0), containerOrigin: .zero)
+                cellCenter: CGPoint(x: 50, y: 20), contentOrigin: CGPoint(x: -300, y: 0))
                 == CGPoint(x: -250, y: 20),
             "scrolling the content 300pt left shifts the anchor by the same 300pt — proving the tooltip "
                 + "tracks the outer container, not a position frozen inside the scrolled/clipped content")
@@ -3442,6 +3441,57 @@ enum SelfTest {
             ContributionHeatmap.shouldClearHoverOnOriginChange(
                 old: CGPoint(x: 10, y: 20), new: CGPoint(x: 10, y: 5)),
             "a vertical-only origin change also clears the hover")
+
+        // MARK: - FLAT-HEATMAP round 8 (perf regression fix; append-only)
+
+        // The scroll-perf fix: measuring `contentOrigin` in a coordinate
+        // space anchored to the OUTER container (instead of `.global`)
+        // means a shared ancestor translation — the dashboard's own
+        // vertical ScrollView scrolling — cancels out, because both the
+        // content's and the container's `.global` positions shift by the
+        // SAME delta. This models that arithmetic directly: two `.global`
+        // snapshots of content/container before an ancestor scroll, and two
+        // after a 150pt vertical shift applied to BOTH.
+        let r8ContentGlobalBefore = CGPoint(x: 40, y: 320)
+        let r8ContainerGlobalBefore = CGPoint(x: 20, y: 300)
+        let r8AncestorScrollDelta: CGFloat = 150
+        let r8ContentGlobalAfter = CGPoint(
+            x: r8ContentGlobalBefore.x, y: r8ContentGlobalBefore.y - r8AncestorScrollDelta)
+        let r8ContainerGlobalAfter = CGPoint(
+            x: r8ContainerGlobalBefore.x, y: r8ContainerGlobalBefore.y - r8AncestorScrollDelta)
+        expect(
+            r8ContentGlobalBefore != r8ContentGlobalAfter,
+            "sanity: the raw `.global` position genuinely changes during the ancestor scroll — this is "
+                + "exactly why tracking `.global` fired `onGeometryChange`'s action, and therefore wrote "
+                + "state, on every single frame of a scroll this view had no other stake in")
+        func relative(content: CGPoint, container: CGPoint) -> CGPoint {
+            CGPoint(x: content.x - container.x, y: content.y - container.y)
+        }
+        let r8RelativeBefore = relative(content: r8ContentGlobalBefore, container: r8ContainerGlobalBefore)
+        let r8RelativeAfter = relative(content: r8ContentGlobalAfter, container: r8ContainerGlobalAfter)
+        expect(
+            r8RelativeBefore == r8RelativeAfter,
+            "content's position relative to its container is invariant under a shared ancestor "
+                + "translation — this is exactly the value a coordinate space anchored to the container "
+                + "reports directly, instead of two independent `.global` values that must be subtracted")
+        expect(
+            !ContributionHeatmap.shouldClearHoverOnOriginChange(old: r8RelativeBefore, new: r8RelativeAfter),
+            "so a pure vertical ancestor scroll correctly does NOT clear the hover or write state "
+                + "(mutation: if the container-relative value were computed wrong — e.g. only the "
+                + "content's delta and not the container's — this would go red)")
+
+        // Contrast: a genuine HORIZONTAL scroll of this grid's own content
+        // (the container does not move) must still change the relative
+        // origin, so hover keeps clearing correctly for the case that
+        // actually matters (round 7's fix).
+        let r8HScrolledContentGlobal = CGPoint(x: r8ContentGlobalBefore.x - 60, y: r8ContentGlobalBefore.y)
+        let r8HScrolledRelative = relative(content: r8HScrolledContentGlobal, container: r8ContainerGlobalBefore)
+        expect(
+            r8HScrolledRelative != r8RelativeBefore,
+            "a genuine horizontal content scroll DOES change the container-relative origin")
+        expect(
+            ContributionHeatmap.shouldClearHoverOnOriginChange(old: r8RelativeBefore, new: r8HScrolledRelative),
+            "...and therefore still clears the hover, same as before this round's fix")
 
         if failures > 0 {
             print("\(failures) selftest check(s) failed")

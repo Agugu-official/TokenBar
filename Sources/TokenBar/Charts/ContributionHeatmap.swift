@@ -233,14 +233,59 @@ struct ContributionHeatmap: View {
 
     /// Round 2, item 1: the tooltip's anchor in the OUTER (non-scrolling)
     /// container's coordinate space, derived from the hovered cell's
-    /// position in the scrolling content plus that content's current
-    /// on-screen origin. This is what lets the tooltip escape the horizontal
-    /// ScrollView's clip: an anchor pinned to the scrolled content's own
-    /// local frame is exactly the bug being fixed.
-    static func tooltipAnchor(cellCenter: CGPoint, contentOrigin: CGPoint, containerOrigin: CGPoint) -> CGPoint {
-        CGPoint(
-            x: cellCenter.x + contentOrigin.x - containerOrigin.x,
-            y: cellCenter.y + contentOrigin.y - containerOrigin.y)
+    /// position in the scrolling content plus that content's current origin
+    /// RELATIVE TO THE CONTAINER. This is what lets the tooltip escape the
+    /// horizontal ScrollView's clip: an anchor pinned to the scrolled
+    /// content's own local frame is exactly the bug being fixed.
+    ///
+    /// Round 8 (perf): simplified from a 3-argument
+    /// `(cellCenter, contentOrigin, containerOrigin)` — `contentOrigin` is
+    /// now measured directly in a coordinate space anchored to the
+    /// container (see `body`'s `.coordinateSpace`), so it already IS
+    /// "relative to the container"; the separate subtraction this used to
+    /// do is now done for free by the coordinate space itself. The
+    /// 3-argument form required tracking `contentOrigin` in `.global` space,
+    /// which changes on every frame of an ANCESTOR's vertical scroll (not
+    /// just this view's own horizontal one) even though the subtracted
+    /// RESULT never does — see `body`'s `.coordinateSpace` comment for the
+    /// full story.
+    static func tooltipAnchor(cellCenter: CGPoint, contentOrigin: CGPoint) -> CGPoint {
+        CGPoint(x: cellCenter.x + contentOrigin.x, y: cellCenter.y + contentOrigin.y)
+    }
+
+    /// Round 8 (perf): everything derived from `grid`/`metric`/`year`/today
+    /// that's expensive to recompute — `Format.todayKey()` builds a
+    /// `DateFormatter` per call (Format.swift:32-38, not touched here: a
+    /// cached `static let` formatter would freeze `.timeZone = .current`,
+    /// conflicting with issue #127's timezone semantics, out of scope for
+    /// this PR), and `lastRenderableCol`/`monthLabelCols`/`maxValue` each
+    /// walk every cell in `grid.cells` (~371 for a 53-column year). These
+    /// used to be six-plus independent zero-argument computed properties,
+    /// each re-deriving `cutoff` (and therefore rebuilding a
+    /// `DateFormatter`) and re-walking the cell array on every access — and
+    /// `contentWidth` read `monthLabelCols` a SECOND time on top of the
+    /// canvas draw loop's own read. Computed exactly once per `body`
+    /// evaluation via `makeRenderState()` and threaded down as a plain
+    /// value instead. This is NOT a cache — nothing persists between
+    /// renders, no `ObservableObject`, no stored property; it's the same
+    /// work, just grouped into one pass instead of scattered redundant ones.
+    private struct RenderState {
+        let cutoff: String
+        let visibleCols: Int
+        let monthLabelCols: [(col: Int, label: String)]
+        let metricMax: Double
+        let contentWidth: CGFloat
+    }
+
+    private func makeRenderState() -> RenderState {
+        let cutoff = Self.cutoffDate(year: year, today: Format.todayKey())
+        let visibleCols = max(0, Self.lastRenderableCol(grid, cutoff: cutoff) + 1)
+        let monthLabelCols = Self.monthLabelCols(grid: grid, cutoff: cutoff)
+        let metricMax = Self.maxValue(grid, metric: metric, cutoff: cutoff)
+        let contentWidth = Self.contentWidth(visibleCols: visibleCols, monthLabelCols: monthLabelCols)
+        return RenderState(
+            cutoff: cutoff, visibleCols: visibleCols, monthLabelCols: monthLabelCols,
+            metricMax: metricMax, contentWidth: contentWidth)
     }
 
     /// The hovered cell, resolved fresh from the CURRENT `grid` on every
@@ -248,28 +293,36 @@ struct ContributionHeatmap: View {
     /// `hoverIndex`'s doc comment. Re-applies `isRenderable`/`hasData` too,
     /// for the same reason: cheap, and consistent with `cellAt` treating
     /// them as the one live judgment call for "does this cell count".
-    private var hoverCell: GridCell? {
+    private func hoverCell(_ state: RenderState) -> GridCell? {
         guard let hoverIndex, grid.cells.indices.contains(hoverIndex) else { return nil }
         let cell = grid.cells[hoverIndex]
-        guard Self.isRenderable(cell, cutoff: cutoff), Self.hasData(cell, metric: metric) else { return nil }
+        guard Self.isRenderable(cell, cutoff: state.cutoff), Self.hasData(cell, metric: metric) else { return nil }
         return cell
     }
 
-    private var metricMax: Double { Self.maxValue(grid, metric: metric, cutoff: cutoff) }
-    private var cutoff: String { Self.cutoffDate(year: year, today: Format.todayKey()) }
-
-    private var monthLabelCols: [(col: Int, label: String)] {
-        Self.monthLabelCols(grid: grid, cutoff: cutoff)
-    }
-
-    /// Columns after the last renderable one (round 3) carry no layout width
-    /// at all — never derived from `grid.cols`.
-    private var visibleCols: Int { max(0, Self.lastRenderableCol(grid, cutoff: cutoff) + 1) }
-    private var contentWidth: CGFloat {
-        Self.contentWidth(visibleCols: visibleCols, monthLabelCols: monthLabelCols)
-    }
     private var gridHeight: CGFloat { 7 * HeatmapLayout.step - HeatmapLayout.gap }
     private var contentHeight: CGFloat { HeatmapLayout.monthLabelHeight + gridHeight }
+
+    /// Round 8 (perf): named coordinate space anchored to the OUTER
+    /// (non-scrolling) container — the same view `outerGeo` describes.
+    /// `canvasBody`'s `.onGeometryChange` measures the scrolling content's
+    /// origin IN THIS SPACE instead of `.global`.
+    ///
+    /// Why: the dashboard's own vertical ScrollView is an ANCESTOR of this
+    /// entire view. When it scrolls, this heatmap's `.global` position
+    /// shifts every single frame — and so does the outer container's. Their
+    /// DIFFERENCE (all `tooltipAnchor` ever needed) does not change; only
+    /// the two individual `.global` values do. Tracking `.global` meant
+    /// paying full price — a `contentOrigin` write, a `hoverIndex = nil`
+    /// write (round 7's fix, correctly reacting to what looked like a
+    /// change), and the resulting `body` re-evaluation (which used to
+    /// rebuild ~8 `DateFormatter`s via `cutoff` and re-walk ~371 cells
+    /// several times over) — on every frame of a scroll that has nothing to
+    /// do with this view at all. Measuring in a space anchored to the
+    /// container reports the already-subtracted, invariant difference
+    /// directly, so a vertical ancestor scroll no longer changes the
+    /// tracked value, writes no state, and triggers no re-render.
+    private static let coordinateSpaceName = "heatmap-container"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -277,10 +330,11 @@ struct ContributionHeatmap: View {
             if grid.cells.isEmpty {
                 Color.clear
             } else {
+                let state = makeRenderState()
                 GeometryReader { outerGeo in
                     ScrollViewReader { proxy in
                         ScrollView(.horizontal, showsIndicators: false) {
-                            canvasBody
+                            canvasBody(state)
                                 .id(Self.contentID)
                         }
                         // Round 2, item 3(b): land on the most recent columns
@@ -295,7 +349,7 @@ struct ContributionHeatmap: View {
                         // already covers both a year change AND a day
                         // rollover while the popover happens to stay open.
                         .onAppear { proxy.scrollTo(Self.contentID, anchor: .trailing) }
-                        .onChange(of: cutoff) { _, _ in
+                        .onChange(of: state.cutoff) { _, _ in
                             proxy.scrollTo(Self.contentID, anchor: .trailing)
                         }
                     }
@@ -304,14 +358,20 @@ struct ContributionHeatmap: View {
                     // decorates, so this is what stops the tooltip being cut
                     // off at the heatmap's edge (round 2, item 1).
                     .overlay(alignment: .topLeading) {
-                        if let cell = hoverCell {
+                        if let cell = hoverCell(state) {
                             let anchor = Self.tooltipAnchor(
-                                cellCenter: cellCenter(cell),
-                                contentOrigin: contentOrigin,
-                                containerOrigin: outerGeo.frame(in: .global).origin)
+                                cellCenter: cellCenter(cell), contentOrigin: contentOrigin)
                             let measuredSize = tooltipSize == .zero
                                 ? CGSize(width: Self.tooltipWidth, height: 60)
                                 : tooltipSize
+                            // Still `.global` here (unrelated to the
+                            // scroll-perf fix above): `containerFrame` only
+                            // needs to match `popoverScrollViewport`'s space
+                            // for the viewport-clamp math, and reading it
+                            // fresh at render time — rather than storing it
+                            // via `@State`/`onGeometryChange` — costs nothing
+                            // extra; it's not what was driving the
+                            // re-render cascade.
                             let offset = PopoverTooltipPlacement.offset(
                                 anchor: anchor,
                                 tooltipSize: measuredSize,
@@ -322,23 +382,24 @@ struct ContributionHeatmap: View {
                         }
                     }
                 }
+                .coordinateSpace(name: Self.coordinateSpaceName)
                 .frame(height: contentHeight)
             }
             Spacer(minLength: 0)
         }
     }
 
-    private var canvasBody: some View {
+    private func canvasBody(_ state: RenderState) -> some View {
         ZStack(alignment: .topLeading) {
             Canvas { context, _ in
-                for (col, label) in monthLabelCols {
+                for (col, label) in state.monthLabelCols {
                     context.draw(
                         Text(label).font(.caption2).foregroundStyle(.secondary),
                         at: CGPoint(x: CGFloat(col) * HeatmapLayout.step, y: HeatmapLayout.monthLabelHeight / 2),
                         anchor: .leading)
                 }
-                for cell in grid.cells where Self.isRenderable(cell, cutoff: cutoff) {
-                    let level = HeatmapLayout.level(value: Self.value(cell, metric: metric), max: metricMax)
+                for cell in grid.cells where Self.isRenderable(cell, cutoff: state.cutoff) {
+                    let level = HeatmapLayout.level(value: Self.value(cell, metric: metric), max: state.metricMax)
                     let rect = CGRect(
                         x: CGFloat(cell.col) * HeatmapLayout.step,
                         y: HeatmapLayout.monthLabelHeight + CGFloat(cell.row) * HeatmapLayout.step,
@@ -349,27 +410,30 @@ struct ContributionHeatmap: View {
                 }
             }
         }
-        .frame(width: contentWidth, height: contentHeight)
+        .frame(width: state.contentWidth, height: contentHeight)
         .contentShape(Rectangle())
         .onContinuousHover { phase in
             switch phase {
             case let .active(point):
-                hoverIndex = cellAt(point)
+                hoverIndex = cellAt(point, visibleCols: state.visibleCols)
             case .ended:
                 hoverIndex = nil
             }
         }
-        // Round 7: clear the hover the instant the content's on-screen
-        // origin actually moves (a redirected mouse-wheel scroll or a
-        // trackpad pan) rather than leaving it pinned to a cell that just
-        // scrolled out from under a stationary cursor — that stale pin was
-        // the actual bug: the tooltip's anchor incorporates `contentOrigin`
-        // (see `tooltipAnchor`), so it kept following the content while
-        // scrolling, landing on screen at a position the cursor was never
-        // over, sometimes naming a date that had scrolled out of view
-        // entirely. `.active` hover events re-populate it the moment the
-        // pointer moves again.
-        .onGeometryChange(for: CGPoint.self) { $0.frame(in: .global).origin } action: { newOrigin in
+        // Round 7: clear the hover the instant the content's origin
+        // (relative to the container — round 8, see `body`'s
+        // `coordinateSpaceName`) actually moves (a redirected mouse-wheel
+        // scroll or a trackpad pan on THIS grid) rather than leaving it
+        // pinned to a cell that just scrolled out from under a stationary
+        // cursor — that stale pin was the actual bug: the tooltip's anchor
+        // incorporates `contentOrigin` (see `tooltipAnchor`), so it kept
+        // following the content while scrolling, landing on screen at a
+        // position the cursor was never over, sometimes naming a date that
+        // had scrolled out of view entirely. `.active` hover events
+        // re-populate it the moment the pointer moves again.
+        .onGeometryChange(
+            for: CGPoint.self, of: { $0.frame(in: .named(Self.coordinateSpaceName)).origin }
+        ) { newOrigin in
             if Self.shouldClearHoverOnOriginChange(old: contentOrigin, new: newOrigin) {
                 hoverIndex = nil
             }
@@ -393,7 +457,7 @@ struct ContributionHeatmap: View {
     /// `grid.cells` is laid out `col * 7 + row` by `buildGrid` (Grid.swift's
     /// nested col/row loop), so direct indexing avoids a lookup dictionary;
     /// the col/row re-check guards against that ordering ever changing.
-    private func cellAt(_ point: CGPoint) -> Int? {
+    private func cellAt(_ point: CGPoint, visibleCols: Int) -> Int? {
         guard point.x >= 0, point.y >= HeatmapLayout.monthLabelHeight else { return nil }
         let localY = point.y - HeatmapLayout.monthLabelHeight
         // Reject gap coordinates before resolving an index — see
