@@ -4391,7 +4391,9 @@ enum SelfTest {
         // The reduction is a clear (`nil`), which is the case where the two
         // come apart: an ordinary sample would still exclude the hidden client
         // and carry the reduction forward, but an unhide puts it back.
-        func dpSupersede(_ visibility: DiscordIPC.VisibilityChange) -> (early: Bool, spent: Double) {
+        func dpSupersede(
+            _ visibility: DiscordIPC.VisibilityChange
+        ) -> (early: Bool, spent: Double, held: Bool) {
             let pairs = [dpSocketPair(), dpSocketPair()]
             let idx = DPCounter()
             let client = DiscordIPCClient(connect: {
@@ -4425,6 +4427,11 @@ enum SelfTest {
             client.drainForTesting()
             let spent = Double(
                 DispatchTime.now().uptimeNanoseconds - armed.uptimeNanoseconds) / 1_000_000_000
+            // The state the whole fixture claims to be in. If anything reached
+            // the replacement socket before READY, neither publish was held at
+            // the ready guard and the measurement below is about something
+            // else entirely.
+            let beforeReady = dpFramesNow(pairs[1].1)
             _ = dpFrameBytes(1, dpReadyBody).withUnsafeBytes {
                 send(pairs[1].1, $0.baseAddress, $0.count, 0)
             }
@@ -4432,10 +4439,14 @@ enum SelfTest {
             client.stop()
             client.drainForTesting()
             close(pairs[1].1)
-            return (early, spent)
+            return (early, spent, beforeReady.isEmpty)
         }
         let dpAfterOrdinary = dpSupersede(DiscordIPC.VisibilityChange.none)
         let dpAfterUnhide = dpSupersede(.increasing)
+        expect(dpAfterOrdinary.held && dpAfterUnhide.held,
+            "A15d fixture: neither run wrote anything to the replacement socket before READY, so "
+                + "both publishes really were held at the ready guard — which is the only state "
+                + "in which an unspent grant can be superseded at all")
         expect(max(dpAfterOrdinary.spent, dpAfterUnhide.spent) < 1.5,
             "A15d fixture: both runs reached the measurement well inside the 3s floor "
                 + "(spent \(String(format: "%.3f", dpAfterOrdinary.spent))s and "
