@@ -4317,6 +4317,92 @@ enum SelfTest {
         dpEpochClient.drainForTesting()
         close(dpEpochPairs[1].1)
 
+        // A18 — the invariant with no exceptions: after a withdrawal the only
+        // thing this process sends Discord is the clear. A ping that arrived
+        // before the user opted out has its read handler queued ahead of
+        // `stop()`'s block, and answering it is a write to a third party after
+        // consent was withdrawn — small, but it is the difference between a
+        // rule and a rule with a footnote.
+        let (dpPingLocal, dpPingPeer) = dpSocketPair()
+        let dpPingClient = DiscordIPCClient(connect: { dpPingLocal })
+        dpPingClient.start()
+        dpPingClient.drainForTesting()
+        _ = dpRecv(dpPingPeer)
+        let dpPingGate = DispatchSemaphore(value: 0)
+        dpPingClient.holdQueueForTesting(until: dpPingGate)
+        dpFrameBytes(3, "{\"ping\":1}").withUnsafeBytes { raw in
+            _ = send(dpPingPeer, raw.baseAddress!, raw.count, 0)
+        }
+        // Let the read source fire and enqueue its handler while the queue is
+        // parked, so the handler really is ahead of the stop block below.
+        usleep(50_000)
+        dpPingClient.stop()
+        dpPingGate.signal()
+        dpPingClient.drainForTesting()
+        var dpPingTail = dpDrainToEOF(dpPingPeer)
+        var dpPongSeen = false
+        var dpPingClearSeen = false
+        while case .frame(let op, let body) = DiscordIPC.decode(from: &dpPingTail) {
+            if op == .pong { dpPongSeen = true }
+            if String(decoding: body, as: UTF8.self).contains("\"activity\":null") {
+                dpPingClearSeen = true
+            }
+        }
+        expect(!dpPongSeen,
+            "A18: a ping whose handler was queued before the switch went off is not answered "
+                + "(mutation: an ungated writeFrame(.pong,) replies to Discord after opt-out)")
+        expect(dpPingClearSeen,
+            "A18 control: the clear still goes out, so the assertion above is not passing on a "
+                + "fixture where nothing was written at all")
+        close(dpPingPeer)
+
+        // A17 — switching the feature on and then off before the queue has run
+        // the start. The publish behind it is epoch-gated and carries nothing
+        // out, but a socket and a handshake would still reach Discord after the
+        // user opted out, and the gate's contract — `makeDiscordClient`
+        // returning nil — is that this process may not connect at all.
+        let dpOptOutConnects = DPCounter()
+        let dpOptOutClient = DiscordIPCClient(connect: {
+            dpOptOutConnects.value += 1
+            var fds: [Int32] = [-1, -1]
+            _ = socketpair(AF_UNIX, SOCK_STREAM, 0, &fds)
+            close(fds[1])
+            return fds[0]
+        })
+        let dpOptOutGate = DispatchSemaphore(value: 0)
+        dpOptOutClient.holdQueueForTesting(until: dpOptOutGate)
+        dpOptOutClient.start()
+        dpOptOutClient.publish(DiscordPresence.Payload(
+            details: "51K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpOptOutClient.stop()
+        dpOptOutGate.signal()
+        dpOptOutClient.drainForTesting()
+        expect(dpOptOutConnects.value == 0,
+            "A17: a start queued before the switch went off never opens a socket "
+                + "(mutation: guarding openConnection on the queue-local `running` alone hands "
+                + "Discord a connection and a handshake after the user opted out)")
+        // Without this the assertion above passes on a client that cannot
+        // connect at all, which is every client whose factory never runs.
+        let dpOptInConnects = DPCounter()
+        let dpOptInClient = DiscordIPCClient(connect: {
+            dpOptInConnects.value += 1
+            var fds: [Int32] = [-1, -1]
+            _ = socketpair(AF_UNIX, SOCK_STREAM, 0, &fds)
+            close(fds[1])
+            return fds[0]
+        })
+        let dpOptInGate = DispatchSemaphore(value: 0)
+        dpOptInClient.holdQueueForTesting(until: dpOptInGate)
+        dpOptInClient.start()
+        dpOptInClient.publish(DiscordPresence.Payload(
+            details: "51K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpOptInGate.signal()
+        dpOptInClient.drainForTesting()
+        expect(dpOptInConnects.value == 1,
+            "A17 control: the same fixture without the opt-out does connect")
+        dpOptInClient.stop()
+        dpOptInClient.drainForTesting()
+
         // A15 — a privacy-reducing update is not throttled. Same client, same
         // floor, same 15s window; the flag is the only difference between the
         // control below and the assertion after it.

@@ -360,6 +360,14 @@ final class DiscordIPCClient: @unchecked Sendable {
         consentLock.withLock { $0.granted && $0.epoch == epoch }
     }
 
+    /// Whether the feature is on right now, with no ticket. Opening a socket is
+    /// not authorized by a past grant the way a payload is: what matters is
+    /// only whether the user wants this connected at the moment it would be
+    /// created, so an off-and-on-again reconnects rather than being refused.
+    private func consentGranted() -> Bool {
+        consentLock.withLock { $0.granted }
+    }
+
     private let connectFD: @Sendable () throws -> Int32
     private let queue = DispatchQueue(label: "com.nyanako.tokenbar.discord-ipc", qos: .utility)
 
@@ -576,7 +584,18 @@ final class DiscordIPCClient: @unchecked Sendable {
         // `!running` guard is what keeps a live connection from being replaced,
         // and two guards for one invariant means neither can be shown to fail
         // on its own.
-        guard running else { return }
+        //
+        // Consent is read here rather than at the two call sites, and read
+        // off-queue, because `running` only says what this queue believed when
+        // the work was enqueued. Switching the feature on and then off while
+        // the queue is busy leaves a start block — or a reconnect whose
+        // deadline fired first — queued ahead of `stop()`, and it would open a
+        // socket and hand Discord a handshake after the user opted out. Nothing
+        // of the user's usage goes out, because the publish behind it is
+        // epoch-gated, but the gate's own contract is that this process may not
+        // connect at all. Current state, not the enqueued state: an off and
+        // then on again is consent, and it should connect.
+        guard running, consentGranted() else { return }
         // Not a guard — a precondition made true. Reaching here with a live fd
         // would overwrite `fd` and `source` without cancelling the old source,
         // leaking the descriptor while libdispatch kept firing on it. That was
@@ -734,7 +753,16 @@ final class DiscordIPCClient: @unchecked Sendable {
                     // nothing local is added, nothing is retained, and the
                     // length is already bounded by `maxFrameLength`. Do not
                     // "improve" this into something that reads or logs `body`.
-                    writeFrame(.pong, body)
+                    //
+                    // Consent-gated like every other write, so the invariant
+                    // holds without exceptions: after a withdrawal, the only
+                    // thing this process sends Discord is the clear. A ping
+                    // that arrived before the user opted out can still have its
+                    // read handler queued ahead of `stop()`'s block, and the
+                    // socket is closed moments later regardless — answering it
+                    // buys nothing and costs the one sentence that makes the
+                    // rule checkable.
+                    if consentGranted() { writeFrame(.pong, body) }
                 case .close:
                     handleDisconnect()
                     return
