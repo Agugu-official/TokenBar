@@ -297,6 +297,9 @@ final class DiscordIPCClient: @unchecked Sendable {
     private var attempts = 0
     private var lastSent: DispatchTime?
     private var pending: DiscordPresence.Payload?
+    /// What Discord currently holds, so `flush` can tell a fresh sample from a
+    /// restore of bytes it already has.
+    private var lastSentPayload: DiscordPresence.Payload?
     private var hasPending = false
     private var inboundToken = ""
     private var writeErrno: Int32 = 0
@@ -322,13 +325,20 @@ final class DiscordIPCClient: @unchecked Sendable {
     /// clear cannot be sent through a closed socket.
     func stop() {
         queue.async {
-            guard self.running else { return }
+            let wasRunning = self.running
             self.running = false
             self.reconnectWork?.cancel()
             self.throttleWork?.cancel()
+            self.readyWork?.cancel()
+            self.readyWork = nil
+            // Cleared whether or not it was running. `giveUp()` deliberately
+            // leaves `pending` behind so a later `start()` can restore, and a
+            // `stop()` that bailed on `!running` would leave that payload
+            // alive to be republished after the user turned the feature off.
             self.hasPending = false
             self.pending = nil
-            if self.fd >= 0 {
+            self.lastSentPayload = nil
+            if wasRunning, self.fd >= 0 {
                 self.writeFrame(
                     .frame,
                     DiscordIPC.activityJSON(nil, pid: self.pid(), nonce: self.nonce()))
@@ -572,7 +582,16 @@ final class DiscordIPCClient: @unchecked Sendable {
 
     private func flush() {
         guard running, ready, hasPending, fd >= 0 else { return }
-        if let lastSent {
+        // The floor limits how often NEW information is published — sampling
+        // frequency is what turns a presence into a working-hours trace. Two
+        // cases carry none, and making them wait points the rule backwards:
+        //   - a clear removes information rather than adding it, and delaying
+        //     one keeps a stale presence public for up to 15s after the user
+        //     hid the clients that produced it;
+        //   - a restore after a reconnect re-sends bytes Discord already had,
+        //     so it discloses nothing a fresh sample would.
+        let carriesNewInformation = pending != nil && pending != lastSentPayload
+        if carriesNewInformation, let lastSent {
             let elapsed = Double(DispatchTime.now().uptimeNanoseconds - lastSent.uptimeNanoseconds)
                 / 1_000_000_000
             if elapsed < publishInterval {
@@ -597,6 +616,7 @@ final class DiscordIPCClient: @unchecked Sendable {
         if writeFrame(.frame, DiscordIPC.activityJSON(pending, pid: pid(), nonce: nonce())) {
             hasPending = false
             lastSent = .now()
+            lastSentPayload = pending
         }
     }
 

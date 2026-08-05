@@ -3795,6 +3795,16 @@ enum SelfTest {
             let count = recv(fd, &buf, buf.count, 0)
             return count > 0 ? Data(buf[0..<count]) : Data()
         }
+        /// Non-blocking, unlike `dpRecv`. The peer ends carry `SO_RCVTIMEO` of
+        /// one second, so a poll loop built on the blocking read spends up to a
+        /// second per turn and can outlast the very delay it is trying to
+        /// detect — which is exactly how a throttle assertion ends up unable to
+        /// fail.
+        func dpRecvNow(_ fd: Int32) -> Data {
+            var buf = [UInt8](repeating: 0, count: 4096)
+            let count = recv(fd, &buf, buf.count, MSG_DONTWAIT)
+            return count > 0 ? Data(buf[0..<count]) : Data()
+        }
         func dpDrainToEOF(_ fd: Int32) -> Data {
             var out = Data()
             while true {
@@ -4291,7 +4301,11 @@ enum SelfTest {
             return dpRepubPairs[i].0
         })
         dpRepubClient.reconnectDelay = 0.02
-        dpRepubClient.publishInterval = 0
+        // Deliberately high: a restore re-sends bytes Discord already has, so
+        // it must not queue behind the sampling floor. With the throttle
+        // applied to it, this frame would arrive 30s late and the wait below
+        // would time out.
+        dpRepubClient.publishInterval = 30
         dpRepubClient.start()
         _ = dpWaitUntil { dpRepubClient.isConnectedForTesting }
         _ = dpRepubReady.withUnsafeBytes { send(dpRepubPairs[0].1, $0.baseAddress, $0.count, 0) }
@@ -4369,6 +4383,106 @@ enum SelfTest {
             "a silent endpoint trips the READY deadline and is retried (mutation: removing "
                 + "armReadyDeadline leaves the client connected-but-never-ready forever, with "
                 + "every publish parked behind `ready`)")
+
+        // Codex round 2 — both findings are consequences of round 1's fixes.
+
+        // The kill switch clears the queued payload even when the retry budget
+        // already gave up. `giveUp()` keeps `pending` on purpose so a later
+        // start() can restore, and `stop()` used to bail on `!running`, which
+        // left that payload alive to be republished after the user turned the
+        // feature off.
+        let dpAbandonReady = dpFrameBytes(1, "{\"evt\":\"READY\"}")
+        let dpAbandonPairs = [dpSocketPair(), dpSocketPair()]
+        // The counter doubles as the fixture's mode: 0 hands out the first
+        // socket, anything below `dpAbandonRevive` fails so the budget is
+        // genuinely exhausted, and the test raises it later to let the second
+        // start() connect. An earlier version simply indexed the pair array,
+        // which handed out the second socket on the first retry and never
+        // reached the given-up state the assertion is about.
+        let dpAbandonIdx = DPCounter()
+        let dpAbandonRevive = DPCounter()
+        dpAbandonRevive.value = 1_000_000
+        let dpAbandonClient = DiscordIPCClient(connect: {
+            let i = dpAbandonIdx.value
+            dpAbandonIdx.value += 1
+            if i == 0 { return dpAbandonPairs[0].0 }
+            guard i >= dpAbandonRevive.value else { throw DiscordIPC.Failure.unavailable }
+            return dpAbandonPairs[1].0
+        })
+        dpAbandonClient.reconnectDelay = 0.01
+        dpAbandonClient.publishInterval = 0
+        dpAbandonClient.start()
+        _ = dpWaitUntil { dpAbandonClient.isConnectedForTesting }
+        _ = dpAbandonReady.withUnsafeBytes { send(dpAbandonPairs[0].1, $0.baseAddress, $0.count, 0) }
+        _ = dpWaitUntil { dpAbandonClient.inboundTokenForTesting == DiscordIPC.readyEvent }
+        dpAbandonClient.publish(dpWirePayload)
+        dpAbandonClient.drainForTesting()
+        _ = dpDrainToEOF(dpAbandonPairs[0].1)
+        // Drop the connection and let every remaining attempt fail, so the
+        // client reaches the given-up state with `pending` still set.
+        close(dpAbandonPairs[0].1)
+        _ = dpWaitUntil { dpAbandonIdx.value > DiscordIPCClient.maxReconnectAttempts + 1 }
+        // The user turns the feature off while it is in that state.
+        dpAbandonClient.stop()
+        dpAbandonClient.drainForTesting()
+        // Now start again on the second socket and see whether the abandoned
+        // payload comes back.
+        dpAbandonRevive.value = dpAbandonIdx.value
+        dpAbandonClient.start()
+        _ = dpWaitUntil { dpAbandonClient.isConnectedForTesting }
+        _ = dpAbandonReady.withUnsafeBytes { send(dpAbandonPairs[1].1, $0.baseAddress, $0.count, 0) }
+        dpAbandonClient.drainForTesting()
+        var dpAbandonRepublished = false
+        for _ in 0..<60 where !dpAbandonRepublished {
+            var buf = dpRecvNow(dpAbandonPairs[1].1)
+            while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
+                if op == .frame,
+                   String(decoding: body, as: UTF8.self).contains("12K tokens today") {
+                    dpAbandonRepublished = true
+                }
+            }
+            usleep(5_000)
+        }
+        dpAbandonClient.stop()
+        close(dpAbandonPairs[1].1)
+        expect(!dpAbandonRepublished,
+            "stop() clears the payload the retry give-up kept, so a later start() does not "
+                + "resurrect it (mutation: restoring stop()'s `guard running else { return }` "
+                + "republishes an activity the user already switched off)")
+
+        // A clear is not a new sample, so it must not queue behind the
+        // sampling floor: delaying one keeps a stale presence public for up to
+        // the whole interval after the user hid the clients that produced it.
+        let dpClearReady = dpFrameBytes(1, "{\"evt\":\"READY\"}")
+        let dpClearPair = dpSocketPair()
+        let dpClearClient = DiscordIPCClient(connect: { dpClearPair.0 })
+        dpClearClient.publishInterval = 30
+        dpClearClient.start()
+        _ = dpWaitUntil { dpClearClient.isConnectedForTesting }
+        _ = dpClearReady.withUnsafeBytes { send(dpClearPair.1, $0.baseAddress, $0.count, 0) }
+        _ = dpWaitUntil { dpClearClient.inboundTokenForTesting == DiscordIPC.readyEvent }
+        dpClearClient.publish(dpWirePayload)
+        dpClearClient.drainForTesting()
+        _ = dpDrainToEOF(dpClearPair.1)
+        dpClearClient.publish(nil)
+        dpClearClient.drainForTesting()
+        var dpClearSent = false
+        for _ in 0..<60 where !dpClearSent {
+            var buf = dpRecvNow(dpClearPair.1)
+            while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
+                if op == .frame,
+                   String(decoding: body, as: UTF8.self).contains("\"activity\":null") {
+                    dpClearSent = true
+                }
+            }
+            usleep(5_000)
+        }
+        dpClearClient.stop()
+        close(dpClearPair.1)
+        expect(dpClearSent,
+            "a clear goes out immediately rather than waiting for the publish floor (mutation: "
+                + "throttling it unconditionally leaves a stale presence public for the whole "
+                + "interval after the user hid everything)")
 
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
