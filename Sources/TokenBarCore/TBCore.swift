@@ -394,6 +394,99 @@ public enum TBCore {
         return out
     }
 
+    /// Hermetic decode checks for the `tb_quota_curve` payload. Every rejection
+    /// here corresponds to something the Rust producer cannot emit, so accepting
+    /// it would mean rendering an ABI drift as a plausible curve.
+    public static func quotaCurveContractChecks() -> [(String, Bool)] {
+        var out: [(String, Bool)] = []
+        func check(_ label: String, _ passed: Bool) { out.append((label, passed)) }
+
+        func point(
+            sampledAt: Int64 = 1_000, usedPercent: String = "10.0", resetAt: Int64 = 1_500,
+            durationSeconds: Int64 = 1_000, durationSource: String = "contract",
+            origin: String = "liveV3"
+        ) -> String {
+            #"{"sampledAt":\#(sampledAt),"usedPercent":\#(usedPercent),"resetAt":\#(resetAt),"#
+                + #""durationSeconds":\#(durationSeconds),"durationSource":"\#(durationSource)","#
+                + #""origin":"\#(origin)"}"#
+        }
+
+        func curve(
+            points: [String], oldest: Int64 = 1_000, newest: Int64 = 1_000, count: Int = 1
+        ) -> Data {
+            Data((#"{"points":[\#(points.joined(separator: ","))],"#
+                + #""coverage":{"oldestSampledAt":\#(oldest),"newestSampledAt":\#(newest),"#
+                + #""sampleCount":\#(count)},"activeResetAt":1500,"generation":7}"#).utf8)
+        }
+
+        func rejects(_ label: String, _ data: Data) {
+            do {
+                _ = try JSONDecoder().decode(QuotaCurve.self, from: data)
+                check(label, false)
+            } catch is DecodingError {
+                check(label, true)
+            } catch {
+                check(label, false)
+            }
+        }
+
+        do {
+            let decoded = try JSONDecoder().decode(
+                QuotaCurve.self,
+                from: curve(
+                    points: [point(), point(sampledAt: 1_200, usedPercent: "99.5")],
+                    newest: 1_200, count: 2))
+            check(
+                "a well-formed curve decodes",
+                decoded.points.count == 2 && decoded.generation == 7
+                    && decoded.points[0].durationSource == .contract
+                    && decoded.points[0].origin == .liveV3
+                    && decoded.points[1].usedPercent == 99.5)
+        } catch {
+            check("a well-formed curve decodes", false)
+        }
+
+        rejects(
+            "an unknown durationSource is rejected",
+            curve(points: [point(durationSource: "guessed")]))
+        rejects("an unknown origin is rejected", curve(points: [point(origin: "liveV4")]))
+        rejects("an empty curve is rejected", curve(points: [], count: 0))
+        rejects(
+            "a sampleCount disagreeing with points is rejected",
+            curve(points: [point()], count: 2))
+        rejects(
+            "coverage that does not match its points is rejected",
+            curve(points: [point()], oldest: 900))
+        rejects(
+            "points out of sampledAt order are rejected",
+            curve(
+                points: [point(sampledAt: 1_200), point()],
+                oldest: 1_200, newest: 1_000, count: 2))
+        // `sampledAt == resetAt` keeps the zero-length cycle self-consistent, so
+        // the containment guard passes and only the duration guard can reject
+        // this. With any other `sampledAt` the containment check fires first and
+        // this case proves nothing about the guard it names.
+        rejects(
+            "a non-positive durationSeconds is rejected",
+            curve(
+                points: [point(sampledAt: 1_500, durationSeconds: 0)],
+                oldest: 1_500, newest: 1_500))
+        rejects(
+            "a usedPercent outside (0, 100] is rejected",
+            curve(points: [point(usedPercent: "0.0")]))
+        // Rejected by JSON number parsing rather than by the `isFinite` guard,
+        // which no JSON input can reach. Kept because it pins that a payload
+        // cannot smuggle an unrepresentable number past this boundary.
+        rejects(
+            "a usedPercent outside Double range is rejected",
+            curve(points: [point(usedPercent: "1e400")]))
+        rejects(
+            "a sampledAt outside its own cycle is rejected",
+            curve(points: [point(sampledAt: 400)], oldest: 400, newest: 400))
+
+        return out
+    }
+
     /// Hermetic decoder and formatting checks for the source-aware filter
     /// parity payload. This keeps the Swift side independent of private local
     /// session data while pinning the lower-camel wire statuses and bounded

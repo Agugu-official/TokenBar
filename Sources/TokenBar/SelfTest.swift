@@ -6423,6 +6423,9 @@ enum SelfTest {
             expect(false, "unbound quota curve fails closed (got \(error))")
         }
 
+        for (label, passed) in TBCore.quotaCurveContractChecks() {
+            expect(passed, "quota curve: \(label)")
+        }
         for (label, passed) in TBCore.filterParityContractChecks() {
             expect(passed, "filter parity: \(label)")
         }
