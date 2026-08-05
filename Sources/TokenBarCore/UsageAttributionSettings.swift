@@ -92,6 +92,19 @@ public enum UsageAttributionSettings {
     /// reading, so that is what gets suggested — never their subscription.
     public static let subscriptionBoundProviders: Set<String> = ["anthropic", "google"]
 
+    /// The client whose *own* subscription a provider is. This is what
+    /// `subscriptionBoundProviders` actually restricts: driving Anthropic's or
+    /// Google's own subscription from a third-party agent is what their terms
+    /// forbid. A different subscription that resells the same models — Copilot
+    /// serving Anthropic — is that subscription's own matter and is not covered
+    /// by the restriction, so it stays assignable.
+    public static let providerOwnClient: [String: String] = [
+        "anthropic": "claude",
+        "openai": "codex",
+        "google": "antigravity",
+        "xai": "grok",
+    ]
+
     public static let subscriptionProviderMap: [String: Set<String>] = [
         "claude": ["anthropic"],
         "codex": ["openai"],
@@ -138,16 +151,18 @@ public enum UsageAttributionSettings {
     /// here — `xai` was, which is how a Grok subscription reached only through
     /// opencode could not be named as a target.
     public static func subscriptionClient(forLabel label: String) -> String? {
-        let renamed = ClientRegistry.clientId(forSubscriptionLabel: label)
-        if renamed != label.lowercased() { return renamed }
+        if let alias = ClientRegistry.subscriptionLabelAliases[label] { return alias }
         let provider = label.lowercased()
         let owners = subscriptionProviderMap
             .filter { $0.value.contains(provider) }
             .keys
             .sorted()
-        // Ambiguity is not resolvable from a label alone, so it yields nothing
-        // rather than a guess.
-        guard owners.count == 1 else { return owners.isEmpty ? renamed : nil }
+        // A label with no owner names no subscription, whatever else it may
+        // name. `Kiro` lowercases to a registered client, so returning it would
+        // put "Counts toward Kiro" in the picker for a client that owns no
+        // subscription provider and that the policy below can never resolve.
+        // Ambiguity yields nothing for the same reason: a guess is not an answer.
+        guard owners.count == 1 else { return nil }
         return owners[0]
     }
 
@@ -248,21 +263,32 @@ public enum UsageAttributionSettings {
         // declaring the CLI's own subscription usage to be API spend.
         let sourceOwner = ClientRegistry.quotaOwner(sourceClient)
         if owners.contains(sourceOwner) { return .assigned(sourceOwner) }
-        // Reached from somewhere else, and this provider's subscription cannot
-        // legitimately be reached that way. Assume the user is complying and
-        // that the tokens were bought, not drawn from the subscription.
-        if subscriptionBoundProviders.contains(provider) { return .excluded }
-        // Otherwise a cross-client assignment is only suggestible when the
-        // provider permits it AND exactly one subscription covers it: two that
-        // both accept this provider cannot be told apart from here.
-        //
-        // The allowlist check is unreachable while every provider a
-        // subscription can serve carries a policy — which the self-test pins.
-        // It stays as the runtime backstop if that ever stops holding.
-        guard crossAgentSubscriptionProviders.contains(provider),
-              owners.count == 1
-        else { return nil }
-        return .assigned(owners[0])
+
+        // Which of the covering subscriptions could legitimately have been
+        // reached from somewhere else. For a bound provider that is every owner
+        // except the provider's own client, whose terms forbid exactly that
+        // route; a reseller like Copilot is unaffected. For a permitted
+        // provider every owner qualifies.
+        let bound = subscriptionBoundProviders.contains(provider)
+        let eligible: [String]
+        if bound {
+            eligible = owners.filter { $0 != providerOwnClient[provider] }
+        } else if crossAgentSubscriptionProviders.contains(provider) {
+            eligible = owners
+        } else {
+            // Neither policy covers this provider. The self-test pins that this
+            // cannot happen for a provider a subscription serves; it remains the
+            // runtime backstop if that stops holding.
+            eligible = []
+        }
+
+        // Nothing eligible and the provider is bound: assume the user is
+        // complying, so the tokens were bought rather than drawn from the
+        // subscription. Nothing eligible otherwise says nothing at all.
+        guard let only = eligible.count == 1 ? eligible[0] : nil else {
+            return eligible.isEmpty && bound ? .excluded : nil
+        }
+        return .assigned(only)
     }
 
     public static func suggestionRecords(

@@ -240,10 +240,15 @@ public enum UsageAttribution {
         }
     }
 
+    /// Only the assignment *target* has to be a registered client: it names a
+    /// quota bucket the app must be able to render. The source is whatever the
+    /// report observed, and the report legitimately emits ids that are not in
+    /// the registry — `cc-mirror/*` is produced during Claude-lane parsing
+    /// rather than being a scanner lane. Constraining the source too rendered
+    /// those rows on the page and then refused every classification made on
+    /// them, which is a dead end rather than a safeguard.
     private static func isPersistable(_ record: Record) -> Bool {
-        // Keep both ends of an assignment in the registry: an arbitrary target
-        // would create a billing bucket the quota layer cannot render.
-        guard ClientRegistry.allIds.contains(record.client) else { return false }
+        guard !record.client.isEmpty else { return false }
         switch record.state {
         case let .assigned(target):
             return ClientRegistry.allIds.contains(target)
@@ -255,8 +260,7 @@ public enum UsageAttribution {
     }
 
     private static func isValidSource(_ record: Record) -> Bool {
-        ClientRegistry.allIds.contains(record.client)
-            && (record.state == .unassigned || isPersistable(record))
+        !record.client.isEmpty && (record.state == .unassigned || isPersistable(record))
     }
 
     private static func sourceKey(_ record: Record) -> SourceKey {

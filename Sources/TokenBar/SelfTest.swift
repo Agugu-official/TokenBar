@@ -944,6 +944,45 @@ enum SelfTest {
         expect(
             UsageAttributionSettings.subscriptionClient(forLabel: "Xai") == "grok",
             "an opencode xai subscription names the grok client")
+        // `Kiro` lowercases to a registered client that owns no subscription
+        // provider, so returning it would put an unresolvable target in the
+        // picker. A label that names no subscription must name nothing.
+        expect(
+            UsageAttributionSettings.subscriptionClient(forLabel: "Kiro") == nil
+                && ClientRegistry.allIds.contains("kiro"),
+            "an opencode label naming no subscription is not a target")
+
+        // The restriction is on the provider's *own* subscription, not on the
+        // provider. Copilot resells Anthropic models under its own subscription,
+        // so opencode reaching anthropic through Copilot is Copilot's usage —
+        // calling it API spend removes the only target those rows can have.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "opencode", provider: "anthropic",
+                subscriptionClients: ["copilot"]) == .assigned("copilot"),
+            "an anthropic row reachable only through copilot targets copilot")
+        // Anthropic's own subscription stays unassignable from elsewhere.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "opencode", provider: "anthropic",
+                subscriptionClients: ["claude"]) == .excluded,
+            "anthropic's own subscription is still not a cross-agent target")
+        // Both subscribed: the compliant explanation is the reseller, and it is
+        // the only eligible one, so it is what gets proposed.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "opencode", provider: "anthropic",
+                subscriptionClients: ["claude", "copilot"]) == .assigned("copilot"),
+            "the reseller is the eligible target when the bound owner is not")
+        // Every provider a subscription serves must name the client whose own
+        // subscription it is, or the eligibility filter above silently keeps a
+        // bound owner assignable.
+        let unownedProviders = Set(
+            UsageAttributionSettings.subscriptionProviderMap.values.flatMap { $0 }
+        ).filter { UsageAttributionSettings.providerOwnClient[$0] == nil }
+        expect(
+            unownedProviders.isEmpty,
+            "every subscription provider names its own client (missing: \(unownedProviders.sorted()))")
 
         // A stored proposal names a target, and until the quota payload says
         // which subscriptions exist there is nothing to check it against.
@@ -1196,7 +1235,20 @@ enum SelfTest {
         }
 
         let malformedAttributionRaw = "not-json"
-        let invalidAttributionRecordRaw = "[{\"client\":\"not-registered\",\"model\":null,\"provider\":\"openai\",\"state\":\"excluded\"}]"
+        // An unregistered *target* is what cannot be persisted: it names a quota
+        // bucket the app cannot render. The source is whatever the report
+        // observed, and the report emits ids outside the registry
+        // (`cc-mirror/*`), so constraining it would render those rows and then
+        // refuse every classification made on them.
+        let invalidAttributionRecordRaw = "[{\"client\":\"claude\",\"model\":null,\"provider\":\"openai\",\"state\":\"assigned\",\"target\":\"not-registered\"}]"
+        let dynamicSourceRecord = UsageAttribution.Record(
+            client: "cc-mirror/sonnet", provider: "anthropic", state: .excluded)
+        let dynamicSourceRaw = UsageAttribution.confirmedRaw(
+            updating: nil, record: dynamicSourceRecord)
+        expect(
+            UsageAttribution.parseRaw(dynamicSourceRaw).records == [dynamicSourceRecord]
+                && !ClientRegistry.allIds.contains("cc-mirror/sonnet"),
+            "a dynamic report client can carry a declaration")
         expect(
             UsageAttribution.parseRaw(malformedAttributionRaw).records.isEmpty
                 && !UsageAttribution.parseRaw(malformedAttributionRaw).isWritable

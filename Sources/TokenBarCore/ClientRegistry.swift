@@ -121,14 +121,21 @@ public enum ClientRegistry {
     /// reports which providers it is authed against as display labels rather
     /// than ids (`agent_usage.rs` builds them in `subscription_label`), so a
     /// consumer that needs the id must map them back here.
+    /// The four labels `subscription_label` renames outright, and the client
+    /// each names. Everything else it emits is a capitalized provider key, which
+    /// cannot be resolved from this table alone. Kept as data rather than a
+    /// `switch` so a caller can tell a rename from a passthrough — three of the
+    /// four lowercase to their own id, so comparing the result against
+    /// `label.lowercased()` cannot make that distinction.
+    public static let subscriptionLabelAliases: [String: String] = [
+        "Codex": "codex",
+        "Claude": "claude",
+        "Copilot": "copilot",
+        "Gemini": "antigravity",
+    ]
+
     public static func clientId(forSubscriptionLabel label: String) -> String {
-        switch label {
-        case "Codex": return "codex"
-        case "Claude": return "claude"
-        case "Copilot": return "copilot"
-        case "Gemini": return "antigravity"
-        default: return label.lowercased()
-        }
+        subscriptionLabelAliases[label] ?? label.lowercased()
     }
 
     /// Parses the comma-separated id form persisted by the tab order/hidden
