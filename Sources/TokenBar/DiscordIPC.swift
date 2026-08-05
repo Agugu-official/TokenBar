@@ -220,13 +220,37 @@ enum DiscordIPC {
 
     /// Only `discord-ipc-0`. Probing `discord-ipc-1..9` would widen the set of
     /// endpoints a same-user process can squat on for no user-visible gain.
+    /// A socket that is close-on-exec from birth.
+    ///
+    /// Darwin has no `SOCK_CLOEXEC`, so this is the closest to atomic the
+    /// platform allows — and it matters that the `fcntl` is here rather than
+    /// after `connect()` returns. The app's Rust core spawns helpers
+    /// (`/usr/bin/security`, a login shell, `claude --version`), and every
+    /// instruction between `socket()` and the flag being set is a window in
+    /// which one of those execs inherits the descriptor and keeps Discord
+    /// seeing this connection long after the app has torn it down.
+    static func makeSocket() -> Int32 {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return -1 }
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
+        return fd
+    }
+
+    /// No deadline machinery here on purpose. A blocking `connect()` to a Unix
+    /// socket cannot park the caller on Darwin: measured against a listener
+    /// with `listen(fd, 1)` that never accepts, the first connect succeeds and
+    /// every subsequent one returns `ECONNREFUSED` in under a millisecond.
+    /// There is no round trip to wait on. Non-blocking connect plus `poll`
+    /// would be machinery for a state this platform does not produce, and its
+    /// only possible assertion — that the call returns quickly — passes
+    /// whether or not the machinery is there.
     static func connectToDiscord() throws -> Int32 {
         guard let dir = ProcessInfo.processInfo.environment["TMPDIR"] else {
             throw Failure.unavailable
         }
         let path = (dir as NSString).appendingPathComponent("discord-ipc-0")
         guard var addr = unixSocketAddress(path: path) else { throw Failure.unavailable }
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        let fd = makeSocket()
         guard fd >= 0 else { throw Failure.unavailable }
         let result = withUnsafePointer(to: &addr) { pointer in
             pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -472,7 +496,15 @@ final class DiscordIPCClient: @unchecked Sendable {
         ready = false
 
         let readSource = DispatchSource.makeReadSource(fileDescriptor: newFD, queue: queue)
-        readSource.setEventHandler { [weak self] in self?.readAvailable() }
+        // Bound to `newFD`, not just to `self`. A source that has already
+        // queued a readability event can run after this client has torn down
+        // and reconnected, and an unbound handler would then read from the
+        // *new* socket before its own source has fired — blocking the serial
+        // queue on a descriptor with nothing to give.
+        readSource.setEventHandler { [weak self] in
+            guard let self, self.fd == newFD else { return }
+            self.readAvailable()
+        }
         // Closing in the cancel handler, not beside `cancel()`: the source may
         // still be about to run its event handler on this fd.
         readSource.setCancelHandler { close(newFD) }

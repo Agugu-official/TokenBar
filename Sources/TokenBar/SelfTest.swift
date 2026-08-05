@@ -4589,6 +4589,20 @@ enum SelfTest {
             "an identical payload on the same connection is not sent twice (mutation: dropping "
                 + "the deliveredOnThisConnection check resends it immediately, past the floor)")
 
+        // Codex round 4 — the connect path itself, which every earlier round
+        // had treated as a detail that either works or throws.
+
+        // Close-on-exec from birth. The previous round set the flag after
+        // `connectFD()` returned, which left `socket()` and `connect()` inside
+        // the window an exec can inherit through — and `connect()` is exactly
+        // the call the next assertion shows can take a while.
+        let dpBornFD = DiscordIPC.makeSocket()
+        let dpBornFlags = fcntl(dpBornFD, F_GETFD)
+        close(dpBornFD)
+        expect(dpBornFD >= 0 && (dpBornFlags & FD_CLOEXEC) != 0,
+            "the socket is close-on-exec before connect() runs (mutation: moving the fcntl back "
+                + "out of makeSocket leaves the whole connect window inheritable)")
+
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
             exit(1)
