@@ -4356,6 +4356,58 @@ enum SelfTest {
                 + "fixture where nothing was written at all")
         close(dpPingPeer)
 
+        // A19 — a clear that lost its socket is retried on the next connection.
+        // `nil` is a payload here: it is the clear. One `nil` standing for both
+        // "this connection has been given nothing" and "this connection has
+        // been given the clear" makes a fresh connection claim it already holds
+        // it, so the clear is dropped instead of retried — and what stays up is
+        // the activity of the clients the user had just hidden.
+        let dpReclearPairs = [dpSocketPair(), dpSocketPair()]
+        let dpReclearIdx = DPCounter()
+        let dpReclearClient = DiscordIPCClient(connect: {
+            let i = min(dpReclearIdx.value, dpReclearPairs.count - 1)
+            dpReclearIdx.value += 1
+            return dpReclearPairs[i].0
+        })
+        dpReclearClient.reconnectDelay = 0.02
+        dpReclearClient.start()
+        _ = dpWaitUntil { dpReclearClient.isConnectedForTesting }
+        _ = dpRecv(dpReclearPairs[0].1)
+        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+            _ = send(dpReclearPairs[0].1, raw.baseAddress!, raw.count, 0)
+        }
+        expect(dpWaitUntil { dpReclearClient.inboundTokenForTesting == "ready" },
+            "the clear-retry fixture reached READY")
+        dpReclearClient.publish(DiscordPresence.Payload(
+            details: "60K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpReclearClient.drainForTesting()
+        expect(dpFramesNow(dpReclearPairs[0].1).contains("60K tokens today"),
+            "A19 control: the fixture published a real payload first, so there is something on "
+                + "the profile for the clear to have to remove")
+        // Park the queue, put the clear behind it, then break the socket. The
+        // clear's write is attempted against a peer that is already gone, so it
+        // fails and tears the connection down with the clear still pending.
+        let dpReclearGate = DispatchSemaphore(value: 0)
+        dpReclearClient.holdQueueForTesting(until: dpReclearGate)
+        dpReclearClient.publish(nil, visibility: .reducing)
+        close(dpReclearPairs[0].1)
+        dpReclearGate.signal()
+        dpReclearClient.drainForTesting()
+        expect(dpWaitUntil { dpReclearIdx.value >= 2 },
+            "A19 control: the fixture reconnected, so there is a second connection for the clear "
+                + "to be retried on")
+        _ = dpRecv(dpReclearPairs[1].1)
+        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+            _ = send(dpReclearPairs[1].1, raw.baseAddress!, raw.count, 0)
+        }
+        expect(dpFrameArrives(dpReclearPairs[1].1, "\"activity\":null", within: 2),
+            "A19: a clear that lost its socket is retried on the next connection "
+                + "(mutation: one `nil` for both \"nothing delivered yet\" and \"the clear was "
+                + "delivered\" makes the fresh connection treat it as already held and drop it)")
+        dpReclearClient.stop()
+        dpReclearClient.drainForTesting()
+        close(dpReclearPairs[1].1)
+
         // A17 — switching the feature on and then off before the queue has run
         // the start. The publish behind it is epoch-gated and carries nothing
         // out, but a socket and a handshake would still reach Discord after the

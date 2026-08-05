@@ -393,10 +393,21 @@ final class DiscordIPCClient: @unchecked Sendable {
     /// connections. `flush` compares against it to tell a fresh sample from a
     /// restore of bytes Discord already had.
     private var lastSampledPayload: DiscordPresence.Payload?
-    /// What the CURRENT connection has been given. Cleared by `teardown`, which
+    /// What the CURRENT connection has been given. Reset by `teardown`, which
     /// is what makes a restore after a reconnect distinguishable from a
     /// duplicate publish on a connection that already holds it.
-    private var deliveredOnThisConnection: DiscordPresence.Payload?
+    ///
+    /// Its own type, not `Payload?`, because `nil` is a payload here: it is the
+    /// clear. Using one `nil` for both "nothing delivered yet" and "a clear was
+    /// delivered" made a fresh connection claim it already held the clear, so a
+    /// clear that lost its socket mid-send was dropped on the reconnect instead
+    /// of retried — leaving the activity of clients the user had just hidden on
+    /// their profile until some later publish happened to remove it.
+    private enum Delivered: Equatable {
+        case nothing
+        case payload(DiscordPresence.Payload?)
+    }
+    private var deliveredOnThisConnection: Delivered = .nothing
     private var hasPending = false
     /// One-shot permission for the *next* write to skip the publish floor,
     /// granted by a `privacyReducing` publish and spent on that write. Separate
@@ -461,7 +472,7 @@ final class DiscordIPCClient: @unchecked Sendable {
             self.pending = nil
             self.floorBypass = false
             self.lastSampledPayload = nil
-            self.deliveredOnThisConnection = nil
+            self.deliveredOnThisConnection = .nothing
             if wasRunning, self.fd >= 0 {
                 self.writeFrame(
                     .frame,
@@ -707,7 +718,7 @@ final class DiscordIPCClient: @unchecked Sendable {
     private func teardown() {
         ready = false
         // A replacement connection holds nothing yet.
-        deliveredOnThisConnection = nil
+        deliveredOnThisConnection = .nothing
         readyWork?.cancel()
         readyWork = nil
         buffer.removeAll()
@@ -813,7 +824,7 @@ final class DiscordIPCClient: @unchecked Sendable {
         // Already on the wire for this connection: not a restore, not a new
         // sample, just a repeat. Sending it would spam Discord and reset the
         // floor's clock, pushing the next real payload behind a no-op.
-        if pending == deliveredOnThisConnection {
+        if deliveredOnThisConnection == .payload(pending) {
             hasPending = false
             // Consumed here too: the reduction is already on the wire, so the
             // permission has nothing left to do, and leaving it armed would
@@ -857,7 +868,7 @@ final class DiscordIPCClient: @unchecked Sendable {
             // would let the next ordinary sample skip the floor as well.
             floorBypass = false
             lastSampledPayload = pending
-            deliveredOnThisConnection = pending
+            deliveredOnThisConnection = .payload(pending)
         }
     }
 
