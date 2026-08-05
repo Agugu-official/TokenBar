@@ -6407,6 +6407,22 @@ enum SelfTest {
         for (label, passed) in TBCore.envelopeContractChecks() {
             expect(passed, "envelope: \(label)")
         }
+        // The one live FFI call this suite makes, and deliberately so: it is the
+        // only way to prove `tb_quota_curve` links, matches its header signature,
+        // and returns the documented error rather than a curve for a series this
+        // process never bound. It reaches no credential, network, or history I/O
+        // — the binding lookup fails first — so it stays hermetic. The smoke gate
+        // asserts the same contract against the shipping binary.
+        do {
+            let curve = try TBCore.quotaCurve(
+                clientId: "__selftest__", windowKey: "__selftest__", generation: 0)
+            expect(false, "unbound quota curve fails closed (got \(curve == nil ? "null" : "a curve"))")
+        } catch TBCoreError.bridge {
+            expect(true, "unbound quota curve fails closed")
+        } catch {
+            expect(false, "unbound quota curve fails closed (got \(error))")
+        }
+
         for (label, passed) in TBCore.filterParityContractChecks() {
             expect(passed, "filter parity: \(label)")
         }

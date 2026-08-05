@@ -100,10 +100,36 @@ enum Smoke {
                 + (subs.isEmpty ? "" : " | opencode subs: \(subs.joined(separator: ", "))")
         }
 
+        // tb_quota_curve has no unconditional success path to smoke: it serves a
+        // curve only for a series this process bound and that already has stored
+        // history, neither of which a CI machine has. What the gate can still
+        // prove is that the symbol links, the header signature matches, and the
+        // optional-envelope decoder round-trips a real Rust response — so it
+        // asks for a series that cannot be bound and requires the documented
+        // fail-closed error. A bridge error is the pass here; anything else,
+        // including a returned curve, is a boundary that has drifted.
+        summarize("quotaCurve") {
+            do {
+                let curve = try TBCore.quotaCurve(
+                    clientId: "__smoke__", windowKey: "__smoke__", generation: 0)
+                throw SmokeExpectationFailure(
+                    "unbound series returned \(curve == nil ? "null" : "a curve") instead of failing closed")
+            } catch let TBCoreError.bridge(message) {
+                return "unbound series fails closed — \(message)"
+            }
+        }
+
         if failures > 0 {
             print("\(failures) entry point(s) failed")
             return 1
         }
         return 0
     }
+}
+
+/// A smoke check that reached an outcome the contract forbids. Distinct from a
+/// thrown FFI error so the printed line cannot be mistaken for one.
+private struct SmokeExpectationFailure: Error, CustomStringConvertible {
+    let description: String
+    init(_ description: String) { self.description = description }
 }

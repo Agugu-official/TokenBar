@@ -33,6 +33,24 @@ struct TBEnvelope<T: Decodable>: Decodable {
     let ok: Bool
     let data: T?
     let err: String?
+    /// Whether `data` was present at all, which `data: T?` alone cannot report:
+    /// synthesized Optional decoding maps both an absent key and an explicit
+    /// null to nil. Only `decodeOptionalEnvelope` needs the distinction — every
+    /// other entry point rejects a nil payload outright — but the envelope is
+    /// where the fact lives.
+    let hasDataKey: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case ok, data, err
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.ok = try container.decode(Bool.self, forKey: .ok)
+        self.data = try container.decodeIfPresent(T.self, forKey: .data)
+        self.err = try container.decodeIfPresent(String.self, forKey: .err)
+        self.hasDataKey = container.contains(.data)
+    }
 }
 
 /// Thin Swift facade over the tb_core_ffi staticlib. All calls are blocking;
@@ -84,6 +102,17 @@ public enum TBCore {
         let envelope = try JSONDecoder().decode(TBEnvelope<T>.self, from: data)
         guard envelope.ok else {
             throw TBCoreError.bridge(envelope.err ?? "unknown")
+        }
+        // `data: T?` cannot tell an explicit null from an absent key — synthesized
+        // Optional decoding accepts both — so the key's presence is checked
+        // separately. Rust always emits it (`envelope()` builds
+        // `{"ok":true,"data":<value>}` and `Value::Null` serializes as `"data":null`),
+        // which makes a missing key ABI drift rather than "no history". Without
+        // this, that drift would read as an empty curve and disappear.
+        guard envelope.hasDataKey else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: [],
+                debugDescription: "successful FFI envelope is missing the data key"))
         }
         return envelope.data
     }
@@ -320,6 +349,46 @@ public enum TBCore {
             check("malformed body throws", false)
         } catch {
             check("malformed body throws", true)
+        }
+
+        // The optional path exists so `tb_quota_curve` can answer "bound, but no
+        // history yet". Only an explicit null is that answer.
+        do {
+            let value: TokensPerMin? = try decodeOptionalEnvelope(
+                Data(#"{"ok":true,"data":null}"#.utf8))
+            check("optional ok:true with null data is absent history", value == nil)
+        } catch {
+            check("optional ok:true with null data is absent history", false)
+        }
+
+        do {
+            let value: TokensPerMin? = try decodeOptionalEnvelope(
+                Data(#"{"ok":true,"data":{"tokensPerMin":7.5}}"#.utf8))
+            check("optional ok:true returns data", value?.tokensPerMin == 7.5)
+        } catch {
+            check("optional ok:true returns data", false)
+        }
+
+        // An omitted key is ABI drift, not an answer. Synthesized Optional
+        // decoding maps it to nil exactly like an explicit null, so without the
+        // presence check this would read as an empty curve.
+        do {
+            let _: TokensPerMin? = try decodeOptionalEnvelope(Data(#"{"ok":true}"#.utf8))
+            check("optional ok:true without the data key is decode failure", false)
+        } catch is DecodingError {
+            check("optional ok:true without the data key is decode failure", true)
+        } catch {
+            check("optional ok:true without the data key is decode failure", false)
+        }
+
+        do {
+            let _: TokensPerMin? = try decodeOptionalEnvelope(
+                Data(#"{"ok":false,"err":"boom"}"#.utf8))
+            check("optional ok:false throws bridge(boom)", false)
+        } catch let TBCoreError.bridge(msg) {
+            check("optional ok:false throws bridge(boom)", msg == "boom")
+        } catch {
+            check("optional ok:false throws bridge(boom)", false)
         }
 
         return out
