@@ -340,10 +340,18 @@ final class DiscordIPCClient: @unchecked Sendable {
     /// and is refused if it no longer matches, so no later `start()` can
     /// re-authorize work from before the withdrawal.
     ///
-    /// Only `stop()` bumps. `start()` restores `granted` and deliberately
-    /// leaves the epoch alone: a publish made while the retry budget was spent
-    /// is the intent a later `start()` is supposed to restore, and bumping here
-    /// would refuse exactly that payload.
+    /// Two things bump, and they are the two ways outstanding work stops being
+    /// valid: `stop()`, because the user withdrew consent, and a `.reducing`
+    /// publish, because everything computed before it was computed against a
+    /// larger visible set. Both retire what came before; only the first also
+    /// clears `granted`.
+    ///
+    /// `start()` restores `granted` and deliberately leaves the epoch alone: a
+    /// publish made while the retry budget was spent is the intent a later
+    /// `start()` is supposed to restore, and bumping there would refuse exactly
+    /// that payload. That reasoning does not extend to the `.reducing` bump —
+    /// which happens in `publish` itself and takes the bumped value as its own
+    /// ticket, so it retires its predecessors without retiring itself.
     private struct Consent {
         var granted: Bool
         var epoch: UInt64
