@@ -4302,16 +4302,33 @@ enum SelfTest {
         //
         // A shortened interval, so "held" and "sent" are distinguishable
         // without the assertion taking fifteen seconds to make its point.
-        func dpFrameArrives(_ fd: Int32, _ needle: String, within turns: Int) -> Bool {
-            for _ in 0..<turns {
-                var buf = dpRecvNow(fd)
-                while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
-                    if op == .frame, String(decoding: body, as: UTF8.self).contains(needle) {
-                        return true
-                    }
-                }
-                usleep(5_000)
+        //
+        // Everything between arming the clock and the measurement is read
+        // synchronously, and the windows below are bounded by wall clock rather
+        // than by a turn count. Both because the first version of this was a
+        // timed assertion with an unbounded wait inside it: it polled for the
+        // two intermediate frames with a 400ms ceiling each, which is nothing
+        // on this machine and was over a second on CI — by which point the 1s
+        // floor being measured had already expired and the assertion was
+        // measuring nothing. It passed locally and failed in CI. A poll loop
+        // is unnecessary for a frame the CLIENT writes: `drainForTesting()` is
+        // `queue.sync`, so the bytes are in the socket buffer when it returns.
+        // Poll only for what the peer has to wait on — here, the deferred
+        // flush that fires when the floor expires.
+        func dpFramesNow(_ fd: Int32) -> String {
+            var buf = dpRecvNow(fd)
+            var out = ""
+            while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
+                if op == .frame { out += String(decoding: body, as: UTF8.self) }
             }
+            return out
+        }
+        func dpFrameArrives(_ fd: Int32, _ needle: String, within seconds: Double) -> Bool {
+            let deadline = DispatchTime.now() + seconds
+            repeat {
+                if dpFramesNow(fd).contains(needle) { return true }
+                usleep(5_000)
+            } while DispatchTime.now() < deadline
             return false
         }
         let (dpOneShotLocal, dpOneShotPeer) = dpSocketPair()
@@ -4328,24 +4345,35 @@ enum SelfTest {
         dpOneShotClient.publish(DiscordPresence.Payload(
             details: "20K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
         dpOneShotClient.drainForTesting()
-        expect(dpFrameArrives(dpOneShotPeer, "20K tokens today", within: 80),
+        let dpOneShotArmed = DispatchTime.now()
+        expect(dpFramesNow(dpOneShotPeer).contains("20K tokens today"),
             "the one-shot fixture published a real sample and armed the clock")
         // Every client hidden: the payload is nil and what goes out is a clear.
         dpOneShotClient.publish(nil, privacyReducing: true)
         dpOneShotClient.drainForTesting()
-        expect(dpFrameArrives(dpOneShotPeer, "\"activity\":null", within: 80),
+        expect(dpFramesNow(dpOneShotPeer).contains("\"activity\":null"),
             "A15c control: the clear itself is not throttled (without this the assertion below "
                 + "would pass on a client that simply never sent the clear)")
         let dpUnhidden = DiscordPresence.Payload(
             details: "21K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar")
         dpOneShotClient.publish(dpUnhidden)
         dpOneShotClient.drainForTesting()
+        // The fixture has to still be inside the floor for the next assertion to
+        // mean anything. Asserted rather than assumed: a machine slow enough to
+        // spend the whole interval on the two reads above would otherwise turn
+        // the measurement into a vacuous pass instead of a visible failure.
+        let dpOneShotSpent = Double(
+            DispatchTime.now().uptimeNanoseconds - dpOneShotArmed.uptimeNanoseconds) / 1_000_000_000
+        expect(dpOneShotSpent < 0.5,
+            "A15c fixture: the clear and the unhide were published well inside the 1s floor "
+                + "(spent \(String(format: "%.3f", dpOneShotSpent))s — over the interval, the "
+                + "assertion below would pass on a payload that was simply due)")
         // 300ms: well inside the 1s floor, well over the time a due frame needs.
-        expect(!dpFrameArrives(dpOneShotPeer, "21K tokens today", within: 60),
+        expect(!dpFrameArrives(dpOneShotPeer, "21K tokens today", within: 0.3),
             "A15c: the unhide that follows a clear still waits out the floor "
                 + "(mutation: granting the bypass by clearing `lastSent` leaves the clock cleared "
                 + "through the clear, and this payload goes out sub-interval)")
-        expect(dpFrameArrives(dpOneShotPeer, "21K tokens today", within: 300),
+        expect(dpFrameArrives(dpOneShotPeer, "21K tokens today", within: 3),
             "A15c control: it does arrive once the floor expires, so the assertion above is not "
                 + "passing on a payload that was dropped outright")
         dpOneShotClient.stop()
