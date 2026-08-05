@@ -265,8 +265,23 @@ final class DiscordIPCClient: @unchecked Sendable {
     /// accepts and immediately drops.
     static let maxReconnectAttempts = 5
 
+    /// A peer that accepts the socket and then says nothing must not hold the
+    /// client connected-but-never-ready forever. `SO_RCVTIMEO` cannot cover
+    /// this: the read source only calls `readAvailable()` when bytes arrive,
+    /// so a silent endpoint never triggers a `recv()` and the socket timeout
+    /// is never observed. Discord answers a handshake in milliseconds.
+    static let readyTimeoutSeconds: TimeInterval = 10
+
     /// Instance-level so the selftest can shrink it. Production never assigns.
     var reconnectDelay: TimeInterval = DiscordIPCClient.reconnectDelaySeconds
+    /// Instance-level so the selftest can assert on the bytes that reach the
+    /// socket rather than on an internal flag. **Production never assigns**,
+    /// and this is not a knob: the static it defaults to is a privacy floor,
+    /// because publish frequency is what turns a presence into a working-hours
+    /// trace. Lowering it in shipping code is a privacy regression, not tuning.
+    var publishInterval: TimeInterval = DiscordIPCClient.minPublishInterval
+    /// Instance-level for the same reason.
+    var readyTimeout: TimeInterval = DiscordIPCClient.readyTimeoutSeconds
 
     private let connectFD: @Sendable () throws -> Int32
     private let queue = DispatchQueue(label: "com.nyanako.tokenbar.discord-ipc", qos: .utility)
@@ -278,6 +293,7 @@ final class DiscordIPCClient: @unchecked Sendable {
     private var source: DispatchSourceRead?
     private var reconnectWork: DispatchWorkItem?
     private var throttleWork: DispatchWorkItem?
+    private var readyWork: DispatchWorkItem?
     private var attempts = 0
     private var lastSent: DispatchTime?
     private var pending: DiscordPresence.Payload?
@@ -426,18 +442,58 @@ final class DiscordIPCClient: @unchecked Sendable {
         readSource.resume()
 
         writeFrame(.handshake, DiscordIPC.handshakeJSON())
+        armReadyDeadline()
+    }
+
+    /// An endpoint that accepts the socket and then stays silent would
+    /// otherwise hold the client connected-but-never-ready forever, with every
+    /// publish parked behind `ready`. `SO_RCVTIMEO` does not cover it: the read
+    /// source only fires when bytes arrive, so no `recv()` ever runs on an idle
+    /// socket and its timeout is never observed.
+    private func armReadyDeadline() {
+        readyWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.running, !self.ready, self.fd >= 0 else { return }
+            self.handleDisconnect()
+        }
+        readyWork = work
+        queue.asyncAfter(deadline: .now() + readyTimeout, execute: work)
     }
 
     private func scheduleReconnect() {
-        guard attempts < Self.maxReconnectAttempts else { return }
+        guard attempts < Self.maxReconnectAttempts else {
+            // The budget is spent, so go back to the stopped state instead of
+            // sitting in `running` with nothing scheduled. Leaving it true
+            // made a later `start()` hit the idempotence guard and silently do
+            // nothing, which turned a bounded retry into a permanent dead
+            // client for anything started once at launch. `pending` is kept:
+            // a later `start()` should republish what was last intended.
+            giveUp()
+            return
+        }
         attempts += 1
         let work = DispatchWorkItem { [weak self] in self?.openConnection() }
         reconnectWork = work
         queue.asyncAfter(deadline: .now() + reconnectDelay, execute: work)
     }
 
+    /// Not `stop()`: there is no socket left to send a clear on, and this is
+    /// not the user asking to stop. It only returns the client to a state a
+    /// later `start()` can act on.
+    private func giveUp() {
+        running = false
+        attempts = 0
+        throttleWork?.cancel()
+        throttleWork = nil
+        reconnectWork?.cancel()
+        reconnectWork = nil
+        teardown()
+    }
+
     private func teardown() {
         ready = false
+        readyWork?.cancel()
+        readyWork = nil
         buffer.removeAll()
         fd = -1
         if let source {
@@ -497,6 +553,14 @@ final class DiscordIPCClient: @unchecked Sendable {
                         // which is the unbounded background loop
                         // `maxReconnectAttempts` exists to prevent.
                         attempts = 0
+                        readyWork?.cancel()
+                        readyWork = nil
+                        // A replacement connection starts with no activity on
+                        // Discord's side, so whatever we last intended has to
+                        // go out again. Without this the presence stays
+                        // missing after a Discord restart until some later
+                        // producer update — up to the tray's 5-minute poll.
+                        if pending != nil { hasPending = true }
                         flush()
                     }
                 }
@@ -511,7 +575,7 @@ final class DiscordIPCClient: @unchecked Sendable {
         if let lastSent {
             let elapsed = Double(DispatchTime.now().uptimeNanoseconds - lastSent.uptimeNanoseconds)
                 / 1_000_000_000
-            if elapsed < Self.minPublishInterval {
+            if elapsed < publishInterval {
                 // Deferred, not dropped: hiding a client has to reach the
                 // published presence in the same turn, and dropping the update
                 // would leave it visible until the next poll.
@@ -519,17 +583,26 @@ final class DiscordIPCClient: @unchecked Sendable {
                 throttleWork?.cancel()
                 throttleWork = work
                 queue.asyncAfter(
-                    deadline: .now() + (Self.minPublishInterval - elapsed), execute: work)
+                    deadline: .now() + (publishInterval - elapsed), execute: work)
                 return
             }
         }
-        hasPending = false
-        lastSent = .now()
-        writeFrame(.frame, DiscordIPC.activityJSON(pending, pid: pid(), nonce: nonce()))
+        // Cleared only once the bytes are actually out. A write that fails
+        // tears the connection down, and marking the payload sent beforehand
+        // meant the newest activity was lost with the socket: the next READY
+        // saw `hasPending == false` and published nothing, leaving the
+        // presence stale until some later producer update. The throttle clock
+        // only advances on success for the same reason — a failed send must
+        // not consume the 15s window.
+        if writeFrame(.frame, DiscordIPC.activityJSON(pending, pid: pid(), nonce: nonce())) {
+            hasPending = false
+            lastSent = .now()
+        }
     }
 
-    private func writeFrame(_ op: DiscordIPC.Opcode, _ body: Data) {
-        guard fd >= 0 else { return }
+    @discardableResult
+    private func writeFrame(_ op: DiscordIPC.Opcode, _ body: Data) -> Bool {
+        guard fd >= 0 else { return false }
         let frame = DiscordIPC.encode(op, body)
         let socketFD = fd
         var failed = false
@@ -548,6 +621,7 @@ final class DiscordIPCClient: @unchecked Sendable {
             }
         }
         if failed { handleDisconnect() }
+        return !failed
     }
 
     private func pid() -> Int32 { ProcessInfo.processInfo.processIdentifier }

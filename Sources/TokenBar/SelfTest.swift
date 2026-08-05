@@ -4273,6 +4273,103 @@ enum SelfTest {
                 + "`attempts` when the socket opens instead of when READY arrives reconnects "
                 + "forever against a peer that accepts and immediately drops)")
 
+        // Codex round 1 on the transport PR — four findings that were all the
+        // same root: the lifecycle treated "connected, published, dropped" as
+        // the end of the story instead of something that has to come back.
+
+        // Reconnecting republishes the last activity. Discord restarting is
+        // ordinary; before this the payload was marked sent, `hasPending` went
+        // false, and the READY on the replacement connection flushed nothing —
+        // the presence stayed missing until the producer happened to publish
+        // again, up to the tray's 5-minute poll away.
+        let dpRepubReady = dpFrameBytes(1, "{\"evt\":\"READY\"}")
+        let dpRepubPairs = [dpSocketPair(), dpSocketPair()]
+        let dpRepubIdx = DPCounter()
+        let dpRepubClient = DiscordIPCClient(connect: {
+            let i = min(dpRepubIdx.value, dpRepubPairs.count - 1)
+            dpRepubIdx.value += 1
+            return dpRepubPairs[i].0
+        })
+        dpRepubClient.reconnectDelay = 0.02
+        dpRepubClient.publishInterval = 0
+        dpRepubClient.start()
+        _ = dpWaitUntil { dpRepubClient.isConnectedForTesting }
+        _ = dpRepubReady.withUnsafeBytes { send(dpRepubPairs[0].1, $0.baseAddress, $0.count, 0) }
+        _ = dpWaitUntil { dpRepubClient.inboundTokenForTesting == DiscordIPC.readyEvent }
+        dpRepubClient.publish(dpWirePayload)
+        dpRepubClient.drainForTesting()
+        _ = dpDrainToEOF(dpRepubPairs[0].1)
+        // Break the first connection; the client retries onto the second pair.
+        close(dpRepubPairs[0].1)
+        _ = dpWaitUntil { dpRepubIdx.value >= 2 }
+        _ = dpRepubReady.withUnsafeBytes { send(dpRepubPairs[1].1, $0.baseAddress, $0.count, 0) }
+        dpRepubClient.drainForTesting()
+        // No second `publish()` anywhere: whatever arrives here was resent by
+        // the client itself.
+        var dpRepubSeen = false
+        _ = dpWaitUntil {
+            var buf = dpRecv(dpRepubPairs[1].1)
+            while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
+                if op == .frame,
+                   String(decoding: body, as: UTF8.self).contains("12K tokens today") {
+                    dpRepubSeen = true
+                }
+            }
+            return dpRepubSeen
+        }
+        expect(dpRepubSeen,
+            "a replacement connection republishes the last activity without a new publish() "
+                + "(mutation: dropping the READY branch's `hasPending = true` leaves the presence "
+                + "missing until the next producer update)")
+        dpRepubClient.stop()
+        close(dpRepubPairs[1].1)
+
+        // Exhausting the retry budget returns the client to a state a later
+        // start() can act on. Leaving `running` true made start() hit the
+        // idempotence guard and do nothing, so a client started once at launch
+        // could never recover once Discord had been away long enough.
+        let dpDeadCount = DPCounter()
+        let dpDeadClient = DiscordIPCClient(connect: {
+            dpDeadCount.value += 1
+            throw DiscordIPC.Failure.unavailable
+        })
+        dpDeadClient.reconnectDelay = 0.01
+        dpDeadClient.start()
+        let dpDeadCap = DiscordIPCClient.maxReconnectAttempts + 1
+        _ = dpWaitUntil { dpDeadCount.value >= dpDeadCap }
+        for _ in 0..<40 where dpDeadCount.value <= dpDeadCap { usleep(5_000) }
+        let dpDeadBefore = dpDeadCount.value
+        dpDeadClient.start()
+        let dpDeadRestarted = dpWaitUntil { dpDeadCount.value > dpDeadBefore }
+        dpDeadClient.stop()
+        expect(dpDeadBefore == dpDeadCap && dpDeadRestarted,
+            "a client whose retry budget ran out can be started again (mutation: returning from "
+                + "scheduleReconnect without giveUp() leaves `running` true and the second start() "
+                + "silently does nothing)")
+
+        // A peer that accepts and then says nothing must not hold the client
+        // forever. SO_RCVTIMEO cannot see this — the read source never fires on
+        // an idle socket, so no recv() runs and its timeout is never observed.
+        let dpMuteReadyCount = DPCounter()
+        let dpMuteReadyClient = DiscordIPCClient(connect: {
+            var fds: [Int32] = [-1, -1]
+            _ = socketpair(AF_UNIX, SOCK_STREAM, 0, &fds)
+            var on: Int32 = 1
+            setsockopt(fds[1], SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+            dpMuteReadyCount.value += 1
+            // The peer end is deliberately never closed and never written to.
+            return fds[0]
+        })
+        dpMuteReadyClient.reconnectDelay = 0.01
+        dpMuteReadyClient.readyTimeout = 0.05
+        dpMuteReadyClient.start()
+        let dpMuteReadyRetried = dpWaitUntil { dpMuteReadyCount.value >= 2 }
+        dpMuteReadyClient.stop()
+        expect(dpMuteReadyRetried,
+            "a silent endpoint trips the READY deadline and is retried (mutation: removing "
+                + "armReadyDeadline leaves the client connected-but-never-ready forever, with "
+                + "every publish parked behind `ready`)")
+
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
             exit(1)
