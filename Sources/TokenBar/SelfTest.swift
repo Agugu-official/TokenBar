@@ -258,14 +258,28 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
     func tokensPerMin() async throws -> Double { DemoData.tokensPerMin }
 }
 
+/// Wait for a condition another task has to establish.
+///
+/// Bounded by a deadline rather than by an iteration count. A fixed number of
+/// yields measures scheduler turns, not elapsed time, so how long it actually
+/// waits depends on how much other work shares the cooperative pool — which
+/// made the tests that use it fail intermittently as unrelated cases were added
+/// ahead of them. The failure was always a false negative: the condition would
+/// have held, the wait just gave up first.
+///
+/// The deadline is generous because the cost of raising it is only paid when a
+/// test is genuinely about to fail, while the cost of setting it too low is a
+/// flake that looks like a product defect.
 private func waitUntil(
+    timeout: Duration = .seconds(5),
     _ predicate: @escaping @Sendable () async -> Bool
 ) async -> Bool {
-    for _ in 0..<1_000 {
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
         if await predicate() { return true }
         await Task.yield()
     }
-    return false
+    return await predicate()
 }
 
 private enum DashboardModelTestError: Error {
