@@ -4186,6 +4186,112 @@ enum SelfTest {
                 + "(mutation: dropping the running guard in openConnection reconnects here)")
         close(dpStopPeer)
 
+        // A14 — consent withdrawn while a publish is already queued. `stop()`
+        // flips its flag off-queue precisely because the block it enqueues runs
+        // *after* that publish, and by then the frame has already gone out; the
+        // clear that follows cannot take back what Discord clients and bots may
+        // have observed in between.
+        let (dpConsentLocal, dpConsentPeer) = dpSocketPair()
+        let dpConsentClient = DiscordIPCClient(connect: { dpConsentLocal })
+        dpConsentClient.start()
+        dpConsentClient.drainForTesting()
+        _ = dpRecv(dpConsentPeer)
+        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+            _ = send(dpConsentPeer, raw.baseAddress!, raw.count, 0)
+        }
+        expect(dpWaitUntil { dpConsentClient.inboundTokenForTesting == "ready" },
+            "the consent fixture reached READY (without this nothing would flush and the "
+                + "assertion below could not fail)")
+        let dpConsentGate = DispatchSemaphore(value: 0)
+        dpConsentClient.holdQueueForTesting(until: dpConsentGate)
+        // Nothing has been published on this connection yet, so this one is not
+        // throttled — it would go out the moment the queue moves.
+        dpConsentClient.publish(DiscordPresence.Payload(
+            details: "77K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpConsentClient.stop()
+        dpConsentGate.signal()
+        dpConsentClient.drainForTesting()
+        let dpConsentTail = String(decoding: dpDrainToEOF(dpConsentPeer), as: UTF8.self)
+        expect(!dpConsentTail.contains("77K tokens today"),
+            "A14: a publish already queued when the switch went off never reaches the socket "
+                + "(mutation: flipping consent inside stop()'s queued block publishes it anyway)")
+        expect(dpConsentTail.contains("\"activity\":null"),
+            "A14 control: the clear still goes out, so the assertion above is not passing on a "
+                + "socket that was simply dead")
+        close(dpConsentPeer)
+
+        // A14b — the same withdrawal, but reproducing the ONE ordering
+        // production actually produces. `applyDiscordPresence` is always
+        // `start()` then `publish()` back to back, so every window in which a
+        // publish sits queued has a start block queued ahead of it. A14 above
+        // does not cover that: it publishes without a paired start, and a
+        // client whose `start()` re-arms consent from inside its queued block
+        // passes A14 while re-arming after the user's `stop()` and letting the
+        // publish behind it flush anyway. One line's difference from A14, and
+        // it is the line that decides whether the fix holds where it is used.
+        let (dpPairedLocal, dpPairedPeer) = dpSocketPair()
+        let dpPairedClient = DiscordIPCClient(connect: { dpPairedLocal })
+        dpPairedClient.start()
+        dpPairedClient.drainForTesting()
+        _ = dpRecv(dpPairedPeer)
+        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+            _ = send(dpPairedPeer, raw.baseAddress!, raw.count, 0)
+        }
+        expect(dpWaitUntil { dpPairedClient.inboundTokenForTesting == "ready" },
+            "the paired-call fixture reached READY")
+        let dpPairedGate = DispatchSemaphore(value: 0)
+        dpPairedClient.holdQueueForTesting(until: dpPairedGate)
+        dpPairedClient.start()
+        dpPairedClient.publish(DiscordPresence.Payload(
+            details: "99K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpPairedClient.stop()
+        dpPairedGate.signal()
+        dpPairedClient.drainForTesting()
+        let dpPairedTail = String(decoding: dpDrainToEOF(dpPairedPeer), as: UTF8.self)
+        expect(!dpPairedTail.contains("99K tokens today"),
+            "A14b: a publish queued behind its paired start() never reaches the socket either "
+                + "(mutation: re-arming consent inside start()'s queued block publishes it, and "
+                + "A14 stays green throughout)")
+        expect(dpPairedTail.contains("\"activity\":null"),
+            "A14b control: the clear still goes out")
+        close(dpPairedPeer)
+
+        // A15 — a privacy-reducing update is not throttled. Same client, same
+        // floor, same 15s window; the flag is the only difference between the
+        // control below and the assertion after it.
+        let (dpBypassLocal, dpBypassPeer) = dpSocketPair()
+        let dpBypassClient = DiscordIPCClient(connect: { dpBypassLocal })
+        dpBypassClient.start()
+        dpBypassClient.drainForTesting()
+        _ = dpRecv(dpBypassPeer)
+        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+            _ = send(dpBypassPeer, raw.baseAddress!, raw.count, 0)
+        }
+        expect(dpWaitUntil { dpBypassClient.inboundTokenForTesting == "ready" },
+            "the throttle fixture reached READY")
+        dpBypassClient.publish(DiscordPresence.Payload(
+            details: "10K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+        dpBypassClient.drainForTesting()
+        expect(String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self).contains("10K tokens today"),
+            "the throttle fixture published its first payload and armed the floor")
+        dpBypassClient.publish(DiscordPresence.Payload(
+            details: "11K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+        dpBypassClient.drainForTesting()
+        expect(!String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self).contains("11K"),
+            "A15 control: an ordinary update inside the floor waits (without this the assertion "
+                + "below would pass on a client that never throttles anything)")
+        dpBypassClient.publish(
+            DiscordPresence.Payload(
+                details: "12K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"),
+            privacyReducing: true)
+        dpBypassClient.drainForTesting()
+        expect(String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self).contains("12K tokens today"),
+            "A15: hiding a client republishes immediately instead of waiting out the 15s floor "
+                + "(mutation: dropping the lastSent reset throttles it like any other sample)")
+        dpBypassClient.stop()
+        dpBypassClient.drainForTesting()
+        close(dpBypassPeer)
+
         // A2 — the two behaviours the previous review found unguarded.
 
         // Superseding a live connection must close the old socket, not leak
@@ -4691,8 +4797,10 @@ enum SelfTest {
         expect(AppDelegate.makeDiscordClient(arguments: ["TokenBar"], enabled: false) == nil,
             "A1 control: the switch off builds nothing")
         let dpTestFlags = DiscordPresence.testArguments
-        expect(dpTestFlags.sorted() == ["--demo", "--selftest", "--smoke"],
-            "A1: the refused arguments are demo, smoke and selftest")
+        expect(dpTestFlags.sorted() == ["--demo", "--icon-gallery", "--selftest", "--smoke"],
+            "A1: the refused arguments are demo, smoke, selftest and the icon gallery — the last "
+                + "because it is a debug window nobody runs the app to use, yet it enters the "
+                + "normal lifecycle and refreshes the live graph")
         expect(
             dpTestFlags.allSatisfy {
                 AppDelegate.makeDiscordClient(
@@ -4725,6 +4833,25 @@ enum SelfTest {
         expect(
             dpTestFlags.allSatisfy { !DiscordPresence.mayConnect(arguments: [$0], enabled: true) },
             "A1: the gate function itself puts the flags above the preference")
+
+        // A15b — which visibility change earns the floor bypass. Getting this
+        // backwards is not a missed optimisation: it makes an *unhide* jump the
+        // floor while a hide waits it out, the exact inversion of the point.
+        expect(AppDelegate.hidesMore(previousHiddenRaw: "", hiddenRaw: "amp"),
+            "A15b: hiding a client is a privacy reduction")
+        expect(!AppDelegate.hidesMore(previousHiddenRaw: "amp", hiddenRaw: ""),
+            "A15b: unhiding is not (mutation: inverting the test bypasses the floor for the one "
+                + "update that adds information back)")
+        expect(AppDelegate.hidesMore(previousHiddenRaw: "amp", hiddenRaw: "amp,zed"),
+            "A15b: hiding a second client counts")
+        expect(!AppDelegate.hidesMore(previousHiddenRaw: "amp,zed", hiddenRaw: "amp"),
+            "A15b: unhiding one of two does not")
+        expect(AppDelegate.hidesMore(previousHiddenRaw: "amp", hiddenRaw: "zed"),
+            "A15b: hiding one while unhiding another still counts — one write of one string "
+                + "carries both (mutation: a strict-subset or size test calls this no reduction "
+                + "and leaves zed named on the profile for the rest of the floor)")
+        expect(!AppDelegate.hidesMore(previousHiddenRaw: "amp", hiddenRaw: "amp"),
+            "A15b: no change is not a reduction")
 
         // A2 — the switch. Read through the authoritative accessor against an
         // isolated suite, never the process's own defaults.

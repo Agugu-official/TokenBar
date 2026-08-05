@@ -73,7 +73,14 @@ enum DiscordPresence {
     /// preferences say. `--demo` serves fixture numbers
     /// (`UsageDataSources.make`), and `--smoke`/`--selftest` never reach the
     /// app lifecycle at all (`main.swift`).
-    static let testArguments = ["--demo", "--smoke", "--selftest"]
+    /// `--icon-gallery` is in here and `--settings`/`--open-popover` are not,
+    /// and the line is drawn at "is this a mode a user runs". The gallery is a
+    /// debug window for checking brand art; nobody launches it to use the app,
+    /// yet it enters the normal lifecycle and refreshes the live graph, so a
+    /// maintainer with the switch already on would publish their real usage
+    /// from an asset check. The other two open real UI on real data — that is
+    /// a real run of the app and it should behave like one.
+    static let testArguments = ["--demo", "--smoke", "--selftest", "--icon-gallery"]
 
     /// The single authoritative read of the opt-in switch. Everything that
     /// decides whether to connect goes through here; the SwiftUI toggle only

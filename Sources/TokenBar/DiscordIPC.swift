@@ -1,3 +1,4 @@
+import os
 import Darwin
 import Foundation
 
@@ -307,6 +308,13 @@ final class DiscordIPCClient: @unchecked Sendable {
     /// Instance-level for the same reason.
     var readyTimeout: TimeInterval = DiscordIPCClient.readyTimeoutSeconds
 
+    /// Set off-queue, read off-queue. `stop()` flips `running` from inside a
+    /// queued block, so any publish enqueued a moment earlier runs first and
+    /// still sees `running == true` — one more activity going out after the
+    /// user withdrew consent, which the clear that follows cannot take back.
+    /// This is the one piece of state that cannot live on the queue.
+    private let consentLock = OSAllocatedUnfairLock(initialState: true)
+
     private let connectFD: @Sendable () throws -> Int32
     private let queue = DispatchQueue(label: "com.nyanako.tokenbar.discord-ipc", qos: .utility)
 
@@ -348,6 +356,16 @@ final class DiscordIPCClient: @unchecked Sendable {
 
     /// Idempotent: a second call while running is a no-op, not a second socket.
     func start() {
+        // Outside the block for the same reason `stop()`'s flip is, and the two
+        // only compose if BOTH are: the sole production call site is
+        // `applyDiscordPresence`'s back-to-back `start()` + `publish()`, so
+        // every window in which a publish sits queued has a start block queued
+        // ahead of it. Re-arming from inside that block re-arms *after* a
+        // `stop()` that has already run off-queue, and the publish behind it
+        // then flushes with consent nominally restored — which is exactly the
+        // frame `stop()` exists to prevent. Off-queue, the two flags are
+        // written in call order, so the later `stop()` wins.
+        consentLock.withLock { $0 = true }
         queue.async {
             // Idempotent while live, but an abandoned client must be able to
             // try again — that is the whole point of not calling `stop()` when
@@ -364,6 +382,9 @@ final class DiscordIPCClient: @unchecked Sendable {
     /// activity on Discord's side, then close the socket. Order matters — the
     /// clear cannot be sent through a closed socket.
     func stop() {
+        // Before the block, not inside it: everything already queued has to see
+        // this, and queued work is exactly what the block cannot reach back to.
+        consentLock.withLock { $0 = false }
         queue.async {
             let wasRunning = self.running
             self.running = false
@@ -391,7 +412,13 @@ final class DiscordIPCClient: @unchecked Sendable {
 
     /// `nil` clears the activity. Coalescing, not queueing: only the newest
     /// payload is ever published.
-    func publish(_ payload: DiscordPresence.Payload?) {
+    /// `privacyReducing` marks an update the user's own action made *less*
+    /// revealing — hiding a client. Those must not queue behind the sampling
+    /// floor: the Settings copy promises hidden clients are never included,
+    /// and a payload that still names one for another fifteen seconds makes
+    /// that promise false for as long as it waits. Unhiding is not this: it
+    /// adds information back and is throttled like any other sample.
+    func publish(_ payload: DiscordPresence.Payload?, privacyReducing: Bool = false) {
         queue.async {
             // Recorded even while abandoned: the producer's latest intent is
             // what a later `start()` should restore, not whatever happened to
@@ -399,6 +426,7 @@ final class DiscordIPCClient: @unchecked Sendable {
             guard self.running else { return }
             self.pending = payload
             self.hasPending = true
+            if privacyReducing { self.lastSent = nil }
             self.flush()
         }
     }
@@ -432,6 +460,16 @@ final class DiscordIPCClient: @unchecked Sendable {
             breakPeer()
             writeFrame(.frame, DiscordIPC.activityJSON(nil, pid: pid(), nonce: nonce()))
         }
+    }
+
+    /// Holds the serial queue until `gate` is signalled, so a test can enqueue
+    /// work that is *guaranteed* to still be waiting when it calls `stop()`
+    /// from another thread. That ordering is the whole subject of the consent
+    /// assertion — without a way to pin it, "a publish already queued when the
+    /// switch went off never reaches the socket" is a race that passes whether
+    /// or not the flag is flipped off-queue.
+    func holdQueueForTesting(until gate: DispatchSemaphore) {
+        queue.async { gate.wait() }
     }
 
     /// Drives the reconnect path directly so the "stopped means stopped"
@@ -643,6 +681,7 @@ final class DiscordIPCClient: @unchecked Sendable {
     // MARK: - Writing
 
     private func flush() {
+        guard consentLock.withLock({ $0 }) else { return }
         guard running, ready, hasPending, fd >= 0 else { return }
         // The floor limits how often NEW information is published — sampling
         // frequency is what turns a presence into a working-hours trace. Two

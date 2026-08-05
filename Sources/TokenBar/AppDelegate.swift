@@ -124,10 +124,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return existing ?? DiscordIPCClient(connect: DiscordIPC.connectToDiscord)
     }
 
+    /// True when `hiddenRaw` hides at least one client `previousHiddenRaw` did
+    /// not — the user took something off the profile.
+    ///
+    /// Deliberately not "the set grew". Hiding one client while unhiding
+    /// another is a single write of one comma-separated string, and a
+    /// subset/size test reads that as no reduction at all, leaving the
+    /// newly hidden client named on a public profile for the rest of the
+    /// publish floor. What matters is whether anything is *newly* hidden.
+    nonisolated static func hidesMore(previousHiddenRaw: String, hiddenRaw: String) -> Bool {
+        !ClientRegistry.parseIdSet(hiddenRaw)
+            .isSubset(of: ClientRegistry.parseIdSet(previousHiddenRaw))
+    }
+
     /// Reconcile the presence with the current preferences and the cached
     /// graph. Start, stop and publish all run through here so there is a single
     /// gated path, and every call site is just a trigger.
-    private func applyDiscordPresence() {
+    private func applyDiscordPresence(privacyReducing: Bool = false) {
         guard let client = AppDelegate.makeDiscordClient(existing: discord) else {
             // Switched off, or a demo/test run. `stop()` clears the activity on
             // Discord's side before closing, so a client that existed a moment
@@ -138,7 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         discord = client
         client.start()
-        client.publish(discordPayload())
+        client.publish(discordPayload(), privacyReducing: privacyReducing)
     }
 
     /// What would be published right now: today's figures from the last good
@@ -175,6 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // cannot recompute from its cached rate. Value-gate the extra fetch.
             let hiddenRaw = UserDefaults.standard.string(
                 forKey: ClientRegistry.tabHiddenKey) ?? ""
+            let previousHiddenRaw = self.lastHiddenRaw
             let hiddenChanged = hiddenRaw != self.lastHiddenRaw
             if hiddenChanged {
                 self.lastHiddenRaw = hiddenRaw
@@ -187,8 +201,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // same two raw values so an unrelated write does not re-publish.
             let discordEnabled = DiscordPresence.enabled()
             if hiddenChanged || discordEnabled != self.lastDiscordEnabled {
+                // Newly hiding a client means the user took something off the
+                // profile, and that update must not queue behind the publish
+                // floor — the Settings copy promises hidden clients are never
+                // included, and fifteen seconds of still naming one makes that
+                // promise false for as long as it waits. Unhiding puts
+                // information back and is throttled like any other sample.
+                let hidMore = AppDelegate.hidesMore(
+                    previousHiddenRaw: previousHiddenRaw, hiddenRaw: hiddenRaw)
                 self.lastDiscordEnabled = discordEnabled
-                self.applyDiscordPresence()
+                self.applyDiscordPresence(privacyReducing: hidMore)
             }
         }
     }
