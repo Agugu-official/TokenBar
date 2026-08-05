@@ -4603,6 +4603,73 @@ enum SelfTest {
             "the socket is close-on-exec before connect() runs (mutation: moving the fcntl back "
                 + "out of makeSocket leaves the whole connect window inheritable)")
 
+        // Codex round 5 — the bypass skipped the floor but still moved its
+        // clock, so a restore delayed the next real payload by a full
+        // interval measured from the restore instead of from the last sample.
+        let dpFloorReady = dpFrameBytes(1, "{\"evt\":\"READY\"}")
+        let dpFloorPairs = [dpSocketPair(), dpSocketPair()]
+        let dpFloorIdx = DPCounter()
+        let dpFloorClient = DiscordIPCClient(connect: {
+            let i = min(dpFloorIdx.value, dpFloorPairs.count - 1)
+            dpFloorIdx.value += 1
+            return dpFloorPairs[i].0
+        })
+        dpFloorClient.reconnectDelay = 0.02
+        dpFloorClient.publishInterval = 1.0
+        dpFloorClient.start()
+        _ = dpWaitUntil { dpFloorClient.isConnectedForTesting }
+        _ = dpFloorReady.withUnsafeBytes { send(dpFloorPairs[0].1, $0.baseAddress, $0.count, 0) }
+        _ = dpWaitUntil { dpFloorClient.inboundTokenForTesting == DiscordIPC.readyEvent }
+        dpFloorClient.publish(dpWirePayload)
+        dpFloorClient.drainForTesting()
+        _ = dpDrainToEOF(dpFloorPairs[0].1)
+        // Let the interval elapse against the real sample, so the payload that
+        // follows the restore is due immediately if the clock was left alone.
+        usleep(1_200_000)
+        close(dpFloorPairs[0].1)
+        _ = dpWaitUntil { dpFloorIdx.value >= 2 }
+        _ = dpFloorReady.withUnsafeBytes { send(dpFloorPairs[1].1, $0.baseAddress, $0.count, 0) }
+        // Wait for the restore to actually reach the socket before publishing
+        // the next payload. `drainForTesting` only syncs the queue, and the
+        // READY read event may not be on it yet — publishing early lets the
+        // new payload flush before the restore ever runs, at which point both
+        // the fixed and the broken build send it immediately and the
+        // assertion measures nothing.
+        var dpFloorRestored = false
+        for _ in 0..<200 where !dpFloorRestored {
+            var buf = dpRecvNow(dpFloorPairs[1].1)
+            while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
+                if op == .frame,
+                   String(decoding: body, as: UTF8.self).contains("12K tokens today") {
+                    dpFloorRestored = true
+                }
+            }
+            usleep(5_000)
+        }
+        let dpFloorNewer = DiscordPresence.Payload(
+            details: "55K tokens today", state: "Amp · $5-10", largeImageKey: "tokenbar")
+        dpFloorClient.publish(dpFloorNewer)
+        dpFloorClient.drainForTesting()
+        // 400ms: comfortably under the 1s the buggy path would defer by, and
+        // comfortably over the time a due payload needs to reach the socket.
+        var dpFloorPrompt = false
+        for _ in 0..<80 where !dpFloorPrompt {
+            var buf = dpRecvNow(dpFloorPairs[1].1)
+            while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
+                if op == .frame,
+                   String(decoding: body, as: UTF8.self).contains("55K tokens today") {
+                    dpFloorPrompt = true
+                }
+            }
+            usleep(5_000)
+        }
+        dpFloorClient.stop()
+        close(dpFloorPairs[1].1)
+        expect(dpFloorRestored && dpFloorPrompt,
+            "a restore does not consume the publish interval (mutation: advancing lastSent on a "
+                + "write that carries no new information throttles the next real payload from the "
+                + "restore instead of from the last sample)")
+
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
             exit(1)

@@ -684,7 +684,13 @@ final class DiscordIPCClient: @unchecked Sendable {
         // not consume the 15s window.
         if writeFrame(.frame, DiscordIPC.activityJSON(pending, pid: pid(), nonce: nonce())) {
             hasPending = false
-            lastSent = .now()
+            // Only a new sample consumes the interval. A restore or a clear
+            // skips the floor on the way out precisely because it carries no
+            // new information, so letting it advance the clock would throttle
+            // the next genuinely changed payload from the moment of the
+            // restore rather than from the last real sample — the same stale
+            // presence the bypass exists to avoid, arriving by the other door.
+            if carriesNewInformation { lastSent = .now() }
             lastSampledPayload = pending
             deliveredOnThisConnection = pending
         }
