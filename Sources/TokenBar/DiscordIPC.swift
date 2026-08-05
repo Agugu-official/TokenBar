@@ -29,6 +29,20 @@ enum DiscordIPC {
     /// checked before any allocation sized from the wire.
     static let maxFrameLength: UInt32 = 64 * 1024
 
+    /// How a publish's own visibility change relates to what may be published.
+    /// Three states, not a Bool: see `DiscordIPCClient.publish(_:visibility:)`
+    /// for why the middle one — an ordinary sample that changed nothing — has
+    /// to be distinguishable from an unhide.
+    enum VisibilityChange {
+        /// An ordinary sample. Whatever the current hidden set is, this payload
+        /// was built from it.
+        case none
+        /// The user hid something. Must not queue behind the publish floor.
+        case reducing
+        /// The user unhid something, putting information back on the profile.
+        case increasing
+    }
+
     enum Opcode: UInt32 {
         case handshake = 0, frame = 1, close = 2, ping = 3, pong = 4
     }
@@ -419,13 +433,30 @@ final class DiscordIPCClient: @unchecked Sendable {
 
     /// `nil` clears the activity. Coalescing, not queueing: only the newest
     /// payload is ever published.
-    /// `privacyReducing` marks an update the user's own action made *less*
-    /// revealing — hiding a client. Those must not queue behind the sampling
-    /// floor: the Settings copy promises hidden clients are never included,
-    /// and a payload that still names one for another fifteen seconds makes
-    /// that promise false for as long as it waits. Unhiding is not this: it
-    /// adds information back and is throttled like any other sample.
-    func publish(_ payload: DiscordPresence.Payload?, privacyReducing: Bool = false) {
+    ///
+    /// `visibility` is how the user's own action changed what may be published,
+    /// and it has three states rather than two because coalescing makes the
+    /// missing one matter. A `.reducing` publish may still be sitting unwritten
+    /// — the connection is reconnecting, or has not finished its handshake —
+    /// when the next publish overwrites `pending`. What that later payload
+    /// deserves depends on what the user did, not on the fact that it arrived:
+    ///
+    ///   - `.none` (an ordinary sample) still carries the reduction, because
+    ///     the payload is rebuilt from the current hidden set every time. Its
+    ///     bypass is inherited on purpose. Dropping it here would throttle the
+    ///     reduction itself and leave a client the user hid on a public profile
+    ///     for the rest of the floor.
+    ///   - `.increasing` (the user unhid something) puts information back, so
+    ///     it takes the bypass with it. Inheriting it would let an unhide
+    ///     publish sub-floor, which is a sample of the user's activity at a
+    ///     higher rate than the floor promises.
+    ///
+    /// A write that hides one client and unhides another is `.reducing`: the
+    /// content the user removed outranks the sampling rate.
+    func publish(
+        _ payload: DiscordPresence.Payload?,
+        visibility: DiscordIPC.VisibilityChange = .none
+    ) {
         queue.async {
             // Recorded even while abandoned: the producer's latest intent is
             // what a later `start()` should restore, not whatever happened to
@@ -441,7 +472,11 @@ final class DiscordIPCClient: @unchecked Sendable {
             // payload — an unhide a second later — went out with no floor at
             // all. That is a sub-15s sample of the user's activity, which is
             // the one thing the floor exists to prevent.
-            if privacyReducing { self.floorBypass = true }
+            switch visibility {
+            case .reducing: self.floorBypass = true
+            case .increasing: self.floorBypass = false
+            case .none: break
+            }
             self.flush()
         }
     }

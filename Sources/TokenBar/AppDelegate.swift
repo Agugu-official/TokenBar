@@ -124,23 +124,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return existing ?? DiscordIPCClient(connect: DiscordIPC.connectToDiscord)
     }
 
-    /// True when `hiddenRaw` hides at least one client `previousHiddenRaw` did
-    /// not — the user took something off the profile.
+    /// How one write of the tab-hidden preference changed what may be
+    /// published: something newly hidden, something put back, or neither.
     ///
-    /// Deliberately not "the set grew". Hiding one client while unhiding
-    /// another is a single write of one comma-separated string, and a
-    /// subset/size test reads that as no reduction at all, leaving the
-    /// newly hidden client named on a public profile for the rest of the
-    /// publish floor. What matters is whether anything is *newly* hidden.
-    nonisolated static func hidesMore(previousHiddenRaw: String, hiddenRaw: String) -> Bool {
-        !ClientRegistry.parseIdSet(hiddenRaw)
-            .isSubset(of: ClientRegistry.parseIdSet(previousHiddenRaw))
+    /// Set membership, not size. Hiding one client while unhiding another is a
+    /// single write of one comma-separated string, and a subset or count test
+    /// reads that as no change at all — leaving the newly hidden client named
+    /// on a public profile for the rest of the publish floor. What matters is
+    /// which direction the membership moved, and a write can move both.
+    ///
+    /// A write that does both is `.reducing`. The content the user removed
+    /// outranks the sampling rate: publishing it late is a client they hid
+    /// still visible to everyone, publishing the other one early is a sample
+    /// of activity they had already consented to publish.
+    nonisolated static func visibilityChange(
+        previousHiddenRaw: String, hiddenRaw: String
+    ) -> DiscordIPC.VisibilityChange {
+        let previous = ClientRegistry.parseIdSet(previousHiddenRaw)
+        let current = ClientRegistry.parseIdSet(hiddenRaw)
+        if !current.isSubset(of: previous) { return .reducing }
+        if !previous.isSubset(of: current) { return .increasing }
+        return .none
     }
 
     /// Reconcile the presence with the current preferences and the cached
     /// graph. Start, stop and publish all run through here so there is a single
     /// gated path, and every call site is just a trigger.
-    private func applyDiscordPresence(privacyReducing: Bool = false) {
+    private func applyDiscordPresence(visibility: DiscordIPC.VisibilityChange = .none) {
         guard let client = AppDelegate.makeDiscordClient(existing: discord) else {
             // Switched off, or a demo/test run. `stop()` clears the activity on
             // Discord's side before closing, so a client that existed a moment
@@ -160,7 +170,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         discord = client
         client.start()
-        client.publish(discordPayload(), privacyReducing: privacyReducing)
+        client.publish(discordPayload(), visibility: visibility)
     }
 
     /// What would be published right now: today's figures from the last good
@@ -216,10 +226,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // included, and fifteen seconds of still naming one makes that
                 // promise false for as long as it waits. Unhiding puts
                 // information back and is throttled like any other sample.
-                let hidMore = AppDelegate.hidesMore(
+                let change = AppDelegate.visibilityChange(
                     previousHiddenRaw: previousHiddenRaw, hiddenRaw: hiddenRaw)
                 self.lastDiscordEnabled = discordEnabled
-                self.applyDiscordPresence(privacyReducing: hidMore)
+                self.applyDiscordPresence(visibility: change)
             }
         }
     }

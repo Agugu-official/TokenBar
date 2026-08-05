@@ -4283,7 +4283,7 @@ enum SelfTest {
         dpBypassClient.publish(
             DiscordPresence.Payload(
                 details: "12K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"),
-            privacyReducing: true)
+            visibility: .reducing)
         dpBypassClient.drainForTesting()
         expect(String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self).contains("12K tokens today"),
             "A15: hiding a client republishes immediately instead of waiting out the 15s floor "
@@ -4349,7 +4349,7 @@ enum SelfTest {
         expect(dpFramesNow(dpOneShotPeer).contains("20K tokens today"),
             "the one-shot fixture published a real sample and armed the clock")
         // Every client hidden: the payload is nil and what goes out is a clear.
-        dpOneShotClient.publish(nil, privacyReducing: true)
+        dpOneShotClient.publish(nil, visibility: .reducing)
         dpOneShotClient.drainForTesting()
         expect(dpFramesNow(dpOneShotPeer).contains("\"activity\":null"),
             "A15c control: the clear itself is not throttled (without this the assertion below "
@@ -4379,6 +4379,76 @@ enum SelfTest {
         dpOneShotClient.stop()
         dpOneShotClient.drainForTesting()
         close(dpOneShotPeer)
+
+        // A15d — what a superseding publish does to a grant that was never
+        // spent. A `.reducing` publish can still be waiting when the next one
+        // overwrites `pending`: the connection dropped and its replacement has
+        // not finished its handshake, so `flush()` returns at the ready guard
+        // with the grant still armed. What the later payload deserves depends
+        // on what the USER did, and the two answers are opposite — so both are
+        // driven from one fixture that differs by a single argument.
+        //
+        // The reduction is a clear (`nil`), which is the case where the two
+        // come apart: an ordinary sample would still exclude the hidden client
+        // and carry the reduction forward, but an unhide puts it back.
+        func dpSupersede(_ visibility: DiscordIPC.VisibilityChange) -> (early: Bool, spent: Double) {
+            let pairs = [dpSocketPair(), dpSocketPair()]
+            let idx = DPCounter()
+            let client = DiscordIPCClient(connect: {
+                let i = min(idx.value, pairs.count - 1)
+                idx.value += 1
+                return pairs[i].0
+            })
+            client.publishInterval = 3.0
+            client.reconnectDelay = 0.02
+            client.start()
+            _ = dpWaitUntil { client.isConnectedForTesting }
+            _ = dpFrameBytes(1, dpReadyBody).withUnsafeBytes {
+                send(pairs[0].1, $0.baseAddress, $0.count, 0)
+            }
+            _ = dpWaitUntil { client.inboundTokenForTesting == "ready" }
+            client.publish(DiscordPresence.Payload(
+                details: "30K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+            client.drainForTesting()
+            _ = dpFramesNow(pairs[0].1)
+            let armed = DispatchTime.now()
+            // Break it. The retry lands on the second socket, which is never
+            // made READY, so everything below is held at the ready guard.
+            close(pairs[0].1)
+            _ = dpWaitUntil { idx.value >= 2 }
+            client.publish(nil, visibility: .reducing)
+            client.drainForTesting()
+            client.publish(
+                DiscordPresence.Payload(
+                    details: "31K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"),
+                visibility: visibility)
+            client.drainForTesting()
+            let spent = Double(
+                DispatchTime.now().uptimeNanoseconds - armed.uptimeNanoseconds) / 1_000_000_000
+            _ = dpFrameBytes(1, dpReadyBody).withUnsafeBytes {
+                send(pairs[1].1, $0.baseAddress, $0.count, 0)
+            }
+            let early = dpFrameArrives(pairs[1].1, "31K tokens today", within: 0.3)
+            client.stop()
+            client.drainForTesting()
+            close(pairs[1].1)
+            return (early, spent)
+        }
+        let dpAfterOrdinary = dpSupersede(DiscordIPC.VisibilityChange.none)
+        let dpAfterUnhide = dpSupersede(.increasing)
+        expect(max(dpAfterOrdinary.spent, dpAfterUnhide.spent) < 1.5,
+            "A15d fixture: both runs reached the measurement well inside the 3s floor "
+                + "(spent \(String(format: "%.3f", dpAfterOrdinary.spent))s and "
+                + "\(String(format: "%.3f", dpAfterUnhide.spent))s — over the interval, both "
+                + "assertions below would be reporting payloads that were simply due)")
+        expect(dpAfterOrdinary.early,
+            "A15d control: an ordinary sample inherits the unspent bypass. It was built from the "
+                + "current hidden set, so it still carries the reduction, and throttling it would "
+                + "leave a client the user hid on a public profile for the rest of the floor")
+        expect(!dpAfterUnhide.early,
+            "A15d: an unhide takes the bypass with it and waits out the floor "
+                + "(mutation: treating `.increasing` like `.none` lets it inherit a pending "
+                + "reduction's bypass and publish a sample sub-floor)")
 
         // A2 — the two behaviours the previous review found unguarded.
 
@@ -4925,21 +4995,29 @@ enum SelfTest {
         // A15b — which visibility change earns the floor bypass. Getting this
         // backwards is not a missed optimisation: it makes an *unhide* jump the
         // floor while a hide waits it out, the exact inversion of the point.
-        expect(AppDelegate.hidesMore(previousHiddenRaw: "", hiddenRaw: "amp"),
+        func dpChange(_ previous: String, _ current: String) -> DiscordIPC.VisibilityChange {
+            AppDelegate.visibilityChange(previousHiddenRaw: previous, hiddenRaw: current)
+        }
+        expect(dpChange("", "amp") == .reducing,
             "A15b: hiding a client is a privacy reduction")
-        expect(!AppDelegate.hidesMore(previousHiddenRaw: "amp", hiddenRaw: ""),
-            "A15b: unhiding is not (mutation: inverting the test bypasses the floor for the one "
-                + "update that adds information back)")
-        expect(AppDelegate.hidesMore(previousHiddenRaw: "amp", hiddenRaw: "amp,zed"),
+        expect(dpChange("amp", "") == .increasing,
+            "A15b: unhiding is the opposite, and is distinguishable from an ordinary sample "
+                + "(mutation: collapsing `.increasing` into `.none` lets an unhide inherit a "
+                + "pending reduction's floor bypass)")
+        expect(dpChange("amp", "amp,zed") == .reducing,
             "A15b: hiding a second client counts")
-        expect(!AppDelegate.hidesMore(previousHiddenRaw: "amp,zed", hiddenRaw: "amp"),
-            "A15b: unhiding one of two does not")
-        expect(AppDelegate.hidesMore(previousHiddenRaw: "amp", hiddenRaw: "zed"),
-            "A15b: hiding one while unhiding another still counts — one write of one string "
-                + "carries both (mutation: a strict-subset or size test calls this no reduction "
-                + "and leaves zed named on the profile for the rest of the floor)")
-        expect(!AppDelegate.hidesMore(previousHiddenRaw: "amp", hiddenRaw: "amp"),
-            "A15b: no change is not a reduction")
+        expect(dpChange("amp,zed", "amp") == .increasing,
+            "A15b: unhiding one of two puts information back")
+        expect(dpChange("amp", "zed") == .reducing,
+            "A15b: hiding one while unhiding another is a reduction — one write of one string "
+                + "carries both, and the content the user removed outranks the sampling rate "
+                + "(mutation: a strict-subset or size test calls this no change and leaves zed "
+                + "named on the profile for the rest of the floor)")
+        expect(dpChange("amp", "amp") == .none,
+            "A15b: no change is neither")
+        expect(dpChange("", "") == .none,
+            "A15b: two empty sets are neither (mutation: returning `.reducing` by default hands "
+                + "every ordinary sample a floor bypass)")
 
         // A2 — the switch. Read through the authoritative accessor against an
         // isolated suite, never the process's own defaults.
