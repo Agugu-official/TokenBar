@@ -97,6 +97,11 @@ public struct QuotaCurve: Decodable, Sendable, Equatable {
     /// on the Rust side fails if that constant moves without this one.
     public static let validDurationSeconds: ClosedRange<Int64> = 1...(400 * 86_400)
 
+    /// Mirrors `MAX_SAMPLES` in `agent_quota_history.rs`: one series is never
+    /// stored holding more than this, so a longer curve did not come from that
+    /// store. `quota_curve_sample_ceiling_matches_swift` fails if it moves.
+    public static let maxPoints = 65_536
+
     static func corrupted(_ decoder: Decoder, _ description: String) -> DecodingError {
         DecodingError.dataCorrupted(.init(
             codingPath: decoder.codingPath, debugDescription: description))
@@ -128,6 +133,31 @@ public struct QuotaCurve: Decodable, Sendable, Equatable {
         }
         guard zip(points, points.dropFirst()).allSatisfy({ $0.sampledAt <= $1.sampledAt }) else {
             throw Self.corrupted(decoder, "points are not ordered by sampledAt")
+        }
+
+        // `validate_series` keys admission on `(normalized reset, phase bucket)`
+        // and refuses a repeat, so no two retained samples can be identical.
+        // Only the exact-repeat half of that is mirrored here, on purpose: the
+        // full key needs `normalize_reset`'s quantum rounding and
+        // `phase_bucket`'s f64 arithmetic, and a Swift re-implementation of
+        // those would be its own drift surface — one whose failure mode is
+        // rejecting a *valid* curve, which is worse than the malformed one it
+        // would catch. This repository has already paid for simulating another
+        // language's floating-point rounding once (the printf/Math.Round
+        // cross-check drift in verification.md). The exact-repeat check needs
+        // only integers.
+        var seen = Set<[Int64]>()
+        guard points.allSatisfy({
+            seen.insert([$0.sampledAt, $0.resetAt, $0.durationSeconds]).inserted
+        }) else {
+            throw Self.corrupted(decoder, "a sample is repeated in the curve")
+        }
+
+        // The store caps one series at `MAX_SAMPLES`, and unique `(reset,
+        // bucket)` keys cap each cycle at the 48 buckets that exist. Both are
+        // integers, so the ceiling is mirrored while the key is not.
+        guard points.count <= Self.maxPoints else {
+            throw Self.corrupted(decoder, "the curve holds more samples than one series can")
         }
     }
 }

@@ -505,6 +505,11 @@ public enum TBCore {
         rejects(
             "a sampledAt outside its own cycle is rejected",
             curve(points: [point(sampledAt: 400)], oldest: 400, newest: 400))
+        // Two identical samples pass the count, coverage and ordering checks, so
+        // only the repeat check can reject this.
+        rejects(
+            "a repeated sample is rejected",
+            curve(points: [point(), point()], count: 2))
 
         // The fixture's generation is 7, which is also what the payload claims,
         // so these two cases differ only in what the caller asked for.

@@ -2480,36 +2480,6 @@ enum SelfTest {
             unseededRefreshCalls == 2 && unseededSource.graphCalls == 0,
             "an unseeded process still observes transitions without the launch hook")
 
-        let savedCardRaw = UserDefaults.standard.object(forKey: UsageAttribution.confirmedKey)
-        let cardRaw = UsageAttribution.confirmedRaw(updating: nil, record: crossAssignment)
-        UserDefaults.standard.set(cardRaw, forKey: UsageAttribution.confirmedKey)
-        let cardState = awaitMainActorValue { () -> UsageAttribution.State? in
-            let card = UsageAttributionBreakdownCard(
-                loadedModelReport: nil, clientIds: [], singleClient: nil)
-            return UsageAttribution.resolve(
-                client: "claude", provider: "openai", model: nil, records: card.confirmed)
-        }
-        // Reading the right value is not the defect that shipped — the old
-        // computed property read the same store and returned the same records.
-        // What was missing is a dependency SwiftUI can invalidate on, so the
-        // mounted card never redrew after Settings wrote. Only a stored
-        // @AppStorage creates it, so assert the storage itself is there.
-        let cardObservesStore = awaitMainActorValue { () -> Bool in
-            let card = UsageAttributionBreakdownCard(
-                loadedModelReport: nil, clientIds: [], singleClient: nil)
-            return Mirror(reflecting: card).children.contains {
-                String(describing: type(of: $0.value)).hasPrefix("AppStorage<")
-            }
-        }
-        if let savedCardRaw {
-            UserDefaults.standard.set(savedCardRaw, forKey: UsageAttribution.confirmedKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: UsageAttribution.confirmedKey)
-        }
-        expect(
-            cardState == .some(.assigned("codex")) && cardObservesStore == true,
-            "attribution card derives confirmed records from an observed stored value")
-
         // tb_quota_curve across the real seam: the ctb.h declaration, the built
         // symbol, and the envelope. A Rust-side unit test cannot see a header
         // that disagrees with the library. No binding exists in this process

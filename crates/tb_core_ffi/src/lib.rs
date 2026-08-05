@@ -984,6 +984,26 @@ mod tests {
         fs::remove_dir_all(directory).expect("remove unbound-generation fixture");
     }
 
+    /// `QuotaCurve.maxPoints` mirrors `MAX_SAMPLES`. Also records why only the
+    /// exact-repeat half of `validate_series`' uniqueness rule is mirrored:
+    /// the key is `(normalize_reset(...), phase_bucket(...))`, and `phase_bucket`
+    /// is f64 arithmetic whose Swift re-implementation could disagree at a
+    /// boundary and reject a valid curve. The bucket count is what caps a cycle,
+    /// so the cap is not an independent rule either.
+    #[test]
+    fn quota_curve_sample_ceiling_matches_swift() {
+        assert_eq!(
+            agent_quota_history::MAX_SAMPLES,
+            65_536,
+            "update QuotaCurve.maxPoints in Sources/TokenBarCore/QuotaCurve.swift"
+        );
+        assert_eq!(
+            agent_quota_history::MAX_SAMPLES_PER_CYCLE,
+            agent_quota_history::PHASE_BUCKET_COUNT,
+            "a cycle's cap is the bucket count; unique sample keys already enforce it"
+        );
+    }
+
     /// `QuotaCurve.validDurationSeconds` in Swift mirrors `valid_duration`'s
     /// bound so a drifted payload fails closed at the decoder. A mirrored
     /// constant is a drift hazard, so this pins the value it was mirrored from:
