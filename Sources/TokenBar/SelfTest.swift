@@ -4256,6 +4256,67 @@ enum SelfTest {
             "A14b control: the clear still goes out")
         close(dpPairedPeer)
 
+        // A14c — switching the feature off and straight back on while a publish
+        // is still queued. A single consent Bool cannot survive this: `stop()`
+        // clears it, `start()` sets it again, and the publish enqueued before
+        // either of them then flushes with consent nominally granted. What
+        // reaches Discord is a payload computed BEFORE the withdrawal — which
+        // may name a client the user hid in between — and the user's off/on is
+        // exactly the moment they were most explicit about what they wanted.
+        //
+        // The epoch is what a later `start()` cannot undo: the publish carries
+        // the grant it was made under, and `stop()` retired that one.
+        let dpEpochPairs = [dpSocketPair(), dpSocketPair()]
+        let dpEpochIdx = DPCounter()
+        let dpEpochClient = DiscordIPCClient(connect: {
+            let i = min(dpEpochIdx.value, dpEpochPairs.count - 1)
+            dpEpochIdx.value += 1
+            return dpEpochPairs[i].0
+        })
+        dpEpochClient.start()
+        dpEpochClient.drainForTesting()
+        _ = dpRecv(dpEpochPairs[0].1)
+        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+            _ = send(dpEpochPairs[0].1, raw.baseAddress!, raw.count, 0)
+        }
+        expect(dpWaitUntil { dpEpochClient.inboundTokenForTesting == "ready" },
+            "the epoch fixture reached READY")
+        let dpEpochGate = DispatchSemaphore(value: 0)
+        dpEpochClient.holdQueueForTesting(until: dpEpochGate)
+        // Queued under the grant that the stop below retires. Nothing has been
+        // published on this connection, so it is not throttled: it would go out
+        // the moment the queue moves.
+        dpEpochClient.publish(DiscordPresence.Payload(
+            details: "41K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpEpochClient.stop()
+        dpEpochClient.start()
+        dpEpochClient.publish(DiscordPresence.Payload(
+            details: "42K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpEpochGate.signal()
+        dpEpochClient.drainForTesting()
+        let dpEpochOld = String(decoding: dpDrainToEOF(dpEpochPairs[0].1), as: UTF8.self)
+        expect(!dpEpochOld.contains("41K tokens today"),
+            "A14c: a publish made before the switch went off is not re-authorized by switching it "
+                + "back on (mutation: a single consent Bool is set again by start() and this "
+                + "payload — computed before the withdrawal — reaches Discord)")
+        expect(dpEpochOld.contains("\"activity\":null"),
+            "A14c control: the off half still cleared the activity, so the assertion above is not "
+                + "passing on a fixture that never ran the stop")
+        close(dpEpochPairs[0].1)
+        // The on half is a working client, not a casualty of the epoch: the
+        // publish made after it must still arrive.
+        expect(dpWaitUntil { dpEpochIdx.value >= 2 }, "A14c control: the on half reconnected")
+        _ = dpRecv(dpEpochPairs[1].1)
+        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+            _ = send(dpEpochPairs[1].1, raw.baseAddress!, raw.count, 0)
+        }
+        expect(dpFrameArrives(dpEpochPairs[1].1, "42K tokens today", within: 2),
+            "A14c control: the publish made after the switch came back on does arrive — without "
+                + "it, a client that refused everything would satisfy the assertion above")
+        dpEpochClient.stop()
+        dpEpochClient.drainForTesting()
+        close(dpEpochPairs[1].1)
+
         // A15 — a privacy-reducing update is not throttled. Same client, same
         // floor, same 15s window; the flag is the only difference between the
         // control below and the assertion after it.

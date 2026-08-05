@@ -322,12 +322,43 @@ final class DiscordIPCClient: @unchecked Sendable {
     /// Instance-level for the same reason.
     var readyTimeout: TimeInterval = DiscordIPCClient.readyTimeoutSeconds
 
-    /// Set off-queue, read off-queue. `stop()` flips `running` from inside a
-    /// queued block, so any publish enqueued a moment earlier runs first and
-    /// still sees `running == true` — one more activity going out after the
-    /// user withdrew consent, which the clear that follows cannot take back.
-    /// This is the one piece of state that cannot live on the queue.
-    private let consentLock = OSAllocatedUnfairLock(initialState: true)
+    /// Whether the feature is on, and *which grant of it* the caller was under.
+    ///
+    /// Set off-queue and read off-queue, because `stop()` flipping `running`
+    /// from inside a queued block lets any publish enqueued a moment earlier
+    /// run first, still see `running == true`, and put one more activity out
+    /// after the user withdrew consent — which the clear that follows cannot
+    /// take back. This is the one piece of state that cannot live on the queue.
+    ///
+    /// An epoch and not just a Bool, because a Bool cannot tell "consent is
+    /// granted now" from "this work was enqueued under a consent that has since
+    /// been withdrawn". Switching the feature off and back on while a publish
+    /// is still queued — the serial queue sitting in socket I/O is enough —
+    /// would otherwise let the later `start()` re-authorize a payload computed
+    /// before the withdrawal, and that payload may name a client the user hid
+    /// in between. `stop()` bumps the epoch; a publish captures it at call time
+    /// and is refused if it no longer matches, so no later `start()` can
+    /// re-authorize work from before the withdrawal.
+    ///
+    /// Only `stop()` bumps. `start()` restores `granted` and deliberately
+    /// leaves the epoch alone: a publish made while the retry budget was spent
+    /// is the intent a later `start()` is supposed to restore, and bumping here
+    /// would refuse exactly that payload.
+    private struct Consent {
+        var granted: Bool
+        var epoch: UInt64
+    }
+    private let consentLock = OSAllocatedUnfairLock(
+        initialState: Consent(granted: true, epoch: 0))
+    /// The epoch `pending` was recorded under. `flush()` is reached from the
+    /// READY restore and the throttle's deferred wake-up as well as from
+    /// `publish`, and those carry no ticket of their own.
+    private var pendingEpoch: UInt64 = 0
+
+    /// Off-queue read, so a queued block asks about the state as it is *now*.
+    private func consentAllows(_ epoch: UInt64) -> Bool {
+        consentLock.withLock { $0.granted && $0.epoch == epoch }
+    }
 
     private let connectFD: @Sendable () throws -> Int32
     private let queue = DispatchQueue(label: "com.nyanako.tokenbar.discord-ipc", qos: .utility)
@@ -385,7 +416,7 @@ final class DiscordIPCClient: @unchecked Sendable {
         // then flushes with consent nominally restored — which is exactly the
         // frame `stop()` exists to prevent. Off-queue, the two flags are
         // written in call order, so the later `stop()` wins.
-        consentLock.withLock { $0 = true }
+        consentLock.withLock { $0.granted = true }
         queue.async {
             // Idempotent while live, but an abandoned client must be able to
             // try again — that is the whole point of not calling `stop()` when
@@ -404,7 +435,8 @@ final class DiscordIPCClient: @unchecked Sendable {
     func stop() {
         // Before the block, not inside it: everything already queued has to see
         // this, and queued work is exactly what the block cannot reach back to.
-        consentLock.withLock { $0 = false }
+        // The epoch bump is what a later `start()` cannot undo.
+        consentLock.withLock { $0.granted = false; $0.epoch &+= 1 }
         queue.async {
             let wasRunning = self.running
             self.running = false
@@ -457,12 +489,17 @@ final class DiscordIPCClient: @unchecked Sendable {
         _ payload: DiscordPresence.Payload?,
         visibility: DiscordIPC.VisibilityChange = .none
     ) {
+        // Captured here, off-queue, because the point is which grant the CALLER
+        // was under — not which one happens to be current by the time the queue
+        // reaches this work.
+        let ticket = consentLock.withLock { $0.epoch }
         queue.async {
             // Recorded even while abandoned: the producer's latest intent is
             // what a later `start()` should restore, not whatever happened to
             // be current when the retries ran out.
-            guard self.running else { return }
+            guard self.running, self.consentAllows(ticket) else { return }
             self.pending = payload
+            self.pendingEpoch = ticket
             self.hasPending = true
             // A one-shot permission to skip the floor, NOT a reset of its
             // clock. Clearing `lastSent` here looked equivalent and was not:
@@ -731,7 +768,11 @@ final class DiscordIPCClient: @unchecked Sendable {
     // MARK: - Writing
 
     private func flush() {
-        guard consentLock.withLock({ $0 }) else { return }
+        // Against the epoch `pending` was recorded under, not against "is it on
+        // now": the READY restore and the throttle's deferred wake-up both land
+        // here carrying no ticket of their own, and what they would write is
+        // that payload.
+        guard consentAllows(pendingEpoch) else { return }
         guard running, ready, hasPending, fd >= 0 else { return }
         // The floor limits how often NEW information is published — sampling
         // frequency is what turns a presence into a working-hours trace. Two
