@@ -4652,9 +4652,14 @@ enum SelfTest {
                 + "\(String(format: "%.3f", dpAfterUnhide.spent))s — over the interval, both "
                 + "assertions below would be reporting payloads that were simply due)")
         expect(dpAfterOrdinary.early,
-            "A15d control: an ordinary sample inherits the unspent bypass. It was built from the "
-                + "current hidden set, so it still carries the reduction, and throttling it would "
-                + "leave a client the user hid on a public profile for the rest of the floor")
+            "A15d control: an ordinary sample inherits the unspent bypass — the mechanism this "
+                + "fixture pins, and the half that fails if `.none` is made to clear the grant. "
+                + "Why inheriting is the RIGHT answer is a fact about production and not about "
+                + "this fixture, whose payloads are literals: the one production publish site "
+                + "passes `discordPayload()`, which reads the hidden set live on every call, so "
+                + "a sample that supersedes a pending reduction still embodies it and throttling "
+                + "it would leave a client the user hid on a public profile for the rest of the "
+                + "floor")
         expect(!dpAfterUnhide.early,
             "A15d: an unhide takes the bypass with it and waits out the floor "
                 + "(mutation: treating `.increasing` like `.none` lets it inherit a pending "
