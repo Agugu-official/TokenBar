@@ -4670,6 +4670,215 @@ enum SelfTest {
                 + "write that carries no new information throttles the next real payload from the "
                 + "restore instead of from the last sample)")
 
+        // MARK: - Discord Rich Presence wiring (DISCORD-PRESENCE M2b)
+        //
+        // M1 built the payload and M2a the transport, both with no caller. This
+        // section covers the only question the wiring adds: can data actually
+        // get out, and under what.
+
+        // A1 (P0) — the demo/test gate, asserted through the production factory
+        // `AppDelegate.applicationDidFinishLaunching` and `applyDiscordPresence`
+        // both call. SelfTest cannot reach the app lifecycle (`run()` returns
+        // `Never` before `NSApplication.shared`), so the gate is a static
+        // function with injectable arguments rather than something buried in a
+        // delegate method — that seam is what makes this assertion possible at
+        // all.
+        //
+        // The control comes first on purpose: without it, every assertion below
+        // would also pass on a factory that refuses everything unconditionally.
+        expect(AppDelegate.makeDiscordClient(arguments: ["TokenBar"], enabled: true) != nil,
+            "A1 control: an ordinary run with the switch on does build a client")
+        expect(AppDelegate.makeDiscordClient(arguments: ["TokenBar"], enabled: false) == nil,
+            "A1 control: the switch off builds nothing")
+        let dpTestFlags = DiscordPresence.testArguments
+        expect(dpTestFlags.sorted() == ["--demo", "--selftest", "--smoke"],
+            "A1: the refused arguments are demo, smoke and selftest")
+        expect(
+            dpTestFlags.allSatisfy {
+                AppDelegate.makeDiscordClient(
+                    arguments: ["TokenBar", $0, "--open-popover"], enabled: true) == nil
+            },
+            "A1: no demo/smoke/selftest run builds a client, even with the switch forced on "
+                + "(mutation: reading the preference before the flags — or checking the flags at "
+                + "all — publishes fixture numbers onto the user's real Discord profile, which is "
+                + "the one failure this feature cannot take back)")
+        // The same call with a client already in hand: a run that turns out to
+        // be a demo run must refuse an EXISTING connection too, which is what
+        // makes `applyDiscordPresence` stop it rather than keep publishing.
+        let dpLiveClient = DiscordIPCClient(connect: { throw DiscordIPC.Failure.unavailable })
+        expect(
+            dpTestFlags.allSatisfy {
+                AppDelegate.makeDiscordClient(
+                    existing: dpLiveClient, arguments: ["TokenBar", $0], enabled: true) == nil
+            },
+            "A1: a test flag refuses an already-built client as well "
+                + "(mutation: returning `existing` before the gate keeps a live connection alive)")
+        expect(
+            AppDelegate.makeDiscordClient(
+                existing: dpLiveClient, arguments: ["TokenBar"], enabled: true) === dpLiveClient,
+            "A1 control: an ordinary run reuses the client it was given rather than opening a "
+                + "second connection")
+        expect(DiscordPresence.mayConnect(arguments: [], enabled: true),
+            "A1 control: with no arguments the gate is just the preference")
+        expect(!DiscordPresence.mayConnect(arguments: [], enabled: false),
+            "A1 control: with no arguments and the switch off the gate refuses")
+        expect(
+            dpTestFlags.allSatisfy { !DiscordPresence.mayConnect(arguments: [$0], enabled: true) },
+            "A1: the gate function itself puts the flags above the preference")
+
+        // A2 — the switch. Read through the authoritative accessor against an
+        // isolated suite, never the process's own defaults.
+        // Fixed, not per-run UUID. `UserDefaults(suiteName:)` creates a
+        // persistent plist unconditionally and NONE of the cleanup calls
+        // delete the file — measured: removing the domain on the instance, on
+        // `.standard`, after clearing the keys, and after setting an empty
+        // persistent domain all leave it behind. A fresh name per run
+        // therefore deposits one more ~/Library/Preferences file every time
+        // the suite runs. One reused name caps it at a single empty file.
+        let dpSuiteName = "TokenBar.SelfTest.Discord"
+        if let dpDefaults = UserDefaults(suiteName: dpSuiteName) {
+            // On `UserDefaults.standard`, not on the suite's own instance:
+            // calling it on the instance leaves the plist behind, so every run
+            // deposited another ~/Library/Preferences file forever.
+            defer { UserDefaults.standard.removePersistentDomain(forName: dpSuiteName) }
+            expect(!DiscordPresence.enabled(defaults: dpDefaults),
+                "A2: an absent key is off")
+            // The mutation this shape exists for. `bool(forKey:)` returns true
+            // here, and the Argument Domain — which the manual acceptance flow
+            // in verification.md uses — stores exactly this: `-tokenbar.<key>
+            // true` lands as the STRING "true", not a Bool.
+            dpDefaults.set("true", forKey: DiscordPresence.enabledKey)
+            expect(!DiscordPresence.enabled(defaults: dpDefaults),
+                "A2: the string \"true\" is not the switch "
+                    + "(mutation: `bool(forKey:)` coerces it and turns the feature on)")
+            // 1, not 2. `as? Bool` bridges NSNumber, so the integer that
+            // actually slips through is the one equal to true — picking 2 here
+            // meant the assertion passed on an accessor that accepted 1.
+            dpDefaults.set(1, forKey: DiscordPresence.enabledKey)
+            expect(!DiscordPresence.enabled(defaults: dpDefaults),
+                "A2: the integer 1 is not the switch (mutation: `as? Bool` alone bridges it to "
+                    + "true, and only a CFBoolean check rejects it)")
+            dpDefaults.set(1.0, forKey: DiscordPresence.enabledKey)
+            expect(!DiscordPresence.enabled(defaults: dpDefaults),
+                "A2: the double 1.0 is not the switch either")
+            dpDefaults.set(2, forKey: DiscordPresence.enabledKey)
+            expect(!DiscordPresence.enabled(defaults: dpDefaults),
+                "A2: a non-boolean number is not the switch")
+            dpDefaults.set(["on"], forKey: DiscordPresence.enabledKey)
+            expect(!DiscordPresence.enabled(defaults: dpDefaults),
+                "A2: a wholly wrong type is not the switch")
+            dpDefaults.set(true, forKey: DiscordPresence.enabledKey)
+            expect(DiscordPresence.enabled(defaults: dpDefaults),
+                "A2 control: a real Bool true is the switch (without this the four assertions "
+                    + "above would pass on an accessor that always returns false)")
+            dpDefaults.set(false, forKey: DiscordPresence.enabledKey)
+            expect(!DiscordPresence.enabled(defaults: dpDefaults),
+                "A2: an explicit false is off")
+        } else {
+            expect(false, "A2: the isolated defaults suite could not be created")
+        }
+
+        // A2b and the structural half of A1. Both are claims about the SHAPE of
+        // the source — "declared in exactly one place", "constructed in exactly
+        // one place" — which no runtime value can express: a second
+        // `@AppStorage` default is invisible until the day it disagrees. So the
+        // tree this binary was built from is read directly, via this file's own
+        // compile-time path.
+        func dpSourceFiles() -> [(name: String, text: String)] {
+            let root = URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()  // Sources/TokenBar
+                .deletingLastPathComponent()  // Sources
+            guard let walk = FileManager.default.enumerator(
+                at: root, includingPropertiesForKeys: nil) else { return [] }
+            var out: [(name: String, text: String)] = []
+            for case let url as URL in walk where url.pathExtension == "swift" {
+                // This file is excluded: it quotes the very strings it counts.
+                guard url.path != #filePath,
+                      let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+                out.append((url.lastPathComponent, text))
+            }
+            return out
+        }
+        func dpOccurrences(_ needle: String, in files: [(name: String, text: String)]) -> Int {
+            files.reduce(0) { $0 + $1.text.components(separatedBy: needle).count - 1 }
+        }
+        let dpSources = dpSourceFiles()
+        expect(dpSources.count > 20 && dpSources.contains { $0.name == "DiscordPresence.swift" },
+            "the source scan found the tree this binary was built from (without this every "
+                + "structural assertion below would pass on an empty list)")
+        // Occurrences, not files: counting files let a second declaration in
+        // the SAME file through, which is the easier mistake of the two.
+        let dpStorageSites = dpSources.filter {
+            $0.text.contains("@AppStorage(DiscordPresence.enabledKey)")
+        }
+        expect(
+            dpOccurrences("@AppStorage(DiscordPresence.enabledKey)", in: dpSources) == 1
+                && dpStorageSites.first?.name == "SettingsPanel.swift",
+            "A2b: exactly one view declares the switch, so no second `@AppStorage` default can "
+                + "disagree with the accessor (mutation: adding a second declaration anywhere — "
+                + "the trap `tokenbar.limits.enabled` already fell into — fails here)")
+        expect(dpOccurrences("\"\(DiscordPresence.enabledKey)\"", in: dpSources) == 1,
+            "A2b: the key string is written once, in `DiscordPresence.enabledKey` "
+                + "(mutation: a hard-coded copy of the key evades the check above)")
+        // Whitespace-normalized, and covering `.init` and an alias of the type,
+        // because `PresenceClient.init(connect : ...)` compiles and matched
+        // none of the literal forms. A source scan can always be evaded by
+        // someone trying; what it has to survive is an ordinary refactor.
+        let dpNormalized = dpSources.map {
+            (name: $0.name, text: $0.text.filter { !$0.isWhitespace })
+        }
+        let dpCtorForms = ["DiscordIPCClient(connect:", "DiscordIPCClient.init(connect:"]
+        expect(
+            dpCtorForms.reduce(0) { $0 + dpOccurrences($1, in: dpNormalized) } == 1,
+            "A1: exactly one production site constructs a client, and it is the gated factory "
+                + "(mutation: constructing one anywhere else — including via `.init` — bypasses "
+                + "the demo/test gate)")
+        expect(dpOccurrences("typealias", in: dpNormalized.filter {
+            $0.text.contains("DiscordIPCClient")
+        }) == 0,
+            "A1: the client type is not aliased, so the construction scan above cannot be "
+                + "sidestepped by giving it another name")
+        expect(!dpNormalized.contains { $0.text.contains("makeDiscordClient(arguments:") },
+            "A1: no production call site substitutes its own arguments for the process's "
+                + "(mutation: passing a curated array turns the gate into a formality)")
+        // M6's gap: the wiring layer's choice of hidden set had no assertion at
+        // all, and the payload fixtures cannot see it — they are handed a set.
+        // `quotaExcludedClients()` and `hiddenLimitsClients()` are different
+        // sets with different meanings; only tab-hidden belongs here.
+        let dpDelegate = dpNormalized.first { $0.name == "AppDelegate.swift" }
+        expect(dpDelegate?.text.contains("hidden:ClientRegistry.hiddenClients()") == true
+            && dpDelegate?.text.contains("hidden:ClientRegistry.quotaExcludedClients()") == false
+            && dpDelegate?.text.contains("hidden:ClientRegistry.hiddenLimitsClients()") == false,
+            "A1: the published payload excludes the tab-hidden clients and no other set "
+                + "(mutation: swapping in quotaExcludedClients publishes a different total and "
+                + "a different top client, and every payload fixture stays green)")
+
+        // A8 — Discord absent. The common case, not an error: the connect
+        // closure fails the way `connectToDiscord` does when there is no socket
+        // to reach. Injected rather than real, because a selftest must not open
+        // a connection to whatever Discord happens to be running on the
+        // machine running it.
+        let dpAbsentAttempts = DPCounter()
+        let dpAbsentClient = DiscordIPCClient(connect: {
+            dpAbsentAttempts.value += 1
+            throw DiscordIPC.Failure.unavailable
+        })
+        dpAbsentClient.reconnectDelay = 0.01
+        let dpAbsentBegan = DispatchTime.now()
+        dpAbsentClient.start()
+        dpAbsentClient.publish(DiscordPresence.Payload(
+            details: "12K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+        let dpAbsentBlocked = Double(
+            DispatchTime.now().uptimeNanoseconds - dpAbsentBegan.uptimeNanoseconds) / 1_000_000_000
+        _ = dpWaitUntil { dpAbsentAttempts.value > DiscordIPCClient.maxReconnectAttempts }
+        let dpAbsentConnected = dpAbsentClient.isConnectedForTesting
+        dpAbsentClient.stop()
+        dpAbsentClient.drainForTesting()
+        expect(dpAbsentBlocked < 0.05 && !dpAbsentConnected && dpAbsentAttempts.value > 1,
+            "A8: with Discord absent the caller is never blocked, nothing connects, and the app "
+                + "keeps running (mutation: making start()/publish() synchronous parks the main "
+                + "actor behind a socket that is not there)")
+
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
             exit(1)
