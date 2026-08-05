@@ -55,8 +55,9 @@ public struct QuotaCurvePoint: Decodable, Sendable, Equatable {
         // Exactly `validate_sample` in agent_quota_history.rs: a sample that
         // fails any of these never enters the store, so seeing one here means
         // the payload did not come from that store.
-        guard durationSeconds >= 1 else {
-            throw QuotaCurve.corrupted(decoder, "durationSeconds must be positive")
+        guard QuotaCurve.validDurationSeconds.contains(durationSeconds) else {
+            throw QuotaCurve.corrupted(
+                decoder, "durationSeconds falls outside the storable window length")
         }
         guard usedPercent.isFinite, usedPercent > 0, usedPercent <= 100 else {
             throw QuotaCurve.corrupted(decoder, "usedPercent must fall in (0, 100]")
@@ -88,6 +89,13 @@ public struct QuotaCurve: Decodable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case points, coverage, activeResetAt, generation
     }
+
+    /// Mirrors `valid_duration` in `agent_quota_duration.rs`, whose bound is
+    /// `1...MAX_DURATION_SECONDS` (400 days). Both ends matter: a sample outside
+    /// either one is refused by the writer, so a payload carrying it did not come
+    /// from the store this call reads. `quota_curve_duration_bound_matches_swift`
+    /// on the Rust side fails if that constant moves without this one.
+    public static let validDurationSeconds: ClosedRange<Int64> = 1...(400 * 86_400)
 
     static func corrupted(_ decoder: Decoder, _ description: String) -> DecodingError {
         DecodingError.dataCorrupted(.init(

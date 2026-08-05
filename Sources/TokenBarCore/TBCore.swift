@@ -228,11 +228,23 @@ public enum TBCore {
     public static func quotaCurve(
         clientId: String, windowKey: String, generation: UInt64
     ) throws -> QuotaCurve? {
-        try clientId.withCString { client in
+        let curve: QuotaCurve? = try clientId.withCString { client in
             try windowKey.withCString { window in
                 try unwrapOptional(tb_quota_curve(client, window, generation))
             }
         }
+        try requireAnswering(curve, request: generation)
+        return curve
+    }
+
+    /// Rust stamps the payload with the generation the call passed in, so this
+    /// is the one field the caller can check against something it already knows.
+    /// A mismatch means the response did not answer this request, which no
+    /// amount of structural validation inside the payload could reveal.
+    package static func requireAnswering(_ curve: QuotaCurve?, request: UInt64) throws {
+        guard let curve, curve.generation != request else { return }
+        throw TBCoreError.bridge(
+            "quota curve generation \(curve.generation) does not answer request \(request)")
     }
 
     /// Live trace buckets over the trailing `windowSecs`.
@@ -471,6 +483,16 @@ public enum TBCore {
             curve(
                 points: [point(sampledAt: 1_500, durationSeconds: 0)],
                 oldest: 1_500, newest: 1_500))
+        // Mirrors `valid_duration`'s full `1...MAX_DURATION_SECONDS` bound. The
+        // upper end needs its own case: a duration above the cap still satisfies
+        // the positive check and, with a consistent `resetAt`, the containment
+        // check too, so nothing else would reject it.
+        rejects(
+            "a durationSeconds above the storable cap is rejected",
+            curve(
+                points: [point(
+                    sampledAt: 1_000, resetAt: 1_500,
+                    durationSeconds: QuotaCurve.validDurationSeconds.upperBound + 1)]))
         rejects(
             "a usedPercent outside (0, 100] is rejected",
             curve(points: [point(usedPercent: "0.0")]))
@@ -483,6 +505,37 @@ public enum TBCore {
         rejects(
             "a sampledAt outside its own cycle is rejected",
             curve(points: [point(sampledAt: 400)], oldest: 400, newest: 400))
+
+        // The fixture's generation is 7, which is also what the payload claims,
+        // so these two cases differ only in what the caller asked for.
+        if let decoded = try? JSONDecoder().decode(
+            QuotaCurve.self, from: curve(points: [point()]))
+        {
+            do {
+                try requireAnswering(decoded, request: 7)
+                check("a curve answering its request is accepted", true)
+            } catch {
+                check("a curve answering its request is accepted", false)
+            }
+            do {
+                try requireAnswering(decoded, request: 8)
+                check("a curve answering another request is rejected", false)
+            } catch is TBCoreError {
+                check("a curve answering another request is rejected", true)
+            } catch {
+                check("a curve answering another request is rejected", false)
+            }
+        } else {
+            check("a curve answering its request is accepted", false)
+            check("a curve answering another request is rejected", false)
+        }
+
+        do {
+            try requireAnswering(nil, request: 8)
+            check("absent history is not a generation mismatch", true)
+        } catch {
+            check("absent history is not a generation mismatch", false)
+        }
 
         return out
     }

@@ -955,6 +955,24 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = path;
     }
 
+    /// `QuotaCurve.validDurationSeconds` in Swift mirrors `valid_duration`'s
+    /// bound so a drifted payload fails closed at the decoder. A mirrored
+    /// constant is a drift hazard, so this pins the value it was mirrored from:
+    /// if the cap moves, update `Sources/TokenBarCore/QuotaCurve.swift` in the
+    /// same change.
+    #[test]
+    fn quota_curve_duration_bound_matches_swift() {
+        assert_eq!(
+            agent_quota_duration::MAX_DURATION_SECONDS,
+            400 * 86_400,
+            "update QuotaCurve.validDurationSeconds in Sources/TokenBarCore/QuotaCurve.swift"
+        );
+        assert!(agent_quota_duration::valid_duration(1));
+        assert!(agent_quota_duration::valid_duration(400 * 86_400));
+        assert!(!agent_quota_duration::valid_duration(0));
+        assert!(!agent_quota_duration::valid_duration(400 * 86_400 + 1));
+    }
+
     #[test]
     fn quota_curve_payload_keeps_raw_points_and_wire_whitelist() {
         let _test_guard = quota_curve_test_guard();
