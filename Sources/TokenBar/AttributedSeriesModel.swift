@@ -98,12 +98,24 @@ import TokenBarCore
     /// instead of publishing the classification the user just changed away from.
     @ObservationIgnored private var contributions: [Contribution]?
 
+    /// Identifies the newest load this model has started.
+    ///
+    /// `load` is `@MainActor` but suspends, so a second one — a declaration
+    /// change, or SwiftUI restarting the task — runs its own body in the gaps.
+    /// Whichever acquisition returns first publishes, and the other then resumes
+    /// and overwrites it with an older payload and the `confirmed` set it
+    /// captured. Cancellation does not prevent this: `LiveUsageDataSource` hands
+    /// the blocking FFI call to a detached task, so its result arrives regardless.
+    @ObservationIgnored private var loadToken = 0
+
     func load(
         source: any UsageDataSource,
         confirmed: [UsageAttribution.Record],
         timeZone: String = TimeZone.current.identifier
     ) async {
         Self.installTimeZoneObserver()
+        loadToken &+= 1
+        let token = loadToken
         // A timezone change invalidates every day key, and the graph cache will
         // not notice: past its 30s window an unchanged source token makes it
         // re-stamp and serve the same entry indefinitely (tb_core_ffi/src/lib.rs
@@ -117,16 +129,28 @@ import TokenBarCore
                 ? source.refreshGraph(year: nil, priority: .userInitiated)
                 : source.graph(year: nil, priority: .userInitiated))
         } catch {
+            guard loadToken == token else { return }
             // Never keep publishing a series built from inputs that have moved
             // on. Classification can always be brought current from rows we
             // already hold; day keys cannot, so a failed recompute after a
             // timezone change drops the series rather than showing buckets
             // already known to be misdated.
-            points = shouldRefresh ? nil : contributions.map {
+            //
+            // `shouldRefresh` was decided before the acquisition and cannot see
+            // a transition that landed during it, so the generation is what
+            // actually answers whether the retained rows are still datable.
+            guard !shouldRefresh, Self.timeZoneGeneration == generation else {
+                points = nil
+                contributions = nil
+                return
+            }
+            points = contributions.map {
                 AttributedDailySeries.points(contributions: $0, confirmed: confirmed)
             }
             return
         }
+
+        guard loadToken == token else { return }
 
         // A transition landed while this acquisition was suspended, so nothing
         // it returned is known to have been built under the current zone.
@@ -137,6 +161,7 @@ import TokenBarCore
         // later load could correct that.
         guard Self.timeZoneGeneration == generation else {
             points = nil
+            contributions = nil
             return
         }
 

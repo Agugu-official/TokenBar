@@ -394,7 +394,7 @@ where
         return Err("window_key is invalid".to_string());
     }
 
-    let key = {
+    let lookup = || -> Result<agent_quota_history::SeriesKey, String> {
         let state = QUOTA_CURVE_BINDINGS
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -405,11 +405,24 @@ where
             .series
             .get(&(client_id.to_string(), window_key.to_string()))
             .cloned()
-            .ok_or_else(|| "quota curve binding is unavailable".to_string())?
+            .ok_or_else(|| "quota curve binding is unavailable".to_string())
     };
 
+    let key = lookup()?;
+
     before_history();
-    let Some(series) = read_history(&key).map_err(history_error_message)? else {
+    let series = read_history(&key).map_err(history_error_message)?;
+
+    // The binding lock is deliberately not held across the history read, so a
+    // publication can replace the tuple while this call is in the file system.
+    // Re-resolving afterwards is what keeps the fail-closed generation contract
+    // honest: without it an account switch mid-read returns the previous
+    // account's curve stamped with a generation that has already expired.
+    if lookup()? != key {
+        return Err("quota curve generation is expired".to_string());
+    }
+
+    let Some(series) = series else {
         return Ok(serde_json::Value::Null);
     };
     if series.samples.is_empty() {
@@ -1171,11 +1184,62 @@ mod tests {
             .expect("binding writer must not wait for history I/O");
         release_tx.send(()).expect("release history reader");
         writer.join().expect("binding writer join");
-        reader
-            .join()
-            .expect("history reader join")
-            .expect("history reader result");
+        // The tuple this read resolved against was replaced while it was in the
+        // file system, so the samples it holds belong to an identity the caller's
+        // generation no longer names. Serving them would be the fail-closed
+        // generation contract broken by exactly the lock release above.
+        assert_eq!(
+            reader.join().expect("history reader join").unwrap_err(),
+            "quota curve generation is expired"
+        );
         fs::remove_dir_all(directory).expect("remove lock-order fixture");
+    }
+
+    /// A publication that keeps the generation but moves the account is the case
+    /// a generation-only recheck cannot see, so the revalidation compares the
+    /// resolved key itself.
+    #[test]
+    fn quota_curve_rejects_an_account_switch_during_history_io() {
+        let _test_guard = quota_curve_test_guard();
+        reset_quota_curve_bindings();
+        let (directory, path) = quota_curve_temp_path("switch-during-io");
+        let now = 9_300_000;
+        let reset_at = now + 96;
+        record_quota_curve_sample(&path, quota_curve_key("account-a"), reset_at, 10.0, now, 96);
+        record_quota_curve_sample(&path, quota_curve_key("account-b"), reset_at, 80.0, now, 96);
+        replace_quota_curve_bindings(1, vec![quota_curve_key("account-a")]);
+
+        let (paused_tx, paused_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let reader_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            quota_curve_result_with_reader(
+                "codex",
+                "weekly.v1",
+                1,
+                || {
+                    paused_tx.send(()).expect("pause reader");
+                    release_rx.recv().expect("release reader");
+                },
+                |key| agent_quota_history::read_series_at_path(key, &reader_path, now),
+            )
+        });
+        paused_rx.recv().expect("reader reached history boundary");
+        replace_quota_curve_bindings(1, vec![quota_curve_key("account-b")]);
+        release_tx.send(()).expect("release history reader");
+
+        assert_eq!(
+            reader.join().expect("history reader join").unwrap_err(),
+            "quota curve generation is expired"
+        );
+        // The same call with a settled binding still serves that account, so the
+        // revalidation rejects a moved identity rather than every read.
+        assert_eq!(
+            quota_curve_value_at_path(&path, "codex", "weekly.v1", 1, now)
+                .expect("settled binding serves its account")["points"][0]["usedPercent"],
+            80.0
+        );
+        fs::remove_dir_all(directory).expect("remove account-switch fixture");
     }
 
     #[test]

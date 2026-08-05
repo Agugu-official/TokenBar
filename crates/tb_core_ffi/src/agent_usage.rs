@@ -74,9 +74,7 @@ impl AgentUsagePayload {
     pub(crate) fn quota_curve_series(&self) -> Vec<SeriesKey> {
         self.agents
             .iter()
-            .filter(|snapshot| {
-                snapshot.error.is_none() && snapshot.transport_diagnostic.is_none()
-            })
+            .filter(|snapshot| snapshot.error.is_none() && snapshot.transport_diagnostic.is_none())
             .filter_map(|snapshot| {
                 snapshot
                     .account_scope
@@ -5045,7 +5043,8 @@ mod tests {
                 // Trusted scope, degraded transport — same reasoning.
                 {
                     let mut degraded = cache_test_snapshot("grok", Ok(trusted.clone()), now);
-                    degraded.transport_diagnostic = Some(SafeTransportDiagnostic::server_error(503));
+                    degraded.transport_diagnostic =
+                        Some(SafeTransportDiagnostic::server_error(503));
                     degraded
                 },
             ],

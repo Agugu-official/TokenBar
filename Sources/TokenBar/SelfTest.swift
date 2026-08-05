@@ -447,30 +447,99 @@ private final class AttributedSeriesHookSource: UsageDataSource, @unchecked Send
     func tokensPerMin() async throws -> Double { DemoData.tokensPerMin }
 }
 
+/// Runs a complete nested load while an outer acquisition is suspended, which
+/// is the actor-reentrancy shape made deterministic: the inner load publishes
+/// first and the outer one then resumes holding an older payload.
+private final class AttributedSeriesReentrantSource: UsageDataSource, @unchecked Sendable {
+    struct Failure: Error {}
+
+    let outerPayload: UsagePayload
+    let innerPayload: UsagePayload
+    let allowsQuotaCachePersistence = false
+    /// Runs only while the first acquisition is suspended.
+    var onFirstAcquire: (@MainActor @Sendable () async -> Void)?
+    var failOuter = false
+    var calls = 0
+
+    init(outerPayload: UsagePayload, innerPayload: UsagePayload) {
+        self.outerPayload = outerPayload
+        self.innerPayload = innerPayload
+    }
+
+    private func serve() async throws -> UsagePayload {
+        calls += 1
+        guard calls == 1 else { return innerPayload }
+        if let onFirstAcquire { await onFirstAcquire() }
+        if failOuter { throw Failure() }
+        return outerPayload
+    }
+
+    func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        _ = (year, priority)
+        return try await serve()
+    }
+
+    func refreshGraph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        _ = (year, priority)
+        return try await serve()
+    }
+
+    func modelReport(year: String?, priority: TaskPriority) async throws -> ModelReport {
+        _ = priority
+        return DemoData.modelReport(for: year)
+    }
+
+    func hourlyReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> HourlyReport {
+        _ = priority
+        return DemoData.hourlyReport(for: year, clients: clients)
+    }
+
+    func agentsReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> AgentsReport {
+        _ = priority
+        return DemoData.agentsReport(for: year, clients: clients)
+    }
+
+    func agentUsage() async throws -> AgentUsagePayload { DemoData.agentUsage }
+
+    func usageTrace(windowSecs: Int64) async throws -> [TraceBucket] {
+        DemoData.trace(windowSecs: windowSecs)
+    }
+
+    func tokensPerMin() async throws -> Double { DemoData.tokensPerMin }
+}
+
 /// Serves one payload until `failing` is set, then throws from both acquisition
-/// paths — the transient-dependency-failure case.
+/// paths — the transient-dependency-failure case. `onAcquire` runs while the
+/// acquisition is suspended, so a test can make the world change under a load
+/// that is about to fail.
 private final class AttributedSeriesFailingSource: UsageDataSource, @unchecked Sendable {
     struct Failure: Error {}
 
     let graphPayload: UsagePayload
     let allowsQuotaCachePersistence = false
     var failing = false
+    var onAcquire: (@MainActor @Sendable () -> Void)?
 
     init(graphPayload: UsagePayload) { self.graphPayload = graphPayload }
 
-    private func serve() throws -> UsagePayload {
+    private func serve() async throws -> UsagePayload {
+        if let onAcquire { await MainActor.run { onAcquire() } }
         if failing { throw Failure() }
         return graphPayload
     }
 
     func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
         _ = (year, priority)
-        return try serve()
+        return try await serve()
     }
 
     func refreshGraph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
         _ = (year, priority)
-        return try serve()
+        return try await serve()
     }
 
     func modelReport(year: String?, priority: TaskPriority) async throws -> ModelReport {
@@ -2226,6 +2295,108 @@ enum SelfTest {
         expect(
             strandedRowsDropped == true,
             "rows retained before a transition are never re-derived after it")
+
+        // The same drop, but for a transition that lands *during* a failing
+        // acquisition. `shouldRefresh` was decided before it and reads false, so
+        // only comparing the generation catches this one; the captured flag would
+        // happily re-derive day buckets already known to be misdated.
+        let failDuringTransitionSource = AttributedSeriesFailingSource(
+            graphPayload: payloadFixture([
+                contributionJSON(
+                    date: "2024-07-01",
+                    clients: [("claude", "transition-model", "openai", 5, 0.5)],
+                    totalsTokens: 5,
+                    totalsCost: 0.5),
+            ]))
+        let failDuringTransitionDropped = awaitMainActorValue { () -> Bool in
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/A")
+            let model = AttributedSeriesModel()
+            await model.load(
+                source: failDuringTransitionSource, confirmed: [], timeZone: "Zone/A")
+            guard model.points?.isEmpty == false else { return false }
+            // Same zone and no transition seen yet, so this load takes the cheap
+            // cached path and captures `shouldRefresh == false`.
+            failDuringTransitionSource.failing = true
+            failDuringTransitionSource.onAcquire = {
+                AttributedSeriesModel.invalidateTimeZoneProvenance()
+            }
+            await model.load(
+                source: failDuringTransitionSource, confirmed: [], timeZone: "Zone/A")
+            failDuringTransitionSource.onAcquire = nil
+            return model.points == nil
+        }
+        expect(
+            failDuringTransitionDropped == true,
+            "a transition during a failing acquisition drops the retained rows")
+
+        // Two loads overlap: the newer one publishes while the older is still
+        // suspended. The older must not resume and overwrite it, neither with its
+        // stale payload nor with the `confirmed` set it captured.
+        let supersededSource = AttributedSeriesReentrantSource(
+            outerPayload: payloadFixture([
+                contributionJSON(
+                    date: "2024-08-01",
+                    clients: [("claude", "superseded-model", "openai", 1, 0.1)],
+                    totalsTokens: 1,
+                    totalsCost: 0.1),
+            ]),
+            innerPayload: payloadFixture([
+                contributionJSON(
+                    date: "2024-08-02",
+                    clients: [("claude", "current-model", "openai", 2, 0.2)],
+                    totalsTokens: 2,
+                    totalsCost: 0.2),
+            ]))
+        let supersededDates = awaitMainActorValue { () -> [String]? in
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/A")
+            let model = AttributedSeriesModel()
+            supersededSource.onFirstAcquire = { @MainActor @Sendable in
+                await model.load(
+                    source: supersededSource, confirmed: [], timeZone: "Zone/A")
+            }
+            await model.load(source: supersededSource, confirmed: [], timeZone: "Zone/A")
+            supersededSource.onFirstAcquire = nil
+            return model.points?.map(\.date)
+        }
+        expect(
+            supersededDates ?? [] == ["2024-08-02"],
+            "a superseded attributed-series load does not overwrite the newer result")
+
+        // The failure path publishes too, by re-deriving retained rows, so it
+        // needs the same guard: a superseded load that then fails would republish
+        // the declarations the user has already moved on from.
+        let supersededFailureSource = AttributedSeriesReentrantSource(
+            outerPayload: payloadFixture([]),
+            innerPayload: payloadFixture([
+                contributionJSON(
+                    date: "2024-08-03",
+                    clients: [("claude", "current-model", "openai", 3, 0.3)],
+                    totalsTokens: 3,
+                    totalsCost: 0.3),
+            ]))
+        supersededFailureSource.failOuter = true
+        let supersededFailureStates = awaitMainActorValue { () -> [UsageAttribution.State]? in
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/A")
+            let model = AttributedSeriesModel()
+            supersededFailureSource.onFirstAcquire = { @MainActor @Sendable in
+                // The newer load classifies this source as excluded.
+                await model.load(
+                    source: supersededFailureSource,
+                    confirmed: [UsageAttribution.Record(
+                        client: "claude", provider: "openai", state: .excluded)],
+                    timeZone: "Zone/A")
+            }
+            // The older load carries no declarations and then fails.
+            await model.load(source: supersededFailureSource, confirmed: [], timeZone: "Zone/A")
+            supersededFailureSource.onFirstAcquire = nil
+            return model.points?.map(\.state)
+        }
+        expect(
+            supersededFailureStates ?? [] == [.excluded],
+            "a superseded load that fails does not re-derive with its stale declarations")
 
         // One recompute cannot outrun the producer race: a computation begun
         // before the transition can still land in the shared entry afterwards.
