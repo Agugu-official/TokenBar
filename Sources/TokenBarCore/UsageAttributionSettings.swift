@@ -349,8 +349,12 @@ public enum UsageAttributionSettings {
         return .sizeOrInvalidRecord
     }
 
+    /// `targetsKnown` distinguishes "no subscriptions" from "not asked yet".
+    /// Both render `subscriptionClients` as an empty list, so without it a
+    /// payload that arrives with zero candidates produces an unchanged signature
+    /// and the reconciliation that should clear stale proposals never runs.
     public static func signature(
-        entries: [ModelReportEntry], subscriptionClients: [String]
+        entries: [ModelReportEntry], subscriptionClients: [String], targetsKnown: Bool = true
     ) -> String {
         let entrySignature = entries.map {
             [
@@ -358,7 +362,8 @@ public enum UsageAttributionSettings {
                 String($0.cost.bitPattern),
             ].joined(separator: "\u{1f}")
         }.joined(separator: "\u{1e}")
-        return entrySignature + "|" + subscriptionClients.joined(separator: ",")
+        return entrySignature + "|" + (targetsKnown ? "known" : "pending")
+            + "|" + subscriptionClients.joined(separator: ",")
     }
 
     private static func sourceKey(client: String, provider: String) -> String {

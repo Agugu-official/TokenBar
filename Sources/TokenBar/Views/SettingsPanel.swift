@@ -215,11 +215,19 @@ struct SettingsPanel: View {
         UsageAttributionSettings.subscriptionClients(from: agentUsage)
     }
 
+    /// Identity of the inputs a suggestion refresh depends on. The target list
+    /// has to contribute its *knownness*, not just its contents: a payload that
+    /// arrives carrying zero subscription candidates leaves
+    /// `attributionTargetClients` empty, which is the same string it was while
+    /// the request was still in flight. Without the lifecycle token the task
+    /// never reruns, so the page stops suppressing stored suggestions without
+    /// ever reconciling them against the now-known empty set.
     private var attributionInputSignature: String? {
         guard let modelReport else { return nil }
         return UsageAttributionSettings.signature(
             entries: modelReport.entries,
-            subscriptionClients: attributionTargetClients)
+            subscriptionClients: attributionTargetClients,
+            targetsKnown: agentUsage != nil)
     }
 
     @ViewBuilder

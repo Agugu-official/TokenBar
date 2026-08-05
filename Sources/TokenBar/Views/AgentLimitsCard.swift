@@ -161,7 +161,11 @@ struct AgentLimitsCard: View {
         let snapshots = self.snapshots
         if opencodeView {
             return opencodeSubs
-                .map(ClientRegistry.clientId(forSubscriptionLabel:))
+                // The subscription-owner resolution, not the raw label mapper:
+                // `Xai` maps to `xai` there, while the quota snapshot is keyed
+                // `grok`, so the filter below would drop the very card opencode
+                // is authed against.
+                .compactMap(UsageAttributionSettings.subscriptionClient(forLabel:))
                 .filter { snapshots[$0] != nil }
         }
         func known(_ id: String) -> Bool {

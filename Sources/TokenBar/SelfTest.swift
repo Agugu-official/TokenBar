@@ -998,6 +998,19 @@ enum SelfTest {
             unownedProviders.isEmpty,
             "every subscription provider names its own client (missing: \(unownedProviders.sorted()))")
 
+        // "No subscriptions" and "not asked yet" both render an empty target
+        // list, so without the lifecycle token the signature is unchanged when a
+        // payload arrives carrying zero candidates — the refresh never reruns
+        // and stale proposals stop being suppressed without being reconciled.
+        let signatureEntries = [attributionEntry(
+            client: "claude", provider: "openai", model: "gpt-5.6-sol", total: 1, cost: 0.1)]
+        expect(
+            UsageAttributionSettings.signature(
+                entries: signatureEntries, subscriptionClients: [], targetsKnown: false)
+                != UsageAttributionSettings.signature(
+                    entries: signatureEntries, subscriptionClients: [], targetsKnown: true),
+            "an empty target list is distinguishable from an unknown one")
+
         // A stored proposal names a target, and until the quota payload says
         // which subscriptions exist there is nothing to check it against.
         let staleSuggestionRows = UsageAttributionSettings.rows(
