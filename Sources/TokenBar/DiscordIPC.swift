@@ -287,7 +287,14 @@ final class DiscordIPCClient: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.nyanako.tokenbar.discord-ipc", qos: .utility)
 
     private var fd: Int32 = -1
+    /// The user's intent: `start()` sets it, `stop()` clears it. Deliberately
+    /// NOT cleared by `giveUp()` — a spent retry budget is a connection state,
+    /// not the user changing their mind, and conflating the two meant producer
+    /// updates were dropped while the client sat abandoned.
     private var running = false
+    /// Connection state: retries are spent and nothing is scheduled. A later
+    /// `start()` clears it and tries again.
+    private var abandoned = false
     private var ready = false
     private var buffer = Data()
     private var source: DispatchSourceRead?
@@ -297,9 +304,14 @@ final class DiscordIPCClient: @unchecked Sendable {
     private var attempts = 0
     private var lastSent: DispatchTime?
     private var pending: DiscordPresence.Payload?
-    /// What Discord currently holds, so `flush` can tell a fresh sample from a
-    /// restore of bytes it already has.
-    private var lastSentPayload: DiscordPresence.Payload?
+    /// The last payload actually sampled from the producer, across
+    /// connections. `flush` compares against it to tell a fresh sample from a
+    /// restore of bytes Discord already had.
+    private var lastSampledPayload: DiscordPresence.Payload?
+    /// What the CURRENT connection has been given. Cleared by `teardown`, which
+    /// is what makes a restore after a reconnect distinguishable from a
+    /// duplicate publish on a connection that already holds it.
+    private var deliveredOnThisConnection: DiscordPresence.Payload?
     private var hasPending = false
     private var inboundToken = ""
     private var writeErrno: Int32 = 0
@@ -313,8 +325,12 @@ final class DiscordIPCClient: @unchecked Sendable {
     /// Idempotent: a second call while running is a no-op, not a second socket.
     func start() {
         queue.async {
-            guard !self.running else { return }
+            // Idempotent while live, but an abandoned client must be able to
+            // try again — that is the whole point of not calling `stop()` when
+            // the budget runs out.
+            guard !self.running || self.abandoned else { return }
             self.running = true
+            self.abandoned = false
             self.attempts = 0
             self.openConnection()
         }
@@ -327,6 +343,7 @@ final class DiscordIPCClient: @unchecked Sendable {
         queue.async {
             let wasRunning = self.running
             self.running = false
+            self.abandoned = false
             self.reconnectWork?.cancel()
             self.throttleWork?.cancel()
             self.readyWork?.cancel()
@@ -337,7 +354,8 @@ final class DiscordIPCClient: @unchecked Sendable {
             // alive to be republished after the user turned the feature off.
             self.hasPending = false
             self.pending = nil
-            self.lastSentPayload = nil
+            self.lastSampledPayload = nil
+            self.deliveredOnThisConnection = nil
             if wasRunning, self.fd >= 0 {
                 self.writeFrame(
                     .frame,
@@ -351,6 +369,9 @@ final class DiscordIPCClient: @unchecked Sendable {
     /// payload is ever published.
     func publish(_ payload: DiscordPresence.Payload?) {
         queue.async {
+            // Recorded even while abandoned: the producer's latest intent is
+            // what a later `start()` should restore, not whatever happened to
+            // be current when the retries ran out.
             guard self.running else { return }
             self.pending = payload
             self.hasPending = true
@@ -418,6 +439,13 @@ final class DiscordIPCClient: @unchecked Sendable {
             scheduleReconnect()
             return
         }
+        // Before anything else on this descriptor. The app's Rust core spawns
+        // helpers (`/usr/bin/security`, a login shell, `claude --version`), and
+        // a child that inherits this socket keeps Discord seeing the connection
+        // open after we have torn it down — stale presence outliving the app's
+        // own teardown. Applied here rather than in `connectToDiscord` so it
+        // covers every descriptor the client adopts, injected ones included.
+        _ = fcntl(newFD, F_SETFD, FD_CLOEXEC)
         // Immediately, before any write can happen: Darwin's default for a
         // write to a closed socket is SIGPIPE, which kills the whole app, and
         // Discord quitting mid-session is ordinary.
@@ -491,7 +519,7 @@ final class DiscordIPCClient: @unchecked Sendable {
     /// not the user asking to stop. It only returns the client to a state a
     /// later `start()` can act on.
     private func giveUp() {
-        running = false
+        abandoned = true
         attempts = 0
         throttleWork?.cancel()
         throttleWork = nil
@@ -502,6 +530,8 @@ final class DiscordIPCClient: @unchecked Sendable {
 
     private func teardown() {
         ready = false
+        // A replacement connection holds nothing yet.
+        deliveredOnThisConnection = nil
         readyWork?.cancel()
         readyWork = nil
         buffer.removeAll()
@@ -590,7 +620,14 @@ final class DiscordIPCClient: @unchecked Sendable {
         //     hid the clients that produced it;
         //   - a restore after a reconnect re-sends bytes Discord already had,
         //     so it discloses nothing a fresh sample would.
-        let carriesNewInformation = pending != nil && pending != lastSentPayload
+        // Already on the wire for this connection: not a restore, not a new
+        // sample, just a repeat. Sending it would spam Discord and reset the
+        // floor's clock, pushing the next real payload behind a no-op.
+        if pending == deliveredOnThisConnection {
+            hasPending = false
+            return
+        }
+        let carriesNewInformation = pending != nil && pending != lastSampledPayload
         if carriesNewInformation, let lastSent {
             let elapsed = Double(DispatchTime.now().uptimeNanoseconds - lastSent.uptimeNanoseconds)
                 / 1_000_000_000
@@ -616,7 +653,8 @@ final class DiscordIPCClient: @unchecked Sendable {
         if writeFrame(.frame, DiscordIPC.activityJSON(pending, pid: pid(), nonce: nonce())) {
             hasPending = false
             lastSent = .now()
-            lastSentPayload = pending
+            lastSampledPayload = pending
+            deliveredOnThisConnection = pending
         }
     }
 

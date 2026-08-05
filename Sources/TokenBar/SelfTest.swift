@@ -4484,6 +4484,111 @@ enum SelfTest {
                 + "throttling it unconditionally leaves a stale presence public for the whole "
                 + "interval after the user hid everything)")
 
+        // Codex round 3 — user intent vs connection state, descriptor
+        // inheritance, and the duplicate that round 2's throttle bypass let in.
+
+        // A producer update while the retry budget is spent is still the
+        // latest intent, and the client is what a later start() must restore.
+        // `giveUp()` used to clear `running`, so `publish()` dropped it and the
+        // reconnect resurrected the pre-give-up payload instead.
+        let dpIntentReady = dpFrameBytes(1, "{\"evt\":\"READY\"}")
+        let dpIntentPairs = [dpSocketPair(), dpSocketPair()]
+        let dpIntentIdx = DPCounter()
+        let dpIntentRevive = DPCounter()
+        dpIntentRevive.value = 1_000_000
+        let dpIntentClient = DiscordIPCClient(connect: {
+            let i = dpIntentIdx.value
+            dpIntentIdx.value += 1
+            if i == 0 { return dpIntentPairs[0].0 }
+            guard i >= dpIntentRevive.value else { throw DiscordIPC.Failure.unavailable }
+            return dpIntentPairs[1].0
+        })
+        dpIntentClient.reconnectDelay = 0.01
+        dpIntentClient.publishInterval = 0
+        dpIntentClient.start()
+        _ = dpWaitUntil { dpIntentClient.isConnectedForTesting }
+        _ = dpIntentReady.withUnsafeBytes { send(dpIntentPairs[0].1, $0.baseAddress, $0.count, 0) }
+        _ = dpWaitUntil { dpIntentClient.inboundTokenForTesting == DiscordIPC.readyEvent }
+        dpIntentClient.publish(dpWirePayload)
+        dpIntentClient.drainForTesting()
+        _ = dpDrainToEOF(dpIntentPairs[0].1)
+        close(dpIntentPairs[0].1)
+        _ = dpWaitUntil { dpIntentIdx.value > DiscordIPCClient.maxReconnectAttempts + 1 }
+        // The producer moves on while the client is abandoned.
+        let dpIntentNewer = DiscordPresence.Payload(
+            details: "77K tokens today", state: "Zed · $1-5", largeImageKey: "tokenbar")
+        dpIntentClient.publish(dpIntentNewer)
+        dpIntentRevive.value = dpIntentIdx.value
+        dpIntentClient.start()
+        _ = dpWaitUntil { dpIntentClient.isConnectedForTesting }
+        _ = dpIntentReady.withUnsafeBytes { send(dpIntentPairs[1].1, $0.baseAddress, $0.count, 0) }
+        dpIntentClient.drainForTesting()
+        var dpIntentGotNewer = false
+        var dpIntentGotStale = false
+        for _ in 0..<60 where !dpIntentGotNewer {
+            var buf = dpRecvNow(dpIntentPairs[1].1)
+            while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
+                let text = String(decoding: body, as: UTF8.self)
+                if op == .frame, text.contains("77K tokens today") { dpIntentGotNewer = true }
+                if op == .frame, text.contains("12K tokens today") { dpIntentGotStale = true }
+            }
+            usleep(5_000)
+        }
+        dpIntentClient.stop()
+        close(dpIntentPairs[1].1)
+        expect(dpIntentGotNewer && !dpIntentGotStale,
+            "a publish while the retries are spent is the intent a later start() restores "
+                + "(mutation: having giveUp() clear `running` makes publish() drop it and the "
+                + "reconnect republishes the pre-give-up payload)")
+
+        // The socket must not survive into a child process. The Rust core
+        // spawns helpers, and an inherited descriptor keeps Discord seeing a
+        // connection this app has already torn down.
+        let dpCloexecPair = dpSocketPair()
+        let dpCloexecClient = DiscordIPCClient(connect: { dpCloexecPair.0 })
+        dpCloexecClient.start()
+        _ = dpWaitUntil { dpCloexecClient.isConnectedForTesting }
+        let dpCloexecFlags = fcntl(dpCloexecPair.0, F_GETFD)
+        dpCloexecClient.stop()
+        close(dpCloexecPair.1)
+        expect(dpCloexecFlags >= 0 && (dpCloexecFlags & FD_CLOEXEC) != 0,
+            "the adopted socket is close-on-exec (mutation: dropping the fcntl leaks the "
+                + "connection into every helper the Rust core spawns)")
+
+        // Publishing the same payload twice on one connection sends it once.
+        // Round 2's throttle bypass is for restores; without a per-connection
+        // record it also let a duplicate through immediately, which resets the
+        // floor's clock and delays the next real payload behind a no-op.
+        let dpDupReady = dpFrameBytes(1, "{\"evt\":\"READY\"}")
+        let dpDupPair = dpSocketPair()
+        let dpDupClient = DiscordIPCClient(connect: { dpDupPair.0 })
+        dpDupClient.publishInterval = 0
+        dpDupClient.start()
+        _ = dpWaitUntil { dpDupClient.isConnectedForTesting }
+        _ = dpDupReady.withUnsafeBytes { send(dpDupPair.1, $0.baseAddress, $0.count, 0) }
+        _ = dpWaitUntil { dpDupClient.inboundTokenForTesting == DiscordIPC.readyEvent }
+        dpDupClient.publish(dpWirePayload)
+        dpDupClient.drainForTesting()
+        _ = dpDrainToEOF(dpDupPair.1)
+        dpDupClient.publish(dpWirePayload)
+        dpDupClient.drainForTesting()
+        var dpDupResent = false
+        for _ in 0..<40 where !dpDupResent {
+            var buf = dpRecvNow(dpDupPair.1)
+            while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
+                if op == .frame,
+                   String(decoding: body, as: UTF8.self).contains("12K tokens today") {
+                    dpDupResent = true
+                }
+            }
+            usleep(5_000)
+        }
+        dpDupClient.stop()
+        close(dpDupPair.1)
+        expect(!dpDupResent,
+            "an identical payload on the same connection is not sent twice (mutation: dropping "
+                + "the deliveredOnThisConnection check resends it immediately, past the floor)")
+
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
             exit(1)
