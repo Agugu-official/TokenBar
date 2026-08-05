@@ -6413,12 +6413,20 @@ enum SelfTest {
         // process never bound. It reaches no credential, network, or history I/O
         // — the binding lookup fails first — so it stays hermetic. The smoke gate
         // asserts the same contract against the shipping binary.
+        // Generation 0 reaches the binding lookup only because this process has
+        // published nothing, which leaves the table's generation at 0 and skips
+        // the expiry check. If a case above ever calls `agentUsage()` first, pass
+        // its `publicationGeneration` here instead — otherwise this silently
+        // starts testing the expiry branch. The exact message is what makes that
+        // substitution visible rather than silent.
         do {
             let curve = try TBCore.quotaCurve(
                 clientId: "__selftest__", windowKey: "__selftest__", generation: 0)
             expect(false, "unbound quota curve fails closed (got \(curve == nil ? "null" : "a curve"))")
-        } catch TBCoreError.bridge {
-            expect(true, "unbound quota curve fails closed")
+        } catch let TBCoreError.bridge(message) {
+            expect(
+                message == "quota curve binding is unavailable",
+                "unbound quota curve fails closed (got \"\(message)\")")
         } catch {
             expect(false, "unbound quota curve fails closed (got \(error))")
         }

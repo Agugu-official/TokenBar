@@ -955,6 +955,35 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = path;
     }
 
+    /// The smoke gate probes an unbound series to prove the binding lookup is
+    /// reachable across the ABI, and that only works if it passes the generation
+    /// its own publication just bound under. This pins why: once a publication
+    /// has happened, any other generation is rejected before the lookup runs, so
+    /// a smoke check using a fixed 0 would exercise the expiry branch instead and
+    /// stay green with a broken lookup.
+    #[test]
+    fn quota_curve_unbound_lookup_needs_the_published_generation() {
+        let _test_guard = quota_curve_test_guard();
+        reset_quota_curve_bindings();
+        let (directory, path) = quota_curve_temp_path("unbound-generation");
+        let now = 9_400_000;
+        record_quota_curve_sample(&path, quota_curve_key("account-a"), now + 96, 10.0, now, 96);
+        replace_quota_curve_bindings(4, vec![quota_curve_key("account-a")]);
+
+        assert_eq!(
+            quota_curve_value_at_path(&path, "__smoke__", "__smoke__", 4, now).unwrap_err(),
+            "quota curve binding is unavailable"
+        );
+        assert_eq!(
+            quota_curve_value_at_path(&path, "__smoke__", "__smoke__", 0, now).unwrap_err(),
+            "quota curve generation is expired"
+        );
+        // The bound tuple still resolves at that generation, so "unavailable"
+        // above is about this series rather than a table that serves nothing.
+        assert!(quota_curve_value_at_path(&path, "codex", "weekly.v1", 4, now).is_ok());
+        fs::remove_dir_all(directory).expect("remove unbound-generation fixture");
+    }
+
     /// `QuotaCurve.validDurationSeconds` in Swift mirrors `valid_duration`'s
     /// bound so a drifted payload fails closed at the decoder. A mirrored
     /// constant is a drift hazard, so this pins the value it was mirrored from:
