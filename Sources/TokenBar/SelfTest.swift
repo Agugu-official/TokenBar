@@ -892,6 +892,42 @@ enum SelfTest {
             UsageAttributionSettings.subscriptionClients(from: terminalAndLastGoodPayload)
                 == ["copilot"],
             "terminal empty provider cards are not subscription candidates, but last-good cards remain")
+
+        // A subscription reached only through opencode has no snapshot of its
+        // own — just the empty placeholder the filter above removes — so without
+        // folding the labels back in, exactly the rows that consume it cannot
+        // name it. This is the case the placeholder filter regressed.
+        let opencodeOnlyPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data(#"{"generatedAt":"now","agents":[{"clientId":"codex","source":"fixture","updatedAt":"now","windows":[],"error":"not configured"}],"opencodeSubscriptions":["Codex","Gemini"]}"#.utf8))
+        expect(
+            UsageAttributionSettings.subscriptionClients(from: opencodeOnlyPayload)
+                == ["codex", "antigravity"],
+            "an opencode-only subscription is still an assignment target")
+        // Both statements naming the same client must not produce it twice.
+        let opencodeDuplicatePayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data(#"{"generatedAt":"now","agents":[{"clientId":"codex","source":"fixture","updatedAt":"now","identity":{"plan":"Plus"},"windows":[]}],"opencodeSubscriptions":["Codex"]}"#.utf8))
+        expect(
+            UsageAttributionSettings.subscriptionClients(from: opencodeDuplicatePayload) == ["codex"],
+            "a subscription reported by both sources appears once")
+
+        // `antigravity-cli` is its own client but spends the `antigravity`
+        // subscription, exactly as the quota views already fold it. Comparing
+        // the raw id finds no owner and falls through to the subscription-bound
+        // branch, which would call the CLI's own subscription usage API spend.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "antigravity-cli", provider: "google",
+                subscriptionClients: ["antigravity"]) == .assigned("antigravity"),
+            "antigravity-cli usage suggests the antigravity subscription it spends")
+        // The fold is only for deciding ownership; a client that genuinely does
+        // not own the provider still gets the bound-provider answer.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "opencode", provider: "google",
+                subscriptionClients: ["antigravity"]) == .excluded,
+            "another client reaching google is still API spend")
         let missingSourceSuggestions = UsageAttributionSettings.suggestionRecords(
             entries: [
                 attributionEntry(client: "copilot", provider: "openai", model: "gpt-5.6-sol"),
@@ -989,6 +1025,66 @@ enum SelfTest {
                 return !copy.contains("consumed") && !copy.contains("deducted")
             },
             "attribution screen copy does not claim consumption or deduction")
+
+        let savedCardRaw = UserDefaults.standard.object(forKey: UsageAttribution.confirmedKey)
+        let cardRaw = UsageAttribution.confirmedRaw(updating: nil, record: crossAssignment)
+        UserDefaults.standard.set(cardRaw, forKey: UsageAttribution.confirmedKey)
+        let cardState = awaitMainActorValue { () -> UsageAttribution.State? in
+            let card = UsageAttributionBreakdownCard(
+                loadedModelReport: nil, clientIds: [], singleClient: nil)
+            return UsageAttribution.resolve(
+                client: "claude", provider: "openai", model: nil, records: card.confirmed)
+        }
+        // Reading the right value is not the defect. A computed read of
+        // UserDefaults returns the same records; what it does not create is a
+        // dependency SwiftUI can invalidate on, so a mounted card kept showing
+        // the previous split after Settings wrote. Only a stored @AppStorage
+        // creates it, so assert the storage itself is present.
+        let cardObservesStore = awaitMainActorValue { () -> Bool in
+            let card = UsageAttributionBreakdownCard(
+                loadedModelReport: nil, clientIds: [], singleClient: nil)
+            return Mirror(reflecting: card).children.contains {
+                String(describing: type(of: $0.value)).hasPrefix("AppStorage<")
+            }
+        }
+        if let savedCardRaw {
+            UserDefaults.standard.set(savedCardRaw, forKey: UsageAttribution.confirmedKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: UsageAttribution.confirmedKey)
+        }
+        expect(
+            cardState == .some(.assigned("codex")) && cardObservesStore == true,
+            "attribution card derives confirmed records from an observed stored value")
+
+        // A nil report is two different states. `load()` fetches the report with
+        // `try?` and still reaches `.ready` on the graph alone, so treating nil
+        // as in-flight leaves the card spinning forever once the report keeps
+        // failing. The flag is what separates them, and the copy differs from
+        // `noUsage`, which is an answer about a report that did arrive.
+        expect(
+            UsageAttributionBreakdown.Copy.all.contains(
+                UsageAttributionBreakdown.Copy.unavailable)
+                && UsageAttributionBreakdown.Copy.unavailable
+                    != UsageAttributionBreakdown.Copy.noUsage,
+            "the breakdown card has distinct copy for an unavailable report")
+        // Assert the branch the body actually takes, not just that the flag can
+        // be set — a card that stored the flag and ignored it would satisfy the
+        // weaker check while still spinning forever.
+        let cardStates = awaitMainActorValue { () -> [UsageAttributionBreakdownCard.ContentState] in
+            [
+                UsageAttributionBreakdownCard.contentState(
+                    rowCount: nil, reportAttempted: false),
+                UsageAttributionBreakdownCard.contentState(
+                    rowCount: nil, reportAttempted: true),
+                UsageAttributionBreakdownCard.contentState(
+                    rowCount: 0, reportAttempted: true),
+                UsageAttributionBreakdownCard.contentState(
+                    rowCount: 3, reportAttempted: true),
+            ]
+        }
+        expect(
+            cardStates ?? [] == [.loading, .unavailable, .empty, .rows],
+            "the breakdown card separates an in-flight report from a finished one with none")
 
         let canonicalRecords = [
             UsageAttribution.Record(

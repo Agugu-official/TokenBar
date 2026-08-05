@@ -7,8 +7,11 @@ public enum UsageAttributionBreakdown {
         public static let hint =
             "Nothing is classified yet. Classify sources in Settings → Usage attribution."
         public static let noUsage = "No attributed usage in this range."
+        /// The report request finished without one. Distinct from `noUsage`,
+        /// which is a real answer about a real report.
+        public static let unavailable = "Usage breakdown is unavailable right now."
 
-        public static var all: [String] { [title, hint, noUsage] }
+        public static var all: [String] { [title, hint, noUsage, unavailable] }
     }
 
     public struct Row: Identifiable, Equatable, Hashable, Sendable {

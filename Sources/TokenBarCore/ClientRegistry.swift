@@ -106,6 +106,31 @@ public enum ClientRegistry {
         }
     }
 
+    /// The client whose quota snapshot a client's usage is served by, where the
+    /// two identities differ. `antigravity-cli` is a registered client in its own
+    /// right — process identity, tab, icon and preferences all stay distinct —
+    /// but it draws on the `antigravity` subscription and the quota views have
+    /// always folded it that way. Anything reasoning about which subscription a
+    /// client's tokens consume has to fold it too, or it will conclude the CLI
+    /// owns no subscription at all.
+    public static func quotaOwner(_ id: String) -> String {
+        id == "antigravity-cli" ? "antigravity" : id
+    }
+
+    /// The registered client behind an opencode subscription label. opencode
+    /// reports which providers it is authed against as display labels rather
+    /// than ids (`agent_usage.rs` builds them in `subscription_label`), so a
+    /// consumer that needs the id must map them back here.
+    public static func clientId(forSubscriptionLabel label: String) -> String {
+        switch label {
+        case "Codex": return "codex"
+        case "Claude": return "claude"
+        case "Copilot": return "copilot"
+        case "Gemini": return "antigravity"
+        default: return label.lowercased()
+        }
+    }
+
     /// Parses the comma-separated id form persisted by the tab order/hidden
     /// defaults into a set, tolerating an empty string. Single source of the
     /// CSV split so callers (and the reactive views, which pass their observed

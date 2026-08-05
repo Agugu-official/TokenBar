@@ -18,6 +18,9 @@ struct StatsView: View {
     /// Overview legitimately displays exactly one client when the others are
     /// hidden or absent.
     var singleClient: String?
+    /// Forwarded to the attribution card so a terminal nil report reads as
+    /// unavailable rather than as a request still in flight.
+    var reportAttempted = false
 
     private var favorite: ModelReportEntry? {
         let allow = Set(clientIds)
@@ -34,7 +37,7 @@ struct StatsView: View {
             summaryCard
             UsageAttributionBreakdownCard(
                 loadedModelReport: loadedModelReport, clientIds: clientIds,
-                singleClient: singleClient)
+                singleClient: singleClient, reportAttempted: reportAttempted)
         }
     }
 

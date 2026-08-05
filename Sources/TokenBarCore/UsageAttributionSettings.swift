@@ -102,14 +102,24 @@ public enum UsageAttributionSettings {
     /// while the Rust producer's required placeholder for an absent provider has
     /// none of them. Exclude only that terminal empty shape so it cannot invent a
     /// subscription the user never configured.
+    ///
+    /// `opencodeSubscriptions` is a second, independent statement of ownership:
+    /// opencode reports the providers its `auth.json` holds an oauth entry for,
+    /// and a user who reaches a subscription only that way has no snapshot of
+    /// their own — just the empty placeholder the filter above removes. Dropping
+    /// them would leave exactly those rows unable to name the subscription they
+    /// are known to consume, so the labels are folded back in as targets.
     public static func subscriptionClients(from payload: AgentUsagePayload?) -> [String] {
         var seen = Set<String>()
-        return (payload?.agents ?? []).compactMap { snapshot in
-            guard snapshot.identity != nil || !snapshot.windows.isEmpty || snapshot.credits != nil,
-                  ClientRegistry.allIds.contains(snapshot.clientId),
-                  seen.insert(snapshot.clientId).inserted
+        let configured = (payload?.agents ?? []).compactMap { snapshot -> String? in
+            guard snapshot.identity != nil || !snapshot.windows.isEmpty || snapshot.credits != nil
             else { return nil }
             return snapshot.clientId
+        }
+        let viaOpencode = (payload?.opencodeSubscriptions ?? [])
+            .map(ClientRegistry.clientId(forSubscriptionLabel:))
+        return (configured + viaOpencode).filter {
+            ClientRegistry.allIds.contains($0) && seen.insert($0).inserted
         }
     }
 
@@ -182,7 +192,14 @@ public enum UsageAttributionSettings {
         }
         // A client talking to its own provider is the plainest reading, and
         // stays unambiguous even when another subscription also accepts it.
-        if owners.contains(sourceClient) { return .assigned(sourceClient) }
+        //
+        // "Its own" is asked of the subscription the source draws on, not of its
+        // process identity: `antigravity-cli` is a client in its own right but
+        // spends the `antigravity` subscription, so comparing the raw id would
+        // find no owner and fall through to the subscription-bound branch —
+        // declaring the CLI's own subscription usage to be API spend.
+        let sourceOwner = ClientRegistry.quotaOwner(sourceClient)
+        if owners.contains(sourceOwner) { return .assigned(sourceOwner) }
         // Reached from somewhere else, and this provider's subscription cannot
         // legitimately be reached that way. Assume the user is complying and
         // that the tokens were bought, not drawn from the subscription.

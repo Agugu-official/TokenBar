@@ -9,9 +9,36 @@ struct UsageAttributionBreakdownCard: View {
     let clientIds: [String]
     /// The client tab this card is scoped to, or nil on Overview.
     var singleClient: String?
+    /// Whether the report request has finished, however it finished. `load()`
+    /// fetches the report with `try?` and still reaches `.ready` on the graph
+    /// alone, so a nil report is not by itself an in-flight request — without
+    /// this the card spins forever whenever the report keeps failing.
+    var reportAttempted = false
 
-    private var confirmed: [UsageAttribution.Record] {
-        UsageAttribution.confirmed(defaults: .standard).records
+    /// Bound rather than read, because a computed read of `UserDefaults` is not
+    /// a view dependency: saving a classification in Settings left an already
+    /// open Stats card showing the previous split until some unrelated state
+    /// happened to rebuild it. `@AppStorage` on the raw value is what makes the
+    /// write invalidate this view.
+    @AppStorage(UsageAttribution.confirmedKey) private var confirmedRaw = ""
+
+    var confirmed: [UsageAttribution.Record] {
+        UsageAttribution.parseRaw(confirmedRaw).records
+    }
+
+    /// What the card body shows. Extracted so the choice is assertable: a nil
+    /// report is two different states and the branch that separates them is not
+    /// reachable from a UI-free test through `body`.
+    enum ContentState: Equatable {
+        case loading
+        case unavailable
+        case empty
+        case rows
+    }
+
+    static func contentState(rowCount: Int?, reportAttempted: Bool) -> ContentState {
+        guard let rowCount else { return reportAttempted ? .unavailable : .loading }
+        return rowCount == 0 ? .empty : .rows
     }
 
     static func rangeLabel(for loadedModelReport: LoadedModelReport?) -> String {
@@ -45,25 +72,30 @@ struct UsageAttributionBreakdownCard: View {
             subtitle: Self.subtitle(
                 for: loadedModelReport, singleClient: singleClient)
         ) {
-            if let rows {
-                if rows.isEmpty {
-                    Text(UsageAttributionBreakdown.Copy.noUsage.localized)
+            switch Self.contentState(
+                rowCount: rows?.count, reportAttempted: reportAttempted)
+            {
+            case .loading:
+                LoadingLine(title: "Loading…")
+            case .unavailable:
+                Text(UsageAttributionBreakdown.Copy.unavailable.localized)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            case .empty:
+                Text(UsageAttributionBreakdown.Copy.noUsage.localized)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            case .rows:
+                if confirmed.isEmpty {
+                    Text(UsageAttributionBreakdown.Copy.hint.localized)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                } else {
-                    if confirmed.isEmpty {
-                        Text(UsageAttributionBreakdown.Copy.hint.localized)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    VStack(spacing: 6) {
-                        ForEach(rows) { row in
-                            breakdownRow(row)
-                        }
+                }
+                VStack(spacing: 6) {
+                    ForEach(rows ?? []) { row in
+                        breakdownRow(row)
                     }
                 }
-            } else {
-                LoadingLine(title: "Loading…")
             }
         }
     }
