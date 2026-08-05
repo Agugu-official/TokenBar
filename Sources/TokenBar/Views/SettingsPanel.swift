@@ -580,10 +580,16 @@ struct SettingsPanel: View {
     private func usageAttributionPage() -> some View {
         let tables = attributionTables
         let targetClients = attributionTargetClients
+        // A stored suggestion proposes a target, and until the quota payload
+        // says which subscriptions exist there is nothing to check that target
+        // against. Suppressing rather than deleting keeps a valid table intact
+        // across a transient failure — the alternative destroys real proposals
+        // every time the request happens to be in flight.
+        let suggestions = agentUsage == nil ? [] : tables.suggestions.records
         let rows = UsageAttributionSettings.rows(
             entries: modelReport?.entries ?? [],
             confirmed: tables.confirmed.records,
-            suggestions: tables.suggestions.records)
+            suggestions: suggestions)
         let suggestedRows = rows.filter { $0.suggestedState != nil }
 
         section(UsageAttributionSettings.Copy.section) {
@@ -612,13 +618,20 @@ struct SettingsPanel: View {
                 hint(UsageAttributionSettings.Copy.suggestionsHint)
             }
 
-            if rows.isEmpty, isLoading {
+            switch UsageAttributionSettings.pageState(
+                hasReport: modelReport != nil, rowCount: rows.count, isLoading: isLoading)
+            {
+            case .loading:
                 LoadingLine(title: "Loading usage…")
-            } else if rows.isEmpty {
+            case .unavailable:
+                Text(UsageAttributionSettings.Copy.unavailable.localized)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            case .empty:
                 Text(UsageAttributionSettings.Copy.noRows.localized)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            } else {
+            case .rows:
                 VStack(spacing: 1) {
                     ForEach(rows) { row in
                         attributionRow(row, targetClients: targetClients)

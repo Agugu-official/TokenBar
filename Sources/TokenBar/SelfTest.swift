@@ -912,6 +912,65 @@ enum SelfTest {
             UsageAttributionSettings.subscriptionClients(from: opencodeDuplicatePayload) == ["codex"],
             "a subscription reported by both sources appears once")
 
+        // The structural guard, not another hand-kept row. Rust's
+        // `subscription_label` renames four providers and capitalizes the rest,
+        // so every provider a subscription serves must be reachable from its
+        // capitalized label. `xai` was not — a Grok subscription reached only
+        // through opencode could not be named — and only a check derived from
+        // the map itself fails when the next provider is added.
+        // The label the Rust producer emits for each provider. `subscription_label`
+        // renames four outright and capitalizes the rest, so this cannot be
+        // derived by capitalizing — `openai` becomes `Codex`, not `Openai`.
+        let opencodeLabels = [
+            "openai": "Codex", "anthropic": "Claude", "google": "Gemini", "xai": "Xai",
+        ]
+        let labelledProviders = Set(
+            UsageAttributionSettings.subscriptionProviderMap.values.flatMap { $0 })
+        expect(
+            labelledProviders == Set(opencodeLabels.keys),
+            "every provider a subscription serves has a known opencode label (missing: \(labelledProviders.subtracting(opencodeLabels.keys).sorted()))")
+        // Reachable means more than "resolves": the client it names must be one
+        // that actually serves that provider.
+        let unreachableProviders = opencodeLabels.filter { provider, label in
+            guard let owner = UsageAttributionSettings.subscriptionClient(forLabel: label),
+                  ClientRegistry.allIds.contains(owner)
+            else { return true }
+            return UsageAttributionSettings.subscriptionProviderMap[owner]?
+                .contains(provider) != true
+        }
+        expect(
+            unreachableProviders.isEmpty,
+            "every subscription provider is reachable from its opencode label (unreachable: \(unreachableProviders.keys.sorted()))")
+        expect(
+            UsageAttributionSettings.subscriptionClient(forLabel: "Xai") == "grok",
+            "an opencode xai subscription names the grok client")
+
+        // A stored proposal names a target, and until the quota payload says
+        // which subscriptions exist there is nothing to check it against.
+        let staleSuggestionRows = UsageAttributionSettings.rows(
+            entries: [attributionEntry(
+                client: "claude", provider: "openai", model: "gpt-5.6-sol", total: 5, cost: 0.5)],
+            confirmed: [],
+            suggestions: [])
+        expect(
+            staleSuggestionRows.count == 1 && staleSuggestionRows[0].suggestedState == nil
+                && UsageAttributionSettings.acceptanceRecords(rows: staleSuggestionRows).isEmpty,
+            "suppressed suggestions offer nothing to accept")
+
+        expect(
+            [
+                UsageAttributionSettings.pageState(hasReport: false, rowCount: 0, isLoading: true),
+                UsageAttributionSettings.pageState(hasReport: false, rowCount: 0, isLoading: false),
+                UsageAttributionSettings.pageState(hasReport: true, rowCount: 0, isLoading: false),
+                UsageAttributionSettings.pageState(hasReport: true, rowCount: 2, isLoading: false),
+            ] == [.loading, .unavailable, .empty, .rows],
+            "the attribution page separates a failed report from one with no rows")
+        expect(
+            UsageAttributionSettings.Copy.all.contains(UsageAttributionSettings.Copy.unavailable)
+                && UsageAttributionSettings.Copy.unavailable
+                    != UsageAttributionSettings.Copy.noRows,
+            "the attribution page has distinct copy for an unavailable report")
+
         // `antigravity-cli` is its own client but spends the `antigravity`
         // subscription, exactly as the quota views already fold it. Comparing
         // the raw id finds no owner and falls through to the subscription-bound

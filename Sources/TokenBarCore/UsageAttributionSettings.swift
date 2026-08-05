@@ -8,6 +8,9 @@ public enum UsageAttributionSettings {
         public static let canonicalizationHint = "Provider IDs are canonicalized before they reach TokenBar: openai_codex becomes openai, and vertex / vertex_ai become anthropic. Routes that canonicalize to the same provider cannot be separated here."
         public static let declarationHint = "A declaration is your classification, not a billing fact."
         public static let noRows = "No provider-split usage in this range."
+        /// The report request finished without one. Distinct from `noRows`,
+        /// which is an answer about a report that did arrive.
+        public static let unavailable = "Usage could not be loaded, so there is nothing to classify yet."
         public static let acceptSuggestions = "Accept all suggestions (%lld)"
         public static let suggestionsHint = "Suggestions are proposals; they do not change your classification until accepted."
         public static let source = "%@ · %@"
@@ -23,7 +26,7 @@ public enum UsageAttributionSettings {
 
         public static var all: [String] {
             [
-                section, classifyHint, canonicalizationHint, declarationHint, noRows,
+                section, classifyHint, canonicalizationHint, declarationHint, noRows, unavailable,
                 acceptSuggestions, suggestionsHint, source, observed, classification,
                 unassigned, excluded, assigned, suggested, suggestedExcluded, unspecifiedProvider,
                 classificationFor,
@@ -117,10 +120,55 @@ public enum UsageAttributionSettings {
             return snapshot.clientId
         }
         let viaOpencode = (payload?.opencodeSubscriptions ?? [])
-            .map(ClientRegistry.clientId(forSubscriptionLabel:))
+            .compactMap(subscriptionClient(forLabel:))
         return (configured + viaOpencode).filter {
             ClientRegistry.allIds.contains($0) && seen.insert($0).inserted
         }
+    }
+
+    /// The subscription client an opencode label names, or nil when none is.
+    ///
+    /// Two rules, because the producer's labels are not uniformly invertible.
+    /// `subscription_label` renames four providers outright (`openai` to `Codex`
+    /// and so on) and otherwise just capitalizes the provider key, so the renames
+    /// need an explicit inverse while everything else *is* a provider and can be
+    /// resolved through the map that already says which client serves it. Writing
+    /// the second rule as a lookup rather than a second hand-kept table is what
+    /// stops a provider added to `subscriptionProviderMap` from being invisible
+    /// here — `xai` was, which is how a Grok subscription reached only through
+    /// opencode could not be named as a target.
+    public static func subscriptionClient(forLabel label: String) -> String? {
+        let renamed = ClientRegistry.clientId(forSubscriptionLabel: label)
+        if renamed != label.lowercased() { return renamed }
+        let provider = label.lowercased()
+        let owners = subscriptionProviderMap
+            .filter { $0.value.contains(provider) }
+            .keys
+            .sorted()
+        // Ambiguity is not resolvable from a label alone, so it yields nothing
+        // rather than a guess.
+        guard owners.count == 1 else { return owners.isEmpty ? renamed : nil }
+        return owners[0]
+    }
+
+    /// What the attribution page shows. A nil report is two states: the request
+    /// is still running, or it finished without one — `DashboardModel.load()`
+    /// takes the report with `try?` and reaches `.ready` on the graph alone.
+    /// Collapsing the second into "no provider-split usage" tells the user there
+    /// is nothing to classify at exactly the moment the data needed to classify
+    /// could not be loaded.
+    public enum PageState: Equatable {
+        case loading
+        case unavailable
+        case empty
+        case rows
+    }
+
+    public static func pageState(
+        hasReport: Bool, rowCount: Int, isLoading: Bool
+    ) -> PageState {
+        guard hasReport else { return isLoading ? .loading : .unavailable }
+        return rowCount == 0 ? .empty : .rows
     }
 
     /// Consume raw provider-split rows. `modelLevelEntries` folds providers
