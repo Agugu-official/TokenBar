@@ -69,9 +69,8 @@ public enum UsageAttributionSettings {
     }
 
     /// This is auditable product knowledge, not an inference from local usage
-    /// or quota payloads. Suggestions are limited to a client's own
-    /// subscription so cross-client routing cannot become a guessed billing
-    /// declaration (for example, Claude traffic using an OpenAI model).
+    /// or quota payloads. Cross-client suggestions remain proposals and are only
+    /// offered where the provider's subscription terms permit that route.
     /// Providers whose subscription terms allow it to be reached through some
     /// other agent. Only these can carry a cross-client assignment suggestion.
     ///
@@ -98,13 +97,19 @@ public enum UsageAttributionSettings {
         "antigravity": ["google"],
     ]
 
-    /// `agentUsage` is the capability source for assignment targets. Keep every
-    /// registered snapshot, including an error-only snapshot, so a transient
-    /// quota outage cannot remove an existing subscription from the picker.
+    /// `agentUsage` is the capability source for assignment targets. A transient
+    /// last-good snapshot keeps its display-ready identity, windows, or credits,
+    /// while the Rust producer's required placeholder for an absent provider has
+    /// none of them. Exclude only that terminal empty shape so it cannot invent a
+    /// subscription the user never configured.
     public static func subscriptionClients(from payload: AgentUsagePayload?) -> [String] {
         var seen = Set<String>()
-        return (payload?.agents.map(\.clientId) ?? []).filter {
-            ClientRegistry.allIds.contains($0) && seen.insert($0).inserted
+        return (payload?.agents ?? []).compactMap { snapshot in
+            guard snapshot.identity != nil || !snapshot.windows.isEmpty || snapshot.credits != nil,
+                  ClientRegistry.allIds.contains(snapshot.clientId),
+                  seen.insert(snapshot.clientId).inserted
+            else { return nil }
+            return snapshot.clientId
         }
     }
 
@@ -230,14 +235,26 @@ public enum UsageAttributionSettings {
         record: UsageAttribution.Record,
         result: String?
     ) -> WriteFailure? {
+        writeFailure(table: table, records: [record], result: result)
+    }
+
+    public static func writeFailure(
+        table: UsageAttribution.Table,
+        records updates: [UsageAttribution.Record],
+        result: String?
+    ) -> WriteFailure? {
         guard result == nil else { return nil }
         guard table.isWritable else { return .invalidExistingValue }
-        let existingKey = table.records.contains {
-            $0.client == record.client && $0.provider == record.provider && $0.model == record.model
+        var records = table.records
+        for update in updates {
+            records.removeAll {
+                $0.client == update.client && $0.provider == update.provider
+                    && $0.model == update.model
+            }
+            if case .unassigned = update.state { continue }
+            records.append(update)
         }
-        if table.records.count >= UsageAttribution.maxEntries && !existingKey {
-            return .entryLimit
-        }
+        if records.count > UsageAttribution.maxEntries { return .entryLimit }
         return .sizeOrInvalidRecord
     }
 

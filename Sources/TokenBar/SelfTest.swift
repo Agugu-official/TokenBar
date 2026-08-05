@@ -882,9 +882,16 @@ enum SelfTest {
 
         let codexOnlyPayload = try! JSONDecoder().decode(
             AgentUsagePayload.self,
-            from: Data(#"{"generatedAt":"now","agents":[{"clientId":"codex","source":"fixture","updatedAt":"now","windows":[]}]}"#.utf8))
+            from: Data(#"{"generatedAt":"now","agents":[{"clientId":"codex","source":"fixture","updatedAt":"now","identity":{"plan":"Plus"},"windows":[]}]}"#.utf8))
         let codexOnlySubscriptions = UsageAttributionSettings.subscriptionClients(
             from: codexOnlyPayload)
+        let terminalAndLastGoodPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data(#"{"generatedAt":"now","agents":[{"clientId":"codex","source":"fixture","updatedAt":"now","windows":[],"error":"not configured"},{"clientId":"claude","source":"fixture","updatedAt":"now","windows":[],"error":"not configured"},{"clientId":"copilot","source":"fixture","updatedAt":"now","identity":{"plan":"Pro"},"windows":[],"error":"temporarily unavailable"}]}"#.utf8))
+        expect(
+            UsageAttributionSettings.subscriptionClients(from: terminalAndLastGoodPayload)
+                == ["copilot"],
+            "terminal empty provider cards are not subscription candidates, but last-good cards remain")
         let missingSourceSuggestions = UsageAttributionSettings.suggestionRecords(
             entries: [
                 attributionEntry(client: "copilot", provider: "openai", model: "gpt-5.6-sol"),
@@ -921,9 +928,8 @@ enum SelfTest {
                 subscriptionClients: attributionTargets))
         let acceptedAttributionRecords = UsageAttributionSettings.acceptanceRecords(
             rows: suggestionRows)
-        let acceptedAttributionRaw = acceptedAttributionRecords.reduce(String?.none) {
-            UsageAttribution.confirmedRaw(updating: $0, record: $1)
-        }
+        let acceptedAttributionRaw = UsageAttribution.confirmedRaw(
+            updating: nil, records: acceptedAttributionRecords)
         let acceptedAttributionTable = UsageAttribution.parseRaw(acceptedAttributionRaw)
         expect(
             acceptedAttributionRecords.count == 1
@@ -934,6 +940,40 @@ enum SelfTest {
                     client: "claude", provider: "openai", model: nil,
                     records: acceptedAttributionTable.records) == .unassigned,
             "accept all assigns only suggested rows")
+
+        let staleSuggestion = UsageAttribution.Record(
+            client: "claude", provider: "stale-provider", state: .excluded)
+        let currentSuggestion = UsageAttribution.Record(
+            client: "claude", provider: "openai", state: .assigned("codex"))
+        let staleSuggestionRaw = UsageAttribution.suggestionsRaw(
+            updating: nil, records: [staleSuggestion, currentSuggestion])
+        let reconciledSuggestionRaw = UsageAttribution.suggestionsRaw(
+            replacing: staleSuggestionRaw, with: [currentSuggestion])
+        expect(
+            UsageAttribution.parseRaw(reconciledSuggestionRaw).records == [currentSuggestion],
+            "suggestion reconciliation drops sources absent from the current report")
+
+        let nearLimitRecords = (0..<(UsageAttribution.maxEntries - 1)).map {
+            UsageAttribution.Record(
+                client: "opencode", provider: "provider-\($0)", state: .excluded)
+        }
+        let nearLimitRaw = UsageAttribution.confirmedRaw(
+            updating: nil, records: nearLimitRecords)
+        let overflowingBatch = [
+            UsageAttribution.Record(client: "claude", provider: "new-a", state: .excluded),
+            UsageAttribution.Record(client: "claude", provider: "new-b", state: .excluded),
+        ]
+        let rejectedBatchRaw = UsageAttribution.confirmedRaw(
+            updating: nearLimitRaw, records: overflowingBatch)
+        expect(
+            UsageAttribution.parseRaw(nearLimitRaw).records.count
+                == UsageAttribution.maxEntries - 1
+                && rejectedBatchRaw == nil
+                && UsageAttributionSettings.writeFailure(
+                    table: UsageAttribution.parseRaw(nearLimitRaw),
+                    records: overflowingBatch,
+                    result: rejectedBatchRaw) == .entryLimit,
+            "accept-all batch validates the complete result before any write")
 
         let refusedAttributionWrite = UsageAttributionSettings.writeFailure(
             table: UsageAttribution.parseRaw("not-json"),
@@ -1006,7 +1046,9 @@ enum SelfTest {
             UsageAttribution.parseRaw(malformedAttributionRaw).records.isEmpty
                 && !UsageAttribution.parseRaw(malformedAttributionRaw).isWritable
                 && UsageAttribution.confirmedRaw(
-                    updating: malformedAttributionRaw, record: crossAssignment) == nil,
+                    updating: malformedAttributionRaw, record: crossAssignment) == nil
+                && UsageAttribution.suggestionsRaw(
+                    replacing: malformedAttributionRaw, with: [crossAssignment]) == nil,
             "malformed attribution raw fails closed and refuses writes")
         expect(
             UsageAttribution.parseRaw(invalidAttributionRecordRaw).records.isEmpty

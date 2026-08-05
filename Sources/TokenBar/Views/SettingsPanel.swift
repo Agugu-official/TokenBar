@@ -612,7 +612,7 @@ struct SettingsPanel: View {
                 hint(UsageAttributionSettings.Copy.suggestionsHint)
             }
 
-            if modelReport == nil {
+            if rows.isEmpty, isLoading {
                 LoadingLine(title: "Loading usage…")
             } else if rows.isEmpty {
                 Text(UsageAttributionSettings.Copy.noRows.localized)
@@ -734,26 +734,16 @@ struct SettingsPanel: View {
             entries: report.entries,
             confirmed: confirmed.records,
             subscriptionClients: targetClients)
-        let proposedBySource = Dictionary(uniqueKeysWithValues: proposed.map {
-            ("\($0.client)\u{0}\($0.provider)", $0)
-        })
-
-        for row in UsageAttributionSettings.rows(
-            entries: report.entries, confirmed: confirmed.records, suggestions: [])
-        {
-            let record = proposedBySource[row.id] ?? UsageAttribution.Record(
-                client: row.client, provider: row.provider, state: .unassigned)
-            let table = UsageAttribution.suggestions(defaults: defaults)
-            let result = UsageAttribution.suggestionsRaw(
-                updating: defaults.object(forKey: UsageAttribution.suggestionsKey), record: record)
-            guard let result else {
-                attributionNotice = UsageAttributionSettings.writeFailure(
-                    table: table, record: record, result: result)?.message
-                attributionRevision += 1
-                return
-            }
-            defaults.set(result, forKey: UsageAttribution.suggestionsKey)
+        let table = UsageAttribution.suggestions(defaults: defaults)
+        let result = UsageAttribution.suggestionsRaw(
+            replacing: defaults.object(forKey: UsageAttribution.suggestionsKey), with: proposed)
+        guard let result else {
+            attributionNotice = UsageAttributionSettings.writeFailure(
+                table: table, records: proposed, result: result)?.message
+            attributionRevision += 1
+            return
         }
+        defaults.set(result, forKey: UsageAttribution.suggestionsKey)
         attributionNotice = nil
         attributionRevision += 1
     }
@@ -768,31 +758,29 @@ struct SettingsPanel: View {
         guard !records.isEmpty else { return }
 
         let defaults = UserDefaults.standard
-        for record in records {
-            let confirmedTable = UsageAttribution.confirmed(defaults: defaults)
-            let confirmedRaw = UsageAttribution.confirmedRaw(
-                updating: defaults.object(forKey: UsageAttribution.confirmedKey), record: record)
-            guard let confirmedRaw else {
-                attributionNotice = UsageAttributionSettings.writeFailure(
-                    table: confirmedTable, record: record, result: confirmedRaw)?.message
-                attributionRevision += 1
-                return
-            }
-            defaults.set(confirmedRaw, forKey: UsageAttribution.confirmedKey)
-
-            let suggestionTable = UsageAttribution.suggestions(defaults: defaults)
-            let removedSuggestion = UsageAttribution.suggestionsRaw(
-                updating: defaults.object(forKey: UsageAttribution.suggestionsKey),
-                record: UsageAttribution.Record(
-                    client: record.client, provider: record.provider, state: .unassigned))
-            guard let removedSuggestion else {
-                attributionNotice = UsageAttributionSettings.writeFailure(
-                    table: suggestionTable, record: record, result: removedSuggestion)?.message
-                attributionRevision += 1
-                return
-            }
-            defaults.set(removedSuggestion, forKey: UsageAttribution.suggestionsKey)
+        let confirmedRaw = UsageAttribution.confirmedRaw(
+            updating: defaults.object(forKey: UsageAttribution.confirmedKey), records: records)
+        guard let confirmedRaw else {
+            attributionNotice = UsageAttributionSettings.writeFailure(
+                table: tables.confirmed, records: records, result: confirmedRaw)?.message
+            attributionRevision += 1
+            return
         }
+        let removals = records.map {
+            UsageAttribution.Record(
+                client: $0.client, provider: $0.provider, model: $0.model, state: .unassigned)
+        }
+        let suggestionsRaw = UsageAttribution.suggestionsRaw(
+            updating: defaults.object(forKey: UsageAttribution.suggestionsKey), records: removals)
+        guard let suggestionsRaw else {
+            attributionNotice = UsageAttributionSettings.writeFailure(
+                table: tables.suggestions, records: removals, result: suggestionsRaw)?.message
+            attributionRevision += 1
+            return
+        }
+
+        defaults.set(confirmedRaw, forKey: UsageAttribution.confirmedKey)
+        defaults.set(suggestionsRaw, forKey: UsageAttribution.suggestionsKey)
         attributionNotice = nil
         attributionRevision += 1
     }

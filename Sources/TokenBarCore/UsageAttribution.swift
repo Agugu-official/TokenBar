@@ -133,11 +133,27 @@ public enum UsageAttribution {
     /// pass `UserDefaults.object(forKey:)` without turning a present foreign
     /// value into the writable nil used for an absent key.
     public static func confirmedRaw(updating raw: Any?, record: Record) -> String? {
-        updatedRaw(raw, record: record)
+        updatedRaw(raw, records: [record])
+    }
+
+    public static func confirmedRaw(updating raw: Any?, records: [Record]) -> String? {
+        updatedRaw(raw, records: records)
     }
 
     public static func suggestionsRaw(updating raw: Any?, record: Record) -> String? {
-        updatedRaw(raw, record: record)
+        updatedRaw(raw, records: [record])
+    }
+
+    public static func suggestionsRaw(updating raw: Any?, records: [Record]) -> String? {
+        updatedRaw(raw, records: records)
+    }
+
+    /// Replace the generated suggestion set in one validated write. The current
+    /// value still has to belong to this codec, so a foreign or malformed value
+    /// remains untouched rather than being repaired as an empty table.
+    public static func suggestionsRaw(replacing raw: Any?, with records: [Record]) -> String? {
+        guard parseState(raw).isWritable else { return nil }
+        return canonicalRaw(records)
     }
 
     private struct SourceKey: Hashable {
@@ -146,15 +162,15 @@ public enum UsageAttribution {
         let model: String?
     }
 
-    private static func updatedRaw(_ raw: Any?, record: Record) -> String? {
+    private static func updatedRaw(_ raw: Any?, records updates: [Record]) -> String? {
         let parsed = parseState(raw)
-        guard isValidSource(record), parsed.isWritable else { return nil }
+        guard updates.allSatisfy(isValidSource), parsed.isWritable else { return nil }
         var records = parsed.records
-        records.removeAll { sourceKey($0) == sourceKey(record) }
-        if case .unassigned = record.state {
-            return canonicalRaw(records)
+        for update in updates {
+            records.removeAll { sourceKey($0) == sourceKey(update) }
+            if case .unassigned = update.state { continue }
+            records.append(update)
         }
-        records.append(record)
         return canonicalRaw(records)
     }
 
