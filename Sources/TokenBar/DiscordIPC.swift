@@ -511,7 +511,24 @@ final class DiscordIPCClient: @unchecked Sendable {
         // Captured here, off-queue, because the point is which grant the CALLER
         // was under — not which one happens to be current by the time the queue
         // reaches this work.
-        let ticket = consentLock.withLock { $0.epoch }
+        //
+        // A reduction also *retires* everything computed before it. Those
+        // payloads were built against a larger visible set, so one of them
+        // reaching the socket first puts the client the user just hid back on
+        // the profile: for microseconds if the reduction follows immediately,
+        // for a whole reconnect if the socket dies in between.
+        //
+        // This is the producer-side half of the same withdrawal the epoch
+        // already protects on the consumer side, and it is deliberately keyed
+        // on the reduction rather than on the switch going off. The defaults
+        // observer coalesces, so an off-then-on pair can collapse before
+        // `AppDelegate` ever sees the `false` — but the hide inside it always
+        // surfaces as `.reducing`. Retiring stale work on a fact that is always
+        // observable beats retiring it on a transition that sometimes is not.
+        let ticket = consentLock.withLock { state -> UInt64 in
+            if case .reducing = visibility { state.epoch &+= 1 }
+            return state.epoch
+        }
         queue.async {
             // Recorded even while abandoned: the producer's latest intent is
             // what a later `start()` should restore, not whatever happened to

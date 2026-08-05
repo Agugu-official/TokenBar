@@ -4356,6 +4356,47 @@ enum SelfTest {
                 + "fixture where nothing was written at all")
         close(dpPingPeer)
 
+        // A20 — a reduction retires what was computed before it. The defaults
+        // observer coalesces, so "switch off, hide a client, switch on" can
+        // reach `AppDelegate` as a single apply that only ever sees the final
+        // `true`: no `stop()`, no withdrawal for the transport to see. What is
+        // always visible is the hide itself, so that is what retires the stale
+        // payload — the one still naming the client the user just hid.
+        let (dpStaleLocal, dpStalePeer) = dpSocketPair()
+        let dpStaleClient = DiscordIPCClient(connect: { dpStaleLocal })
+        dpStaleClient.start()
+        dpStaleClient.drainForTesting()
+        _ = dpRecv(dpStalePeer)
+        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+            _ = send(dpStalePeer, raw.baseAddress!, raw.count, 0)
+        }
+        expect(dpWaitUntil { dpStaleClient.inboundTokenForTesting == "ready" },
+            "the stale-payload fixture reached READY")
+        let dpStaleGate = DispatchSemaphore(value: 0)
+        dpStaleClient.holdQueueForTesting(until: dpStaleGate)
+        // Computed while the hidden client was still visible. Nothing has been
+        // published on this connection, so it is not throttled either: it would
+        // go out the moment the queue moves.
+        dpStaleClient.publish(DiscordPresence.Payload(
+            details: "70K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpStaleClient.publish(
+            DiscordPresence.Payload(
+                details: "71K tokens today", state: "Zed · $10-25", largeImageKey: "tokenbar"),
+            visibility: .reducing)
+        dpStaleGate.signal()
+        dpStaleClient.drainForTesting()
+        let dpStaleSeen = dpFramesNow(dpStalePeer)
+        expect(!dpStaleSeen.contains("70K tokens today"),
+            "A20: a payload computed before the hide never reaches the socket "
+                + "(mutation: without the reduction retiring earlier work it is written first, "
+                + "putting the client the user just hid back on the profile)")
+        expect(dpStaleSeen.contains("71K tokens today"),
+            "A20 control: the reduction itself does go out, so the assertion above is not passing "
+                + "on a client that refused both")
+        dpStaleClient.stop()
+        dpStaleClient.drainForTesting()
+        close(dpStalePeer)
+
         // A19 — a clear that lost its socket is retried on the next connection.
         // `nil` is a payload here: it is the clear. One `nil` standing for both
         // "this connection has been given nothing" and "this connection has
