@@ -345,6 +345,12 @@ final class DiscordIPCClient: @unchecked Sendable {
     /// duplicate publish on a connection that already holds it.
     private var deliveredOnThisConnection: DiscordPresence.Payload?
     private var hasPending = false
+    /// One-shot permission for the *next* write to skip the publish floor,
+    /// granted by a `privacyReducing` publish and spent on that write. Separate
+    /// from `lastSent` on purpose: the bypass is about one update, the clock is
+    /// about the sampling rate, and collapsing the two lets a clear leave the
+    /// rate unbounded. See `publish(_:privacyReducing:)`.
+    private var floorBypass = false
     private var inboundToken = ""
     private var writeErrno: Int32 = 0
 
@@ -399,6 +405,7 @@ final class DiscordIPCClient: @unchecked Sendable {
             // alive to be republished after the user turned the feature off.
             self.hasPending = false
             self.pending = nil
+            self.floorBypass = false
             self.lastSampledPayload = nil
             self.deliveredOnThisConnection = nil
             if wasRunning, self.fd >= 0 {
@@ -426,7 +433,15 @@ final class DiscordIPCClient: @unchecked Sendable {
             guard self.running else { return }
             self.pending = payload
             self.hasPending = true
-            if privacyReducing { self.lastSent = nil }
+            // A one-shot permission to skip the floor, NOT a reset of its
+            // clock. Clearing `lastSent` here looked equivalent and was not:
+            // hiding every visible client publishes a *clear*, which carries no
+            // new information and therefore does not re-arm the clock on its
+            // way out, so the cleared `lastSent` survived and the next real
+            // payload — an unhide a second later — went out with no floor at
+            // all. That is a sub-15s sample of the user's activity, which is
+            // the one thing the floor exists to prevent.
+            if privacyReducing { self.floorBypass = true }
             self.flush()
         }
     }
@@ -696,10 +711,14 @@ final class DiscordIPCClient: @unchecked Sendable {
         // floor's clock, pushing the next real payload behind a no-op.
         if pending == deliveredOnThisConnection {
             hasPending = false
+            // Consumed here too: the reduction is already on the wire, so the
+            // permission has nothing left to do, and leaving it armed would
+            // hand the floor bypass to whatever ordinary sample comes next.
+            floorBypass = false
             return
         }
         let carriesNewInformation = pending != nil && pending != lastSampledPayload
-        if carriesNewInformation, let lastSent {
+        if carriesNewInformation, !floorBypass, let lastSent {
             let elapsed = Double(DispatchTime.now().uptimeNanoseconds - lastSent.uptimeNanoseconds)
                 / 1_000_000_000
             if elapsed < publishInterval {
@@ -730,6 +749,9 @@ final class DiscordIPCClient: @unchecked Sendable {
             // restore rather than from the last real sample — the same stale
             // presence the bypass exists to avoid, arriving by the other door.
             if carriesNewInformation { lastSent = .now() }
+            // One shot, spent on the write it was granted for. Left armed it
+            // would let the next ordinary sample skip the floor as well.
+            floorBypass = false
             lastSampledPayload = pending
             deliveredOnThisConnection = pending
         }

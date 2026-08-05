@@ -145,8 +145,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Switched off, or a demo/test run. `stop()` clears the activity on
             // Discord's side before closing, so a client that existed a moment
             // ago does not leave its last payload on the profile.
+            //
+            // The reference is deliberately NOT dropped here. `stop()` only
+            // *queues* the clear, and `applicationWillTerminate`'s bounded
+            // drain is guarded on this being non-nil — so nil-ing it means
+            // switching Discord off and immediately quitting abandons the clear
+            // as the process exits, and the last activity stays on the profile
+            // after consent was withdrawn. A stopped client costs a closed
+            // socket's worth of nothing, and re-enabling reuses it: the gate in
+            // `makeDiscordClient` is what decides whether it may run, never the
+            // presence of the object.
             discord?.stop()
-            discord = nil
             return
         }
         discord = client

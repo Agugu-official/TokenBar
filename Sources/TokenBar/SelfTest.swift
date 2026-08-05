@@ -4287,10 +4287,70 @@ enum SelfTest {
         dpBypassClient.drainForTesting()
         expect(String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self).contains("12K tokens today"),
             "A15: hiding a client republishes immediately instead of waiting out the 15s floor "
-                + "(mutation: dropping the lastSent reset throttles it like any other sample)")
+                + "(mutation: dropping the floorBypass grant throttles it like any other sample)")
         dpBypassClient.stop()
         dpBypassClient.drainForTesting()
         close(dpBypassPeer)
+
+        // A15c — the bypass is one shot, and it does not reset the floor's
+        // clock. Hiding EVERY visible client publishes a clear, and a clear
+        // carries no new information, so it does not re-arm the clock on its
+        // way out. An implementation that grants the bypass by clearing
+        // `lastSent` therefore leaves the clock cleared: the unhide a second
+        // later goes out with no floor at all, which is a sub-15s sample of the
+        // user's activity — the exact thing the floor exists to prevent.
+        //
+        // A shortened interval, so "held" and "sent" are distinguishable
+        // without the assertion taking fifteen seconds to make its point.
+        func dpFrameArrives(_ fd: Int32, _ needle: String, within turns: Int) -> Bool {
+            for _ in 0..<turns {
+                var buf = dpRecvNow(fd)
+                while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
+                    if op == .frame, String(decoding: body, as: UTF8.self).contains(needle) {
+                        return true
+                    }
+                }
+                usleep(5_000)
+            }
+            return false
+        }
+        let (dpOneShotLocal, dpOneShotPeer) = dpSocketPair()
+        let dpOneShotClient = DiscordIPCClient(connect: { dpOneShotLocal })
+        dpOneShotClient.publishInterval = 1.0
+        dpOneShotClient.start()
+        dpOneShotClient.drainForTesting()
+        _ = dpRecv(dpOneShotPeer)
+        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+            _ = send(dpOneShotPeer, raw.baseAddress!, raw.count, 0)
+        }
+        expect(dpWaitUntil { dpOneShotClient.inboundTokenForTesting == "ready" },
+            "the one-shot fixture reached READY")
+        dpOneShotClient.publish(DiscordPresence.Payload(
+            details: "20K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+        dpOneShotClient.drainForTesting()
+        expect(dpFrameArrives(dpOneShotPeer, "20K tokens today", within: 80),
+            "the one-shot fixture published a real sample and armed the clock")
+        // Every client hidden: the payload is nil and what goes out is a clear.
+        dpOneShotClient.publish(nil, privacyReducing: true)
+        dpOneShotClient.drainForTesting()
+        expect(dpFrameArrives(dpOneShotPeer, "\"activity\":null", within: 80),
+            "A15c control: the clear itself is not throttled (without this the assertion below "
+                + "would pass on a client that simply never sent the clear)")
+        let dpUnhidden = DiscordPresence.Payload(
+            details: "21K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar")
+        dpOneShotClient.publish(dpUnhidden)
+        dpOneShotClient.drainForTesting()
+        // 300ms: well inside the 1s floor, well over the time a due frame needs.
+        expect(!dpFrameArrives(dpOneShotPeer, "21K tokens today", within: 60),
+            "A15c: the unhide that follows a clear still waits out the floor "
+                + "(mutation: granting the bypass by clearing `lastSent` leaves the clock cleared "
+                + "through the clear, and this payload goes out sub-interval)")
+        expect(dpFrameArrives(dpOneShotPeer, "21K tokens today", within: 300),
+            "A15c control: it does arrive once the floor expires, so the assertion above is not "
+                + "passing on a payload that was dropped outright")
+        dpOneShotClient.stop()
+        dpOneShotClient.drainForTesting()
+        close(dpOneShotPeer)
 
         // A2 — the two behaviours the previous review found unguarded.
 
@@ -4960,6 +5020,19 @@ enum SelfTest {
             "A1: exactly one production site constructs a client, and it is the gated factory "
                 + "(mutation: constructing one anywhere else — including via `.init` — bypasses "
                 + "the demo/test gate)")
+        // A16 — structural, because the behaviour it guards needs a real app
+        // lifecycle: `applicationWillTerminate` waits out the queued clear
+        // behind `if let discord`, so dropping the reference on the disable
+        // path silently skips that wait. Switching Discord off and quitting
+        // immediately then abandons the clear as the process exits, and the
+        // last activity stays on the profile after consent was withdrawn.
+        // This does not prove the drain works — A7c proves `stop()` writes the
+        // clear, and the drain is what gives it time to leave. It proves the
+        // drain still has something to drain.
+        expect(dpOccurrences("discord=nil", in: dpNormalized) == 0,
+            "A16: the disable path keeps the client reference until termination drains its clear "
+                + "(mutation: re-adding `discord = nil` after `stop()` abandons the clear on an "
+                + "off-then-quit, because the drain is guarded on the reference)")
         expect(dpOccurrences("typealias", in: dpNormalized.filter {
             $0.text.contains("DiscordIPCClient")
         }) == 0,
