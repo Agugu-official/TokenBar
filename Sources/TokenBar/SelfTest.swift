@@ -4186,6 +4186,526 @@ enum SelfTest {
                 + "(mutation: dropping the running guard in openConnection reconnects here)")
         close(dpStopPeer)
 
+        // A14 — consent withdrawn while a publish is already queued. `stop()`
+        // flips its flag off-queue precisely because the block it enqueues runs
+        // *after* that publish, and by then the frame has already gone out; the
+        // clear that follows cannot take back what Discord clients and bots may
+        // have observed in between.
+        let (dpConsentLocal, dpConsentPeer) = dpSocketPair()
+        let dpConsentClient = DiscordIPCClient(connect: { dpConsentLocal })
+        dpConsentClient.start()
+        dpConsentClient.drainForTesting()
+        _ = dpRecv(dpConsentPeer)
+        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+            _ = send(dpConsentPeer, raw.baseAddress!, raw.count, 0)
+        }
+        expect(dpWaitUntil { dpConsentClient.inboundTokenForTesting == "ready" },
+            "the consent fixture reached READY (without this nothing would flush and the "
+                + "assertion below could not fail)")
+        let dpConsentGate = DispatchSemaphore(value: 0)
+        dpConsentClient.holdQueueForTesting(until: dpConsentGate)
+        // Nothing has been published on this connection yet, so this one is not
+        // throttled — it would go out the moment the queue moves.
+        dpConsentClient.publish(DiscordPresence.Payload(
+            details: "77K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpConsentClient.stop()
+        dpConsentGate.signal()
+        dpConsentClient.drainForTesting()
+        let dpConsentTail = String(decoding: dpDrainToEOF(dpConsentPeer), as: UTF8.self)
+        expect(!dpConsentTail.contains("77K tokens today"),
+            "A14: a publish already queued when the switch went off never reaches the socket "
+                + "(mutation: flipping consent inside stop()'s queued block publishes it anyway)")
+        expect(dpConsentTail.contains("\"activity\":null"),
+            "A14 control: the clear still goes out, so the assertion above is not passing on a "
+                + "socket that was simply dead")
+        close(dpConsentPeer)
+
+        // A14b — the same withdrawal, but reproducing the ONE ordering
+        // production actually produces. `applyDiscordPresence` is always
+        // `start()` then `publish()` back to back, so every window in which a
+        // publish sits queued has a start block queued ahead of it. A14 above
+        // does not cover that: it publishes without a paired start, and a
+        // client whose `start()` re-arms consent from inside its queued block
+        // passes A14 while re-arming after the user's `stop()` and letting the
+        // publish behind it flush anyway. One line's difference from A14, and
+        // it is the line that decides whether the fix holds where it is used.
+        let (dpPairedLocal, dpPairedPeer) = dpSocketPair()
+        let dpPairedClient = DiscordIPCClient(connect: { dpPairedLocal })
+        dpPairedClient.start()
+        dpPairedClient.drainForTesting()
+        _ = dpRecv(dpPairedPeer)
+        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+            _ = send(dpPairedPeer, raw.baseAddress!, raw.count, 0)
+        }
+        expect(dpWaitUntil { dpPairedClient.inboundTokenForTesting == "ready" },
+            "the paired-call fixture reached READY")
+        let dpPairedGate = DispatchSemaphore(value: 0)
+        dpPairedClient.holdQueueForTesting(until: dpPairedGate)
+        dpPairedClient.start()
+        dpPairedClient.publish(DiscordPresence.Payload(
+            details: "99K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpPairedClient.stop()
+        dpPairedGate.signal()
+        dpPairedClient.drainForTesting()
+        let dpPairedTail = String(decoding: dpDrainToEOF(dpPairedPeer), as: UTF8.self)
+        expect(!dpPairedTail.contains("99K tokens today"),
+            "A14b: a publish queued behind its paired start() never reaches the socket either "
+                + "(mutation: re-arming consent inside start()'s queued block publishes it, and "
+                + "A14 stays green throughout)")
+        expect(dpPairedTail.contains("\"activity\":null"),
+            "A14b control: the clear still goes out")
+        close(dpPairedPeer)
+
+        // A14c — switching the feature off and straight back on while a publish
+        // is still queued. A single consent Bool cannot survive this: `stop()`
+        // clears it, `start()` sets it again, and the publish enqueued before
+        // either of them then flushes with consent nominally granted. What
+        // reaches Discord is a payload computed BEFORE the withdrawal — which
+        // may name a client the user hid in between — and the user's off/on is
+        // exactly the moment they were most explicit about what they wanted.
+        //
+        // The epoch is what a later `start()` cannot undo: the publish carries
+        // the grant it was made under, and `stop()` retired that one.
+        let dpEpochPairs = [dpSocketPair(), dpSocketPair()]
+        let dpEpochIdx = DPCounter()
+        let dpEpochClient = DiscordIPCClient(connect: {
+            let i = min(dpEpochIdx.value, dpEpochPairs.count - 1)
+            dpEpochIdx.value += 1
+            return dpEpochPairs[i].0
+        })
+        dpEpochClient.start()
+        dpEpochClient.drainForTesting()
+        _ = dpRecv(dpEpochPairs[0].1)
+        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+            _ = send(dpEpochPairs[0].1, raw.baseAddress!, raw.count, 0)
+        }
+        expect(dpWaitUntil { dpEpochClient.inboundTokenForTesting == "ready" },
+            "the epoch fixture reached READY")
+        let dpEpochGate = DispatchSemaphore(value: 0)
+        dpEpochClient.holdQueueForTesting(until: dpEpochGate)
+        // Queued under the grant that the stop below retires. Nothing has been
+        // published on this connection, so it is not throttled: it would go out
+        // the moment the queue moves.
+        dpEpochClient.publish(DiscordPresence.Payload(
+            details: "41K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpEpochClient.stop()
+        dpEpochClient.start()
+        dpEpochClient.publish(DiscordPresence.Payload(
+            details: "42K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpEpochGate.signal()
+        dpEpochClient.drainForTesting()
+        let dpEpochOld = String(decoding: dpDrainToEOF(dpEpochPairs[0].1), as: UTF8.self)
+        expect(!dpEpochOld.contains("41K tokens today"),
+            "A14c: a publish made before the switch went off is not re-authorized by switching it "
+                + "back on (mutation: a single consent Bool is set again by start() and this "
+                + "payload — computed before the withdrawal — reaches Discord)")
+        expect(dpEpochOld.contains("\"activity\":null"),
+            "A14c control: the off half still cleared the activity, so the assertion above is not "
+                + "passing on a fixture that never ran the stop")
+        close(dpEpochPairs[0].1)
+        // The on half is a working client, not a casualty of the epoch: the
+        // publish made after it must still arrive.
+        expect(dpWaitUntil { dpEpochIdx.value >= 2 }, "A14c control: the on half reconnected")
+        _ = dpRecv(dpEpochPairs[1].1)
+        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+            _ = send(dpEpochPairs[1].1, raw.baseAddress!, raw.count, 0)
+        }
+        expect(dpFrameArrives(dpEpochPairs[1].1, "42K tokens today", within: 2),
+            "A14c control: the publish made after the switch came back on does arrive — without "
+                + "it, a client that refused everything would satisfy the assertion above")
+        dpEpochClient.stop()
+        dpEpochClient.drainForTesting()
+        close(dpEpochPairs[1].1)
+
+        // A18 — the invariant with no exceptions: after a withdrawal the only
+        // thing this process sends Discord is the clear. A ping that arrived
+        // before the user opted out has its read handler queued ahead of
+        // `stop()`'s block, and answering it is a write to a third party after
+        // consent was withdrawn — small, but it is the difference between a
+        // rule and a rule with a footnote.
+        let (dpPingLocal, dpPingPeer) = dpSocketPair()
+        let dpPingClient = DiscordIPCClient(connect: { dpPingLocal })
+        dpPingClient.start()
+        dpPingClient.drainForTesting()
+        _ = dpRecv(dpPingPeer)
+        let dpPingGate = DispatchSemaphore(value: 0)
+        dpPingClient.holdQueueForTesting(until: dpPingGate)
+        dpFrameBytes(3, "{\"ping\":1}").withUnsafeBytes { raw in
+            _ = send(dpPingPeer, raw.baseAddress!, raw.count, 0)
+        }
+        // Let the read source fire and enqueue its handler while the queue is
+        // parked, so the handler really is ahead of the stop block below.
+        usleep(50_000)
+        dpPingClient.stop()
+        dpPingGate.signal()
+        dpPingClient.drainForTesting()
+        var dpPingTail = dpDrainToEOF(dpPingPeer)
+        var dpPongSeen = false
+        var dpPingClearSeen = false
+        while case .frame(let op, let body) = DiscordIPC.decode(from: &dpPingTail) {
+            if op == .pong { dpPongSeen = true }
+            if String(decoding: body, as: UTF8.self).contains("\"activity\":null") {
+                dpPingClearSeen = true
+            }
+        }
+        expect(!dpPongSeen,
+            "A18: a ping whose handler was queued before the switch went off is not answered "
+                + "(mutation: an ungated writeFrame(.pong,) replies to Discord after opt-out)")
+        expect(dpPingClearSeen,
+            "A18 control: the clear still goes out, so the assertion above is not passing on a "
+                + "fixture where nothing was written at all")
+        close(dpPingPeer)
+
+        // A20 — a reduction retires what was computed before it. The defaults
+        // observer coalesces, so "switch off, hide a client, switch on" can
+        // reach `AppDelegate` as a single apply that only ever sees the final
+        // `true`: no `stop()`, no withdrawal for the transport to see. What is
+        // always visible is the hide itself, so that is what retires the stale
+        // payload — the one still naming the client the user just hid.
+        let (dpStaleLocal, dpStalePeer) = dpSocketPair()
+        let dpStaleClient = DiscordIPCClient(connect: { dpStaleLocal })
+        dpStaleClient.start()
+        dpStaleClient.drainForTesting()
+        _ = dpRecv(dpStalePeer)
+        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+            _ = send(dpStalePeer, raw.baseAddress!, raw.count, 0)
+        }
+        expect(dpWaitUntil { dpStaleClient.inboundTokenForTesting == "ready" },
+            "the stale-payload fixture reached READY")
+        let dpStaleGate = DispatchSemaphore(value: 0)
+        dpStaleClient.holdQueueForTesting(until: dpStaleGate)
+        // Computed while the hidden client was still visible. Nothing has been
+        // published on this connection, so it is not throttled either: it would
+        // go out the moment the queue moves.
+        dpStaleClient.publish(DiscordPresence.Payload(
+            details: "70K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpStaleClient.publish(
+            DiscordPresence.Payload(
+                details: "71K tokens today", state: "Zed · $10-25", largeImageKey: "tokenbar"),
+            visibility: .reducing)
+        dpStaleGate.signal()
+        dpStaleClient.drainForTesting()
+        let dpStaleSeen = dpFramesNow(dpStalePeer)
+        expect(!dpStaleSeen.contains("70K tokens today"),
+            "A20: a payload computed before the hide never reaches the socket "
+                + "(mutation: without the reduction retiring earlier work it is written first, "
+                + "putting the client the user just hid back on the profile)")
+        expect(dpStaleSeen.contains("71K tokens today"),
+            "A20 control: the reduction itself does go out, so the assertion above is not passing "
+                + "on a client that refused both")
+        dpStaleClient.stop()
+        dpStaleClient.drainForTesting()
+        close(dpStalePeer)
+
+        // A19 — a clear that lost its socket is retried on the next connection.
+        // `nil` is a payload here: it is the clear. One `nil` standing for both
+        // "this connection has been given nothing" and "this connection has
+        // been given the clear" makes a fresh connection claim it already holds
+        // it, so the clear is dropped instead of retried — and what stays up is
+        // the activity of the clients the user had just hidden.
+        let dpReclearPairs = [dpSocketPair(), dpSocketPair()]
+        let dpReclearIdx = DPCounter()
+        let dpReclearClient = DiscordIPCClient(connect: {
+            let i = min(dpReclearIdx.value, dpReclearPairs.count - 1)
+            dpReclearIdx.value += 1
+            return dpReclearPairs[i].0
+        })
+        dpReclearClient.reconnectDelay = 0.02
+        dpReclearClient.start()
+        _ = dpWaitUntil { dpReclearClient.isConnectedForTesting }
+        _ = dpRecv(dpReclearPairs[0].1)
+        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+            _ = send(dpReclearPairs[0].1, raw.baseAddress!, raw.count, 0)
+        }
+        expect(dpWaitUntil { dpReclearClient.inboundTokenForTesting == "ready" },
+            "the clear-retry fixture reached READY")
+        dpReclearClient.publish(DiscordPresence.Payload(
+            details: "60K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpReclearClient.drainForTesting()
+        expect(dpFramesNow(dpReclearPairs[0].1).contains("60K tokens today"),
+            "A19 control: the fixture published a real payload first, so there is something on "
+                + "the profile for the clear to have to remove")
+        // Park the queue, put the clear behind it, then break the socket. The
+        // clear's write is attempted against a peer that is already gone, so it
+        // fails and tears the connection down with the clear still pending.
+        let dpReclearGate = DispatchSemaphore(value: 0)
+        dpReclearClient.holdQueueForTesting(until: dpReclearGate)
+        dpReclearClient.publish(nil, visibility: .reducing)
+        close(dpReclearPairs[0].1)
+        dpReclearGate.signal()
+        dpReclearClient.drainForTesting()
+        expect(dpWaitUntil { dpReclearIdx.value >= 2 },
+            "A19 control: the fixture reconnected, so there is a second connection for the clear "
+                + "to be retried on")
+        _ = dpRecv(dpReclearPairs[1].1)
+        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+            _ = send(dpReclearPairs[1].1, raw.baseAddress!, raw.count, 0)
+        }
+        expect(dpFrameArrives(dpReclearPairs[1].1, "\"activity\":null", within: 2),
+            "A19: a clear that lost its socket is retried on the next connection "
+                + "(mutation: one `nil` for both \"nothing delivered yet\" and \"the clear was "
+                + "delivered\" makes the fresh connection treat it as already held and drop it)")
+        dpReclearClient.stop()
+        dpReclearClient.drainForTesting()
+        close(dpReclearPairs[1].1)
+
+        // A17 — switching the feature on and then off before the queue has run
+        // the start. The publish behind it is epoch-gated and carries nothing
+        // out, but a socket and a handshake would still reach Discord after the
+        // user opted out, and the gate's contract — `makeDiscordClient`
+        // returning nil — is that this process may not connect at all.
+        let dpOptOutConnects = DPCounter()
+        let dpOptOutClient = DiscordIPCClient(connect: {
+            dpOptOutConnects.value += 1
+            var fds: [Int32] = [-1, -1]
+            _ = socketpair(AF_UNIX, SOCK_STREAM, 0, &fds)
+            close(fds[1])
+            return fds[0]
+        })
+        let dpOptOutGate = DispatchSemaphore(value: 0)
+        dpOptOutClient.holdQueueForTesting(until: dpOptOutGate)
+        dpOptOutClient.start()
+        dpOptOutClient.publish(DiscordPresence.Payload(
+            details: "51K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpOptOutClient.stop()
+        dpOptOutGate.signal()
+        dpOptOutClient.drainForTesting()
+        expect(dpOptOutConnects.value == 0,
+            "A17: a start queued before the switch went off never opens a socket "
+                + "(mutation: guarding openConnection on the queue-local `running` alone hands "
+                + "Discord a connection and a handshake after the user opted out)")
+        // Without this the assertion above passes on a client that cannot
+        // connect at all, which is every client whose factory never runs.
+        let dpOptInConnects = DPCounter()
+        let dpOptInClient = DiscordIPCClient(connect: {
+            dpOptInConnects.value += 1
+            var fds: [Int32] = [-1, -1]
+            _ = socketpair(AF_UNIX, SOCK_STREAM, 0, &fds)
+            close(fds[1])
+            return fds[0]
+        })
+        let dpOptInGate = DispatchSemaphore(value: 0)
+        dpOptInClient.holdQueueForTesting(until: dpOptInGate)
+        dpOptInClient.start()
+        dpOptInClient.publish(DiscordPresence.Payload(
+            details: "51K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpOptInGate.signal()
+        dpOptInClient.drainForTesting()
+        expect(dpOptInConnects.value == 1,
+            "A17 control: the same fixture without the opt-out does connect")
+        dpOptInClient.stop()
+        dpOptInClient.drainForTesting()
+
+        // A15 — a privacy-reducing update is not throttled. Same client, same
+        // floor, same 15s window; the flag is the only difference between the
+        // control below and the assertion after it.
+        let (dpBypassLocal, dpBypassPeer) = dpSocketPair()
+        let dpBypassClient = DiscordIPCClient(connect: { dpBypassLocal })
+        dpBypassClient.start()
+        dpBypassClient.drainForTesting()
+        _ = dpRecv(dpBypassPeer)
+        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+            _ = send(dpBypassPeer, raw.baseAddress!, raw.count, 0)
+        }
+        expect(dpWaitUntil { dpBypassClient.inboundTokenForTesting == "ready" },
+            "the throttle fixture reached READY")
+        dpBypassClient.publish(DiscordPresence.Payload(
+            details: "10K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+        dpBypassClient.drainForTesting()
+        expect(String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self).contains("10K tokens today"),
+            "the throttle fixture published its first payload and armed the floor")
+        dpBypassClient.publish(DiscordPresence.Payload(
+            details: "11K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+        dpBypassClient.drainForTesting()
+        expect(!String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self).contains("11K"),
+            "A15 control: an ordinary update inside the floor waits (without this the assertion "
+                + "below would pass on a client that never throttles anything)")
+        dpBypassClient.publish(
+            DiscordPresence.Payload(
+                details: "12K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"),
+            visibility: .reducing)
+        dpBypassClient.drainForTesting()
+        expect(String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self).contains("12K tokens today"),
+            "A15: hiding a client republishes immediately instead of waiting out the 15s floor "
+                + "(mutation: dropping the floorBypass grant throttles it like any other sample)")
+        dpBypassClient.stop()
+        dpBypassClient.drainForTesting()
+        close(dpBypassPeer)
+
+        // A15c — the bypass is one shot, and it does not reset the floor's
+        // clock. Hiding EVERY visible client publishes a clear, and a clear
+        // carries no new information, so it does not re-arm the clock on its
+        // way out. An implementation that grants the bypass by clearing
+        // `lastSent` therefore leaves the clock cleared: the unhide a second
+        // later goes out with no floor at all, which is a sub-15s sample of the
+        // user's activity — the exact thing the floor exists to prevent.
+        //
+        // A shortened interval, so "held" and "sent" are distinguishable
+        // without the assertion taking fifteen seconds to make its point.
+        //
+        // Everything between arming the clock and the measurement is read
+        // synchronously, and the windows below are bounded by wall clock rather
+        // than by a turn count. Both because the first version of this was a
+        // timed assertion with an unbounded wait inside it: it polled for the
+        // two intermediate frames with a 400ms ceiling each, which is nothing
+        // on this machine and was over a second on CI — by which point the 1s
+        // floor being measured had already expired and the assertion was
+        // measuring nothing. It passed locally and failed in CI. A poll loop
+        // is unnecessary for a frame the CLIENT writes: `drainForTesting()` is
+        // `queue.sync`, so the bytes are in the socket buffer when it returns.
+        // Poll only for what the peer has to wait on — here, the deferred
+        // flush that fires when the floor expires.
+        func dpFramesNow(_ fd: Int32) -> String {
+            var buf = dpRecvNow(fd)
+            var out = ""
+            while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
+                if op == .frame { out += String(decoding: body, as: UTF8.self) }
+            }
+            return out
+        }
+        func dpFrameArrives(_ fd: Int32, _ needle: String, within seconds: Double) -> Bool {
+            let deadline = DispatchTime.now() + seconds
+            repeat {
+                if dpFramesNow(fd).contains(needle) { return true }
+                usleep(5_000)
+            } while DispatchTime.now() < deadline
+            return false
+        }
+        let (dpOneShotLocal, dpOneShotPeer) = dpSocketPair()
+        let dpOneShotClient = DiscordIPCClient(connect: { dpOneShotLocal })
+        dpOneShotClient.publishInterval = 1.0
+        dpOneShotClient.start()
+        dpOneShotClient.drainForTesting()
+        _ = dpRecv(dpOneShotPeer)
+        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+            _ = send(dpOneShotPeer, raw.baseAddress!, raw.count, 0)
+        }
+        expect(dpWaitUntil { dpOneShotClient.inboundTokenForTesting == "ready" },
+            "the one-shot fixture reached READY")
+        dpOneShotClient.publish(DiscordPresence.Payload(
+            details: "20K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+        dpOneShotClient.drainForTesting()
+        let dpOneShotArmed = DispatchTime.now()
+        expect(dpFramesNow(dpOneShotPeer).contains("20K tokens today"),
+            "the one-shot fixture published a real sample and armed the clock")
+        // Every client hidden: the payload is nil and what goes out is a clear.
+        dpOneShotClient.publish(nil, visibility: .reducing)
+        dpOneShotClient.drainForTesting()
+        expect(dpFramesNow(dpOneShotPeer).contains("\"activity\":null"),
+            "A15c control: the clear itself is not throttled (without this the assertion below "
+                + "would pass on a client that simply never sent the clear)")
+        let dpUnhidden = DiscordPresence.Payload(
+            details: "21K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar")
+        dpOneShotClient.publish(dpUnhidden)
+        dpOneShotClient.drainForTesting()
+        // The fixture has to still be inside the floor for the next assertion to
+        // mean anything. Asserted rather than assumed: a machine slow enough to
+        // spend the whole interval on the two reads above would otherwise turn
+        // the measurement into a vacuous pass instead of a visible failure.
+        let dpOneShotSpent = Double(
+            DispatchTime.now().uptimeNanoseconds - dpOneShotArmed.uptimeNanoseconds) / 1_000_000_000
+        expect(dpOneShotSpent < 0.5,
+            "A15c fixture: the clear and the unhide were published well inside the 1s floor "
+                + "(spent \(String(format: "%.3f", dpOneShotSpent))s — over the interval, the "
+                + "assertion below would pass on a payload that was simply due)")
+        // 300ms: well inside the 1s floor, well over the time a due frame needs.
+        expect(!dpFrameArrives(dpOneShotPeer, "21K tokens today", within: 0.3),
+            "A15c: the unhide that follows a clear still waits out the floor "
+                + "(mutation: granting the bypass by clearing `lastSent` leaves the clock cleared "
+                + "through the clear, and this payload goes out sub-interval)")
+        expect(dpFrameArrives(dpOneShotPeer, "21K tokens today", within: 3),
+            "A15c control: it does arrive once the floor expires, so the assertion above is not "
+                + "passing on a payload that was dropped outright")
+        dpOneShotClient.stop()
+        dpOneShotClient.drainForTesting()
+        close(dpOneShotPeer)
+
+        // A15d — what a superseding publish does to a grant that was never
+        // spent. A `.reducing` publish can still be waiting when the next one
+        // overwrites `pending`: the connection dropped and its replacement has
+        // not finished its handshake, so `flush()` returns at the ready guard
+        // with the grant still armed. What the later payload deserves depends
+        // on what the USER did, and the two answers are opposite — so both are
+        // driven from one fixture that differs by a single argument.
+        //
+        // The reduction is a clear (`nil`), which is the case where the two
+        // come apart: an ordinary sample would still exclude the hidden client
+        // and carry the reduction forward, but an unhide puts it back.
+        func dpSupersede(
+            _ visibility: DiscordIPC.VisibilityChange
+        ) -> (early: Bool, spent: Double, held: Bool) {
+            let pairs = [dpSocketPair(), dpSocketPair()]
+            let idx = DPCounter()
+            let client = DiscordIPCClient(connect: {
+                let i = min(idx.value, pairs.count - 1)
+                idx.value += 1
+                return pairs[i].0
+            })
+            client.publishInterval = 3.0
+            client.reconnectDelay = 0.02
+            client.start()
+            _ = dpWaitUntil { client.isConnectedForTesting }
+            _ = dpFrameBytes(1, dpReadyBody).withUnsafeBytes {
+                send(pairs[0].1, $0.baseAddress, $0.count, 0)
+            }
+            _ = dpWaitUntil { client.inboundTokenForTesting == "ready" }
+            client.publish(DiscordPresence.Payload(
+                details: "30K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+            client.drainForTesting()
+            _ = dpFramesNow(pairs[0].1)
+            let armed = DispatchTime.now()
+            // Break it. The retry lands on the second socket, which is never
+            // made READY, so everything below is held at the ready guard.
+            close(pairs[0].1)
+            _ = dpWaitUntil { idx.value >= 2 }
+            client.publish(nil, visibility: .reducing)
+            client.drainForTesting()
+            client.publish(
+                DiscordPresence.Payload(
+                    details: "31K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"),
+                visibility: visibility)
+            client.drainForTesting()
+            let spent = Double(
+                DispatchTime.now().uptimeNanoseconds - armed.uptimeNanoseconds) / 1_000_000_000
+            // The state the whole fixture claims to be in. If anything reached
+            // the replacement socket before READY, neither publish was held at
+            // the ready guard and the measurement below is about something
+            // else entirely.
+            let beforeReady = dpFramesNow(pairs[1].1)
+            _ = dpFrameBytes(1, dpReadyBody).withUnsafeBytes {
+                send(pairs[1].1, $0.baseAddress, $0.count, 0)
+            }
+            let early = dpFrameArrives(pairs[1].1, "31K tokens today", within: 0.3)
+            client.stop()
+            client.drainForTesting()
+            close(pairs[1].1)
+            return (early, spent, beforeReady.isEmpty)
+        }
+        let dpAfterOrdinary = dpSupersede(DiscordIPC.VisibilityChange.none)
+        let dpAfterUnhide = dpSupersede(.increasing)
+        expect(dpAfterOrdinary.held && dpAfterUnhide.held,
+            "A15d fixture: neither run wrote anything to the replacement socket before READY, so "
+                + "both publishes really were held at the ready guard — which is the only state "
+                + "in which an unspent grant can be superseded at all")
+        expect(max(dpAfterOrdinary.spent, dpAfterUnhide.spent) < 1.5,
+            "A15d fixture: both runs reached the measurement well inside the 3s floor "
+                + "(spent \(String(format: "%.3f", dpAfterOrdinary.spent))s and "
+                + "\(String(format: "%.3f", dpAfterUnhide.spent))s — over the interval, both "
+                + "assertions below would be reporting payloads that were simply due)")
+        expect(dpAfterOrdinary.early,
+            "A15d control: an ordinary sample inherits the unspent bypass — the mechanism this "
+                + "fixture pins, and the half that fails if `.none` is made to clear the grant. "
+                + "Why inheriting is the RIGHT answer is a fact about production and not about "
+                + "this fixture, whose payloads are literals: the one production publish site "
+                + "passes `discordPayload()`, which reads the hidden set live on every call, so "
+                + "a sample that supersedes a pending reduction still embodies it and throttling "
+                + "it would leave a client the user hid on a public profile for the rest of the "
+                + "floor")
+        expect(!dpAfterUnhide.early,
+            "A15d: an unhide takes the bypass with it and waits out the floor "
+                + "(mutation: treating `.increasing` like `.none` lets it inherit a pending "
+                + "reduction's bypass and publish a sample sub-floor)")
+
         // A2 — the two behaviours the previous review found unguarded.
 
         // Superseding a live connection must close the old socket, not leak
@@ -4669,6 +5189,257 @@ enum SelfTest {
             "a restore does not consume the publish interval (mutation: advancing lastSent on a "
                 + "write that carries no new information throttles the next real payload from the "
                 + "restore instead of from the last sample)")
+
+        // MARK: - Discord Rich Presence wiring (DISCORD-PRESENCE M2b)
+        //
+        // M1 built the payload and M2a the transport, both with no caller. This
+        // section covers the only question the wiring adds: can data actually
+        // get out, and under what.
+
+        // A1 (P0) — the demo/test gate, asserted through the production factory
+        // `AppDelegate.applicationDidFinishLaunching` and `applyDiscordPresence`
+        // both call. SelfTest cannot reach the app lifecycle (`run()` returns
+        // `Never` before `NSApplication.shared`), so the gate is a static
+        // function with injectable arguments rather than something buried in a
+        // delegate method — that seam is what makes this assertion possible at
+        // all.
+        //
+        // The control comes first on purpose: without it, every assertion below
+        // would also pass on a factory that refuses everything unconditionally.
+        expect(AppDelegate.makeDiscordClient(arguments: ["TokenBar"], enabled: true) != nil,
+            "A1 control: an ordinary run with the switch on does build a client")
+        expect(AppDelegate.makeDiscordClient(arguments: ["TokenBar"], enabled: false) == nil,
+            "A1 control: the switch off builds nothing")
+        let dpTestFlags = DiscordPresence.testArguments
+        expect(dpTestFlags.sorted() == ["--demo", "--icon-gallery", "--selftest", "--smoke"],
+            "A1: the refused arguments are demo, smoke, selftest and the icon gallery — the last "
+                + "because it is a debug window nobody runs the app to use, yet it enters the "
+                + "normal lifecycle and refreshes the live graph")
+        expect(
+            dpTestFlags.allSatisfy {
+                AppDelegate.makeDiscordClient(
+                    arguments: ["TokenBar", $0, "--open-popover"], enabled: true) == nil
+            },
+            "A1: no demo/smoke/selftest run builds a client, even with the switch forced on "
+                + "(mutation: reading the preference before the flags — or checking the flags at "
+                + "all — publishes fixture numbers onto the user's real Discord profile, which is "
+                + "the one failure this feature cannot take back)")
+        // The same call with a client already in hand: a run that turns out to
+        // be a demo run must refuse an EXISTING connection too, which is what
+        // makes `applyDiscordPresence` stop it rather than keep publishing.
+        let dpLiveClient = DiscordIPCClient(connect: { throw DiscordIPC.Failure.unavailable })
+        expect(
+            dpTestFlags.allSatisfy {
+                AppDelegate.makeDiscordClient(
+                    existing: dpLiveClient, arguments: ["TokenBar", $0], enabled: true) == nil
+            },
+            "A1: a test flag refuses an already-built client as well "
+                + "(mutation: returning `existing` before the gate keeps a live connection alive)")
+        expect(
+            AppDelegate.makeDiscordClient(
+                existing: dpLiveClient, arguments: ["TokenBar"], enabled: true) === dpLiveClient,
+            "A1 control: an ordinary run reuses the client it was given rather than opening a "
+                + "second connection")
+        expect(DiscordPresence.mayConnect(arguments: [], enabled: true),
+            "A1 control: with no arguments the gate is just the preference")
+        expect(!DiscordPresence.mayConnect(arguments: [], enabled: false),
+            "A1 control: with no arguments and the switch off the gate refuses")
+        expect(
+            dpTestFlags.allSatisfy { !DiscordPresence.mayConnect(arguments: [$0], enabled: true) },
+            "A1: the gate function itself puts the flags above the preference")
+
+        // A15b — which visibility change earns the floor bypass. Getting this
+        // backwards is not a missed optimisation: it makes an *unhide* jump the
+        // floor while a hide waits it out, the exact inversion of the point.
+        func dpChange(_ previous: String, _ current: String) -> DiscordIPC.VisibilityChange {
+            AppDelegate.visibilityChange(previousHiddenRaw: previous, hiddenRaw: current)
+        }
+        expect(dpChange("", "amp") == .reducing,
+            "A15b: hiding a client is a privacy reduction")
+        expect(dpChange("amp", "") == .increasing,
+            "A15b: unhiding is the opposite, and is distinguishable from an ordinary sample "
+                + "(mutation: collapsing `.increasing` into `.none` lets an unhide inherit a "
+                + "pending reduction's floor bypass)")
+        expect(dpChange("amp", "amp,zed") == .reducing,
+            "A15b: hiding a second client counts")
+        expect(dpChange("amp,zed", "amp") == .increasing,
+            "A15b: unhiding one of two puts information back")
+        expect(dpChange("amp", "zed") == .reducing,
+            "A15b: hiding one while unhiding another is a reduction — one write of one string "
+                + "carries both, and the content the user removed outranks the sampling rate "
+                + "(mutation: a strict-subset or size test calls this no change and leaves zed "
+                + "named on the profile for the rest of the floor)")
+        expect(dpChange("amp", "amp") == .none,
+            "A15b: no change is neither")
+        expect(dpChange("", "") == .none,
+            "A15b: two empty sets are neither (mutation: returning `.reducing` by default hands "
+                + "every ordinary sample a floor bypass)")
+
+        // A2 — the switch. Read through the authoritative accessor against an
+        // isolated suite, never the process's own defaults.
+        // Fixed, not per-run UUID. `UserDefaults(suiteName:)` creates a
+        // persistent plist unconditionally and NONE of the cleanup calls
+        // delete the file — measured: removing the domain on the instance, on
+        // `.standard`, after clearing the keys, and after setting an empty
+        // persistent domain all leave it behind. A fresh name per run
+        // therefore deposits one more ~/Library/Preferences file every time
+        // the suite runs. One reused name caps it at a single empty file.
+        let dpSuiteName = "TokenBar.SelfTest.Discord"
+        if let dpDefaults = UserDefaults(suiteName: dpSuiteName) {
+            // On `UserDefaults.standard`, not on the suite's own instance:
+            // calling it on the instance leaves the plist behind, so every run
+            // deposited another ~/Library/Preferences file forever.
+            defer { UserDefaults.standard.removePersistentDomain(forName: dpSuiteName) }
+            expect(!DiscordPresence.enabled(defaults: dpDefaults),
+                "A2: an absent key is off")
+            // The mutation this shape exists for. `bool(forKey:)` returns true
+            // here, and the Argument Domain — which the manual acceptance flow
+            // in verification.md uses — stores exactly this: `-tokenbar.<key>
+            // true` lands as the STRING "true", not a Bool.
+            dpDefaults.set("true", forKey: DiscordPresence.enabledKey)
+            expect(!DiscordPresence.enabled(defaults: dpDefaults),
+                "A2: the string \"true\" is not the switch "
+                    + "(mutation: `bool(forKey:)` coerces it and turns the feature on)")
+            // 1, not 2. `as? Bool` bridges NSNumber, so the integer that
+            // actually slips through is the one equal to true — picking 2 here
+            // meant the assertion passed on an accessor that accepted 1.
+            dpDefaults.set(1, forKey: DiscordPresence.enabledKey)
+            expect(!DiscordPresence.enabled(defaults: dpDefaults),
+                "A2: the integer 1 is not the switch (mutation: `as? Bool` alone bridges it to "
+                    + "true, and only a CFBoolean check rejects it)")
+            dpDefaults.set(1.0, forKey: DiscordPresence.enabledKey)
+            expect(!DiscordPresence.enabled(defaults: dpDefaults),
+                "A2: the double 1.0 is not the switch either")
+            dpDefaults.set(2, forKey: DiscordPresence.enabledKey)
+            expect(!DiscordPresence.enabled(defaults: dpDefaults),
+                "A2: a non-boolean number is not the switch")
+            dpDefaults.set(["on"], forKey: DiscordPresence.enabledKey)
+            expect(!DiscordPresence.enabled(defaults: dpDefaults),
+                "A2: a wholly wrong type is not the switch")
+            dpDefaults.set(true, forKey: DiscordPresence.enabledKey)
+            expect(DiscordPresence.enabled(defaults: dpDefaults),
+                "A2 control: a real Bool true is the switch (without this the four assertions "
+                    + "above would pass on an accessor that always returns false)")
+            dpDefaults.set(false, forKey: DiscordPresence.enabledKey)
+            expect(!DiscordPresence.enabled(defaults: dpDefaults),
+                "A2: an explicit false is off")
+        } else {
+            expect(false, "A2: the isolated defaults suite could not be created")
+        }
+
+        // A2b and the structural half of A1. Both are claims about the SHAPE of
+        // the source — "declared in exactly one place", "constructed in exactly
+        // one place" — which no runtime value can express: a second
+        // `@AppStorage` default is invisible until the day it disagrees. So the
+        // tree this binary was built from is read directly, via this file's own
+        // compile-time path.
+        func dpSourceFiles() -> [(name: String, text: String)] {
+            let root = URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()  // Sources/TokenBar
+                .deletingLastPathComponent()  // Sources
+            guard let walk = FileManager.default.enumerator(
+                at: root, includingPropertiesForKeys: nil) else { return [] }
+            var out: [(name: String, text: String)] = []
+            for case let url as URL in walk where url.pathExtension == "swift" {
+                // This file is excluded: it quotes the very strings it counts.
+                guard url.path != #filePath,
+                      let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+                out.append((url.lastPathComponent, text))
+            }
+            return out
+        }
+        func dpOccurrences(_ needle: String, in files: [(name: String, text: String)]) -> Int {
+            files.reduce(0) { $0 + $1.text.components(separatedBy: needle).count - 1 }
+        }
+        let dpSources = dpSourceFiles()
+        expect(dpSources.count > 20 && dpSources.contains { $0.name == "DiscordPresence.swift" },
+            "the source scan found the tree this binary was built from (without this every "
+                + "structural assertion below would pass on an empty list)")
+        // Occurrences, not files: counting files let a second declaration in
+        // the SAME file through, which is the easier mistake of the two.
+        let dpStorageSites = dpSources.filter {
+            $0.text.contains("@AppStorage(DiscordPresence.enabledKey)")
+        }
+        expect(
+            dpOccurrences("@AppStorage(DiscordPresence.enabledKey)", in: dpSources) == 1
+                && dpStorageSites.first?.name == "SettingsPanel.swift",
+            "A2b: exactly one view declares the switch, so no second `@AppStorage` default can "
+                + "disagree with the accessor (mutation: adding a second declaration anywhere — "
+                + "the trap `tokenbar.limits.enabled` already fell into — fails here)")
+        expect(dpOccurrences("\"\(DiscordPresence.enabledKey)\"", in: dpSources) == 1,
+            "A2b: the key string is written once, in `DiscordPresence.enabledKey` "
+                + "(mutation: a hard-coded copy of the key evades the check above)")
+        // Whitespace-normalized, and covering `.init` and an alias of the type,
+        // because `PresenceClient.init(connect : ...)` compiles and matched
+        // none of the literal forms. A source scan can always be evaded by
+        // someone trying; what it has to survive is an ordinary refactor.
+        let dpNormalized = dpSources.map {
+            (name: $0.name, text: $0.text.filter { !$0.isWhitespace })
+        }
+        let dpCtorForms = ["DiscordIPCClient(connect:", "DiscordIPCClient.init(connect:"]
+        expect(
+            dpCtorForms.reduce(0) { $0 + dpOccurrences($1, in: dpNormalized) } == 1,
+            "A1: exactly one production site constructs a client, and it is the gated factory "
+                + "(mutation: constructing one anywhere else — including via `.init` — bypasses "
+                + "the demo/test gate)")
+        // A16 — structural, because the behaviour it guards needs a real app
+        // lifecycle: `applicationWillTerminate` waits out the queued clear
+        // behind `if let discord`, so dropping the reference on the disable
+        // path silently skips that wait. Switching Discord off and quitting
+        // immediately then abandons the clear as the process exits, and the
+        // last activity stays on the profile after consent was withdrawn.
+        // This does not prove the drain works — A7c proves `stop()` writes the
+        // clear, and the drain is what gives it time to leave. It proves the
+        // drain still has something to drain.
+        expect(dpOccurrences("discord=nil", in: dpNormalized) == 0,
+            "A16: the disable path keeps the client reference until termination drains its clear "
+                + "(mutation: re-adding `discord = nil` after `stop()` abandons the clear on an "
+                + "off-then-quit, because the drain is guarded on the reference)")
+        expect(dpOccurrences("typealias", in: dpNormalized.filter {
+            $0.text.contains("DiscordIPCClient")
+        }) == 0,
+            "A1: the client type is not aliased, so the construction scan above cannot be "
+                + "sidestepped by giving it another name")
+        expect(!dpNormalized.contains { $0.text.contains("makeDiscordClient(arguments:") },
+            "A1: no production call site substitutes its own arguments for the process's "
+                + "(mutation: passing a curated array turns the gate into a formality)")
+        // M6's gap: the wiring layer's choice of hidden set had no assertion at
+        // all, and the payload fixtures cannot see it — they are handed a set.
+        // `quotaExcludedClients()` and `hiddenLimitsClients()` are different
+        // sets with different meanings; only tab-hidden belongs here.
+        let dpDelegate = dpNormalized.first { $0.name == "AppDelegate.swift" }
+        expect(dpDelegate?.text.contains("hidden:ClientRegistry.hiddenClients()") == true
+            && dpDelegate?.text.contains("hidden:ClientRegistry.quotaExcludedClients()") == false
+            && dpDelegate?.text.contains("hidden:ClientRegistry.hiddenLimitsClients()") == false,
+            "A1: the published payload excludes the tab-hidden clients and no other set "
+                + "(mutation: swapping in quotaExcludedClients publishes a different total and "
+                + "a different top client, and every payload fixture stays green)")
+
+        // A8 — Discord absent. The common case, not an error: the connect
+        // closure fails the way `connectToDiscord` does when there is no socket
+        // to reach. Injected rather than real, because a selftest must not open
+        // a connection to whatever Discord happens to be running on the
+        // machine running it.
+        let dpAbsentAttempts = DPCounter()
+        let dpAbsentClient = DiscordIPCClient(connect: {
+            dpAbsentAttempts.value += 1
+            throw DiscordIPC.Failure.unavailable
+        })
+        dpAbsentClient.reconnectDelay = 0.01
+        let dpAbsentBegan = DispatchTime.now()
+        dpAbsentClient.start()
+        dpAbsentClient.publish(DiscordPresence.Payload(
+            details: "12K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+        let dpAbsentBlocked = Double(
+            DispatchTime.now().uptimeNanoseconds - dpAbsentBegan.uptimeNanoseconds) / 1_000_000_000
+        _ = dpWaitUntil { dpAbsentAttempts.value > DiscordIPCClient.maxReconnectAttempts }
+        let dpAbsentConnected = dpAbsentClient.isConnectedForTesting
+        dpAbsentClient.stop()
+        dpAbsentClient.drainForTesting()
+        expect(dpAbsentBlocked < 0.05 && !dpAbsentConnected && dpAbsentAttempts.value > 1,
+            "A8: with Discord absent the caller is never blocked, nothing connects, and the app "
+                + "keeps running (mutation: making start()/publish() synchronous parks the main "
+                + "actor behind a socket that is not there)")
 
         if failures > 0 {
             print("\(failures) selftest check(s) failed")

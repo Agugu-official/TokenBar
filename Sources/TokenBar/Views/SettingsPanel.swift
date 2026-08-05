@@ -63,6 +63,12 @@ struct SettingsPanel: View {
     @AppStorage("tokenbar.trace.detailed") private var detailedTrace = false
     @AppStorage("tokenbar.refresh.intervalMin") private var refreshIntervalMin = 30
     @AppStorage(AppLanguage.storageKey) private var languageRaw = AppLanguage.system.rawValue
+    /// The ONLY binding of this key in the app, and the only place other than
+    /// `DiscordPresence.enabled()` where its default appears. A second
+    /// declaration that said `true` would read as "already on" after an
+    /// upgrade — this repo has precedent (`tokenbar.limits.enabled` declares
+    /// its default in two views).
+    @AppStorage(DiscordPresence.enabledKey) private var discordEnabled = false
     @State private var showLanguageRestartPrompt = false
     /// 0 = auto (≈60% of the screen). The popover's drag handle writes the
     /// same key, so the two stay in sync.
@@ -563,6 +569,16 @@ struct SettingsPanel: View {
                     (String($0), $0 == 60 ? "Every hour" : "Every %lld min".localized($0))
                 })
             hint("How often the tray re-reads your logs. The dashboard refreshes when the popover opens; live tokens/min updates every few seconds regardless.")
+        }
+
+        section("Discord") {
+            toggleRow("Show today's usage on Discord", isOn: $discordEnabled)
+            // Consent copy, not a feature blurb. It has to say what leaves the
+            // machine, who ends up seeing it, and that switching back off does
+            // not undo it — the reference implementation ships "Show today's
+            // tokens, cost, and most-used AI tool in your Discord activity",
+            // which describes the display and hides the disclosure.
+            hint("Off by default. When on, TokenBar sends today's total tokens, a cost range, and the name of your most-used visible client to the Discord app on this Mac, and Discord publishes them on your profile. Anyone who can see your profile — friends and their bots included — can read every update and keep it indefinitely; switching this off stops future updates but cannot take back what was already shared. It also updates while you work, so your active hours are visible too. Hidden clients are never included.")
         }
 
         section("Language") {

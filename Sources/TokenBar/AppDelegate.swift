@@ -32,6 +32,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // then — never on the flood of unrelated writes. Same value-gating
     // discipline as refreshIntervalMin, to avoid the CPU-regression storm.
     private var lastHiddenRaw = UserDefaults.standard.string(forKey: ClientRegistry.tabHiddenKey) ?? ""
+    // The Discord presence client, or nil whenever this process may not connect
+    // (switched off, or a demo/test run). Only makeDiscordClient creates it.
+    private var discord: DiscordIPCClient?
+    // Value gate for the opt-in switch, same discipline as lastHiddenRaw:
+    // didChangeNotification carries no key and fires for every write.
+    private var lastDiscordEnabled = false
 
     private static func readIntervalMin() -> Int {
         max(1, UserDefaults.standard.object(forKey: intervalKey).flatMap { $0 as? Int } ?? 30)
@@ -95,6 +101,91 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 IconGalleryWindowController.show()
             }
         }
+
+        lastDiscordEnabled = DiscordPresence.enabled()
+        applyDiscordPresence()
+    }
+
+    /// The one place a Discord connection can come into existence, and
+    /// therefore the one place the demo/test gate has to hold. `nil` means this
+    /// process may not connect at all — a caller that gets `nil` must not build
+    /// a client of its own.
+    ///
+    /// Static and injectable because `SelfTest.run()` returns `Never` before
+    /// `NSApplication.shared` exists: the P0 assertion ("a demo run does not
+    /// connect, even with the preference forced on") has to be able to call the
+    /// real production gate without an app lifecycle.
+    nonisolated static func makeDiscordClient(
+        existing: DiscordIPCClient? = nil,
+        arguments: [String] = CommandLine.arguments,
+        enabled: Bool = DiscordPresence.enabled()
+    ) -> DiscordIPCClient? {
+        guard DiscordPresence.mayConnect(arguments: arguments, enabled: enabled) else { return nil }
+        return existing ?? DiscordIPCClient(connect: DiscordIPC.connectToDiscord)
+    }
+
+    /// How one write of the tab-hidden preference changed what may be
+    /// published: something newly hidden, something put back, or neither.
+    ///
+    /// Set membership, not size. Hiding one client while unhiding another is a
+    /// single write of one comma-separated string, and a subset or count test
+    /// reads that as no change at all — leaving the newly hidden client named
+    /// on a public profile for the rest of the publish floor. What matters is
+    /// which direction the membership moved, and a write can move both.
+    ///
+    /// A write that does both is `.reducing`. The content the user removed
+    /// outranks the sampling rate: publishing it late is a client they hid
+    /// still visible to everyone, publishing the other one early is a sample
+    /// of activity they had already consented to publish.
+    nonisolated static func visibilityChange(
+        previousHiddenRaw: String, hiddenRaw: String
+    ) -> DiscordIPC.VisibilityChange {
+        let previous = ClientRegistry.parseIdSet(previousHiddenRaw)
+        let current = ClientRegistry.parseIdSet(hiddenRaw)
+        if !current.isSubset(of: previous) { return .reducing }
+        if !previous.isSubset(of: current) { return .increasing }
+        return .none
+    }
+
+    /// Reconcile the presence with the current preferences and the cached
+    /// graph. Start, stop and publish all run through here so there is a single
+    /// gated path, and every call site is just a trigger.
+    private func applyDiscordPresence(visibility: DiscordIPC.VisibilityChange = .none) {
+        guard let client = AppDelegate.makeDiscordClient(existing: discord) else {
+            // Switched off, or a demo/test run. `stop()` clears the activity on
+            // Discord's side before closing, so a client that existed a moment
+            // ago does not leave its last payload on the profile.
+            //
+            // The reference is deliberately NOT dropped here. `stop()` only
+            // *queues* the clear, and `applicationWillTerminate`'s bounded
+            // drain is guarded on this being non-nil — so nil-ing it means
+            // switching Discord off and immediately quitting abandons the clear
+            // as the process exits, and the last activity stays on the profile
+            // after consent was withdrawn. A stopped client costs a closed
+            // socket's worth of nothing, and re-enabling reuses it: the gate in
+            // `makeDiscordClient` is what decides whether it may run, never the
+            // presence of the object.
+            discord?.stop()
+            return
+        }
+        discord = client
+        client.start()
+        client.publish(discordPayload(), visibility: visibility)
+    }
+
+    /// What would be published right now: today's figures from the last good
+    /// graph, with the tab-hidden clients excluded.
+    ///
+    /// `hiddenClients()` and deliberately not `quotaExcludedClients()` or
+    /// `hiddenLimitsClients()` — those are different sets, and this one is what
+    /// `trayTotals` folds the very same stripes with. Nothing is published
+    /// before the first graph arrives.
+    private func discordPayload() -> DiscordPresence.Payload? {
+        guard let lastGraph else { return nil }
+        return DiscordPresence.payload(
+            graph: lastGraph,
+            hidden: ClientRegistry.hiddenClients(),
+            today: Format.todayKey())
     }
 
     private func scheduleDefaultsApply() {
@@ -116,9 +207,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // cannot recompute from its cached rate. Value-gate the extra fetch.
             let hiddenRaw = UserDefaults.standard.string(
                 forKey: ClientRegistry.tabHiddenKey) ?? ""
-            if hiddenRaw != self.lastHiddenRaw {
+            let previousHiddenRaw = self.lastHiddenRaw
+            let hiddenChanged = hiddenRaw != self.lastHiddenRaw
+            if hiddenChanged {
                 self.lastHiddenRaw = hiddenRaw
                 self.refreshFilteredRate()
+            }
+
+            // Hiding a client has to leave the published presence in the SAME
+            // turn — waiting for the next refresh cycle would keep that client
+            // on a public profile for up to five minutes. Value-gated on the
+            // same two raw values so an unrelated write does not re-publish.
+            let discordEnabled = DiscordPresence.enabled()
+            if hiddenChanged || discordEnabled != self.lastDiscordEnabled {
+                // Newly hiding a client means the user took something off the
+                // profile, and that update must not queue behind the publish
+                // floor — the Settings copy promises hidden clients are never
+                // included, and fifteen seconds of still naming one makes that
+                // promise false for as long as it waits. Unhiding puts
+                // information back and is throttled like any other sample.
+                let change = AppDelegate.visibilityChange(
+                    previousHiddenRaw: previousHiddenRaw, hiddenRaw: hiddenRaw)
+                self.lastDiscordEnabled = discordEnabled
+                self.applyDiscordPresence(visibility: change)
             }
         }
     }
@@ -145,6 +256,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the menu-bar item down cleanly (avoids the ~40s RunningBoard
         // "waiting on exit context" stall seen on the 2026-06-16 quit).
         statusController?.tearDown()
+        if let discord {
+            discord.stop()
+            // Waited on, not fired and forgotten: `stop()` queues the activity
+            // clear on the client's serial queue, and the process is gone
+            // moments after this method returns. Whether Discord reliably drops
+            // an activity when the socket just closes is unverified, so the
+            // clear is the mechanism and the close is the backstop, not the
+            // other way round.
+            //
+            // The wait is bounded on THIS side rather than trusting the
+            // client's own socket timeouts. `drainForTesting` is `queue.sync`,
+            // which waits for whatever that serial queue is already doing —
+            // possibly a `recv` or `send` sitting on its 2s timeout — and has
+            // no ceiling of its own. Quit is the wrong place to inherit
+            // someone else's worst case: the ~40s RunningBoard stall handled
+            // just below is what that looks like to a user. A local sub-KiB
+            // frame needs single-digit milliseconds, so 300ms is generous for
+            // the clear and cheap when Discord is gone.
+            //
+            // The name says "ForTesting" because the selftest is its other
+            // caller. This use is not a test; do not delete it as one.
+            let cleared = DispatchSemaphore(value: 0)
+            DispatchQueue.global(qos: .userInitiated).async {
+                discord.drainForTesting()
+                cleared.signal()
+            }
+            _ = cleared.wait(timeout: .now() + 0.3)
+        }
+
     }
 
     /// Re-derive every menu-bar surface from the cached data and the current
@@ -220,6 +360,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 guard !Task.isCancelled else { break }
                 self.applyMenuBarState()
+                // Republish on the same cadence the tray title refreshes on.
+                // The client coalesces an unchanged payload, so a cycle that
+                // moved no numbers costs nothing on the wire.
+                self.applyDiscordPresence()
                 // Wake at least as often as the force interval (so a short
                 // interval is honored) but never sleep longer than the 5-min
                 // cached-refresh cap (so graph titles don't lag a long interval).

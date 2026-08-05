@@ -55,6 +55,7 @@ The release workflow is tag-driven. It validates and bundles the native app, pro
 | `appcast.xml` | `scripts/make_appcast.sh` and generated feed | XML parses, old items remain, channel semantics are correct |
 | Homebrew cask | Release workflow generator plus tap repository | Version, URL, checksum, and style match the published asset |
 | Install count | `update-install-count.yml` | Orphan badge branch contains the current filtered asset count |
+| Discord presence artwork | Discord Developer Portal (manual, outside this repo) | Before tagging: the application's asset key matches `DiscordPresence.largeImageKey` exactly, lowercase, and still exists. Asset keys cannot be edited after saving and an unresolved key does not error — the image just disappears — so a rename adds the new key and keeps the old one |
 
 > **授權邊界：** 發版是不可逆的公開狀態變更。除非使用者明確要求，不能自行 tag、push appcast、改 Release body、更新 cask 或發佈 asset。
 

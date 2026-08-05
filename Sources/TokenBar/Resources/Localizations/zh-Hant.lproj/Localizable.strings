@@ -193,6 +193,7 @@
 "Popover size" = "視窗尺寸";
 "Data refresh" = "資料更新";
 "Language" = "語言";
+"Discord" = "Discord";
 "About" = "關於";
 "Menu bar" = "選單列";
 "Dashboard" = "儀表板";
@@ -213,6 +214,8 @@
 "Check for updates" = "檢查更新";
 "Check Now" = "立即檢查";
 "Receive beta updates" = "接收 beta 版更新";
+"Show today's usage on Discord" = "在 Discord 顯示今日用量";
+"Off by default. When on, TokenBar sends today's total tokens, a cost range, and the name of your most-used visible client to the Discord app on this Mac, and Discord publishes them on your profile. Anyone who can see your profile — friends and their bots included — can read every update and keep it indefinitely; switching this off stops future updates but cannot take back what was already shared. It also updates while you work, so your active hours are visible too. Hidden clients are never included." = "預設關閉。開啟後，TokenBar 會把今日 token 總量、成本級距，以及用量最高的可見用戶端名稱送給這台 Mac 上的 Discord，再由 Discord 公開顯示在你的個人檔案上。任何看得到你個人檔案的人（包含好友與他們的機器人）都能讀取每一次更新並無限期保存；之後關閉只會停止後續更新，無法收回已經送出的內容。它也會在你工作時持續更新，因此你的活動時段同樣會曝光。已隱藏的用戶端一律不會送出。";
 "Live preview — settings apply immediately." = "即時預覽，設定會立即套用。";
 "Takes effect the next time TokenBar starts." = "下次啟動 TokenBar 時生效。";
 "Restart TokenBar?" = "重新啟動 TokenBar？";

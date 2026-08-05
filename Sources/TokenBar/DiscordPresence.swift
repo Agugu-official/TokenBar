@@ -45,7 +45,76 @@ enum DiscordPresence {
 
     /// Shown instead of an unregistered client id.
     static let neutralClientLabel = "an AI tool"
+
+    /// Discord asset key. **Renaming this is an add, never a replace.**
+    ///
+    /// An asset key cannot be edited once saved in the Developer Portal — the
+    /// only way to "rename" one is to delete it and upload again under the new
+    /// key. And a key Discord cannot resolve does not error: the image simply
+    /// does not appear. So deleting `tokenbar` in favour of a new name would
+    /// silently strip the image from the presence of every user still on a
+    /// build that asks for the old one, with nothing anywhere reporting it.
+    ///
+    /// The correct move at a product rename is to upload the new key and keep
+    /// this one forever: an application has 300 asset slots and currently uses
+    /// one, so carrying both costs nothing and needs no coordination with the
+    /// release.
+    ///
+    /// This warning exists in exactly one place upstream — a line of small
+    /// print next to the Portal's upload field — and nowhere in this repo. It
+    /// is written here rather than in `docs/` because the declaration is what
+    /// the person doing the rename will actually have open.
     static let largeImageKey = "tokenbar"
+
+    /// The opt-in switch. Default-off.
+    static let enabledKey = "tokenbar.discord.enabled"
+
+    /// The arguments under which this process must never connect, whatever the
+    /// preferences say. `--demo` serves fixture numbers
+    /// (`UsageDataSources.make`), and `--smoke`/`--selftest` never reach the
+    /// app lifecycle at all (`main.swift`).
+    /// `--icon-gallery` is in here and `--settings`/`--open-popover` are not,
+    /// and the line is drawn at "is this a mode a user runs". The gallery is a
+    /// debug window for checking brand art; nobody launches it to use the app,
+    /// yet it enters the normal lifecycle and refreshes the live graph, so a
+    /// maintainer with the switch already on would publish their real usage
+    /// from an asset check. The other two open real UI on real data — that is
+    /// a real run of the app and it should behave like one.
+    static let testArguments = ["--demo", "--smoke", "--selftest", "--icon-gallery"]
+
+    /// The single authoritative read of the opt-in switch. Everything that
+    /// decides whether to connect goes through here; the SwiftUI toggle only
+    /// binds `enabledKey`.
+    ///
+    /// Explicit `object(forKey:) as? Bool`, not `bool(forKey:)`: the latter
+    /// coerces a string `"true"` into true, and returns false for a missing key
+    /// through the same path it returns false for an explicit off, so it cannot
+    /// tell "absent" from "switched off". Publishing to a third party has to
+    /// require a real Bool the user actually wrote.
+    static func enabled(defaults: UserDefaults = .standard) -> Bool {
+        // `as? Bool` alone is not enough: `NSNumber` bridges, so an integer 1
+        // or a double 1.0 sitting in this key would read as "on". Nothing this
+        // app writes produces that, but "an explicit Bool the user wrote" is
+        // the contract, and a type check that accepts three other types is not
+        // that contract. Only a real CFBoolean counts.
+        guard let stored = defaults.object(forKey: enabledKey) as? NSNumber,
+              CFGetTypeID(stored) == CFBooleanGetTypeID()
+        else { return false }
+        return stored.boolValue
+    }
+
+    /// The one place that decides whether this process may ever connect.
+    ///
+    /// Test flags outrank the preference, and that order is the whole point:
+    /// `docs/knowledge/verification.md`'s manual flow sets preferences straight
+    /// from the command line (`-tokenbar.<key> <value>`) on the same machine and
+    /// the same defaults domain as the user's real app, so a demo run whose
+    /// defaults say "on" must still stay silent. Fixture numbers on a real
+    /// Discord profile is the one failure this feature cannot take back.
+    static func mayConnect(arguments: [String], enabled: Bool) -> Bool {
+        guard !arguments.contains(where: testArguments.contains) else { return false }
+        return enabled
+    }
 
     /// Fixed allowlist: a registered id gets its registry display name, anything
     /// else gets the neutral constant.
