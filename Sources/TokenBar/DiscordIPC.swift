@@ -11,9 +11,20 @@ import Foundation
 /// here is hermetically testable, while "can it leak" only becomes answerable
 /// once there is a switch to flip.
 ///
-/// `DiscordPresence.Payload.fields` is the published surface. This file may
-/// rename a key on the way out (Discord nests the asset key as
-/// `assets.large_image`); it may not add a field, drop one, or alter a value.
+/// `DiscordPresence.Payload.fields` is the payload-derived published surface.
+/// This file may rename a key on the way out (Discord nests the asset key as
+/// `assets.large_image`); it may not drop a field or alter a value.
+///
+/// It adds exactly four leaves of its own, and every one is independent of the
+/// user: the pid, a bare UUID nonce, and the label and URL of a single button
+/// linking to this project's repository. The button is here rather than in
+/// `fields` on purpose — a value inside `fields` is admitted by the wire
+/// assertion's own expected value, and a compile-time constant has no input for
+/// the value scans to poison, so a URL that later grew a query parameter would
+/// pass every payload check. Carried here it is pinned by literal assertions
+/// instead. Adding a FIFTH leaf, or making any of these four depend on the
+/// machine, is the thing this sentence exists to forbid.
+///
 /// `leafStrings(_:)` exists so that contract is asserted against the actual
 /// serialized bytes rather than a hand-maintained list.
 enum DiscordIPC {
