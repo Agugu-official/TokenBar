@@ -3600,7 +3600,7 @@ enum SelfTest {
             dpToday, 1_200_000, 6.0,
             dpStripe("claude", 1_000_000, 5.0) + "," + dpStripe("codex", 200_000, 1.0))))
         let dpHidden = DiscordPresence.payload(
-            graph: dpHiddenGraph, hidden: ["claude"], today: dpToday)
+            graph: dpHiddenGraph, hidden: ["claude"], today: dpToday, costStyle: .banded)
         expect(dpHidden?.details == "200K tokens today",
             "discord payload tokens exclude the hidden client (mutation: reading the day-level "
                 + "totals publishes 1.2M)")
@@ -3621,7 +3621,7 @@ enum SelfTest {
                 + "," + dpStripe("SECRET_HIDDEN", 900_000, 9.0,
                     model: "SECRET_MODEL2", provider: "SECRET_PROVIDER2"))))
         let dpSecret = DiscordPresence.payload(
-            graph: dpSecretGraph, hidden: ["SECRET_HIDDEN"], today: dpToday)
+            graph: dpSecretGraph, hidden: ["SECRET_HIDDEN"], today: dpToday, costStyle: .banded)
         let dpSecretText = (dpSecret?.fields.values ?? [:].values).joined(separator: "|")
         expect(dpSecret != nil && !dpSecretText.contains("SECRET_"),
             "discord payload redacts an unregistered client id (mutation: using "
@@ -3652,7 +3652,8 @@ enum SelfTest {
         // the raw token count nor cent-precision cost.
         let dpGrainGraph = dpGraph(dpPayload(dpDay(
             dpToday, 1_234_567, 7.89, dpStripe("claude", 1_234_567, 7.89))))
-        let dpGrain = DiscordPresence.payload(graph: dpGrainGraph, hidden: [], today: dpToday)
+        let dpGrain = DiscordPresence.payload(
+            graph: dpGrainGraph, hidden: [], today: dpToday, costStyle: .banded)
         let dpGrainText = (dpGrain?.fields.values ?? [:].values).joined(separator: "|")
         expect(dpGrain?.details == "1.2M tokens today",
             "discord tokens publish as a compact string (mutation: String(todayTokens) fails here)")
@@ -3660,14 +3661,106 @@ enum SelfTest {
             "discord payload never carries the raw token count")
         expect(dpGrain != nil && !dpGrainText.contains("7.89"),
             "discord payload never carries cent-precision cost (mutation: Format.usd fails here)")
-        expect(dpGrain?.state.hasSuffix("$5-10") == true, "cost publishes as a coarse band")
+        expect(dpGrain?.state.hasSuffix("<$10") == true, "cost publishes as a coarse band")
+
+        // A21 — the band table, by equality on every boundary. Not "returns a
+        // finite band": every band string is finite, so that phrasing passes on
+        // an implementation that hands a zero-cost day to the top band.
+        let dpBands: [(Double, String)] = [
+            (-1, "<$10"), (0, "<$10"), (9.99, "<$10"),
+            (10, "$10-50"), (49.99, "$10-50"),
+            (50, "$50-100"), (99.99, "$50-100"),
+            (100, "$100-250"), (249.99, "$100-250"),
+            (250, "$250-500"), (499.99, "$250-500"),
+            (500, "$500-1000"), (999.99, "$500-1000"),
+            (1000, "$1000+"), (1e6, "$1000+"),
+        ]
+        for (cost, band) in dpBands {
+            expect(DiscordPresence.costBucket(cost) == band,
+                "A21: cost \(cost) bands as \(band) "
+                    + "(mutation: shifting a bound, or flipping a bound to exclusive, fails here)")
+        }
+        expect(DiscordPresence.costBucket(.nan) == "<$10"
+            && DiscordPresence.costBucket(.infinity) == "<$10",
+            "A21: a non-finite cost bands as the LOWEST band "
+                + "(mutation: dropping the isFinite guard sends it to the default arm, which "
+                + "publishes the top band for a value that means nothing)")
+
+        // A22 — whole-dollar mode is total. These are the inputs that abort the
+        // process rather than failing: `Int(.infinity)` and `Int(1e308)` both
+        // trap, and a trap prints no FAIL line and reaches no verdict — the run
+        // just disappears. So the assertion has to be reachable past the
+        // conversion at all.
+        let dpDollars: [(Double, String)] = [
+            (.nan, "$0"), (.infinity, "$0"), (-.infinity, "$0"),
+            (-5, "$0"), (0, "$0"), (0.4, "$0"), (0.5, "$1"),
+            (7.89, "$8"), (1500.2, "$1500"),
+            (999_999.4, "$999999"),
+            // The boundary the cap is judged at. Before the rounding moved
+            // ahead of the comparison these rendered a bare `$1000000`.
+            (999_999.5, "$1000000+"), (1e6.nextDown, "$1000000+"),
+            (1e6, "$1000000+"), (1e308, "$1000000+"),
+        ]
+        for (cost, text) in dpDollars {
+            expect(DiscordPresence.wholeDollars(cost) == text,
+                "A22: cost \(cost) renders as \(text) "
+                    + "(mutation: `\"$\" + Int(max(0, cost).rounded())` traps here rather than "
+                    + "failing, because max() folds only NaN and -infinity)")
+        }
+
+        // A23 — the two modes disagree on the same fixture, which is the only
+        // thing that makes either assertion able to fail. An earlier draft
+        // checked "banded contains no 7.89" and "whole dollars contains no
+        // '.'" — both true of BOTH modes, so a build that ignored the
+        // parameter passed both.
+        let dpModeGraph = dpGraph(dpPayload(dpDay(
+            dpToday, 12_000, 7.89, dpStripe("claude", 12_000, 7.89))))
+        let dpBanded = DiscordPresence.payload(
+            graph: dpModeGraph, hidden: [], today: dpToday, costStyle: .banded)
+        let dpExact = DiscordPresence.payload(
+            graph: dpModeGraph, hidden: [], today: dpToday, costStyle: .wholeDollars)
+        expect(dpBanded?.state == "Claude Code · <$10",
+            "A23: the banded parameter publishes the band "
+                + "(mutation: ignoring costStyle and always rendering whole dollars fails here)")
+        expect(dpExact?.state == "Claude Code · $8",
+            "A23: the whole-dollar parameter publishes the rounded figure "
+                + "(mutation: ignoring costStyle and always rendering the band fails here)")
+        expect(dpBanded?.state != dpExact?.state,
+            "A23 control: the two modes actually differ on this fixture — without that neither "
+                + "assertion above could fail")
+        expect(dpBanded.map { !$0.fields.values.joined().contains("7.89") } ?? false,
+            "A23: cents never reach the payload in banded mode")
+        expect(dpExact.map { !$0.fields.values.joined().contains("7.89") } ?? false,
+            "A23: cents never reach the payload in whole-dollar mode either — rounding is to "
+                + "the dollar, and a fractional daily figure is what makes a month of them a "
+                + "fingerprint")
+
+        // A24 — the cost switch is read as strictly as the on/off switch, and
+        // reducing precision is classified so it does not queue behind the
+        // publish floor.
+        expect(AppDelegate.costStyleChange(previous: .wholeDollars, current: .banded) == .reducing,
+            "A24: turning the figure back into a range is a reduction, so it does not wait out "
+                + "the floor with the precise figure still on the profile "
+                + "(mutation: returning .none queues it behind the floor)")
+        expect(AppDelegate.costStyleChange(previous: .banded, current: .wholeDollars)
+            == .increasing,
+            "A24: adding precision is throttled like any other sample")
+        expect(AppDelegate.costStyleChange(previous: .banded, current: .banded) == .none,
+            "A24: no change is neither")
+        expect(DiscordIPC.VisibilityChange.increasing.combined(with: .reducing) == .reducing
+            && DiscordIPC.VisibilityChange.reducing.combined(with: .increasing) == .reducing,
+            "A24: a turn that both hides and adds precision is a reduction — removed content "
+                + "outranks the sampling rate, and the combination is order-independent")
+        expect(DiscordIPC.VisibilityChange.none.combined(with: .increasing) == .increasing
+            && DiscordIPC.VisibilityChange.none.combined(with: .none) == .none,
+            "A24 control: combining does not invent a change that neither side reported")
         // A11 (cont.) — the two inputs where the SHARED tray formatter would
         // publish an exact figure. `Format.compactTokens` returns `String(count)`
         // below 1000 and for every negative value, which is right for the menu
         // bar and wrong on a public profile.
         let dpSmall = DiscordPresence.payload(
             graph: dpGraph(dpPayload(dpDay(dpToday, 850, 0.4, dpStripe("claude", 850, 0.4)))),
-            hidden: [], today: dpToday)
+            hidden: [], today: dpToday, costStyle: .banded)
         expect(dpSmall?.details == "<1K tokens today",
             "a light day publishes a band, not the exact count (mutation: calling "
                 + "Format.compactTokens directly publishes \"850\")")
@@ -3678,16 +3771,21 @@ enum SelfTest {
             graph: dpGraph(dpPayload(dpDay(
                 dpToday, 0, 1.0,
                 dpStripe("claude", -1_234_567, 0.0) + "," + dpStripe("codex", 1_000, 1.0)))),
-            hidden: ["nobody"], today: dpToday)
+            hidden: ["nobody"], today: dpToday, costStyle: .banded)
         expect(dpNegative.map { !$0.fields.values.joined().contains("1233567") } ?? true,
             "a negative day total never publishes its signed digits")
 
         // A12 — zero usage publishes nothing (no "machine is on" beacon), and a
         // day absent from the graph publishes nothing either.
         let dpZeroGraph = dpGraph(dpPayload(dpDay(dpToday, 0, 0, dpStripe("claude", 0, 0))))
-        expect(DiscordPresence.payload(graph: dpZeroGraph, hidden: [], today: dpToday) == nil,
+        expect(
+            DiscordPresence.payload(
+                graph: dpZeroGraph, hidden: [], today: dpToday, costStyle: .banded) == nil,
             "zero usage publishes nothing (mutation: dropping the guard publishes an idle beacon)")
-        expect(DiscordPresence.payload(graph: dpGrainGraph, hidden: [], today: "2099-01-01") == nil,
+        expect(
+            DiscordPresence.payload(
+                graph: dpGrainGraph, hidden: [], today: "2099-01-01",
+                costStyle: .banded) == nil,
             "a day with no contribution publishes nothing")
         // The isFinite guard, made reachable. JSON cannot express NaN, but the
         // slow path sums Double costs, so two finite stripes overflow to +inf —
@@ -3696,10 +3794,10 @@ enum SelfTest {
             graph: dpGraph(dpPayload(dpDay(
                 dpToday, 10, 1e308,
                 dpStripe("claude", 10, 1e308) + "," + dpStripe("codex", 10, 1e308)))),
-            hidden: ["nobody"], today: dpToday)
+            hidden: ["nobody"], today: dpToday, costStyle: .banded)
         expect(dpInfinite == nil,
-            "an overflowed cost publishes nothing (mutation: dropping the isFinite guard "
-                + "publishes $100+)")
+            "an overflowed cost publishes nothing (mutation: dropping the isFinite guard in "
+                + "payload() publishes the band costBucket returns for a non-finite cost)")
 
         // A14 — the top client is the busiest CLIENT, not the biggest single
         // stripe. `Contribution.clients` holds per client×model×provider
@@ -3709,12 +3807,13 @@ enum SelfTest {
             dpStripe("claude", 30, 0.3, model: "m1") + ","
                 + dpStripe("claude", 30, 0.3, model: "m2") + ","
                 + dpStripe("codex", 50, 0.5, model: "m1"))))
-        let dpFold = DiscordPresence.payload(graph: dpFoldGraph, hidden: [], today: dpToday)
+        let dpFold = DiscordPresence.payload(
+            graph: dpFoldGraph, hidden: [], today: dpToday, costStyle: .banded)
         expect(dpFold?.state.hasPrefix("Claude Code") == true,
             "top client folds stripes per client first (mutation: max over raw stripes picks "
                 + "Codex CLI's single 50 over Claude Code's 30+30)")
         let dpFoldHidden = DiscordPresence.payload(
-            graph: dpFoldGraph, hidden: ["claude"], today: dpToday)
+            graph: dpFoldGraph, hidden: ["claude"], today: dpToday, costStyle: .banded)
         expect(dpFoldHidden?.state.hasPrefix("Codex CLI") == true,
             "hiding the busiest client promotes the next visible one")
 
@@ -3723,8 +3822,9 @@ enum SelfTest {
         // publishes.
         let dpTieCost = dpGraph(dpPayload(dpDay(
             dpToday, 200, 3.0, dpStripe("amp", 100, 1.0) + "," + dpStripe("zed", 100, 2.0))))
-        expect(DiscordPresence.payload(graph: dpTieCost, hidden: [], today: dpToday)?.state
-            == "Zed · $1-5",
+        expect(DiscordPresence.payload(
+            graph: dpTieCost, hidden: [], today: dpToday, costStyle: .banded)?.state
+            == "Zed · <$10",
             "equal tokens break to the higher cost")
         // Six-way tie on purpose, and the fixture lists the ids in REVERSE
         // order so input order cannot supply the answer.
@@ -3744,15 +3844,17 @@ enum SelfTest {
         let dpTieId = dpGraph(dpPayload(dpDay(
             dpToday, 600, 6.0, dpTieIds.map { dpStripe($0, 100, 1.0) }.joined(separator: ","))))
         expect(
-            DiscordPresence.payload(graph: dpTieId, hidden: [], today: dpToday)?.state
-                == "Amp · $5-10",
+            DiscordPresence.payload(
+                graph: dpTieId, hidden: [], today: dpToday, costStyle: .banded)?.state
+                == "Amp · <$10",
             "a full tie breaks to the lexicographically smallest id")
         let dpTieIdReversed = dpGraph(dpPayload(dpDay(
             dpToday, 600, 6.0,
             dpTieIds.reversed().map { dpStripe($0, 100, 1.0) }.joined(separator: ","))))
         expect(
-            DiscordPresence.payload(graph: dpTieIdReversed, hidden: [], today: dpToday)?.state
-                == "Amp · $5-10",
+            DiscordPresence.payload(
+                graph: dpTieIdReversed, hidden: [], today: dpToday, costStyle: .banded)?.state
+                == "Amp · <$10",
             "the tie-break does not depend on the order the stripes arrive in")
 
         // MARK: - Discord Rich Presence transport (DISCORD-PRESENCE M2a)
@@ -5323,6 +5425,35 @@ enum SelfTest {
             dpDefaults.set(false, forKey: DiscordPresence.enabledKey)
             expect(!DiscordPresence.enabled(defaults: dpDefaults),
                 "A2: an explicit false is off")
+            // A25 — the cost switch reads through the same strict path. Sharing
+            // one reader is what keeps the two from drifting apart, so this
+            // checks the sharing rather than re-testing every wrong type.
+            expect(DiscordPresence.costStyle(defaults: dpDefaults) == .banded,
+                "A25: an absent cost key is banded, the safe direction")
+            dpDefaults.set("true", forKey: DiscordPresence.wholeDollarsKey)
+            expect(DiscordPresence.costStyle(defaults: dpDefaults) == .banded,
+                "A25: the string \"true\" is not the cost switch either "
+                    + "(mutation: a second, looser reader for this key fails here)")
+            dpDefaults.set(1, forKey: DiscordPresence.wholeDollarsKey)
+            expect(DiscordPresence.costStyle(defaults: dpDefaults) == .banded,
+                "A25: the integer 1 is not the cost switch")
+            // Removed, not overwritten, and this is not tidiness. Writing a
+            // real `true` over a stored integer `1` DOES NOT CHANGE THE STORED
+            // TYPE — measured: the value stays a non-CFBoolean NSNumber, so the
+            // control below would fail against a perfectly correct accessor.
+            // A2 above only escapes this because it writes an array in between,
+            // which is true by accident rather than by design.
+            //
+            // The production reading is the same and is the safe direction: a
+            // key that somehow holds an integer stays "off" until something
+            // clears it, and the strict reader exists precisely to refuse
+            // anything that is not a Bool the user wrote.
+            dpDefaults.removeObject(forKey: DiscordPresence.wholeDollarsKey)
+            dpDefaults.set(true, forKey: DiscordPresence.wholeDollarsKey)
+            expect(DiscordPresence.costStyle(defaults: dpDefaults) == .wholeDollars,
+                "A25 control: a real Bool true is the cost switch (without this the three above "
+                    + "would pass on an accessor that always returns banded)")
+            dpDefaults.removeObject(forKey: DiscordPresence.wholeDollarsKey)
         } else {
             expect(false, "A2: the isolated defaults suite could not be created")
         }
@@ -5369,6 +5500,31 @@ enum SelfTest {
         expect(dpOccurrences("\"\(DiscordPresence.enabledKey)\"", in: dpSources) == 1,
             "A2b: the key string is written once, in `DiscordPresence.enabledKey` "
                 + "(mutation: a hard-coded copy of the key evades the check above)")
+        expect(
+            dpOccurrences("@AppStorage(DiscordPresence.wholeDollarsKey)", in: dpSources) == 1
+                && dpOccurrences("\"\(DiscordPresence.wholeDollarsKey)\"", in: dpSources) == 1,
+            "A2b: the cost switch gets the same treatment as the on/off switch — one "
+                + "`@AppStorage` declaration, one written key")
+        // The reason `DiscordPresence` takes the style as a parameter: the
+        // manual acceptance flow writes preferences from the command line into
+        // the same defaults domain the selftest runs in, so a payload path that
+        // read one would make every assertion above depend on the machine.
+        // Counted on `.object(forKey:` rather than `defaults.object(forKey:`,
+        // and that is the whole assertion. The first draft matched the
+        // receiver name, so it could only see a read written against the
+        // `defaults` parameter — but `payload()` has no such parameter, so the
+        // natural way to violate this is `UserDefaults.standard.object(forKey:)`
+        // and the scan looked straight past it. Measured: that mutation
+        // survived the whole suite. A guard that cannot catch the mutation
+        // named in its own message is not a guard.
+        let dpPayloadLayer = dpSources.first { $0.name == "DiscordPresence.swift" }
+        expect(
+            dpPayloadLayer.map { $0.text.components(separatedBy: ".object(forKey:").count - 1 } == 1
+                && dpPayloadLayer.map { $0.text.contains("UserDefaults.standard") } == false,
+            "A2b: exactly one preference read exists in the payload layer, it is the shared strict "
+                + "reader the two accessors call, and nothing there reaches for "
+                + "`UserDefaults.standard` (mutation: reading the cost switch inside payload() "
+                + "makes every privacy assertion depend on the machine running the suite)")
         // Whitespace-normalized, and covering `.init` and an alias of the type,
         // because `PresenceClient.init(connect : ...)` compiles and matched
         // none of the literal forms. A source scan can always be evaded by

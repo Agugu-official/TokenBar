@@ -38,6 +38,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Value gate for the opt-in switch, same discipline as lastHiddenRaw:
     // didChangeNotification carries no key and fires for every write.
     private var lastDiscordEnabled = false
+    // Third value gate, same discipline. Without it, turning whole dollars back
+    // off would leave the finer figure on a public profile until the next tray
+    // poll — as long as five minutes, with nothing to recall it.
+    private var lastCostStyle = DiscordPresence.CostStyle.banded
 
     private static func readIntervalMin() -> Int {
         max(1, UserDefaults.standard.object(forKey: intervalKey).flatMap { $0 as? Int } ?? 30)
@@ -103,6 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         lastDiscordEnabled = DiscordPresence.enabled()
+        lastCostStyle = DiscordPresence.costStyle()
         applyDiscordPresence()
     }
 
@@ -147,6 +152,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .none
     }
 
+    /// The cost switch read the same way the hidden set is: which direction did
+    /// the published content move.
+    ///
+    /// Whole dollars → banded is a reduction. The figure the user had on their
+    /// profile is replaced by a coarser one, and until that lands the precise
+    /// one is still up. Banded → whole dollars adds precision back and is
+    /// throttled like any other sample.
+    nonisolated static func costStyleChange(
+        previous: DiscordPresence.CostStyle, current: DiscordPresence.CostStyle
+    ) -> DiscordIPC.VisibilityChange {
+        switch (previous, current) {
+        case (.wholeDollars, .banded): return .reducing
+        case (.banded, .wholeDollars): return .increasing
+        default: return .none
+        }
+    }
+
     /// Reconcile the presence with the current preferences and the cached
     /// graph. Start, stop and publish all run through here so there is a single
     /// gated path, and every call site is just a trigger.
@@ -185,7 +207,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return DiscordPresence.payload(
             graph: lastGraph,
             hidden: ClientRegistry.hiddenClients(),
-            today: Format.todayKey())
+            today: Format.todayKey(),
+            // Read here and passed down. `DiscordPresence` performs no
+            // preference lookup of its own, so the privacy assertions cannot
+            // come to depend on the defaults of whatever machine runs them.
+            costStyle: DiscordPresence.costStyle())
     }
 
     private func scheduleDefaultsApply() {
@@ -219,16 +245,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // on a public profile for up to five minutes. Value-gated on the
             // same two raw values so an unrelated write does not re-publish.
             let discordEnabled = DiscordPresence.enabled()
-            if hiddenChanged || discordEnabled != self.lastDiscordEnabled {
+            let costStyle = DiscordPresence.costStyle()
+            let previousCostStyle = self.lastCostStyle
+            if hiddenChanged || discordEnabled != self.lastDiscordEnabled
+                || costStyle != previousCostStyle {
                 // Newly hiding a client means the user took something off the
                 // profile, and that update must not queue behind the publish
                 // floor — the Settings copy promises hidden clients are never
                 // included, and fifteen seconds of still naming one makes that
                 // promise false for as long as it waits. Unhiding puts
                 // information back and is throttled like any other sample.
+                //
+                // Turning whole dollars off is the same shape: the user just
+                // made the published figure coarser, and leaving the precise
+                // one up while the floor expires is the same broken promise in
+                // miniature.
                 let change = AppDelegate.visibilityChange(
                     previousHiddenRaw: previousHiddenRaw, hiddenRaw: hiddenRaw)
+                    .combined(with: AppDelegate.costStyleChange(
+                        previous: previousCostStyle, current: costStyle))
                 self.lastDiscordEnabled = discordEnabled
+                self.lastCostStyle = costStyle
                 self.applyDiscordPresence(visibility: change)
             }
         }

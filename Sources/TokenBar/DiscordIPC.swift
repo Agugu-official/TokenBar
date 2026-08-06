@@ -41,6 +41,18 @@ enum DiscordIPC {
         case reducing
         /// The user unhid something, putting information back on the profile.
         case increasing
+
+        /// Two preference changes landing in one coalesced turn. A reduction
+        /// anywhere wins, for the same reason a single write that both hides
+        /// and unhides is a reduction: the content the user removed outranks
+        /// the sampling rate.
+        func combined(with other: VisibilityChange) -> VisibilityChange {
+            switch (self, other) {
+            case (.reducing, _), (_, .reducing): return .reducing
+            case (.increasing, _), (_, .increasing): return .increasing
+            default: return .none
+            }
+        }
     }
 
     enum Opcode: UInt32 {

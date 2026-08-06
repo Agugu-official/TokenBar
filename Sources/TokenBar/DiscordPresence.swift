@@ -92,12 +92,35 @@ enum DiscordPresence {
     /// tell "absent" from "switched off". Publishing to a third party has to
     /// require a real Bool the user actually wrote.
     static func enabled(defaults: UserDefaults = .standard) -> Bool {
-        // `as? Bool` alone is not enough: `NSNumber` bridges, so an integer 1
-        // or a double 1.0 sitting in this key would read as "on". Nothing this
-        // app writes produces that, but "an explicit Bool the user wrote" is
-        // the contract, and a type check that accepts three other types is not
-        // that contract. Only a real CFBoolean counts.
-        guard let stored = defaults.object(forKey: enabledKey) as? NSNumber,
+        strictBool(enabledKey, defaults: defaults)
+    }
+
+    /// The cost-display switch. Default-off means banded, which is the safe
+    /// direction: forgetting to write this key cannot make the presence more
+    /// revealing than it was.
+    static let wholeDollarsKey = "tokenbar.discord.wholeDollars"
+
+    /// The single authoritative read of the cost-display switch, and the only
+    /// place a preference decides it. Everything below `payload(...)` takes the
+    /// style as a parameter.
+    static func costStyle(defaults: UserDefaults = .standard) -> CostStyle {
+        strictBool(wholeDollarsKey, defaults: defaults) ? .wholeDollars : .banded
+    }
+
+    /// One reader for both switches, so their strictness cannot drift apart.
+    ///
+    /// `as? Bool` alone is not enough: `NSNumber` bridges, so an integer 1 or a
+    /// double 1.0 sitting in one of these keys would read as "on". Nothing this
+    /// app writes produces that, but "an explicit Bool the user wrote" is the
+    /// contract, and a type check that accepts three other types is not that
+    /// contract. Only a real CFBoolean counts.
+    ///
+    /// `bool(forKey:)` is wrong for a different reason: it coerces the string
+    /// `"true"`, and it returns false for a missing key through the same path
+    /// it returns false for an explicit off, so it cannot tell absent from
+    /// switched-off.
+    private static func strictBool(_ key: String, defaults: UserDefaults) -> Bool {
+        guard let stored = defaults.object(forKey: key) as? NSNumber,
               CFGetTypeID(stored) == CFBooleanGetTypeID()
         else { return false }
         return stored.boolValue
@@ -131,22 +154,94 @@ enum DiscordPresence {
         return ClientRegistry.style(id).displayName
     }
 
+    /// How a cost is rendered. A parameter threaded through `payload(...)` and
+    /// never a preference lookup: this layer performs none, and the reason is
+    /// operational rather than stylistic. `verification.md`'s manual flow writes
+    /// preferences from the command line into the same defaults domain the
+    /// selftest runs in, so a payload path that read one would make the privacy
+    /// assertions depend on the state of the machine running them.
+    ///
+    /// There is deliberately no default value on the parameter either. A
+    /// default is how "the implementation ignores the setting" compiles.
+    enum CostStyle: Equatable {
+        case banded
+        case wholeDollars
+    }
+
     /// Coarse cost band rather than `$%.2f`: the cost ÷ tokens ratio leaks the
     /// model tier and cache structure in use, and accumulated daily costs leak a
     /// monthly spend bracket.
     ///
-    /// Finite input only. A NaN matches no range and falls through to `$100+`,
-    /// which is why `payload(...)` rejects a non-finite cost before it ever gets
-    /// here — keep that guard if you add a second call site.
+    /// The shape is logarithmic with an open tail, and both halves of that are
+    /// load-bearing. Coarse at the bottom because most days live there and the
+    /// old `<$1`/`$1-5`/`$5-10` split published three bits about the median
+    /// user for nothing. Open at the top because any finite top band publishes
+    /// more than today's `$100+` did precisely where the anonymity set is
+    /// smallest — a daily figure near $1,900 is a monthly spend near $50k, and
+    /// very few individual profiles sit there.
+    ///
+    /// "Logarithmic" describes the table, not the arithmetic. There is no
+    /// `log10` here on purpose: it would map zero to `-inf` and a negative to
+    /// `NaN`, both of which match no `case` and land on the top band. Literal
+    /// bounds let negatives and zero fall into the lowest band by ordinary
+    /// comparison, which is what a negative daily total should read as. They
+    /// do occur — `trayTotals`' slow path cannot reproduce the day-level
+    /// `.max(0)`, see its doc comment.
+    ///
+    /// Bounds are half-open and lower-inclusive: $50 is `$50-100`, not
+    /// `$10-50`.
     static func costBucket(_ cost: Double) -> String {
+        // Before the comparisons, not after. A NaN matches no range and would
+        // reach the `default` arm, publishing the TOP band for a value that
+        // means nothing at all. `payload(...)` rejects a non-finite cost before
+        // it ever gets here and remains the primary defence; this is the second
+        // one, for the day someone adds a call site.
+        guard cost.isFinite else { return "<$10" }
         switch cost {
-        case ..<1: return "<$1"
-        case ..<5: return "$1-5"
-        case ..<10: return "$5-10"
-        case ..<25: return "$10-25"
-        case ..<50: return "$25-50"
+        case ..<10: return "<$10"
+        case ..<50: return "$10-50"
         case ..<100: return "$50-100"
-        default: return "$100+"
+        case ..<250: return "$100-250"
+        case ..<500: return "$250-500"
+        case ..<1000: return "$500-1000"
+        default: return "$1000+"
+        }
+    }
+
+    /// Opt-in whole dollars. Never cents: a daily figure carrying a fractional
+    /// part is a near-unique fingerprint across a month, so anyone holding a
+    /// second usage record — a bill, a shared dashboard, a screenshot — can
+    /// match a public profile to an account. Rounding to the dollar removes
+    /// that entropy while still showing a real number.
+    ///
+    /// Total by construction, which is the whole reason it is written this way
+    /// rather than as `"$" + Int(max(0, cost).rounded())`. That expression
+    /// looks like it renders infinity as `$0` and does not: `max` folds only
+    /// `NaN` and `-.infinity` to the other operand, so `max(0, .infinity)` is
+    /// `.infinity` and `Int(.infinity)` **traps**. So does `Int(1e308)`, and
+    /// `1e308` is finite, so it clears `payload(...)`'s `isFinite` guard and
+    /// arrives here. A trap is worse than any wrong band: it aborts the
+    /// process, and in the selftest it produces no FAIL line and no verdict —
+    /// the run simply disappears.
+    ///
+    /// The million-dollar cap is a safety bound, not a privacy one. It also
+    /// keeps the string short, which matters because Discord's `details` and
+    /// `state` have length limits.
+    static func wholeDollars(_ cost: Double) -> String {
+        guard cost.isFinite, cost > 0 else { return "$0" }
+        // Rounded BEFORE the cap is judged, not after. Comparing the raw cost
+        // put `[999999.5, 1_000_000)` on the wrong side of it: those round to
+        // 1000000 and were rendered as `$1000000`, a figure the cap exists to
+        // avoid printing bare. One value, two spellings, for no reason.
+        let dollars = cost.rounded()
+        guard dollars < 1_000_000 else { return "$1000000+" }
+        return "$\(Int(dollars))"
+    }
+
+    static func costText(_ cost: Double, style: CostStyle) -> String {
+        switch style {
+        case .banded: return costBucket(cost)
+        case .wholeDollars: return wholeDollars(cost)
         }
     }
 
@@ -168,7 +263,9 @@ enum DiscordPresence {
     /// published. `hidden` must be the tab-hidden set (`ClientRegistry
     /// .hiddenClients()` at the call site) — `trayTotals` applies it to the same
     /// stripes the top client is folded from.
-    static func payload(graph: UsagePayload, hidden: Set<String>, today: String) -> Payload? {
+    static func payload(
+        graph: UsagePayload, hidden: Set<String>, today: String, costStyle: CostStyle
+    ) -> Payload? {
         let totals = graph.trayTotals(hidden: hidden, today: today)
         // Non-finite numbers must never be published — garbage on a public
         // profile is worse than no presence at all.
@@ -179,7 +276,8 @@ enum DiscordPresence {
         guard totals.todayTokens > 0 || totals.todayCost > 0 else { return nil }
         return Payload(
             details: "\(tokenBand(totals.todayTokens)) tokens today",
-            state: "\(safeClientLabel(totals.todayTopClient)) · \(costBucket(totals.todayCost))",
+            state: "\(safeClientLabel(totals.todayTopClient)) · "
+                + costText(totals.todayCost, style: costStyle),
             largeImageKey: largeImageKey)
     }
 }
