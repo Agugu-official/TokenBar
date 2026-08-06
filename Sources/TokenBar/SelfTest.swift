@@ -3612,25 +3612,35 @@ enum SelfTest {
             "the top client skips the hidden client (mutation: dropping the hidden filter from "
                 + "the fold publishes Claude Code)")
 
-        // Outbound label allowlist: the busiest visible client is an
-        // UNREGISTERED id whose suffix comes from a local config file, and the
-        // hidden one carries a sentinel too.
+        // Outbound allowlist, at the PRODUCER. The busiest stripe by far is an
+        // UNREGISTERED id whose suffix comes from a local config file; a
+        // registered client sits underneath it with a fifth of the tokens, and
+        // a second unregistered id is hidden as well. Under a positive filter
+        // the secret contributes nothing at all — not a neutral label, not a
+        // token, not a cent — so the registered client is what publishes.
+        //
+        // This is the fixture the complement design fails: `hidden ∪ (allIds −
+        // {selected})` cannot subtract an id it has never heard of, so
+        // `cc-mirror/SECRET_VARIANT` would survive and, being the largest,
+        // would take the label.
         let dpSecretGraph = dpGraph(dpPayload(dpDay(
             dpToday, 1_400_000, 12.0,
-            dpStripe("cc-mirror/SECRET_VARIANT", 500_000, 3.0,
+            dpStripe("cc-mirror/SECRET_VARIANT", 900_000, 9.0,
                 model: "SECRET_MODEL", provider: "SECRET_PROVIDER")
-                + "," + dpStripe("SECRET_HIDDEN", 900_000, 9.0,
+                + "," + dpStripe("claude", 200_000, 1.0)
+                + "," + dpStripe("SECRET_HIDDEN", 300_000, 2.0,
                     model: "SECRET_MODEL2", provider: "SECRET_PROVIDER2"))))
         let dpSecret = DiscordPresence.payload(
             graph: dpSecretGraph, hidden: ["SECRET_HIDDEN"], today: dpToday, costStyle: .banded, components: dpAllComponents)
         let dpSecretText = dpSecret.map { Array($0.fields.values).joined(separator: "|") } ?? ""
-        // The expected label is a literal: an assertion reading it out of the
-        // constant it guards passes whatever that constant becomes.
         expect(
-            dpSecret != nil && !dpSecretText.contains("SECRET_")
-                && dpSecret?.state.contains("an AI tool") == true,
-            "an unregistered top client publishes the neutral label and its id reaches no field "
-                + "(mutation: ClientRegistry.style().displayName without the allowlist gate)")
+            dpSecret?.details == "200K tokens today"
+                && dpSecret?.state.hasPrefix("Claude Code") == true
+                && !dpSecretText.contains("SECRET_"),
+            "an unregistered id reaches neither the figures nor the label — the registered "
+                + "client publishes its own 200K, not the 1.1M the day holds "
+                + "(mutation: a complement filter cannot subtract an id it has never heard of, "
+                + "so cc-mirror/SECRET_VARIANT survives and takes the label)")
         expect(!dpSecretText.contains("/"),
             "no path-like segment is published (mutation: adding any raw-id or path field to "
                 + "Payload.fields fails here)")
@@ -3640,6 +3650,20 @@ enum SelfTest {
         expect(dpSecret.map { Set($0.fields.keys) } == ["details", "state", "largeImageKey"],
             "exactly three named fields are published (mutation: adding a key to Payload.fields, "
                 + "or dropping one, fails here)")
+        // The neutral label is now unreachable from `payload()` — kept in
+        // `safeClientLabel` as defence, asserted here as dead. A graph of only
+        // unregistered ids publishes nothing rather than "an AI tool".
+        expect(
+            DiscordPresence.payload(
+                graph: dpGraph(dpPayload(dpDay(
+                    dpToday, 500_000, 5.0,
+                    dpStripe("cc-mirror/one", 300_000, 3.0) + ","
+                        + dpStripe("brand-new-agent", 200_000, 2.0)))),
+                hidden: [], today: dpToday, costStyle: .banded,
+                components: dpAllComponents) == nil,
+            "a graph holding only unregistered ids publishes nothing at all, so the neutral "
+                + "label cannot reach the wire (mutation: filtering only at the label leaves "
+                + "their tokens and cost in the figures under `an AI tool`)")
 
         // Published granularity: neither the raw token count nor cent-precision
         // cost may survive.
@@ -3817,11 +3841,11 @@ enum SelfTest {
             graph: dpSecretGraph, hidden: ["SECRET_HIDDEN"], today: dpToday,
             costStyle: .banded, components: [.client])
         expect(
-            dpClientOnly?.details == "an AI tool"
+            dpClientOnly?.details == "Claude Code"
                 && dpClientOnly.map { Array($0.fields.values).joined().contains("SECRET_") } == false
                 && dpClientOnly?.fields.keys.sorted() == ["details", "largeImageKey"],
-            "one selected component becomes `details`, an unregistered id still publishes the "
-                + "neutral label, and no empty `state` key reaches the wire "
+            "one selected component becomes `details`, an unregistered id reaches no field, and "
+                + "no empty `state` key reaches the wire "
                 + "(mutation: composing without the allowlist gate leaks the id; publishing "
                 + "`state` unconditionally adds a blank field)")
         // The composition is a user-controlled string flowing toward a public
@@ -3913,6 +3937,70 @@ enum SelfTest {
             "an overflowed cost blocks only a composition that publishes cost "
                 + "(mutation: guarding before the composition is read silently blanks the "
                 + "presence of a tokens-only selection)")
+
+        // Agent selection. Survival is `id ∈ only && id ∉ hidden`, and BOTH
+        // conditions holding is what makes "a selection cannot defeat hiding"
+        // structural rather than a guard someone has to remember.
+        expect(
+            DiscordPresence.payload(
+                graph: dpSecretGraph, hidden: ["claude"], today: dpToday, costStyle: .banded,
+                components: dpAllComponents, selection: .only("claude")) == nil,
+            "selecting a client that is also hidden publishes nothing (mutation: applying the "
+                + "selection instead of intersecting it lets a selection override a hide)")
+        // The same hostile graph with a REGISTERED client selected. The secret
+        // is larger than the selection, so a filter that lets it through would
+        // be visible in the figures as well as the label.
+        let dpSelected = DiscordPresence.payload(
+            graph: dpSecretGraph, hidden: [], today: dpToday, costStyle: .banded,
+            components: dpAllComponents, selection: .only("claude"))
+        expect(
+            dpSelected?.details == "200K tokens today"
+                && dpSelected?.state.hasPrefix("Claude Code") == true
+                && dpSelected.map { Array($0.fields.values).joined().contains("SECRET") } == false,
+            "a selected client publishes only its own figures, with an unregistered stripe "
+                + "excluded from the totals (mutation: a complement filter cannot subtract "
+                + "cc-mirror/SECRET_VARIANT, so it is aggregated in and its 900K is published)")
+        expect(
+            DiscordPresence.payload(
+                graph: dpSecretGraph, hidden: [], today: dpToday, costStyle: .banded,
+                components: dpAllComponents, selection: .only("renamed-since-release")) == nil,
+            "a selection the registry does not know publishes nothing (mutation: falling back to "
+                + "most-used silently widens `one agent` to `all of them` on a rename)")
+        // The re-summed slow path can go negative, and it is reachable here
+        // because a positive filter never takes the fast path.
+        expect(
+            DiscordPresence.payload(
+                graph: dpGraph(dpPayload(dpDay(
+                    dpToday, 0, 1.0,
+                    dpStripe("claude", -1_234_567, 0.0) + "," + dpStripe("codex", 1_000, 1.0)))),
+                hidden: [], today: dpToday, costStyle: .banded,
+                components: dpAllComponents, selection: .only("codex"))?.state
+                .hasSuffix("<$10") == true,
+            "a negative stripe elsewhere still leaves the selected client a finite band")
+        // Selection changes retire earlier work WITHOUT arming the floor
+        // bypass. Hide and unhide alternate, so a reduction's bypass is
+        // naturally rate-limited; A->B->C->A does not alternate, and four
+        // bypasses is a per-client breakdown pushed out in one second.
+        expect(
+            AppDelegate.selectionChange(
+                previous: .mostUsed, current: .only("claude"), hidden: []) == .retiring
+                && AppDelegate.selectionChange(
+                    previous: .only("claude"), current: .only("codex"), hidden: []) == .retiring
+                && AppDelegate.selectionChange(
+                    previous: .only("claude"), current: .only("claude"), hidden: []) == .none
+                && AppDelegate.selectionChange(
+                    previous: .only("claude"), current: .only("codex"),
+                    hidden: ["claude", "codex"]) == .none,
+            "a selection change is `.retiring`, and switching between two clients that are both "
+                + "hidden is no change at all (mutation: classifying it `.reducing` grants an "
+                + "unbounded floor bypass; comparing raw selections republishes when nothing "
+                + "published actually moved)")
+        expect(
+            DiscordIPC.VisibilityChange.retiring.combined(with: .increasing) == .retiring
+                && DiscordIPC.VisibilityChange.retiring.combined(with: .reducing) == .reducing
+                && DiscordIPC.VisibilityChange.retiring.combined(with: .none) == .retiring,
+            "a reduction still outranks a retire, and a retire outranks an unhide — losing a "
+                + "retire would let a payload built for the previous agent reach the socket")
 
         // MARK: - Discord Rich Presence transport (DISCORD-PRESENCE M2a)
         //

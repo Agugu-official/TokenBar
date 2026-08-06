@@ -75,6 +75,9 @@ struct SettingsPanel: View {
     /// different ideas of what is selected.
     @AppStorage(DiscordPresence.componentsKey) private var discordComponentsRaw =
         DiscordPresence.defaultComponentsRaw
+    /// Empty means the busiest visible client. Stored as the raw id so the
+    /// panel and `DiscordPresence.selection()` read one value.
+    @AppStorage(DiscordPresence.selectionKey) private var discordSelectionRaw = ""
     @State private var showLanguageRestartPrompt = false
     /// 0 = auto (≈60% of the screen). The popover's drag handle writes the
     /// same key, so the two stay in sync.
@@ -598,11 +601,19 @@ struct SettingsPanel: View {
             // work — so it is treated as switching the feature off for as long
             // as it stays empty.
             hint("Untick everything and nothing is published at all.")
+            radioGroup(
+                selection: $discordSelectionRaw,
+                options: [("", "Whichever client you used most")]
+                    + ClientRegistry.allIds.map { ($0, ClientRegistry.style($0).displayName) })
+            // Two consequences, and neither is obvious from the control. The
+            // first reads as a bug when it is a decision; the second is the one
+            // that compounds with the switch below it.
+            hint("Naming one client publishes only its usage, so the total can differ from the menu bar, which counts every client including ones TokenBar does not recognise. It also turns cost per token into that one tool's price rather than a mixed average.")
             toggleRow("Show cost as a figure instead of a range", isOn: $discordWholeDollars)
             // Says what the trade is, not that there is one. A range puts you
             // in a group; a figure is closer to a value only you have, and a
             // sequence of them across weeks is closer still.
-            hint("A range keeps you among everyone else in that band. A figure is rounded to the dollar, never cents, but still says more about you — every day.")
+            hint("A range keeps you among everyone else in that band. A figure is rounded to the dollar, never cents, but still says more about you — every day. With one client named above, it becomes that tool's daily spend.")
         }
 
         section("Language") {

@@ -100,14 +100,33 @@ enum DiscordIPC {
         case reducing
         /// The user unhid something, putting information back on the profile.
         case increasing
+        /// The published content was replaced rather than narrowed or widened —
+        /// today, a change of which agent is published. It retires earlier work
+        /// exactly as a reduction does, because those payloads were built for a
+        /// different client, but it does NOT arm the floor bypass.
+        ///
+        /// `.reducing` binds two effects, and hide/unhide alternate so its
+        /// bypass is naturally rate-limited. Selection changes do not alternate:
+        /// A→B→C→A is four steps, four bypasses, and a way to push a full
+        /// per-client breakdown onto a profile in one second while sampling far
+        /// above the floor's promise. The urgency argument is weaker too — the
+        /// previous agent was never hidden, so no promise is broken while the
+        /// update waits.
+        case retiring
 
         /// Two preference changes landing in one coalesced turn. A reduction
         /// anywhere wins, for the same reason a single write that both hides
         /// and unhides is a reduction: the content the user removed outranks
         /// the sampling rate.
         func combined(with other: VisibilityChange) -> VisibilityChange {
+            // `.retiring` outranks `.increasing` because losing a retire is a
+            // correctness failure — a payload built for the previous agent
+            // reaching the socket — while losing `.increasing` costs only its
+            // clearing of an unspent grant, and `.retiring` treats that grant
+            // exactly as `.none` does. A reduction still outranks everything.
             switch (self, other) {
             case (.reducing, _), (_, .reducing): return .reducing
+            case (.retiring, _), (_, .retiring): return .retiring
             case (.increasing, _), (_, .increasing): return .increasing
             default: return .none
             }
@@ -611,7 +630,10 @@ final class DiscordIPCClient: @unchecked Sendable {
         // surfaces as `.reducing`. Retiring stale work on a fact that is always
         // observable beats retiring it on a transition that sometimes is not.
         let ticket = consentLock.withLock { state -> UInt64 in
-            if case .reducing = visibility { state.epoch &+= 1 }
+            switch visibility {
+            case .reducing, .retiring: state.epoch &+= 1
+            case .increasing, .none: break
+            }
             return state.epoch
         }
         queue.async {
@@ -633,7 +655,11 @@ final class DiscordIPCClient: @unchecked Sendable {
             switch visibility {
             case .reducing: self.floorBypass = true
             case .increasing: self.floorBypass = false
-            case .none: break
+            // Leaves an existing grant alone, exactly as `.none` does. A hide
+            // that armed one is still unpublished at this point, and its
+            // content is in the payload being written now — clearing it here
+            // would leave the hidden client up for the rest of the floor.
+            case .retiring, .none: break
             }
             self.flush()
         }

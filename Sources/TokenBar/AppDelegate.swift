@@ -45,6 +45,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Same discipline again. Compared as a parsed SET, so a reordered or
     /// respaced write is not read as a change to what gets published.
     private var lastComponents = DiscordPresence.defaultComponents
+    /// Fifth value gate. Without it a selection change would wait out the tray
+    /// poll, publishing the previous agent's figures for up to five minutes.
+    private var lastSelection = DiscordPresence.ClientSelection.mostUsed
 
     private static func readIntervalMin() -> Int {
         max(1, UserDefaults.standard.object(forKey: intervalKey).flatMap { $0 as? Int } ?? 30)
@@ -112,6 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastDiscordEnabled = DiscordPresence.enabled()
         lastCostStyle = DiscordPresence.costStyle()
         lastComponents = DiscordPresence.components()
+        lastSelection = DiscordPresence.selection()
         applyDiscordPresence()
     }
 
@@ -171,6 +175,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// something off the profile, so a shrinking selection is the reduction.
     /// The arguments go into the same subset test swapped, rather than into a
     /// second classifier with its own idea of which way is which.
+    /// A selection change replaces what is published rather than narrowing or
+    /// widening it, so it retires earlier work without arming the floor bypass.
+    ///
+    /// Compared as EFFECTIVE published sets — the selection intersected with
+    /// what is visible — and not as raw selections, so switching between two
+    /// clients that are both hidden is correctly no change at all. The hidden
+    /// set's own movement is classified separately by `visibilityChange`; this
+    /// isolates the selection's contribution by holding it fixed.
+    nonisolated static func selectionChange(
+        previous: DiscordPresence.ClientSelection,
+        current: DiscordPresence.ClientSelection,
+        hidden: Set<String>
+    ) -> DiscordIPC.VisibilityChange {
+        func effective(_ selection: DiscordPresence.ClientSelection) -> Set<String> {
+            let registered = Set(ClientRegistry.allIds)
+            switch selection {
+            case .mostUsed: return registered.subtracting(hidden)
+            case .only(let id):
+                return registered.contains(id) ? Set([id]).subtracting(hidden) : []
+            }
+        }
+        return effective(previous) == effective(current) ? .none : .retiring
+    }
+
     nonisolated static func componentsChange(
         previous: Set<DiscordPresence.Component>, current: Set<DiscordPresence.Component>
     ) -> DiscordIPC.VisibilityChange {
@@ -251,7 +279,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // preference lookup of its own, so the privacy assertions cannot
             // come to depend on the defaults of whatever machine runs them.
             costStyle: DiscordPresence.costStyle(),
-            components: DiscordPresence.components())
+            components: DiscordPresence.components(),
+            selection: DiscordPresence.selection())
     }
 
     private func scheduleDefaultsApply() {
@@ -289,8 +318,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let previousCostStyle = self.lastCostStyle
             let components = DiscordPresence.components()
             let previousComponents = self.lastComponents
+            let selection = DiscordPresence.selection()
+            let previousSelection = self.lastSelection
             if hiddenChanged || discordEnabled != self.lastDiscordEnabled
-                || costStyle != previousCostStyle || components != previousComponents {
+                || costStyle != previousCostStyle || components != previousComponents
+                || selection != previousSelection {
                 // Newly hiding a client means the user took something off the
                 // profile, and that update must not queue behind the publish
                 // floor — the Settings copy promises hidden clients are never
@@ -310,9 +342,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             && components.contains(.cost)))
                     .combined(with: AppDelegate.componentsChange(
                         previous: previousComponents, current: components))
+                    .combined(with: AppDelegate.selectionChange(
+                        previous: previousSelection, current: selection,
+                        hidden: ClientRegistry.parseIdSet(hiddenRaw)))
                 self.lastDiscordEnabled = discordEnabled
                 self.lastCostStyle = costStyle
                 self.lastComponents = components
+                self.lastSelection = selection
                 self.applyDiscordPresence(visibility: change)
             }
         }

@@ -138,6 +138,23 @@ enum DiscordPresence {
         case cost
     }
 
+    /// Which client's usage is published: the busiest one, or a named agent.
+    enum ClientSelection: Equatable {
+        case mostUsed
+        case only(String)
+    }
+
+    static let selectionKey = "tokenbar.discord.client"
+
+    /// Absent or empty means the busiest visible client, which is what the
+    /// feature published before this preference existed.
+    static func selection(defaults: UserDefaults = .standard) -> ClientSelection {
+        guard let id = defaults.object(forKey: selectionKey) as? String, !id.isEmpty else {
+            return .mostUsed
+        }
+        return .only(id)
+    }
+
     static let componentsKey = "tokenbar.discord.components"
 
     /// Absent means all three. Unlike the two switches the safe direction here
@@ -345,9 +362,36 @@ enum DiscordPresence {
     /// stripes the top client is folded from.
     static func payload(
         graph: UsagePayload, hidden: Set<String>, today: String, costStyle: CostStyle,
-        components: Set<Component>
+        components: Set<Component>, selection: ClientSelection = .mostUsed
     ) -> Payload? {
-        let totals = graph.trayTotals(hidden: hidden, today: today)
+        // Derived HERE, not in the wiring. Putting it in `AppDelegate` would
+        // repeat the earlier breach word for word: logic the payload fixtures
+        // cannot see, guarded only by a source scan that keeps passing while
+        // the derivation underneath it changes.
+        //
+        // A positive allowlist in BOTH modes, which is what makes
+        // `safeClientLabel`'s neutral branch unreachable from here. An
+        // unregistered id — `cc-mirror/<user-chosen name>`, or any agent the
+        // aggregator detects before the registry catches up — no longer
+        // publishes under a neutral label; it contributes nothing at all.
+        //
+        // The consequence is deliberate and belongs in the Settings copy, not
+        // in a bug report: the presence total can differ from the tray total
+        // whenever an unregistered client has usage.
+        let only: Set<String>
+        switch selection {
+        case .mostUsed:
+            only = Set(ClientRegistry.allIds)
+        case .only(let id):
+            // Not a fallback to most-used. A selection the registry no longer
+            // knows — a rename, a typo written from the command line — would
+            // otherwise silently widen "one agent" to "all of them", which is
+            // the wrong direction; and if it matched an unregistered id it
+            // would target exactly that client's figures under a neutral label.
+            guard ClientRegistry.allIds.contains(id) else { return nil }
+            only = [id]
+        }
+        let totals = graph.trayTotals(hidden: hidden, today: today, only: only)
         // Non-finite numbers must never be published — garbage on a public
         // profile is worse than no presence at all. Scoped to a cost that will
         // actually be serialized: `costBucket` maps a non-finite value to the
