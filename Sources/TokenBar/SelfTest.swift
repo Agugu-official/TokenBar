@@ -4129,8 +4129,7 @@ enum SelfTest {
             "A13: nothing from the READY frame survives in the client's state")
 
         dpClient.publish(dpWirePayload)
-        dpClient.publish(DiscordPresence.Payload(
-            details: "999K tokens today", state: "Zed · $50-100", largeImageKey: "tokenbar"))
+        dpClient.publish(dpP("999K tokens today", state: "Zed · $50-100"))
         dpClient.drainForTesting()
         var dpActivityBuffer = dpRecv(dpPeer)
         var dpActivityText = ""
@@ -4310,16 +4309,10 @@ enum SelfTest {
         let dpPairedClient = DiscordIPCClient(connect: { dpPairedLocal })
         dpPairedClient.start()
         dpPairedClient.drainForTesting()
-        _ = dpRecv(dpPairedPeer)
-        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
-            _ = send(dpPairedPeer, raw.baseAddress!, raw.count, 0)
-        }
-        let dpPairedReady = dpWaitUntil { dpPairedClient.inboundTokenForTesting == "ready" }
-        let dpPairedGate = DispatchSemaphore(value: 0)
-        dpPairedClient.holdQueueForTesting(until: dpPairedGate)
+        let dpPairedReady = dpReachReady(dpPairedPeer, dpPairedClient)
+        let dpPairedGate = dpHold(dpPairedClient)
         dpPairedClient.start()
-        dpPairedClient.publish(DiscordPresence.Payload(
-            details: "99K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpPairedClient.publish(dpP("99K tokens today"))
         dpPairedClient.stop()
         dpPairedGate.signal()
         dpPairedClient.drainForTesting()
@@ -4368,8 +4361,7 @@ enum SelfTest {
         dpPingClient.start()
         dpPingClient.drainForTesting()
         _ = dpRecv(dpPingPeer)
-        let dpPingGate = DispatchSemaphore(value: 0)
-        dpPingClient.holdQueueForTesting(until: dpPingGate)
+        let dpPingGate = dpHold(dpPingClient)
         dpFrameBytes(3, "{\"ping\":1}").withUnsafeBytes { raw in
             _ = send(dpPingPeer, raw.baseAddress!, raw.count, 0)
         }
@@ -4397,19 +4389,10 @@ enum SelfTest {
         let dpStaleClient = DiscordIPCClient(connect: { dpStaleLocal })
         dpStaleClient.start()
         dpStaleClient.drainForTesting()
-        _ = dpRecv(dpStalePeer)
-        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
-            _ = send(dpStalePeer, raw.baseAddress!, raw.count, 0)
-        }
-        let dpStaleReady = dpWaitUntil { dpStaleClient.inboundTokenForTesting == "ready" }
-        let dpStaleGate = DispatchSemaphore(value: 0)
-        dpStaleClient.holdQueueForTesting(until: dpStaleGate)
-        dpStaleClient.publish(DiscordPresence.Payload(
-            details: "70K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
-        dpStaleClient.publish(
-            DiscordPresence.Payload(
-                details: "71K tokens today", state: "Zed · $10-25", largeImageKey: "tokenbar"),
-            visibility: .reducing)
+        let dpStaleReady = dpReachReady(dpStalePeer, dpStaleClient)
+        let dpStaleGate = dpHold(dpStaleClient)
+        dpStaleClient.publish(dpP("70K tokens today"))
+        dpStaleClient.publish(dpP("71K tokens today", state: "Zed · $10-25"), visibility: .reducing)
         dpStaleGate.signal()
         dpStaleClient.drainForTesting()
         let dpStaleSeen = dpFramesNow(dpStalePeer)
@@ -4419,9 +4402,7 @@ enum SelfTest {
                 + "reduction itself does "
                 + "(mutation: without the reduction retiring earlier work it is written first, "
                 + "putting the client the user just hid back on the profile)")
-        dpStaleClient.stop()
-        dpStaleClient.drainForTesting()
-        close(dpStalePeer)
+        dpFinish(dpStaleClient, [dpStalePeer])
 
         // A19 — a clear that lost its socket is retried on the next
         // connection. `nil` stands for both "nothing given yet" and "the
@@ -4462,11 +4443,9 @@ enum SelfTest {
             close(fds[1])
             return fds[0]
         })
-        let dpOptOutGate = DispatchSemaphore(value: 0)
-        dpOptOutClient.holdQueueForTesting(until: dpOptOutGate)
+        let dpOptOutGate = dpHold(dpOptOutClient)
         dpOptOutClient.start()
-        dpOptOutClient.publish(DiscordPresence.Payload(
-            details: "51K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpOptOutClient.publish(dpP("51K tokens today"))
         dpOptOutClient.stop()
         dpOptOutGate.signal()
         dpOptOutClient.drainForTesting()
@@ -4480,11 +4459,9 @@ enum SelfTest {
             close(fds[1])
             return fds[0]
         })
-        let dpOptInGate = DispatchSemaphore(value: 0)
-        dpOptInClient.holdQueueForTesting(until: dpOptInGate)
+        let dpOptInGate = dpHold(dpOptInClient)
         dpOptInClient.start()
-        dpOptInClient.publish(DiscordPresence.Payload(
-            details: "51K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpOptInClient.publish(dpP("51K tokens today"))
         dpOptInGate.signal()
         dpOptInClient.drainForTesting()
         dpOptInClient.stop()
@@ -4502,31 +4479,20 @@ enum SelfTest {
         let dpBypassClient = DiscordIPCClient(connect: { dpBypassLocal })
         dpBypassClient.start()
         dpBypassClient.drainForTesting()
-        _ = dpRecv(dpBypassPeer)
-        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
-            _ = send(dpBypassPeer, raw.baseAddress!, raw.count, 0)
-        }
-        let dpBypassReady = dpWaitUntil { dpBypassClient.inboundTokenForTesting == "ready" }
-        dpBypassClient.publish(DiscordPresence.Payload(
-            details: "10K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+        let dpBypassReady = dpReachReady(dpBypassPeer, dpBypassClient)
+        dpBypassClient.publish(dpP("10K tokens today", state: "Amp · $1-5"))
         dpBypassClient.drainForTesting()
         let dpBypassArmed = String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self)
             .contains("10K tokens today")
-        dpBypassClient.publish(DiscordPresence.Payload(
-            details: "11K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+        dpBypassClient.publish(dpP("11K tokens today", state: "Amp · $1-5"))
         dpBypassClient.drainForTesting()
         let dpBypassWaited = !String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self)
             .contains("11K")
-        dpBypassClient.publish(
-            DiscordPresence.Payload(
-                details: "12K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"),
-            visibility: .reducing)
+        dpBypassClient.publish(dpP("12K tokens today", state: "Amp · $1-5"), visibility: .reducing)
         dpBypassClient.drainForTesting()
         let dpBypassSent = String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self)
             .contains("12K tokens today")
-        dpBypassClient.stop()
-        dpBypassClient.drainForTesting()
-        close(dpBypassPeer)
+        dpFinish(dpBypassClient, [dpBypassPeer])
         expect(dpBypassReady && dpBypassArmed && dpBypassWaited && dpBypassSent,
             "A15: hiding a client republishes immediately instead of waiting out the 15s floor, "
                 + "unlike an ordinary update inside it "
@@ -4552,13 +4518,8 @@ enum SelfTest {
         dpOneShotClient.publishInterval = 1.0
         dpOneShotClient.start()
         dpOneShotClient.drainForTesting()
-        _ = dpRecv(dpOneShotPeer)
-        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
-            _ = send(dpOneShotPeer, raw.baseAddress!, raw.count, 0)
-        }
-        let dpOneShotReady = dpWaitUntil { dpOneShotClient.inboundTokenForTesting == "ready" }
-        dpOneShotClient.publish(DiscordPresence.Payload(
-            details: "20K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+        let dpOneShotReady = dpReachReady(dpOneShotPeer, dpOneShotClient)
+        dpOneShotClient.publish(dpP("20K tokens today", state: "Amp · $1-5"))
         dpOneShotClient.drainForTesting()
         let dpOneShotArmedAt = DispatchTime.now()
         let dpOneShotArmed = dpFramesNow(dpOneShotPeer).contains("20K tokens today")
@@ -4566,9 +4527,7 @@ enum SelfTest {
         dpOneShotClient.publish(nil, visibility: .reducing)
         dpOneShotClient.drainForTesting()
         let dpOneShotCleared = dpFramesNow(dpOneShotPeer).contains("\"activity\":null")
-        let dpUnhidden = DiscordPresence.Payload(
-            details: "21K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar")
-        dpOneShotClient.publish(dpUnhidden)
+        dpOneShotClient.publish(dpP("21K tokens today", state: "Amp · $1-5"))
         dpOneShotClient.drainForTesting()
         // The fixture has to still be inside the 1s floor here, or the
         // assertions below would be reporting payloads that were simply due.
@@ -4579,9 +4538,7 @@ enum SelfTest {
         // 300ms: well inside the 1s floor, well over the time a due frame needs.
         let dpOneShotHeld = !dpFrameArrives(dpOneShotPeer, "21K tokens today", within: 0.3)
         let dpOneShotArrivedLater = dpFrameArrives(dpOneShotPeer, "21K tokens today", within: 3)
-        dpOneShotClient.stop()
-        dpOneShotClient.drainForTesting()
-        close(dpOneShotPeer)
+        dpFinish(dpOneShotClient, [dpOneShotPeer])
         expect(dpOneShotReady && dpOneShotArmed && dpOneShotCleared && dpOneShotFast
                 && dpOneShotHeld && dpOneShotArrivedLater,
             "A15c: the unhide that follows a clear still waits out the floor, and does arrive "
@@ -4645,34 +4602,26 @@ enum SelfTest {
         // Superseding a live connection must close the old socket, checked
         // from the OLD PEER reaching EOF — an fd number can be reused, so "is
         // fd N still open" proves nothing.
-        let dpSupA = dpSocketPair()
-        let dpSupB = dpSocketPair()
-        let dpSupIdx = DPCounter()
-        let dpSupFDs: [Int32] = [dpSupA.0, dpSupB.0]
-        let dpSupClient = DiscordIPCClient(connect: {
-            let i = min(dpSupIdx.value, dpSupFDs.count - 1)
-            dpSupIdx.value += 1
-            return dpSupFDs[i]
-        })
+        let (dpSupPeers, dpSupClient, dpSupIdx) = dpRig(peers: 2)
         dpSupClient.reconnectDelay = 0.02
         dpSupClient.start()
         _ = dpWaitUntil { dpSupClient.isConnectedForTesting }
         // Drain the handshake first, or the peer has bytes waiting and can
         // never report EOF.
-        _ = dpRecv(dpSupA.1)
+        _ = dpRecv(dpSupPeers[0])
         dpSupClient.scheduleReconnectForTesting()
         _ = dpWaitUntil { dpSupIdx.value >= 2 }
         let dpSupClosed = dpWaitUntil {
             var byte: UInt8 = 0
-            return recv(dpSupA.1, &byte, 1, MSG_DONTWAIT) == 0
+            return recv(dpSupPeers[0], &byte, 1, MSG_DONTWAIT) == 0
         }
         expect(dpSupClosed,
             "reconnecting over a live connection closes the superseded socket (mutation: dropping "
                 + "openConnection's `if fd >= 0 { teardown() }` leaks the descriptor and the old "
                 + "peer never sees EOF)")
         dpSupClient.stop()
-        close(dpSupA.1)
-        close(dpSupB.1)
+        close(dpSupPeers[0])
+        close(dpSupPeers[1])
 
         // The retry budget resets on READY, so a long session survives more
         // than `maxReconnectAttempts` restarts — the peer must answer READY
@@ -4736,13 +4685,7 @@ enum SelfTest {
         // Reconnecting republishes the last activity, or the presence stays
         // missing until the producer happens to publish again.
         let dpRepubReady = dpFrameBytes(1, "{\"evt\":\"READY\"}")
-        let dpRepubPairs = [dpSocketPair(), dpSocketPair()]
-        let dpRepubIdx = DPCounter()
-        let dpRepubClient = DiscordIPCClient(connect: {
-            let i = min(dpRepubIdx.value, dpRepubPairs.count - 1)
-            dpRepubIdx.value += 1
-            return dpRepubPairs[i].0
-        })
+        let (dpRepubPeers, dpRepubClient, dpRepubIdx) = dpRig(peers: 2)
         dpRepubClient.reconnectDelay = 0.02
         // Deliberately high: a restore re-sends bytes Discord already has, so
         // it must not queue behind the sampling floor. With the throttle
@@ -4751,21 +4694,21 @@ enum SelfTest {
         dpRepubClient.publishInterval = 30
         dpRepubClient.start()
         _ = dpWaitUntil { dpRepubClient.isConnectedForTesting }
-        _ = dpRepubReady.withUnsafeBytes { send(dpRepubPairs[0].1, $0.baseAddress, $0.count, 0) }
+        _ = dpRepubReady.withUnsafeBytes { send(dpRepubPeers[0], $0.baseAddress, $0.count, 0) }
         _ = dpWaitUntil { dpRepubClient.inboundTokenForTesting == DiscordIPC.readyEvent }
         dpRepubClient.publish(dpWirePayload)
         dpRepubClient.drainForTesting()
-        _ = dpDrainToEOF(dpRepubPairs[0].1)
+        _ = dpDrainToEOF(dpRepubPeers[0])
         // Break the first connection; the client retries onto the second pair.
-        close(dpRepubPairs[0].1)
+        close(dpRepubPeers[0])
         _ = dpWaitUntil { dpRepubIdx.value >= 2 }
-        _ = dpRepubReady.withUnsafeBytes { send(dpRepubPairs[1].1, $0.baseAddress, $0.count, 0) }
+        _ = dpRepubReady.withUnsafeBytes { send(dpRepubPeers[1], $0.baseAddress, $0.count, 0) }
         dpRepubClient.drainForTesting()
         // No second `publish()` anywhere: whatever arrives here was resent by
         // the client itself.
         var dpRepubSeen = false
         _ = dpWaitUntil {
-            if dpFrames(dpRepubPairs[1].1).contains(where: {
+            if dpFrames(dpRepubPeers[1]).contains(where: {
                 $0.0 == .frame && String(decoding: $0.1, as: UTF8.self).contains("12K tokens today")
             }) { dpRepubSeen = true }
             return dpRepubSeen
@@ -4775,7 +4718,7 @@ enum SelfTest {
                 + "(mutation: dropping the READY branch's `hasPending = true` leaves the presence "
                 + "missing until the next producer update)")
         dpRepubClient.stop()
-        close(dpRepubPairs[1].1)
+        close(dpRepubPeers[1])
 
         // Exhausting the retry budget returns the client to a state a later
         // start() can act on. Leaving `running` true made start() hit the
@@ -4939,8 +4882,7 @@ enum SelfTest {
         close(dpIntentPairs[0].1)
         _ = dpWaitUntil { dpIntentIdx.value > DiscordIPCClient.maxReconnectAttempts + 1 }
         // The producer moves on while the client is abandoned.
-        let dpIntentNewer = DiscordPresence.Payload(
-            details: "77K tokens today", state: "Zed · $1-5", largeImageKey: "tokenbar")
+        let dpIntentNewer = dpP("77K tokens today", state: "Zed · $1-5")
         dpIntentClient.publish(dpIntentNewer)
         dpIntentRevive.value = dpIntentIdx.value
         dpIntentClient.start()
@@ -5016,53 +4958,45 @@ enum SelfTest {
         // clock, so a restore delayed the next real payload by a full
         // interval measured from the restore instead of from the last sample.
         let dpFloorReady = dpFrameBytes(1, "{\"evt\":\"READY\"}")
-        let dpFloorPairs = [dpSocketPair(), dpSocketPair()]
-        let dpFloorIdx = DPCounter()
-        let dpFloorClient = DiscordIPCClient(connect: {
-            let i = min(dpFloorIdx.value, dpFloorPairs.count - 1)
-            dpFloorIdx.value += 1
-            return dpFloorPairs[i].0
-        })
+        let (dpFloorPeers, dpFloorClient, dpFloorIdx) = dpRig(peers: 2)
         dpFloorClient.reconnectDelay = 0.02
         dpFloorClient.publishInterval = 1.0
         dpFloorClient.start()
         _ = dpWaitUntil { dpFloorClient.isConnectedForTesting }
-        _ = dpFloorReady.withUnsafeBytes { send(dpFloorPairs[0].1, $0.baseAddress, $0.count, 0) }
+        _ = dpFloorReady.withUnsafeBytes { send(dpFloorPeers[0], $0.baseAddress, $0.count, 0) }
         _ = dpWaitUntil { dpFloorClient.inboundTokenForTesting == DiscordIPC.readyEvent }
         dpFloorClient.publish(dpWirePayload)
         dpFloorClient.drainForTesting()
-        _ = dpDrainToEOF(dpFloorPairs[0].1)
+        _ = dpDrainToEOF(dpFloorPeers[0])
         // Let the interval elapse against the real sample, so the payload that
         // follows the restore is due immediately if the clock was left alone.
         usleep(1_200_000)
-        close(dpFloorPairs[0].1)
+        close(dpFloorPeers[0])
         _ = dpWaitUntil { dpFloorIdx.value >= 2 }
-        _ = dpFloorReady.withUnsafeBytes { send(dpFloorPairs[1].1, $0.baseAddress, $0.count, 0) }
+        _ = dpFloorReady.withUnsafeBytes { send(dpFloorPeers[1], $0.baseAddress, $0.count, 0) }
         // Wait for the restore to actually reach the socket before
         // publishing next, or both builds send it immediately and this
         // measures nothing.
         var dpFloorRestored = false
         for _ in 0..<200 where !dpFloorRestored {
-            if dpFrames(dpFloorPairs[1].1).contains(where: {
+            if dpFrames(dpFloorPeers[1]).contains(where: {
                 $0.0 == .frame && String(decoding: $0.1, as: UTF8.self).contains("12K tokens today")
             }) { dpFloorRestored = true }
             usleep(5_000)
         }
-        let dpFloorNewer = DiscordPresence.Payload(
-            details: "55K tokens today", state: "Amp · $5-10", largeImageKey: "tokenbar")
-        dpFloorClient.publish(dpFloorNewer)
+        dpFloorClient.publish(dpP("55K tokens today", state: "Amp · $5-10"))
         dpFloorClient.drainForTesting()
         // 400ms: comfortably under the 1s the buggy path would defer by, and
         // comfortably over the time a due payload needs to reach the socket.
         var dpFloorPrompt = false
         for _ in 0..<80 where !dpFloorPrompt {
-            if dpFrames(dpFloorPairs[1].1).contains(where: {
+            if dpFrames(dpFloorPeers[1]).contains(where: {
                 $0.0 == .frame && String(decoding: $0.1, as: UTF8.self).contains("55K tokens today")
             }) { dpFloorPrompt = true }
             usleep(5_000)
         }
         dpFloorClient.stop()
-        close(dpFloorPairs[1].1)
+        close(dpFloorPeers[1])
         expect(dpFloorRestored && dpFloorPrompt,
             "a restore does not consume the publish interval (mutation: advancing lastSent on a "
                 + "write that carries no new information throttles the next real payload from the "
