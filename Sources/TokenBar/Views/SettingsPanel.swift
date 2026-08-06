@@ -784,9 +784,20 @@ struct SettingsPanel: View {
     /// reordering as a change.
     private func componentBinding(_ component: DiscordPresence.Component) -> Binding<Bool> {
         Binding(
-            get: { DiscordPresence.parseComponents(self.discordComponentsRaw).contains(component) },
+            get: {
+                // `discordComponentsRaw` is read for the SwiftUI dependency
+                // only; the ANSWER comes from the authoritative accessor.
+                // `@AppStorage<String>` substitutes its default for both an
+                // absent key and one holding a non-string, while
+                // `components()` distinguishes them — so reading the wrapper
+                // for the answer would tick all three boxes over a malformed
+                // write while the runtime published nothing, and the next tick
+                // would start from that phantom all-selected state.
+                _ = self.discordComponentsRaw
+                return DiscordPresence.components().contains(component)
+            },
             set: { isOn in
-                var selected = DiscordPresence.parseComponents(self.discordComponentsRaw)
+                var selected = DiscordPresence.components()
                 if isOn { selected.insert(component) } else { selected.remove(component) }
                 self.discordComponentsRaw = DiscordPresence.rawComponents(selected)
             })
