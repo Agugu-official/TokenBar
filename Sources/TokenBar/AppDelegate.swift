@@ -150,23 +150,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// outranks the sampling rate: publishing it late is a client they hid
     /// still visible to everyone, publishing the other one early is a sample
     /// of activity they had already consented to publish.
-    /// Scoped to the SELECTION, not to the raw hidden set. With one agent
-    /// named, hiding an unrelated client cannot move a published byte — but
-    /// classifying it `.reducing` anyway hands out a floor bypass that an
-    /// ordinary update to the selected client can then spend, publishing
-    /// inside the fifteen-second floor. The inverse is worse: unhiding an
-    /// unrelated client would clear a grant a real hide is still owed.
+    /// Did the user take something off the profile, or put something back?
+    ///
+    /// Asked directly, against the clients published at EITHER endpoint,
+    /// rather than by comparing two effective sets. A set comparison cannot
+    /// tell "removed because hidden" from "removed because deselected", and
+    /// those want different answers: only the first is a promise with a
+    /// deadline. Coalescing makes the distinction load-bearing — switching
+    /// from claude to codex while newly hiding claude is one turn, and
+    /// classifying its hidden delta under codex alone reports no change while
+    /// the old payload keeps claude on the profile for the rest of the floor.
     nonisolated static func visibilityChange(
         previousHiddenRaw: String, hiddenRaw: String,
+        previousSelection: DiscordPresence.ClientSelection = .mostUsed,
         selection: DiscordPresence.ClientSelection = .mostUsed
     ) -> DiscordIPC.VisibilityChange {
-        // A SHRUNK effective set is the reduction: something left the profile.
-        // Same swap as the components caller, for the same reason.
-        subsetChange(
-            grownMeansLess: effectivePublished(
-                selection: selection, hidden: ClientRegistry.parseIdSet(hiddenRaw)),
-            to: effectivePublished(
-                selection: selection, hidden: ClientRegistry.parseIdSet(previousHiddenRaw)))
+        let previousHidden = ClientRegistry.parseIdSet(previousHiddenRaw)
+        let currentHidden = ClientRegistry.parseIdSet(hiddenRaw)
+        let wasPublished = effectivePublished(
+            selection: previousSelection, hidden: previousHidden)
+        let isPublished = effectivePublished(selection: selection, hidden: currentHidden)
+        // Something that WAS on the profile is now hidden.
+        if !wasPublished.isDisjoint(with: currentHidden.subtracting(previousHidden)) {
+            return .reducing
+        }
+        // Something just unhidden is on it now.
+        if !isPublished.isDisjoint(with: previousHidden.subtracting(currentHidden)) {
+            return .increasing
+        }
+        return .none
+    }
+
+    /// A floor bypass is owed only when something was actually on the profile
+    /// to take down. With the selected client hidden, or no registered client
+    /// visible, nothing could have been published — so unticking a component
+    /// removes nothing, and arming a grant there leaves one for a later
+    /// selection change to inherit and spend on a client that IS visible,
+    /// inside the floor.
+    ///
+    /// A static rather than a branch inside `applyDiscordPresence`, for the
+    /// same reason `makeDiscordClient` is one: SelfTest returns `Never` before
+    /// the app lifecycle exists, so a rule buried in the delegate cannot be
+    /// asserted at all. It shipped unasserted for one round and a mutation
+    /// proved it: removing the branch changed nothing.
+    ///
+    /// The retire survives — only the claim on the floor is dropped.
+    nonisolated static func withoutUnownedGrant(
+        _ change: DiscordIPC.VisibilityChange, wasPublishing: Bool
+    ) -> DiscordIPC.VisibilityChange {
+        guard change.grant == .arm, !wasPublishing else { return change }
+        return DiscordIPC.VisibilityChange(retires: change.retires, grant: .leave)
     }
 
     /// The one direction test both set-shaped preferences use. The parameter
@@ -355,9 +388,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // made the published figure coarser, and leaving the precise
                 // one up while the floor expires is the same broken promise in
                 // miniature.
-                let change = AppDelegate.visibilityChange(
+                var change = AppDelegate.visibilityChange(
                     previousHiddenRaw: previousHiddenRaw, hiddenRaw: hiddenRaw,
-                    selection: selection)
+                    previousSelection: previousSelection, selection: selection)
                     .combined(with: AppDelegate.costStyleChange(
                         previous: previousCostStyle, current: costStyle,
                         publishedInBoth: previousComponents.contains(.cost)
@@ -367,6 +400,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     .combined(with: AppDelegate.selectionChange(
                         previous: previousSelection, current: selection,
                         hidden: ClientRegistry.parseIdSet(hiddenRaw)))
+                change = AppDelegate.withoutUnownedGrant(
+                    change,
+                    wasPublishing: !AppDelegate.effectivePublished(
+                        selection: previousSelection,
+                        hidden: ClientRegistry.parseIdSet(previousHiddenRaw)).isEmpty)
                 self.lastDiscordEnabled = discordEnabled
                 self.lastCostStyle = costStyle
                 self.lastComponents = components

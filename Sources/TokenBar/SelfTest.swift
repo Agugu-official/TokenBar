@@ -3995,24 +3995,49 @@ enum SelfTest {
                 + "hidden is no change at all (mutation: classifying it `.reducing` grants an "
                 + "unbounded floor bypass; comparing raw selections republishes when nothing "
                 + "published actually moved)")
-        // A hidden-set change is classified against what the SELECTION would
-        // publish. With one agent named, hiding an unrelated client cannot move
-        // a published byte, and calling it `.reducing` hands out a bypass an
-        // ordinary update can then spend inside the floor.
-        expect(
+        // A hidden-set change is judged against the clients published at EITHER
+        // endpoint. With one agent named, hiding an unrelated client cannot
+        // move a published byte; hiding the selected one is still a reduction;
+        // and a turn that BOTH switches selection and hides the outgoing client
+        // is a reduction too — that one is only visible if the previous
+        // selection is consulted, and it is the case coalescing produces.
+        func dpVis(
+            _ previousHidden: String, _ hidden: String,
+            _ previousSelection: DiscordPresence.ClientSelection = .mostUsed,
+            _ selection: DiscordPresence.ClientSelection = .mostUsed
+        ) -> DiscordIPC.VisibilityChange {
             AppDelegate.visibilityChange(
-                previousHiddenRaw: "", hiddenRaw: "amp", selection: .only("claude")) == .none
-                && AppDelegate.visibilityChange(
-                    previousHiddenRaw: "amp", hiddenRaw: "", selection: .only("claude")) == .none
-                && AppDelegate.visibilityChange(
-                    previousHiddenRaw: "", hiddenRaw: "claude",
-                    selection: .only("claude")) == .reducing
-                && AppDelegate.visibilityChange(
-                    previousHiddenRaw: "", hiddenRaw: "amp", selection: .mostUsed) == .reducing,
-            "hiding a client the selection does not publish is no change, while hiding the "
-                + "selected one is still a reduction (mutation: classifying against the raw "
-                + "hidden set grants a bypass for an unrelated hide, and lets an unrelated "
-                + "unhide clear a grant a real hide is still owed)")
+                previousHiddenRaw: previousHidden, hiddenRaw: hidden,
+                previousSelection: previousSelection, selection: selection)
+        }
+        expect(
+            dpVis("", "amp", .only("claude"), .only("claude")) == .none
+                && dpVis("amp", "", .only("claude"), .only("claude")) == .none
+                && dpVis("", "claude", .only("claude"), .only("claude")) == .reducing
+                && dpVis("", "amp") == .reducing
+                && dpVis("amp", "") == .increasing
+                && dpVis("", "claude", .only("claude"), .only("codex")) == .reducing,
+            "hiding a client the selection does not publish is no change, hiding the selected one "
+                + "is a reduction, and switching selection while hiding the outgoing client is "
+                + "still a reduction (mutation: judging the hidden delta under the CURRENT "
+                + "selection alone reports no change and leaves the just-hidden client on the "
+                + "profile for the rest of the floor)")
+
+        // A reduction that removed nothing published earns no bypass. If the
+        // selected client is hidden there is no payload, so unticking a
+        // component takes nothing off the profile — and a grant armed there
+        // waits for a later selection change to inherit and spend it on a
+        // client that IS visible.
+        expect(
+            AppDelegate.withoutUnownedGrant(.reducing, wasPublishing: false)
+                == DiscordIPC.VisibilityChange(retires: true, grant: .leave)
+                && AppDelegate.withoutUnownedGrant(.reducing, wasPublishing: true) == .reducing
+                && AppDelegate.withoutUnownedGrant(.increasing, wasPublishing: false)
+                    == .increasing
+                && AppDelegate.withoutUnownedGrant(.retiring, wasPublishing: false) == .retiring,
+            "a reduction with nothing published keeps its retire and loses its floor claim, while "
+                + "a real one is untouched (mutation: arming it anyway leaves a grant for a later "
+                + "selection change to spend inside the floor)")
 
         // Absent, malformed and named are three answers. One `as? String` cast
         // would send a key holding a number down the ABSENT branch and widen a
