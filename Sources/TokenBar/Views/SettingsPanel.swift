@@ -579,7 +579,11 @@ struct SettingsPanel: View {
             // not undo it — the reference implementation ships "Show today's
             // tokens, cost, and most-used AI tool in your Discord activity",
             // which describes the display and hides the disclosure.
-            hint("Off by default. When on, TokenBar sends today's total tokens, a cost range, and the name of your most-used visible client to the Discord app on this Mac, and Discord publishes them on your profile. Anyone who can see your profile — friends and their bots included — can read every update and keep it indefinitely; switching this off stops future updates but cannot take back what was already shared. It also updates while you work, so your active hours are visible too. Hidden clients are never included.")
+            // Names the second switch's consequence here, in the disclosure the
+            // user reads BEFORE opting in, rather than only next to the switch
+            // itself. Saying "a cost range" while a setting below can turn it
+            // into a figure would describe a state the app may not be in.
+            hint("Off by default. When on, TokenBar sends today's total tokens, your spending as a range like $10-50, and the name of your most-used visible client to the Discord app on this Mac, and Discord publishes them on your profile. The setting below replaces that range with a rounded dollar amount, which says more about you. Anyone who can see your profile — friends and their bots included — can read every update and keep it indefinitely; switching this off stops future updates but cannot take back what was already shared. It also updates while you work, so your active hours are visible too. Hidden clients are never included.")
             toggleRow("Show cost as a figure instead of a range", isOn: $discordWholeDollars)
             // Says what the trade is, not that there is one. A range puts you
             // in a group; a figure is closer to a value only you have, and a
