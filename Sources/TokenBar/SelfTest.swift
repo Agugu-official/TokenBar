@@ -3862,12 +3862,34 @@ enum SelfTest {
         /// Decodes every complete frame currently sitting in `fd`'s buffer,
         /// non-blocking. Replaces the hand-rolled `while case .frame(...) =
         /// decode(...)` loop that most scenarios below used to repeat.
+        ///
+        /// The leftover is CARRIED between calls, per descriptor. `SOCK_STREAM`
+        /// does not preserve write boundaries, so a frame can be split across
+        /// `recv` calls; discarding the prefix would leave every later poll
+        /// starting in the middle of a frame and reporting it missing —
+        /// intermittently, and only under the timing that splits the write.
+        /// Only a `needMore` remainder is carried, and only that. A first
+        /// attempt kept whatever the `while case .frame` loop stopped on, which
+        /// exhausted memory: `fatal` consumes nothing, so the loop halted on
+        /// the same bytes every turn while each poll appended more, and
+        /// `dpFrameArrives` polls in a tight loop. Retaining a decodable
+        /// remainder is bounded by one frame; retaining an undecodable one is
+        /// not bounded at all. The entry is dropped when empty so a recycled
+        /// descriptor never inherits another socket's bytes.
+        var dpPartial: [Int32: Data] = [:]
         func dpFrames(_ fd: Int32) -> [(DiscordIPC.Opcode, Data)] {
-            var buf = dpRecvNow(fd)
+            var buf = (dpPartial[fd] ?? Data()) + dpRecvNow(fd)
             var out: [(DiscordIPC.Opcode, Data)] = []
-            while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
-                out.append((op, body))
+            decoding: while !buf.isEmpty {
+                switch DiscordIPC.decode(from: &buf) {
+                case .frame(let op, let body): out.append((op, body))
+                case .discard: continue
+                case .needMore: break decoding
+                // Unrecoverable by definition, so there is nothing to carry.
+                case .fatal: buf.removeAll()
+                }
             }
+            dpPartial[fd] = buf.isEmpty ? nil : buf
             return out
         }
         /// Counts calls to an injected connect factory. Mutated on the client's
@@ -3881,8 +3903,17 @@ enum SelfTest {
         /// `body`, then stop and close. Scenarios that need two socket pairs, a
         /// mode-counting connect factory, or `holdQueueForTesting` keep their
         /// own setup instead — this shape does not fit them.
+        ///
+        /// `peerClosedByBody` hands descriptor ownership to the body. The
+        /// SIGPIPE scenario closes the peer itself to provoke the write
+        /// failure, and closing it again here would be a double close: in a
+        /// harness with a live serial queue the number can already have been
+        /// reused, so the second `close` can take an unrelated socket out from
+        /// under `stop()` and make later scenarios fail unpredictably.
         @discardableResult
-        func dpScenario<T>(_ body: (Int32, DiscordIPCClient) -> T) -> T {
+        func dpScenario<T>(
+            peerClosedByBody: Bool = false, _ body: (Int32, DiscordIPCClient) -> T
+        ) -> T {
             let (local, peer) = dpSocketPair()
             let client = DiscordIPCClient(connect: { local })
             client.start()
@@ -3891,7 +3922,7 @@ enum SelfTest {
             let result = body(peer, client)
             client.stop()
             client.drainForTesting()
-            close(peer)
+            if !peerClosedByBody { close(peer) }
             return result
         }
         /// The cases `dpScenario` excludes: several socket pairs handed out in
@@ -4035,9 +4066,18 @@ enum SelfTest {
                     "activity", "args", "assets", "buttons", "cmd", "details",
                     "label", "large_image", "nonce", "pid", "state", "url",
                 ]
-                && dpWireAssets?.count == 1,
+                && dpWireAssets?.count == 1
+                // Per KEY, not only as a sorted multiset. Swapping `details`
+                // and `state` in `activityJSON` preserves the sorted leaves,
+                // the sorted keys and the object counts, so every clause above
+                // still passes while Discord renders the token summary in the
+                // cost field and the client name in the other.
+                && dpWireActivity?["details"] as? String == dpWirePayload.details
+                && dpWireActivity?["state"] as? String == dpWirePayload.state
+                && dpWireAssets?["large_image"] as? String == dpWirePayload.largeImageKey,
             "A-wire: the activity's leaves are exactly Payload.fields plus Discord's structural "
-                + "constants, counted; its keys are exactly the protocol's; and assets holds "
+                + "constants, counted; each field keeps its own key; its keys are exactly the "
+                + "protocol's; and assets holds "
                 + "exactly large_image (mutation: adding any field or key — even one whose value "
                 + "or an empty-object value duplicates an existing leaf — fails one of these three)")
         expect(dpWireActivity?.count == 4 && dpWireAssets?["large_image"] as? String == "tokenbar",
@@ -4233,7 +4273,7 @@ enum SelfTest {
         // written in the same queue item so the EOF handler cannot get there
         // first. With SO_NOSIGPIPE removed this does not fail, it kills the
         // selftest process: no FAIL line, no "selftest passed", exit 141.
-        let dpSigOK = dpScenario { peer, client in
+        let dpSigOK = dpScenario(peerClosedByBody: true) { peer, client in
             client.probeWriteForTesting { close(peer) }
             return client.writeErrnoForTesting == EPIPE && !client.isConnectedForTesting
         }
@@ -5202,23 +5242,36 @@ enum SelfTest {
         // `UserDefaults.standard.object(forKey:)`, which is exactly the natural
         // way to violate this, and that mutation survived the whole suite.
         //
-        // No assertion here, and no write to any defaults domain. The M1
-        // cost-mode conjunction already catches it: a payload that reads a
-        // domain instead of its parameter returns the SAME rendering for both
-        // `.banded` and `.wholeDollars`, so whatever the domain happens to
-        // hold, one of that assertion's two equalities fails. Measured — the
-        // mutation `costText(..., style: DiscordPresence.costStyle())` is
-        // caught there.
+        // Structural, and it has to be. The M1 cost-mode conjunction catches an
+        // UNCONDITIONAL replacement of the parameter, because a payload reading
+        // a domain renders both `.banded` and `.wholeDollars` the same way. It
+        // does not catch a CONDITIONAL read — consulting the domain only when
+        // `style == .banded` renders both correctly on a default-off host and
+        // still makes the payload machine-dependent the moment a saved or
+        // command-line whole-dollar value exists.
         //
-        // An earlier revision of this section did write the process's own
-        // domain to make the contract locally observable. It read the prior
-        // value with `object(forKey:)`, which searches volatile domains
-        // including `NSArgumentDomain`, while `set` and `removeObject` write
-        // the persistent application domain. Running the suite with
-        // `-tokenbar.discord.wholeDollars ...` — which the manual acceptance
-        // flow does — would therefore have copied a command-line override into
-        // the user's saved preferences, where it takes effect on the next
-        // ordinary launch. A test must not be able to change what it measures.
+        // Not asserted by writing the process's own domain either, which an
+        // earlier revision did: it read the prior value with `object(forKey:)`,
+        // which searches volatile domains including `NSArgumentDomain`, while
+        // `set` and `removeObject` write the persistent application domain.
+        // Running the suite with `-tokenbar.discord.wholeDollars ...`, which
+        // the manual acceptance flow does, would have copied a command-line
+        // override into the user's saved preferences. A test must not be able
+        // to change what it measures.
+        //
+        // The substring is `UserDefaults.standard`, not `.object(forKey:`. An
+        // earlier draft counted the latter and matched on the receiver name, so
+        // it could only see reads written against a `defaults` parameter —
+        // `payload()` has no such parameter, and the natural violation is
+        // `UserDefaults.standard.object(forKey:)`, which it looked straight
+        // past. Measured: that mutation survived the whole suite.
+        expect(
+            dpSources.first { $0.name == "DiscordPresence.swift" }
+                .map { !$0.text.contains("UserDefaults.standard") } == true,
+            "A2b: the payload layer never reaches for `UserDefaults.standard`, so what it "
+                + "publishes depends on its arguments and not on the machine running it "
+                + "(mutation: consulting the domain inside payload(), conditionally or not, "
+                + "makes every privacy assertion above machine-dependent)")
 
         // The gate is the only path to a client. All three are shape claims —
         // "constructed in exactly one place", "not aliased", "not handed
