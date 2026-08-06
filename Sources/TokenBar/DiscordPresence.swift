@@ -10,8 +10,15 @@ import TokenBarCore
 /// performs file I/O — the transport and the opt-in switch land separately.
 /// `hidden` is a parameter, not a lookup, for the same reason.
 enum DiscordPresence {
-    /// Everything, and only what, would be published to a third party and shown
-    /// on a public profile.
+    /// Everything about the USER that would be published to a third party and
+    /// shown on a public profile — and only that.
+    ///
+    /// Not the whole profile surface: the transport adds four leaves of its own
+    /// (the pid, a nonce, and a repository button's label and URL), all
+    /// constants or process facts with nothing of the user in them, declared
+    /// and asserted in `DiscordIPC`. An audit needs both halves. This type
+    /// bounds what can be said about the person; that file bounds what else can
+    /// ride along.
     struct Payload: Equatable {
         let details: String
         let state: String

@@ -161,7 +161,8 @@ enum DiscordIPC {
         serialize(["v": 1, "client_id": applicationID])
     }
 
-    /// Map the published surface onto Discord's activity wire shape. `nil`
+    /// Map the user-derived surface onto Discord's activity wire shape, and
+    /// add the transport's own constant leaves alongside it. `nil`
     /// clears the activity (`"activity":null`), which is what `stop()` sends
     /// before closing the socket.
     static func activityJSON(
