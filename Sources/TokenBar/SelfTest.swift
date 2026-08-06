@@ -4007,7 +4007,15 @@ enum SelfTest {
         // is what closes that.
         expect(
             DiscordIPC.leafStrings(dpWire).sorted()
-                == (Array(dpWirePayload.fields.values) + ["SET_ACTIVITY", "NONCE-1", "4242"]).sorted(),
+                == (Array(dpWirePayload.fields.values)
+                    // Literals, not the constants. The button is carried by the
+                    // transport rather than the payload so that a value derived
+                    // from anything — a `?ref=` parameter being the obvious one
+                    // — fails right here instead of being admitted as just
+                    // another field. Pinning it to the constant would defeat
+                    // that: the constant would move and the assertion with it.
+                    + ["View on GitHub", "https://github.com/Nanako0129/TokenBar"]
+                    + ["SET_ACTIVITY", "NONCE-1", "4242"]).sorted(),
             "A-wire: the activity's leaves are exactly Payload.fields plus Discord's structural "
                 + "constants, counted (mutation: adding any field — hostname, startTimestamp, or "
                 + "one whose value duplicates an existing leaf — fails here)")
@@ -4020,8 +4028,8 @@ enum SelfTest {
         expect(dpWireActivity?["details"] as? String == "12K tokens today"
             && dpWireActivity?["state"] as? String == "Amp · $1-5",
             "A-wire: details and state go out verbatim")
-        expect(dpWireActivity?.count == 3,
-            "A-wire: the activity object holds exactly details, state and assets")
+        expect(dpWireActivity?.count == 4,
+            "A-wire: the activity object holds exactly details, state, assets and buttons")
         // The nested level needs its own count: `activity.count` only sees the
         // top level, so a field added under `assets` kept it at 3.
         // Keys are a channel of their own. A leaf scan cannot see them, and an
@@ -4030,8 +4038,8 @@ enum SelfTest {
         // array, not a Set, so a key repeated at another level shows too.
         expect(
             DiscordIPC.leafKeys(dpWire).sorted() == [
-                "activity", "args", "assets", "cmd", "details",
-                "large_image", "nonce", "pid", "state",
+                "activity", "args", "assets", "buttons", "cmd", "details",
+                "label", "large_image", "nonce", "pid", "state", "url",
             ],
             "A-wire: the frame's keys are exactly the protocol's (mutation: adding a key whose "
                 + "VALUE is an empty object smuggles the key text out with no new leaf — this is "
@@ -4158,12 +4166,59 @@ enum SelfTest {
         // Guarding a serializer is not guarding what it is called with.
         expect(
             DiscordIPC.leafKeys(dpActivityBody).sorted() == [
-                "activity", "args", "assets", "cmd", "details",
-                "large_image", "nonce", "pid", "state",
+                "activity", "args", "assets", "buttons", "cmd", "details",
+                "label", "large_image", "nonce", "pid", "state", "url",
             ],
             "the frame on the wire carries exactly the protocol's keys")
+
+        // A26 — the button's shape, against Discord's documented limits and
+        // against the one way this constant could become a channel.
+        if let dpWireButtons = (((try? JSONSerialization.jsonObject(with: dpActivityBody))
+            as? [String: Any])?["args"] as? [String: Any])?["activity"] as? [String: Any],
+            let dpButtons = dpWireButtons["buttons"] as? [[String: String]] {
+            expect(dpButtons.count == 1 && dpButtons.count <= 2,
+                "A26: one button goes out, and Discord's limit of two is not exceeded")
+            let dpLabel = dpButtons.first?["label"] ?? ""
+            let dpURL = dpButtons.first?["url"] ?? ""
+            expect(!dpLabel.isEmpty && dpLabel.count <= 32,
+                "A26: the label is within Discord's 1-32 characters (mutation: a longer label is "
+                    + "silently dropped by Discord, so the button would simply not appear)")
+            expect(!dpURL.isEmpty && dpURL.count <= 512,
+                "A26: the URL is within Discord's 1-512 characters")
+            let dpURLParts = URLComponents(string: dpURL)
+            expect(
+                dpURLParts?.scheme == "https" && dpURLParts?.host == "github.com"
+                    && dpURLParts?.query == nil && dpURLParts?.fragment == nil
+                    && dpURLParts?.user == nil && dpURLParts?.password == nil,
+                "A26: the URL is a bare https://github.com link with no query, fragment or "
+                    + "credentials (mutation: `buttonURL + \"?ref=\" + installID` — the shape a "
+                    + "per-user tracking parameter takes — fails here, and it is the reason this "
+                    + "constant lives in the transport rather than in the payload)")
+        } else {
+            expect(false, "A26: the activity on the wire carries a buttons array at all")
+        }
+
+        // A26b — buttons ride with an activity, never with a clear. A cleared
+        // presence is the user withdrawing; sending them a link at that moment
+        // would be the one place this feature turns into advertising.
+        var dpClearFrame = DiscordIPC.activityJSON(nil, pid: 4242, nonce: "NONCE-C")
+        expect(!String(decoding: dpClearFrame, as: UTF8.self).contains("buttons")
+            && DiscordIPC.leafStrings(dpClearFrame).allSatisfy {
+                $0 != DiscordIPC.buttonURL && $0 != DiscordIPC.buttonLabel
+            },
+            "A26b: a clear carries no buttons (mutation: attaching them outside the `if let "
+                + "payload` sends a link on the frame that withdraws the presence)")
+        dpClearFrame = Data()
         let dpLiveLeaves = DiscordIPC.leafStrings(dpActivityBody)
-        let dpLivePayloadLeaves = ["12K tokens today", "Amp · $1-5", "tokenbar", "SET_ACTIVITY"]
+        // Literals, not the constants they pin — the same rule the pid and the
+        // nonce follow below. The button is a transport-layer constant
+        // precisely so that a future non-constant value, a `?ref=` parameter
+        // being the obvious one, fails HERE in the strongest assertion in this
+        // file rather than riding along as one more payload field.
+        let dpLivePayloadLeaves = [
+            "12K tokens today", "Amp · $1-5", "tokenbar", "SET_ACTIVITY",
+            "View on GitHub", "https://github.com/Nanako0129/TokenBar",
+        ]
         expect(
             dpLiveLeaves.count == dpLivePayloadLeaves.count + 2
                 && dpLivePayloadLeaves.allSatisfy(dpLiveLeaves.contains),

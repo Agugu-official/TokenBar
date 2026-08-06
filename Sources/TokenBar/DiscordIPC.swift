@@ -29,6 +29,32 @@ enum DiscordIPC {
     /// checked before any allocation sized from the wire.
     static let maxFrameLength: UInt32 = 64 * 1024
 
+    /// The repository link the presence carries. Discord allows at most two
+    /// buttons, each `{label, url}`, with the label 1–32 characters and the URL
+    /// 1–512.
+    ///
+    /// **Transport-layer constants, deliberately not payload fields.** Putting
+    /// the URL in `Payload.fields` would open a channel the privacy assertions
+    /// structurally cannot see: the wire assertion's expected value *is*
+    /// `fields.values` plus the envelope constants, so anything placed there is
+    /// admitted by definition; and the value scans work by poisoning the
+    /// payload's inputs, which a compile-time constant does not have. A later
+    /// `buttonURL + "?ref=" + installID` would pass every one of them. It would
+    /// also break the "no path-like segment in the payload" assertion outright,
+    /// and the natural exemption for that is exactly what would admit the query
+    /// parameter.
+    ///
+    /// Carried here instead, alongside the pid and the nonce — the other two
+    /// leaves the transport synthesises — these are pinned by literal
+    /// assertions, so a non-constant value fails the strongest check in the
+    /// suite with no new machinery.
+    ///
+    /// Nothing about the user is in either value, and nothing may be added to
+    /// them. A query parameter, a fragment, or anything derived from the
+    /// machine belongs to a different feature and a different review.
+    static let buttonLabel = "View on GitHub"
+    static let buttonURL = "https://github.com/Nanako0129/TokenBar"
+
     /// How a publish's own visibility change relates to what may be published.
     /// Three states, not a Bool: see `DiscordIPCClient.publish(_:visibility:)`
     /// for why the middle one — an ordinary sample that changed nothing — has
@@ -143,6 +169,11 @@ enum DiscordIPC {
                     fields[key] = value
                 }
             }
+            // Added by the transport, like the pid and the nonce, and only
+            // alongside a real activity: a clear is `nil` and carries nothing,
+            // buttons included. This is the one place `fields` is added to, and
+            // it adds constants rather than anything derived from the payload.
+            fields["buttons"] = [["label": buttonLabel, "url": buttonURL]]
             activity = fields
         }
         return serialize([
