@@ -194,6 +194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .mostUsed: return registered.subtracting(hidden)
             case .only(let id):
                 return registered.contains(id) ? Set([id]).subtracting(hidden) : []
+            case .malformed: return []
             }
         }
         return effective(previous) == effective(current) ? .none : .retiring

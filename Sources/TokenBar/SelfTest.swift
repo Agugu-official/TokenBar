@@ -3995,6 +3995,28 @@ enum SelfTest {
                 + "hidden is no change at all (mutation: classifying it `.reducing` grants an "
                 + "unbounded floor bypass; comparing raw selections republishes when nothing "
                 + "published actually moved)")
+        // Absent, malformed and named are three answers. One `as? String` cast
+        // would send a key holding a number down the ABSENT branch and widen a
+        // one-client selection to every registered client.
+        let dpSelSuite = "TokenBar.SelfTest.DiscordSelection"
+        if let dpSelDefaults = UserDefaults(suiteName: dpSelSuite) {
+            defer { UserDefaults.standard.removePersistentDomain(forName: dpSelSuite) }
+            let dpSelAbsent = DiscordPresence.selection(defaults: dpSelDefaults)
+            dpSelDefaults.set(1, forKey: DiscordPresence.selectionKey)
+            let dpSelWrong = DiscordPresence.selection(defaults: dpSelDefaults)
+            dpSelDefaults.set("claude", forKey: DiscordPresence.selectionKey)
+            let dpSelNamed = DiscordPresence.selection(defaults: dpSelDefaults)
+            expect(
+                dpSelAbsent == .mostUsed && dpSelWrong == .malformed && dpSelNamed == .only("claude")
+                    && DiscordPresence.payload(
+                        graph: dpSecretGraph, hidden: [], today: dpToday, costStyle: .banded,
+                        components: dpAllComponents, selection: .malformed) == nil,
+                "an absent selection key is most-used, a present non-string publishes nothing, and "
+                    + "a named one selects (mutation: one `as? String` cast for both widens a "
+                    + "malformed one-client selection to every registered client)")
+        } else {
+            expect(false, "the isolated selection suite could not be created")
+        }
         expect(
             DiscordIPC.VisibilityChange.retiring.combined(with: .increasing) == .retiring
                 && DiscordIPC.VisibilityChange.retiring.combined(with: .reducing) == .reducing
@@ -4759,6 +4781,41 @@ enum SelfTest {
             "A15: hiding a client republishes immediately instead of waiting out the 15s floor, "
                 + "unlike an ordinary update inside it "
                 + "(mutation: dropping the floorBypass grant throttles it like any other sample)")
+
+        // A hide's grant survives a selection change that supersedes it. The
+        // hide publishes `.reducing` but its queued block has not run, so
+        // `floorBypass` is not armed yet; the selection change publishes
+        // `.retiring`, whose epoch bump retires that block. Without the grant
+        // being carried, the replacement — which already contains the new
+        // hidden set — waits out the floor while the just-hidden client stays
+        // public. The control run is the same fixture with no reduction in
+        // front, which must still be throttled.
+        func dpSupersededHide(withReduction: Bool) -> Bool {
+            let (local, peer) = dpSocketPair()
+            let client = DiscordIPCClient(connect: { local })
+            client.publishInterval = 3.0
+            client.start()
+            client.drainForTesting()
+            _ = dpReachReady(peer, client)
+            client.publish(dpP("20K tokens today", state: "Amp · $1-5"))
+            client.drainForTesting()
+            _ = dpFramesNow(peer) // consume the sample that arms the clock
+            let gate = dpHold(client)
+            if withReduction {
+                client.publish(dpP("21K tokens today", state: "Amp · $1-5"), visibility: .reducing)
+            }
+            client.publish(dpP("22K tokens today", state: "Zed · $1-5"), visibility: .retiring)
+            gate.signal()
+            client.drainForTesting()
+            let arrived = dpFrameArrives(peer, "22K tokens today", within: 0.4)
+            dpFinish(client, [peer])
+            return arrived
+        }
+        expect(dpSupersededHide(withReduction: true) && !dpSupersededHide(withReduction: false),
+            "a retire inherits the grant of a reduction it superseded, and earns none on its own "
+                + "(mutation: dropping the inheritance leaves the just-hidden client public for "
+                + "the rest of the floor; arming one for every retire hands a selection change "
+                + "an unbounded bypass)")
 
         // A15c — the bypass is one shot: a clear carries no new information
         // and must not re-arm the floor's clock, or the unhide behind it goes

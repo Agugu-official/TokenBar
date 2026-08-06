@@ -593,7 +593,7 @@ struct SettingsPanel: View {
             // into a figure would describe a state the app may not be in.
             hint("Off by default. Publishes what you pick below — today's tokens, your most-used visible client, a cost range or rounded figure — and a link to TokenBar's source to your Discord profile. It updates while you work, so your active hours show too. Anyone who can see your profile can read and keep every update; switching this off stops new ones but cannot unshare what already went out. Hidden clients are never included.")
             toggleRow("Include today's tokens", isOn: componentBinding(.tokens))
-            toggleRow("Include your most-used client", isOn: componentBinding(.client))
+            toggleRow("Include the client name", isOn: componentBinding(.client))
             toggleRow("Include cost", isOn: componentBinding(.cost))
             // Not a hint about tidiness. Unticking everything is the one
             // combination that would otherwise still publish — an activity
@@ -608,7 +608,7 @@ struct SettingsPanel: View {
             // Two consequences, and neither is obvious from the control. The
             // first reads as a bug when it is a decision; the second is the one
             // that compounds with the switch below it.
-            hint("Naming one client publishes only its usage, so the total can differ from the menu bar, which counts every client including ones TokenBar does not recognise. It also turns cost per token into that one tool's price rather than a mixed average.")
+            hint("Naming one client publishes only its usage, so the totals can differ from the menu bar, which counts every client including ones TokenBar does not recognise. The cost becomes that one tool's daily spend rather than the whole day's.")
             toggleRow("Show cost as a figure instead of a range", isOn: $discordWholeDollars)
             // Says what the trade is, not that there is one. A range puts you
             // in a group; a figure is closer to a value only you have, and a

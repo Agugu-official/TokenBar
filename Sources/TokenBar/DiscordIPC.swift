@@ -451,6 +451,13 @@ final class DiscordIPCClient: @unchecked Sendable {
     private struct Consent {
         var granted: Bool
         var epoch: UInt64
+        /// A `.reducing` publish whose queued block has not run yet, so it has
+        /// not armed `floorBypass`. Recorded here, under the lock, because a
+        /// `.retiring` publish landing in between bumps the epoch and retires
+        /// that block — which would otherwise destroy the grant along with the
+        /// stale payload, leaving the just-hidden client public for the rest of
+        /// the floor while the replacement waits it out.
+        var unspentReduction = false
     }
     private let consentLock = OSAllocatedUnfairLock(
         initialState: Consent(granted: true, epoch: 0))
@@ -629,12 +636,24 @@ final class DiscordIPCClient: @unchecked Sendable {
         // `AppDelegate` ever sees the `false` — but the hide inside it always
         // surfaces as `.reducing`. Retiring stale work on a fact that is always
         // observable beats retiring it on a transition that sometimes is not.
-        let ticket = consentLock.withLock { state -> UInt64 in
+        // `inheritsReduction` carries a hide's grant across a retire. The
+        // retire's own payload already contains the new hidden set, so the
+        // grant is still owed even though the block that would have armed it
+        // has been retired.
+        let (ticket, inheritsReduction) = consentLock.withLock { state -> (UInt64, Bool) in
             switch visibility {
-            case .reducing, .retiring: state.epoch &+= 1
-            case .increasing, .none: break
+            case .reducing:
+                state.epoch &+= 1
+                state.unspentReduction = true
+            case .retiring:
+                state.epoch &+= 1
+            case .increasing:
+                // An unhide puts information back and must not inherit a grant.
+                state.unspentReduction = false
+            case .none:
+                break
             }
-            return state.epoch
+            return (state.epoch, state.unspentReduction)
         }
         queue.async {
             // Recorded even while abandoned: the producer's latest intent is
@@ -655,11 +674,16 @@ final class DiscordIPCClient: @unchecked Sendable {
             switch visibility {
             case .reducing: self.floorBypass = true
             case .increasing: self.floorBypass = false
-            // Leaves an existing grant alone, exactly as `.none` does. A hide
-            // that armed one is still unpublished at this point, and its
-            // content is in the payload being written now — clearing it here
-            // would leave the hidden client up for the rest of the floor.
-            case .retiring, .none: break
+            // A retire never ARMS a bypass of its own — that is the whole point
+            // of the case — but it does inherit one a hide is still owed.
+            case .retiring: if inheritsReduction { self.floorBypass = true }
+            // Leaves an existing grant alone. A hide that armed one is still
+            // unpublished, and its content is in the payload being written now.
+            case .none: break
+            }
+            // Spent, or superseded by this write either way.
+            if case .increasing = visibility {} else {
+                self.consentLock.withLock { $0.unspentReduction = false }
             }
             self.flush()
         }

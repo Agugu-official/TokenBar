@@ -142,17 +142,25 @@ enum DiscordPresence {
     enum ClientSelection: Equatable {
         case mostUsed
         case only(String)
+        /// The key is present but holds something that is not a string — a
+        /// malformed `defaults write`. Publishes nothing, the same answer an
+        /// unknown id gets, rather than widening to every registered client.
+        case malformed
     }
 
     static let selectionKey = "tokenbar.discord.client"
 
     /// Absent or empty means the busiest visible client, which is what the
     /// feature published before this preference existed.
+    /// Absent, malformed and named are three different answers, for the same
+    /// reason `components()` distinguishes them: one `as? String` cast would
+    /// send a key holding a number down the ABSENT branch and silently widen a
+    /// one-client selection to every registered client, while an unknown
+    /// string id correctly publishes nothing.
     static func selection(defaults: UserDefaults = .standard) -> ClientSelection {
-        guard let id = defaults.object(forKey: selectionKey) as? String, !id.isEmpty else {
-            return .mostUsed
-        }
-        return .only(id)
+        guard let stored = defaults.object(forKey: selectionKey) else { return .mostUsed }
+        guard let id = stored as? String else { return .malformed }
+        return id.isEmpty ? .mostUsed : .only(id)
     }
 
     static let componentsKey = "tokenbar.discord.components"
@@ -390,6 +398,8 @@ enum DiscordPresence {
             // would target exactly that client's figures under a neutral label.
             guard ClientRegistry.allIds.contains(id) else { return nil }
             only = [id]
+        case .malformed:
+            return nil
         }
         let totals = graph.trayTotals(hidden: hidden, today: today, only: only)
         // Non-finite numbers must never be published — garbage on a public
