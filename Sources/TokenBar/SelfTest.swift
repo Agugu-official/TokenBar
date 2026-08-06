@@ -4167,10 +4167,18 @@ enum SelfTest {
                 dpURLParts?.scheme == "https" && dpURLParts?.host == "github.com"
                     && dpURLParts?.query == nil && dpURLParts?.fragment == nil
                     && dpURLParts?.user == nil && dpURLParts?.password == nil,
-                "A26: the URL is a bare https://github.com link with no query, fragment or "
+                "A26-URL: the URL is a bare https://github.com link with no query, fragment or "
                     + "credentials (mutation: `buttonURL + \"?ref=\" + installID` — the shape a "
                     + "per-user tracking parameter takes — fails here, and it is the reason this "
                     + "constant lives in the transport rather than in the payload)")
+        } else {
+            // Not a formality. The cast above is what asserts the wire shape:
+            // if `buttons` regressed from an array to an OBJECT carrying the
+            // same `label` and `url`, this block would simply be skipped, and
+            // every other check still passes — the leaf-key and leaf-value
+            // assertions see identical leaves from both shapes. Discord renders
+            // nothing for the object form, so the button would silently vanish.
+            expect(false, "A26: the activity carries `buttons` as an ARRAY of objects")
         }
 
         // A26b — buttons ride with an activity, never with a clear. A cleared
@@ -5193,24 +5201,25 @@ enum SelfTest {
         // the receiver name and looked straight past
         // `UserDefaults.standard.object(forKey:)`, which is exactly the natural
         // way to violate this, and that mutation survived the whole suite.
-        // Written into the process's own domain because "reads no domain" is
-        // only observable by making the real one disagree with the parameter,
-        // and reverted immediately: the manual acceptance flow reads it.
-        let dpPriorWholeDollars = UserDefaults.standard.object(
-            forKey: DiscordPresence.wholeDollarsKey)
-        UserDefaults.standard.set(true, forKey: DiscordPresence.wholeDollarsKey)
-        let dpBandedUnderTrue = DiscordPresence.payload(
-            graph: dpGrainGraph, hidden: [], today: dpToday, costStyle: .banded)
-        if let dpPriorWholeDollars {
-            UserDefaults.standard.set(dpPriorWholeDollars, forKey: DiscordPresence.wholeDollarsKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: DiscordPresence.wholeDollarsKey)
-        }
-        expect(dpBandedUnderTrue?.state.hasSuffix("<$10") == true,
-            "A2b: the payload honours the costStyle it is passed and reads no preference of its "
-                + "own, with the process's own domain saying the opposite "
-                + "(mutation: reading the cost switch inside payload() makes every privacy "
-                + "assertion depend on the machine running the suite)")
+        //
+        // No assertion here, and no write to any defaults domain. The M1
+        // cost-mode conjunction already catches it: a payload that reads a
+        // domain instead of its parameter returns the SAME rendering for both
+        // `.banded` and `.wholeDollars`, so whatever the domain happens to
+        // hold, one of that assertion's two equalities fails. Measured — the
+        // mutation `costText(..., style: DiscordPresence.costStyle())` is
+        // caught there.
+        //
+        // An earlier revision of this section did write the process's own
+        // domain to make the contract locally observable. It read the prior
+        // value with `object(forKey:)`, which searches volatile domains
+        // including `NSArgumentDomain`, while `set` and `removeObject` write
+        // the persistent application domain. Running the suite with
+        // `-tokenbar.discord.wholeDollars ...` — which the manual acceptance
+        // flow does — would therefore have copied a command-line override into
+        // the user's saved preferences, where it takes effect on the next
+        // ordinary launch. A test must not be able to change what it measures.
+
         // The gate is the only path to a client. All three are shape claims —
         // "constructed in exactly one place", "not aliased", "not handed
         // curated arguments" — which no runtime value can express: a second
@@ -5227,6 +5236,17 @@ enum SelfTest {
                 + "the type is not aliased, and no call site substitutes its own arguments for "
                 + "the process's (mutations: constructing one elsewhere including via `.init`, "
                 + "renaming the type, or passing a curated array, each bypass the demo/test gate)")
+        // A16 — the same class of claim, and kept for the same reason. The
+        // disable path leaves the stopped client in `discord` on purpose:
+        // `applicationWillTerminate` drains the queued clear inside
+        // `if let discord`, so re-adding `discord = nil` after `stop()` lets an
+        // immediate quit abandon it and leave the withdrawn activity public.
+        // That needs a real app lifecycle to exercise and nothing else in the
+        // suite detects it, so the shape is asserted instead.
+        expect(dpOccurrences("discord=nil", in: dpNormalized) == 0,
+            "A16: the disable path keeps the client reference until termination drains its clear "
+                + "(mutation: re-adding `discord = nil` after `stop()` abandons the clear on an "
+                + "off-then-quit, because the drain is guarded on the reference)")
         // A26c — the button constants, pinned as literal DECLARATIONS and as a
         // file compiled identically in every configuration. Neither half covers
         // the other's survivor, and both were measured to pass all 659
