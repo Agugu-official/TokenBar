@@ -3589,6 +3589,10 @@ enum SelfTest {
             """
         }
         let dpToday = "2026-08-04"
+        /// The default composition, which reproduces exactly what was published
+        /// before composition existed — so every assertion written against the
+        /// old single shape keeps testing the same bytes.
+        let dpAllComponents = DiscordPresence.defaultComponents
 
         // Hidden clients are excluded from the published totals. The day-level
         // `totals` (1.2M) differs from the visible-only sum (200K) on purpose: a
@@ -3597,7 +3601,7 @@ enum SelfTest {
             dpToday, 1_200_000, 6.0,
             dpStripe("claude", 1_000_000, 5.0) + "," + dpStripe("codex", 200_000, 1.0))))
         let dpHidden = DiscordPresence.payload(
-            graph: dpHiddenGraph, hidden: ["claude"], today: dpToday, costStyle: .banded)
+            graph: dpHiddenGraph, hidden: ["claude"], today: dpToday, costStyle: .banded, components: dpAllComponents)
         expect(
             dpHidden?.details == "200K tokens today"
                 && dpHidden.map { !$0.fields.values.joined().contains("1.2M") } == true,
@@ -3618,8 +3622,8 @@ enum SelfTest {
                 + "," + dpStripe("SECRET_HIDDEN", 900_000, 9.0,
                     model: "SECRET_MODEL2", provider: "SECRET_PROVIDER2"))))
         let dpSecret = DiscordPresence.payload(
-            graph: dpSecretGraph, hidden: ["SECRET_HIDDEN"], today: dpToday, costStyle: .banded)
-        let dpSecretText = (dpSecret?.fields.values ?? [:].values).joined(separator: "|")
+            graph: dpSecretGraph, hidden: ["SECRET_HIDDEN"], today: dpToday, costStyle: .banded, components: dpAllComponents)
+        let dpSecretText = dpSecret.map { Array($0.fields.values).joined(separator: "|") } ?? ""
         // The expected label is a literal: an assertion reading it out of the
         // constant it guards passes whatever that constant becomes.
         expect(
@@ -3642,8 +3646,8 @@ enum SelfTest {
         let dpGrainGraph = dpGraph(dpPayload(dpDay(
             dpToday, 1_234_567, 7.89, dpStripe("claude", 1_234_567, 7.89))))
         let dpGrain = DiscordPresence.payload(
-            graph: dpGrainGraph, hidden: [], today: dpToday, costStyle: .banded)
-        let dpGrainText = (dpGrain?.fields.values ?? [:].values).joined(separator: "|")
+            graph: dpGrainGraph, hidden: [], today: dpToday, costStyle: .banded, components: dpAllComponents)
+        let dpGrainText = dpGrain.map { Array($0.fields.values).joined(separator: "|") } ?? ""
         expect(dpGrain?.details == "1.2M tokens today" && !dpGrainText.contains("1234567"),
             "tokens publish as a compact string and the raw count reaches no field "
                 + "(mutation: String(todayTokens) fails here)")
@@ -3697,9 +3701,9 @@ enum SelfTest {
         let dpModeGraph = dpGraph(dpPayload(dpDay(
             dpToday, 12_000, 7.89, dpStripe("claude", 12_000, 7.89))))
         let dpBanded = DiscordPresence.payload(
-            graph: dpModeGraph, hidden: [], today: dpToday, costStyle: .banded)
+            graph: dpModeGraph, hidden: [], today: dpToday, costStyle: .banded, components: dpAllComponents)
         let dpExact = DiscordPresence.payload(
-            graph: dpModeGraph, hidden: [], today: dpToday, costStyle: .wholeDollars)
+            graph: dpModeGraph, hidden: [], today: dpToday, costStyle: .wholeDollars, components: dpAllComponents)
         expect(
             dpBanded?.state == "Claude Code · <$10" && dpExact?.state == "Claude Code · $8"
                 && dpBanded.map { !$0.fields.values.joined().contains("7.89") } == true
@@ -3731,12 +3735,12 @@ enum SelfTest {
         // per lane, so the re-summed slow path can go negative.
         let dpSmall = DiscordPresence.payload(
             graph: dpGraph(dpPayload(dpDay(dpToday, 850, 0.4, dpStripe("claude", 850, 0.4)))),
-            hidden: [], today: dpToday, costStyle: .banded)
+            hidden: [], today: dpToday, costStyle: .banded, components: dpAllComponents)
         let dpNegative = DiscordPresence.payload(
             graph: dpGraph(dpPayload(dpDay(
                 dpToday, 0, 1.0,
                 dpStripe("claude", -1_234_567, 0.0) + "," + dpStripe("codex", 1_000, 1.0)))),
-            hidden: ["nobody"], today: dpToday, costStyle: .banded)
+            hidden: ["nobody"], today: dpToday, costStyle: .banded, components: dpAllComponents)
         expect(
             dpSmall?.details == "<1K tokens today"
                 && dpNegative.map { !$0.fields.values.joined().contains("1233567") } ?? true,
@@ -3749,14 +3753,14 @@ enum SelfTest {
         let dpSilent: [(String, DiscordPresence.Payload?)] = [
             ("zero usage", DiscordPresence.payload(
                 graph: dpGraph(dpPayload(dpDay(dpToday, 0, 0, dpStripe("claude", 0, 0)))),
-                hidden: [], today: dpToday, costStyle: .banded)),
+                hidden: [], today: dpToday, costStyle: .banded, components: dpAllComponents)),
             ("a day with no contribution", DiscordPresence.payload(
-                graph: dpGrainGraph, hidden: [], today: "2099-01-01", costStyle: .banded)),
+                graph: dpGrainGraph, hidden: [], today: "2099-01-01", costStyle: .banded, components: dpAllComponents)),
             ("an overflowed cost", DiscordPresence.payload(
                 graph: dpGraph(dpPayload(dpDay(
                     dpToday, 10, 1e308,
                     dpStripe("claude", 10, 1e308) + "," + dpStripe("codex", 10, 1e308)))),
-                hidden: ["nobody"], today: dpToday, costStyle: .banded)),
+                hidden: ["nobody"], today: dpToday, costStyle: .banded, components: dpAllComponents)),
         ]
         for (label, payload) in dpSilent {
             expect(payload == nil,
@@ -3774,7 +3778,7 @@ enum SelfTest {
                 + dpStripe("claude", 30, 0.3, model: "m2") + ","
                 + dpStripe("codex", 50, 0.5, model: "m1"))))
         let dpFold = DiscordPresence.payload(
-            graph: dpFoldGraph, hidden: [], today: dpToday, costStyle: .banded)
+            graph: dpFoldGraph, hidden: [], today: dpToday, costStyle: .banded, components: dpAllComponents)
         expect(dpFold?.state.hasPrefix("Claude Code") == true,
             "the top client folds stripes per client first (mutation: max over raw stripes picks "
                 + "Codex CLI's single 50 over Claude Code's 30+30)")
@@ -3797,9 +3801,67 @@ enum SelfTest {
             expect(
                 DiscordPresence.payload(
                     graph: dpGraph(dpPayload(dpDay(dpToday, 600, 6.0, stripes))),
-                    hidden: [], today: dpToday, costStyle: .banded)?.state == expected,
+                    hidden: [], today: dpToday, costStyle: .banded, components: dpAllComponents)?.state == expected,
                 "\(label) (mutation: `>=` in the fold comparison, or an unsorted key walk)")
         }
+
+        // Composition. The hostile fixture runs with the client component
+        // selected and NOTHING else, which is the whole point: every privacy
+        // value-scan above runs against whichever shape its fixture picked, so
+        // a selection of tokens + cost would satisfy "a `cc-mirror/SECRET` id
+        // cannot escape" without ever executing the allowlist path that
+        // assertion exists to guard. The client label is the only component
+        // built from a user-controlled string, so this is the case that closes
+        // it — not sixteen fixtures, one per subset.
+        let dpClientOnly = DiscordPresence.payload(
+            graph: dpSecretGraph, hidden: ["SECRET_HIDDEN"], today: dpToday,
+            costStyle: .banded, components: [.client])
+        expect(
+            dpClientOnly?.details == "an AI tool"
+                && dpClientOnly.map { Array($0.fields.values).joined().contains("SECRET_") } == false
+                && dpClientOnly?.fields.keys.sorted() == ["details", "largeImageKey"],
+            "one selected component becomes `details`, an unregistered id still publishes the "
+                + "neutral label, and no empty `state` key reaches the wire "
+                + "(mutation: composing without the allowlist gate leaks the id; publishing "
+                + "`state` unconditionally adds a blank field)")
+        // The composition is a user-controlled string flowing toward a public
+        // profile — the same shape as the `cc-mirror/<name>` id. Unknown tokens
+        // must produce nothing and never echo themselves, and the canonical
+        // write-back is what keeps a reordering from reaching the value gate as
+        // a change.
+        let dpMixedComponents = DiscordPresence.parseComponents("tokens, SECRET_COMPONENT ,cost")
+        expect(
+            dpMixedComponents == [.tokens, .cost]
+                && DiscordPresence.rawComponents([.cost, .tokens]) == "tokens,cost"
+                && DiscordPresence.payload(
+                    graph: dpSecretGraph, hidden: [], today: dpToday, costStyle: .banded,
+                    components: dpMixedComponents)
+                    .map { Array($0.fields.values).joined().contains("SECRET_COMPONENT") } == false,
+            "an unknown component token is dropped rather than echoed, and the canonical form is "
+                + "written in a fixed order (mutation: a fallback branch passing the raw token "
+                + "through publishes it)")
+        expect(
+            DiscordPresence.payload(
+                graph: dpGrainGraph, hidden: [], today: dpToday, costStyle: .banded,
+                components: []) == nil
+                && DiscordPresence.parseComponents("SECRET_COMPONENT").isEmpty,
+            "an empty composition publishes nothing at all, and a preference of only unknown "
+                + "tokens is empty (mutation: an activity with no components still carries the "
+                + "app name, image and button, and still refreshes — a working-hours beacon "
+                + "with no usage content to justify it)")
+        // Unticking a component takes something off the profile, so it must not
+        // wait out the publish floor. Same subset rule as the hidden set with
+        // the arguments swapped, including the swap case a size test gets wrong.
+        expect(
+            AppDelegate.componentsChange(previous: [.tokens, .cost], current: [.tokens])
+                == .reducing
+                && AppDelegate.componentsChange(previous: [.tokens], current: [.tokens, .cost])
+                    == .increasing
+                && AppDelegate.componentsChange(previous: [.tokens], current: [.cost]) == .reducing
+                && AppDelegate.componentsChange(previous: [.tokens], current: [.tokens]) == .none,
+            "unticking a component is a reduction, ticking one is throttled, and swapping one for "
+                + "another is a reduction (mutation: a size test calls the swap no change and "
+                + "leaves the unticked component on the profile for the rest of the floor)")
 
         // MARK: - Discord Rich Presence transport (DISCORD-PRESENCE M2a)
         //

@@ -42,6 +42,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // off would leave the finer figure on a public profile until the next tray
     // poll — as long as five minutes, with nothing to recall it.
     private var lastCostStyle = DiscordPresence.CostStyle.banded
+    /// Same discipline again. Compared as a parsed SET, so a reordered or
+    /// respaced write is not read as a change to what gets published.
+    private var lastComponents = DiscordPresence.defaultComponents
 
     private static func readIntervalMin() -> Int {
         max(1, UserDefaults.standard.object(forKey: intervalKey).flatMap { $0 as? Int } ?? 30)
@@ -108,6 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         lastDiscordEnabled = DiscordPresence.enabled()
         lastCostStyle = DiscordPresence.costStyle()
+        lastComponents = DiscordPresence.components()
         applyDiscordPresence()
     }
 
@@ -145,11 +149,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     nonisolated static func visibilityChange(
         previousHiddenRaw: String, hiddenRaw: String
     ) -> DiscordIPC.VisibilityChange {
-        let previous = ClientRegistry.parseIdSet(previousHiddenRaw)
-        let current = ClientRegistry.parseIdSet(hiddenRaw)
+        // A GROWN hidden set is the reduction: something left the profile.
+        subsetChange(
+            grownMeansLess: ClientRegistry.parseIdSet(previousHiddenRaw),
+            to: ClientRegistry.parseIdSet(hiddenRaw))
+    }
+
+    /// The one direction test both set-shaped preferences use. The parameter
+    /// names the set whose GROWTH means less is published — the hidden set for
+    /// clients, and the complement for components, which is why the component
+    /// caller passes its two sets the other way round.
+    nonisolated static func subsetChange<T: Hashable>(
+        grownMeansLess previous: Set<T>, to current: Set<T>
+    ) -> DiscordIPC.VisibilityChange {
         if !current.isSubset(of: previous) { return .reducing }
         if !previous.isSubset(of: current) { return .increasing }
         return .none
+    }
+
+    /// Components are the mirror image of the hidden set: UNTICKING one takes
+    /// something off the profile, so a shrinking selection is the reduction.
+    /// The arguments go into the same subset test swapped, rather than into a
+    /// second classifier with its own idea of which way is which.
+    nonisolated static func componentsChange(
+        previous: Set<DiscordPresence.Component>, current: Set<DiscordPresence.Component>
+    ) -> DiscordIPC.VisibilityChange {
+        subsetChange(grownMeansLess: current, to: previous)
     }
 
     /// The cost switch read the same way the hidden set is: which direction did
@@ -211,7 +236,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Read here and passed down. `DiscordPresence` performs no
             // preference lookup of its own, so the privacy assertions cannot
             // come to depend on the defaults of whatever machine runs them.
-            costStyle: DiscordPresence.costStyle())
+            costStyle: DiscordPresence.costStyle(),
+            components: DiscordPresence.components())
     }
 
     private func scheduleDefaultsApply() {
@@ -247,8 +273,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let discordEnabled = DiscordPresence.enabled()
             let costStyle = DiscordPresence.costStyle()
             let previousCostStyle = self.lastCostStyle
+            let components = DiscordPresence.components()
+            let previousComponents = self.lastComponents
             if hiddenChanged || discordEnabled != self.lastDiscordEnabled
-                || costStyle != previousCostStyle {
+                || costStyle != previousCostStyle || components != previousComponents {
                 // Newly hiding a client means the user took something off the
                 // profile, and that update must not queue behind the publish
                 // floor — the Settings copy promises hidden clients are never
@@ -264,8 +292,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     previousHiddenRaw: previousHiddenRaw, hiddenRaw: hiddenRaw)
                     .combined(with: AppDelegate.costStyleChange(
                         previous: previousCostStyle, current: costStyle))
+                    .combined(with: AppDelegate.componentsChange(
+                        previous: previousComponents, current: components))
                 self.lastDiscordEnabled = discordEnabled
                 self.lastCostStyle = costStyle
+                self.lastComponents = components
                 self.applyDiscordPresence(visibility: change)
             }
         }
