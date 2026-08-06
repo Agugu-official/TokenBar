@@ -184,9 +184,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// profile is replaced by a coarser one, and until that lands the precise
     /// one is still up. Banded → whole dollars adds precision back and is
     /// throttled like any other sample.
+    /// `publishedInBoth` is whether cost is part of the composition on BOTH
+    /// sides of the change. When it is not, the style cannot alter a single
+    /// published byte, and classifying it anyway is not merely noise: the
+    /// `.reducing` case carries a publish-floor bypass. A user who ticks a new
+    /// component (throttled, waiting out the floor) and then switches whole
+    /// dollars off while cost stays unticked would combine to `.reducing` and
+    /// push that newly added information out early — a bypass that exists for
+    /// reductions, spent on an addition.
+    ///
+    /// Both sides, not just the current one: a cost that was just ticked or
+    /// unticked is already classified by `componentsChange`, and the style it
+    /// arrives or leaves with is part of that same change.
     nonisolated static func costStyleChange(
-        previous: DiscordPresence.CostStyle, current: DiscordPresence.CostStyle
+        previous: DiscordPresence.CostStyle, current: DiscordPresence.CostStyle,
+        publishedInBoth: Bool = true
     ) -> DiscordIPC.VisibilityChange {
+        guard publishedInBoth else { return .none }
         switch (previous, current) {
         case (.wholeDollars, .banded): return .reducing
         case (.banded, .wholeDollars): return .increasing
@@ -291,7 +305,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let change = AppDelegate.visibilityChange(
                     previousHiddenRaw: previousHiddenRaw, hiddenRaw: hiddenRaw)
                     .combined(with: AppDelegate.costStyleChange(
-                        previous: previousCostStyle, current: costStyle))
+                        previous: previousCostStyle, current: costStyle,
+                        publishedInBoth: previousComponents.contains(.cost)
+                            && components.contains(.cost)))
                     .combined(with: AppDelegate.componentsChange(
                         previous: previousComponents, current: components))
                 self.lastDiscordEnabled = discordEnabled

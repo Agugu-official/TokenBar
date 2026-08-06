@@ -146,9 +146,18 @@ enum DiscordPresence {
     static let defaultComponents = Set(Component.allCases)
 
     static func components(defaults: UserDefaults = .standard) -> Set<Component> {
-        guard let raw = defaults.object(forKey: componentsKey) as? String else {
+        // Absent and malformed are different answers on purpose. An ABSENT key
+        // is an upgrade from before this preference existed, and must not
+        // silently empty a presence the user already consented to. A key that
+        // is PRESENT but not a string is a malformed write, and gets the same
+        // answer a string of only unknown tokens gets: nothing. Collapsing the
+        // two would mean `defaults write ... -int 1` publishes all three
+        // components the user never selected, which is the wrong direction for
+        // the same input class.
+        guard let stored = defaults.object(forKey: componentsKey) else {
             return defaultComponents
         }
+        guard let raw = stored as? String else { return [] }
         return parseComponents(raw)
     }
 
@@ -340,8 +349,12 @@ enum DiscordPresence {
     ) -> Payload? {
         let totals = graph.trayTotals(hidden: hidden, today: today)
         // Non-finite numbers must never be published — garbage on a public
-        // profile is worse than no presence at all.
-        guard totals.todayCost.isFinite else { return nil }
+        // profile is worse than no presence at all. Scoped to a cost that will
+        // actually be serialized: `costBucket` maps a non-finite value to the
+        // LOWEST band, so publishing it would assert something false, but a
+        // user who selected only tokens loses their whole presence to an
+        // overflow that was never going to reach the wire.
+        guard components.contains(.cost) ? totals.todayCost.isFinite : true else { return nil }
         // Zero usage would otherwise publish a "this machine is switched on"
         // beacon. Nothing is published, and no startTimestamp is ever emitted.
         // `||`, not `&&`: UsageStats allows a day with cost > 0 and tokens == 0.

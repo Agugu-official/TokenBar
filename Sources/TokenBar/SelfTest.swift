@@ -3862,6 +3862,57 @@ enum SelfTest {
             "unticking a component is a reduction, ticking one is throttled, and swapping one for "
                 + "another is a reduction (mutation: a size test calls the swap no change and "
                 + "leaves the unticked component on the profile for the rest of the floor)")
+        // A cost-style change cannot alter a byte when cost is not published,
+        // and classifying it anyway is not just noise: `.reducing` carries a
+        // floor bypass, so ticking a component and then switching whole dollars
+        // off would push the newly added information out early.
+        expect(
+            AppDelegate.costStyleChange(
+                previous: .wholeDollars, current: .banded, publishedInBoth: false) == .none
+                && AppDelegate.costStyleChange(
+                    previous: .banded, current: .wholeDollars, publishedInBoth: false) == .none
+                && AppDelegate.costStyleChange(
+                    previous: .wholeDollars, current: .banded, publishedInBoth: true) == .reducing,
+            "a cost-style change is classified only when cost is published on both sides of it "
+                + "(mutation: classifying it unconditionally spends a reduction's floor bypass "
+                + "on an addition that is still waiting out the floor)")
+        // Absent and malformed are different answers. An absent key is an
+        // upgrade and keeps every component; a present non-string is a
+        // malformed write and gets what a string of only unknown tokens gets.
+        let dpCompSuite = "TokenBar.SelfTest.DiscordComponents"
+        if let dpCompDefaults = UserDefaults(suiteName: dpCompSuite) {
+            defer { UserDefaults.standard.removePersistentDomain(forName: dpCompSuite) }
+            let dpAbsent = DiscordPresence.components(defaults: dpCompDefaults)
+            dpCompDefaults.set(1, forKey: DiscordPresence.componentsKey)
+            let dpWrongType = DiscordPresence.components(defaults: dpCompDefaults)
+            dpCompDefaults.set("client", forKey: DiscordPresence.componentsKey)
+            let dpGoodString = DiscordPresence.components(defaults: dpCompDefaults)
+            expect(
+                dpAbsent == DiscordPresence.defaultComponents && dpWrongType.isEmpty
+                    && dpGoodString == [.client],
+                "an absent composition key keeps every component while a present non-string "
+                    + "publishes nothing (mutation: one `as? String` cast for both makes a "
+                    + "malformed `defaults write` publish all three the user never selected)")
+        } else {
+            expect(false, "the isolated composition suite could not be created")
+        }
+        // The cost validity check belongs to the cost component. `costBucket`
+        // maps a non-finite value to the LOWEST band, so publishing one would
+        // assert something false — but a tokens-only selection loses its whole
+        // presence to an overflow that was never going to reach the wire.
+        let dpOverflowGraph = dpGraph(dpPayload(dpDay(
+            dpToday, 10, 1e308,
+            dpStripe("claude", 10, 1e308) + "," + dpStripe("codex", 10, 1e308))))
+        expect(
+            DiscordPresence.payload(
+                graph: dpOverflowGraph, hidden: ["nobody"], today: dpToday,
+                costStyle: .banded, components: [.tokens])?.details == "<1K tokens today"
+                && DiscordPresence.payload(
+                    graph: dpOverflowGraph, hidden: ["nobody"], today: dpToday,
+                    costStyle: .banded, components: [.tokens, .cost]) == nil,
+            "an overflowed cost blocks only a composition that publishes cost "
+                + "(mutation: guarding before the composition is read silently blanks the "
+                + "presence of a tokens-only selection)")
 
         // MARK: - Discord Rich Presence transport (DISCORD-PRESENCE M2a)
         //
