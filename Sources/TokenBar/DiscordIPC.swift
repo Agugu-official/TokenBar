@@ -92,44 +92,60 @@ enum DiscordIPC {
     /// Three states, not a Bool: see `DiscordIPCClient.publish(_:visibility:)`
     /// for why the middle one — an ordinary sample that changed nothing — has
     /// to be distinguishable from an unhide.
-    enum VisibilityChange {
+    /// Two independent effects, which is why this is a struct and not an enum.
+    /// A single coalesced turn can both replace what is published and put
+    /// information back, and those want opposite things from the grant: the
+    /// replacement must retire the old payload, while the addition must clear
+    /// any bypass so it cannot go out inside the floor. An enum forced one of
+    /// them to be dropped, and dropping the clear is the privacy failure.
+    struct VisibilityChange: Equatable {
+        /// What this change does to the one-shot permission to skip the
+        /// publish floor.
+        enum Grant: Equatable {
+            /// The user removed content: skip the floor, it is owed to them.
+            case arm
+            /// The user put content back: it must not ride an unspent grant.
+            case clear
+            /// Neither claim. An ordinary sample inherits whatever is pending.
+            case leave
+        }
+
+        /// Whether earlier queued work was computed against a state that no
+        /// longer holds and must not reach the socket.
+        var retires: Bool
+        var grant: Grant
+
         /// An ordinary sample. Whatever the current hidden set is, this payload
         /// was built from it.
-        case none
+        static let none = VisibilityChange(retires: false, grant: .leave)
         /// The user hid something. Must not queue behind the publish floor.
-        case reducing
+        static let reducing = VisibilityChange(retires: true, grant: .arm)
         /// The user unhid something, putting information back on the profile.
-        case increasing
+        static let increasing = VisibilityChange(retires: false, grant: .clear)
         /// The published content was replaced rather than narrowed or widened —
-        /// today, a change of which agent is published. It retires earlier work
-        /// exactly as a reduction does, because those payloads were built for a
-        /// different client, but it does NOT arm the floor bypass.
-        ///
-        /// `.reducing` binds two effects, and hide/unhide alternate so its
-        /// bypass is naturally rate-limited. Selection changes do not alternate:
-        /// A→B→C→A is four steps, four bypasses, and a way to push a full
-        /// per-client breakdown onto a profile in one second while sampling far
-        /// above the floor's promise. The urgency argument is weaker too — the
-        /// previous agent was never hidden, so no promise is broken while the
-        /// update waits.
-        case retiring
+        /// a change of which agent is published. It retires earlier work, since
+        /// those payloads were built for a different client, but earns no grant
+        /// of its own: hide and unhide alternate so a reduction's bypass is
+        /// self-limiting, while A→B→C→A does not, and four bypasses is a full
+        /// per-client breakdown pushed out in one second.
+        static let retiring = VisibilityChange(retires: true, grant: .leave)
 
-        /// Two preference changes landing in one coalesced turn. A reduction
-        /// anywhere wins, for the same reason a single write that both hides
-        /// and unhides is a reduction: the content the user removed outranks
-        /// the sampling rate.
+        /// Two preference changes landing in one coalesced turn. The retire is
+        /// the union — losing one lets a payload built against a state that no
+        /// longer holds reach the socket — and the grant takes the strongest
+        /// claim, `arm` over `clear` over `leave`, for the same reason a single
+        /// write that both hides and unhides is a reduction: the content the
+        /// user removed outranks the sampling rate.
         func combined(with other: VisibilityChange) -> VisibilityChange {
-            // `.retiring` outranks `.increasing` because losing a retire is a
-            // correctness failure — a payload built for the previous agent
-            // reaching the socket — while losing `.increasing` costs only its
-            // clearing of an unspent grant, and `.retiring` treats that grant
-            // exactly as `.none` does. A reduction still outranks everything.
-            switch (self, other) {
-            case (.reducing, _), (_, .reducing): return .reducing
-            case (.retiring, _), (_, .retiring): return .retiring
-            case (.increasing, _), (_, .increasing): return .increasing
-            default: return .none
+            let strongest: Grant
+            if grant == .arm || other.grant == .arm {
+                strongest = .arm
+            } else if grant == .clear || other.grant == .clear {
+                strongest = .clear
+            } else {
+                strongest = .leave
             }
+            return VisibilityChange(retires: retires || other.retires, grant: strongest)
         }
     }
 
@@ -566,7 +582,15 @@ final class DiscordIPCClient: @unchecked Sendable {
         // Before the block, not inside it: everything already queued has to see
         // this, and queued work is exactly what the block cannot reach back to.
         // The epoch bump is what a later `start()` cannot undo.
-        consentLock.withLock { $0.granted = false; $0.epoch &+= 1 }
+        // The deferred grant goes with it. A reduction queued but not yet run
+        // is abandoned by this epoch bump, so leaving the flag set would let a
+        // later re-enable plus a selection change inherit a bypass from a hide
+        // that was withdrawn along with consent.
+        consentLock.withLock {
+            $0.granted = false
+            $0.epoch &+= 1
+            $0.unspentReduction = false
+        }
         queue.async {
             let wasRunning = self.running
             self.running = false
@@ -641,17 +665,12 @@ final class DiscordIPCClient: @unchecked Sendable {
         // grant is still owed even though the block that would have armed it
         // has been retired.
         let (ticket, inheritsReduction) = consentLock.withLock { state -> (UInt64, Bool) in
-            switch visibility {
-            case .reducing:
-                state.epoch &+= 1
-                state.unspentReduction = true
-            case .retiring:
-                state.epoch &+= 1
-            case .increasing:
-                // An unhide puts information back and must not inherit a grant.
-                state.unspentReduction = false
-            case .none:
-                break
+            if visibility.retires { state.epoch &+= 1 }
+            switch visibility.grant {
+            case .arm: state.unspentReduction = true
+            // An unhide puts information back and must not inherit a grant.
+            case .clear: state.unspentReduction = false
+            case .leave: break
             }
             return (state.epoch, state.unspentReduction)
         }
@@ -671,18 +690,16 @@ final class DiscordIPCClient: @unchecked Sendable {
             // payload — an unhide a second later — went out with no floor at
             // all. That is a sub-15s sample of the user's activity, which is
             // the one thing the floor exists to prevent.
-            switch visibility {
-            case .reducing: self.floorBypass = true
-            case .increasing: self.floorBypass = false
-            // A retire never ARMS a bypass of its own — that is the whole point
-            // of the case — but it does inherit one a hide is still owed.
-            case .retiring: if inheritsReduction { self.floorBypass = true }
-            // Leaves an existing grant alone. A hide that armed one is still
-            // unpublished, and its content is in the payload being written now.
-            case .none: break
+            switch visibility.grant {
+            case .arm: self.floorBypass = true
+            case .clear: self.floorBypass = false
+            // Earns nothing of its own, but a retire inherits a grant a hide is
+            // still owed — that hide's block was retired before it could arm
+            // one, and its content is in the payload being written now.
+            case .leave: if visibility.retires && inheritsReduction { self.floorBypass = true }
             }
             // Spent, or superseded by this write either way.
-            if case .increasing = visibility {} else {
+            if visibility.grant != .clear {
                 self.consentLock.withLock { $0.unspentReduction = false }
             }
             self.flush()

@@ -602,9 +602,26 @@ struct SettingsPanel: View {
             // as it stays empty.
             hint("Untick everything and nothing is published at all.")
             radioGroup(
-                selection: $discordSelectionRaw,
+                selection: Binding(
+                    get: {
+                        // Read for the SwiftUI dependency only; the ANSWER comes
+                        // from the strict accessor. `@AppStorage<String>`
+                        // substitutes its empty default for a key holding a
+                        // non-string, which would tick "most used" while the
+                        // runtime published nothing at all.
+                        _ = discordSelectionRaw
+                        switch DiscordPresence.selection() {
+                        case .mostUsed: return ""
+                        case .only(let id): return id
+                        case .malformed: return DiscordPresence.malformedSelectionLabel
+                        }
+                    },
+                    set: { discordSelectionRaw = $0 }),
                 options: [("", "Whichever client you used most")]
                     + ClientRegistry.allIds.map { ($0, ClientRegistry.style($0).displayName) })
+            // Nothing is ticked when the stored value is malformed, which is
+            // honest: the runtime publishes nothing, and no option describes
+            // that. Picking any row writes a well-formed value and recovers.
             // Two consequences, and neither is obvious from the control. The
             // first reads as a bug when it is a decision; the second is the one
             // that compounds with the switch below it.

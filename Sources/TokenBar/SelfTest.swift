@@ -4017,12 +4017,22 @@ enum SelfTest {
         } else {
             expect(false, "the isolated selection suite could not be created")
         }
+        // The two effects combine independently, which is why this is a struct.
+        // An earlier revision made it a four-case enum with a total order and
+        // collapsed `retiring + increasing` to `retiring` — keeping the retire
+        // and DROPPING the clear. That is the wrong half to lose: `.increasing`
+        // exists precisely to stop newly added information riding an unspent
+        // grant out inside the floor.
+        let dpRetireUnhide = DiscordIPC.VisibilityChange.retiring.combined(with: .increasing)
         expect(
-            DiscordIPC.VisibilityChange.retiring.combined(with: .increasing) == .retiring
+            dpRetireUnhide.retires && dpRetireUnhide.grant == .clear
                 && DiscordIPC.VisibilityChange.retiring.combined(with: .reducing) == .reducing
-                && DiscordIPC.VisibilityChange.retiring.combined(with: .none) == .retiring,
-            "a reduction still outranks a retire, and a retire outranks an unhide — losing a "
-                + "retire would let a payload built for the previous agent reach the socket")
+                && DiscordIPC.VisibilityChange.retiring.combined(with: .none) == .retiring
+                && DiscordIPC.VisibilityChange.reducing.combined(with: .increasing) == .reducing,
+            "a turn that both retires and adds information keeps BOTH effects — the old payload "
+                + "is retired and the bypass is cleared — while a reduction still outranks an "
+                + "unhide (mutation: a total order over four cases has to drop one of them, and "
+                + "dropping the clear publishes the addition sub-floor)")
 
         // MARK: - Discord Rich Presence transport (DISCORD-PRESENCE M2a)
         //
@@ -4811,6 +4821,37 @@ enum SelfTest {
             dpFinish(client, [peer])
             return arrived
         }
+        // The deferred grant does not survive a withdrawal. A hide queued but
+        // never run is abandoned by `stop()`'s epoch bump, so re-enabling and
+        // then changing the selection must NOT inherit its bypass — the hide
+        // was withdrawn along with consent, and the new client's activity would
+        // otherwise publish inside the floor.
+        func dpGrantAcrossStop() -> Bool {
+            let (peers, client, _) = dpRig(peers: 2)
+            client.publishInterval = 3.0
+            client.start()
+            client.drainForTesting()
+            _ = dpReachReady(peers[0], client)
+            client.publish(dpP("30K tokens today", state: "Amp · $1-5"))
+            client.drainForTesting()
+            _ = dpFramesNow(peers[0])
+            let gate = dpHold(client)
+            client.publish(dpP("31K tokens today", state: "Amp · $1-5"), visibility: .reducing)
+            client.stop()
+            gate.signal()
+            client.drainForTesting()
+            client.start()
+            _ = dpReachReady(peers[1], client)
+            client.publish(dpP("32K tokens today", state: "Zed · $1-5"), visibility: .retiring)
+            client.drainForTesting()
+            let early = dpFrameArrives(peers[1], "32K tokens today", within: 0.4)
+            dpFinish(client, peers)
+            return early
+        }
+        expect(!dpGrantAcrossStop(),
+            "a reduction abandoned by stop() leaves no grant behind, so a later selection change "
+                + "is throttled like any other sample (mutation: leaving `unspentReduction` set "
+                + "across the withdrawal lets the new client publish inside the floor)")
         expect(dpSupersededHide(withReduction: true) && !dpSupersededHide(withReduction: false),
             "a retire inherits the grant of a reduction it superseded, and earns none on its own "
                 + "(mutation: dropping the inheritance leaves the just-hidden client public for "

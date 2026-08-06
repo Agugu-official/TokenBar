@@ -150,6 +150,10 @@ enum DiscordPresence {
 
     static let selectionKey = "tokenbar.discord.client"
 
+    /// Matches no radio option, so a malformed stored value ticks nothing
+    /// rather than claiming a selection the payload path does not agree with.
+    static let malformedSelectionLabel = "\u{0}malformed"
+
     /// Absent or empty means the busiest visible client, which is what the
     /// feature published before this preference existed.
     /// Absent, malformed and named are three different answers, for the same
