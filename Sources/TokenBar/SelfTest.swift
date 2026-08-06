@@ -3822,9 +3822,21 @@ enum SelfTest {
             let body = Data(text.utf8)
             return dpRaw(op, UInt32(body.count), body)
         }
+        /// Incomplete frame prefixes carried between `dpFrames` polls, per
+        /// descriptor. Declared here because `dpSocketPair` clears it: see
+        /// there for why clearing happens at birth rather than at close.
+        var dpPartial: [Int32: Data] = [:]
         func dpSocketPair() -> (Int32, Int32) {
             var fds: [Int32] = [-1, -1]
             _ = socketpair(AF_UNIX, SOCK_STREAM, 0, &fds)
+            // Descriptor numbers are recycled the moment a fixture closes one,
+            // and a one-shot `dpFrames` that lands between fragments of a frame
+            // leaves a non-empty entry behind. Clearing at birth covers every
+            // teardown path — `dpFinish`, `dpScenario`, and the scenarios that
+            // call `close` directly — where clearing at close would have to be
+            // remembered at each of them.
+            dpPartial[fds[0]] = nil
+            dpPartial[fds[1]] = nil
             var timeout = timeval(tv_sec: 1, tv_usec: 0)
             setsockopt(fds[1], SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
             var on: Int32 = 1
@@ -3875,8 +3887,9 @@ enum SelfTest {
         /// `dpFrameArrives` polls in a tight loop. Retaining a decodable
         /// remainder is bounded by one frame; retaining an undecodable one is
         /// not bounded at all. The entry is dropped when empty so a recycled
-        /// descriptor never inherits another socket's bytes.
-        var dpPartial: [Int32: Data] = [:]
+        /// descriptor never inherits another socket's bytes — and `dpSocketPair`
+        /// clears the entry at birth, which covers the case where a one-shot
+        /// call leaves a real prefix behind on a descriptor about to be closed.
         func dpFrames(_ fd: Int32) -> [(DiscordIPC.Opcode, Data)] {
             var buf = (dpPartial[fd] ?? Data()) + dpRecvNow(fd)
             var out: [(DiscordIPC.Opcode, Data)] = []
@@ -5259,19 +5272,42 @@ enum SelfTest {
         // override into the user's saved preferences. A test must not be able
         // to change what it measures.
         //
-        // The substring is `UserDefaults.standard`, not `.object(forKey:`. An
-        // earlier draft counted the latter and matched on the receiver name, so
-        // it could only see reads written against a `defaults` parameter —
-        // `payload()` has no such parameter, and the natural violation is
-        // `UserDefaults.standard.object(forKey:)`, which it looked straight
-        // past. Measured: that mutation survived the whole suite.
+        // Scoped to the BODY of `payload(...)`, brace-matched, rather than to
+        // the file: the file legitimately declares the accessors, and every
+        // wider form of this check has been evaded in turn. Counting
+        // `.object(forKey:` matched on the receiver name and could only see
+        // reads written against a `defaults` parameter, which `payload()` does
+        // not have. Searching the file for `UserDefaults.standard` missed
+        // `DiscordPresence.costStyle()` — the accessor spells `.standard` as
+        // its own default argument, so calling it introduces no such substring.
+        // Banning the accessor calls inside this one body closes both.
+        let dpPayloadBody: String = {
+            guard let text = dpSources.first(where: { $0.name == "DiscordPresence.swift" })?.text,
+                  let start = text.range(of: "static func payload(") else { return "" }
+            var depth = 0
+            var opened = false
+            var out = ""
+            for character in text[start.lowerBound...] {
+                out.append(character)
+                if character == "{" { depth += 1; opened = true }
+                if character == "}" {
+                    depth -= 1
+                    if opened && depth == 0 { break }
+                }
+            }
+            return out
+        }()
         expect(
-            dpSources.first { $0.name == "DiscordPresence.swift" }
-                .map { !$0.text.contains("UserDefaults.standard") } == true,
-            "A2b: the payload layer never reaches for `UserDefaults.standard`, so what it "
-                + "publishes depends on its arguments and not on the machine running it "
-                + "(mutation: consulting the domain inside payload(), conditionally or not, "
-                + "makes every privacy assertion above machine-dependent)")
+            !dpPayloadBody.isEmpty
+                && !dpPayloadBody.contains("UserDefaults")
+                && !dpPayloadBody.contains("costStyle(")
+                && !dpPayloadBody.contains("enabled("),
+            "A2b: `payload(...)` reaches no defaults domain, directly or through an accessor, so "
+                + "what it publishes depends on its arguments and not on the machine running it "
+                + "(mutations: `UserDefaults.standard.bool(forKey:)`, or the subtler "
+                + "`costStyle == .banded ? DiscordPresence.costStyle() : costStyle`, which reads "
+                + "correctly on a default-off host and goes machine-dependent the moment a saved "
+                + "whole-dollar value exists)")
 
         // The gate is the only path to a client. All three are shape claims —
         // "constructed in exactly one place", "not aliased", "not handed
