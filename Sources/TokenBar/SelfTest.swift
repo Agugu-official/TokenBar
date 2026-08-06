@@ -5016,76 +5016,60 @@ enum SelfTest {
         // delegate method — that seam is what makes this assertion possible at
         // all.
         //
-        // The control comes first on purpose: without it, every assertion below
-        // would also pass on a factory that refuses everything unconditionally.
-        expect(AppDelegate.makeDiscordClient(arguments: ["TokenBar"], enabled: true) != nil,
-            "A1 control: an ordinary run with the switch on does build a client")
-        expect(AppDelegate.makeDiscordClient(arguments: ["TokenBar"], enabled: false) == nil,
-            "A1 control: the switch off builds nothing")
+        // The flag SET is pinned separately from the behaviour: every assertion
+        // below iterates `testArguments`, so all of them pass trivially on a
+        // shortened array. `--icon-gallery` is in it because that debug window
+        // enters the normal lifecycle and refreshes the live graph.
         let dpTestFlags = DiscordPresence.testArguments
         expect(dpTestFlags.sorted() == ["--demo", "--icon-gallery", "--selftest", "--smoke"],
-            "A1: the refused arguments are demo, smoke, selftest and the icon gallery — the last "
-                + "because it is a debug window nobody runs the app to use, yet it enters the "
-                + "normal lifecycle and refreshes the live graph")
-        expect(
-            dpTestFlags.allSatisfy {
-                AppDelegate.makeDiscordClient(
-                    arguments: ["TokenBar", $0, "--open-popover"], enabled: true) == nil
-            },
-            "A1: no demo/smoke/selftest run builds a client, even with the switch forced on "
-                + "(mutation: reading the preference before the flags — or checking the flags at "
-                + "all — publishes fixture numbers onto the user's real Discord profile, which is "
-                + "the one failure this feature cannot take back)")
-        // The same call with a client already in hand: a run that turns out to
-        // be a demo run must refuse an EXISTING connection too, which is what
-        // makes `applyDiscordPresence` stop it rather than keep publishing.
+            "A1: the refused arguments are exactly demo, smoke, selftest and the icon gallery")
         let dpLiveClient = DiscordIPCClient(connect: { throw DiscordIPC.Failure.unavailable })
         expect(
             dpTestFlags.allSatisfy {
                 AppDelegate.makeDiscordClient(
-                    existing: dpLiveClient, arguments: ["TokenBar", $0], enabled: true) == nil
+                    arguments: ["TokenBar", $0, "--open-popover"], enabled: true) == nil
+                    && AppDelegate.makeDiscordClient(
+                        existing: dpLiveClient, arguments: ["TokenBar", $0], enabled: true) == nil
+                    && !DiscordPresence.mayConnect(arguments: [$0], enabled: true)
             },
-            "A1: a test flag refuses an already-built client as well "
-                + "(mutation: returning `existing` before the gate keeps a live connection alive)")
+            "A1: no demo/smoke/selftest run builds a client or keeps an existing one, even with "
+                + "the switch forced on, and the gate function itself puts the flags above the "
+                + "preference (mutation: reading the preference before the flags publishes "
+                + "fixture numbers onto the user's real Discord profile, which is the one "
+                + "failure this feature cannot take back)")
+        // The control half. Without it every assertion above passes on a
+        // factory that refuses everything unconditionally.
         expect(
-            AppDelegate.makeDiscordClient(
-                existing: dpLiveClient, arguments: ["TokenBar"], enabled: true) === dpLiveClient,
-            "A1 control: an ordinary run reuses the client it was given rather than opening a "
-                + "second connection")
-        expect(DiscordPresence.mayConnect(arguments: [], enabled: true),
-            "A1 control: with no arguments the gate is just the preference")
-        expect(!DiscordPresence.mayConnect(arguments: [], enabled: false),
-            "A1 control: with no arguments and the switch off the gate refuses")
-        expect(
-            dpTestFlags.allSatisfy { !DiscordPresence.mayConnect(arguments: [$0], enabled: true) },
-            "A1: the gate function itself puts the flags above the preference")
+            AppDelegate.makeDiscordClient(arguments: ["TokenBar"], enabled: true) != nil
+                && AppDelegate.makeDiscordClient(arguments: ["TokenBar"], enabled: false) == nil
+                && AppDelegate.makeDiscordClient(
+                    existing: dpLiveClient, arguments: ["TokenBar"], enabled: true) === dpLiveClient
+                && DiscordPresence.mayConnect(arguments: [], enabled: true)
+                && !DiscordPresence.mayConnect(arguments: [], enabled: false),
+            "A1 control: an ordinary run builds a client, reuses the one it was given rather "
+                + "than opening a second connection, and refuses when the switch is off")
 
         // A15b — which visibility change earns the floor bypass. Getting this
         // backwards is not a missed optimisation: it makes an *unhide* jump the
         // floor while a hide waits it out, the exact inversion of the point.
+        // The swap case is the one a strict-subset or size test gets wrong.
         func dpChange(_ previous: String, _ current: String) -> DiscordIPC.VisibilityChange {
             AppDelegate.visibilityChange(previousHiddenRaw: previous, hiddenRaw: current)
         }
-        expect(dpChange("", "amp") == .reducing,
-            "A15b: hiding a client is a privacy reduction")
-        expect(dpChange("amp", "") == .increasing,
-            "A15b: unhiding is the opposite, and is distinguishable from an ordinary sample "
-                + "(mutation: collapsing `.increasing` into `.none` lets an unhide inherit a "
-                + "pending reduction's floor bypass)")
-        expect(dpChange("amp", "amp,zed") == .reducing,
-            "A15b: hiding a second client counts")
-        expect(dpChange("amp,zed", "amp") == .increasing,
-            "A15b: unhiding one of two puts information back")
-        expect(dpChange("amp", "zed") == .reducing,
-            "A15b: hiding one while unhiding another is a reduction — one write of one string "
-                + "carries both, and the content the user removed outranks the sampling rate "
-                + "(mutation: a strict-subset or size test calls this no change and leaves zed "
-                + "named on the profile for the rest of the floor)")
-        expect(dpChange("amp", "amp") == .none,
-            "A15b: no change is neither")
-        expect(dpChange("", "") == .none,
-            "A15b: two empty sets are neither (mutation: returning `.reducing` by default hands "
-                + "every ordinary sample a floor bypass)")
+        let dpChanges: [(String, String, DiscordIPC.VisibilityChange)] = [
+            ("", "amp", .reducing), ("amp", "", .increasing),
+            ("amp", "amp,zed", .reducing), ("amp,zed", "amp", .increasing),
+            ("amp", "zed", .reducing),
+            ("amp", "amp", DiscordIPC.VisibilityChange.none), ("", "", .none),
+        ]
+        for (previous, current, expected) in dpChanges {
+            expect(dpChange(previous, current) == expected,
+                "A15b: \"\(previous)\" -> \"\(current)\" is \(expected) (mutations: collapsing "
+                    + "`.increasing` into `.none` lets an unhide inherit a pending reduction's "
+                    + "bypass; a strict-subset or size test calls the swap no change and leaves "
+                    + "the newly hidden client named for the rest of the floor; `.reducing` by "
+                    + "default hands every ordinary sample a bypass)")
+        }
 
         // A2 — the switch. Read through the authoritative accessor against an
         // isolated suite, never the process's own defaults.
@@ -5102,67 +5086,53 @@ enum SelfTest {
             // calling it on the instance leaves the plist behind, so every run
             // deposited another ~/Library/Preferences file forever.
             defer { UserDefaults.standard.removePersistentDomain(forName: dpSuiteName) }
-            expect(!DiscordPresence.enabled(defaults: dpDefaults),
-                "A2: an absent key is off")
-            // The mutation this shape exists for. `bool(forKey:)` returns true
-            // here, and the Argument Domain — which the manual acceptance flow
-            // in verification.md uses — stores exactly this: `-tokenbar.<key>
-            // true` lands as the STRING "true", not a Bool.
-            dpDefaults.set("true", forKey: DiscordPresence.enabledKey)
-            expect(!DiscordPresence.enabled(defaults: dpDefaults),
-                "A2: the string \"true\" is not the switch "
-                    + "(mutation: `bool(forKey:)` coerces it and turns the feature on)")
-            // 1, not 2. `as? Bool` bridges NSNumber, so the integer that
-            // actually slips through is the one equal to true — picking 2 here
-            // meant the assertion passed on an accessor that accepted 1.
-            dpDefaults.set(1, forKey: DiscordPresence.enabledKey)
-            expect(!DiscordPresence.enabled(defaults: dpDefaults),
-                "A2: the integer 1 is not the switch (mutation: `as? Bool` alone bridges it to "
-                    + "true, and only a CFBoolean check rejects it)")
-            dpDefaults.set(1.0, forKey: DiscordPresence.enabledKey)
-            expect(!DiscordPresence.enabled(defaults: dpDefaults),
-                "A2: the double 1.0 is not the switch either")
-            dpDefaults.set(2, forKey: DiscordPresence.enabledKey)
-            expect(!DiscordPresence.enabled(defaults: dpDefaults),
-                "A2: a non-boolean number is not the switch")
-            dpDefaults.set(["on"], forKey: DiscordPresence.enabledKey)
-            expect(!DiscordPresence.enabled(defaults: dpDefaults),
-                "A2: a wholly wrong type is not the switch")
+            // Every wrong type, by table. The string "true" is the one that
+            // matters most: the Argument Domain, which the manual acceptance
+            // flow in verification.md uses, stores `-tokenbar.<key> true` as
+            // exactly that string, and `bool(forKey:)` coerces it. The integer
+            // is 1 rather than 2 because `as? Bool` bridges NSNumber, so the
+            // one that actually slips through is the one equal to true.
+            let dpWrongTypes: [(String, Any?)] = [
+                ("an absent key", nil), ("the string \"true\"", "true"),
+                ("the integer 1", 1), ("the double 1.0", 1.0),
+                ("a non-boolean number", 2), ("a wholly wrong type", ["on"]),
+            ]
+            for (label, value) in dpWrongTypes {
+                if let value { dpDefaults.set(value, forKey: DiscordPresence.enabledKey) }
+                expect(!DiscordPresence.enabled(defaults: dpDefaults),
+                    "A2: \(label) is not the switch (mutation: `bool(forKey:)` coerces the "
+                        + "string, and `as? Bool` alone bridges the integer — only a CFBoolean "
+                        + "check rejects both)")
+            }
             dpDefaults.set(true, forKey: DiscordPresence.enabledKey)
-            expect(DiscordPresence.enabled(defaults: dpDefaults),
-                "A2 control: a real Bool true is the switch (without this the four assertions "
-                    + "above would pass on an accessor that always returns false)")
+            let dpRealTrue = DiscordPresence.enabled(defaults: dpDefaults)
             dpDefaults.set(false, forKey: DiscordPresence.enabledKey)
-            expect(!DiscordPresence.enabled(defaults: dpDefaults),
-                "A2: an explicit false is off")
-            // A25 — the cost switch reads through the same strict path. Sharing
-            // one reader is what keeps the two from drifting apart, so this
-            // checks the sharing rather than re-testing every wrong type.
-            expect(DiscordPresence.costStyle(defaults: dpDefaults) == .banded,
-                "A25: an absent cost key is banded, the safe direction")
-            dpDefaults.set("true", forKey: DiscordPresence.wholeDollarsKey)
-            expect(DiscordPresence.costStyle(defaults: dpDefaults) == .banded,
-                "A25: the string \"true\" is not the cost switch either "
-                    + "(mutation: a second, looser reader for this key fails here)")
-            dpDefaults.set(1, forKey: DiscordPresence.wholeDollarsKey)
-            expect(DiscordPresence.costStyle(defaults: dpDefaults) == .banded,
-                "A25: the integer 1 is not the cost switch")
-            // Removed, not overwritten, and this is not tidiness. Writing a
-            // real `true` over a stored integer `1` DOES NOT CHANGE THE STORED
-            // TYPE — measured: the value stays a non-CFBoolean NSNumber, so the
-            // control below would fail against a perfectly correct accessor.
-            // A2 above only escapes this because it writes an array in between,
-            // which is true by accident rather than by design.
+            expect(dpRealTrue && !DiscordPresence.enabled(defaults: dpDefaults),
+                "A2 control: a real Bool true is the switch and an explicit false is off — "
+                    + "without this the table above passes on an accessor that always says false")
+            // A25 — the cost switch reads through the SAME strict path. Sharing
+            // one reader is what keeps the two from drifting, so this checks the
+            // sharing rather than re-testing every wrong type.
             //
-            // The production reading is the same and is the safe direction: a
-            // key that somehow holds an integer stays "off" until something
-            // clears it, and the strict reader exists precisely to refuse
-            // anything that is not a Bool the user wrote.
+            // The key is removed rather than overwritten before the control, and
+            // that is not tidiness: writing a real `true` over a stored integer
+            // `1` DOES NOT CHANGE THE STORED TYPE — measured, it stays a
+            // non-CFBoolean NSNumber, so the control would fail against a
+            // perfectly correct accessor. A2 above only escapes this because it
+            // writes an array in between, which is true by accident.
+            let dpCostAbsent = DiscordPresence.costStyle(defaults: dpDefaults) == .banded
+            dpDefaults.set("true", forKey: DiscordPresence.wholeDollarsKey)
+            let dpCostString = DiscordPresence.costStyle(defaults: dpDefaults) == .banded
+            dpDefaults.set(1, forKey: DiscordPresence.wholeDollarsKey)
+            let dpCostInt = DiscordPresence.costStyle(defaults: dpDefaults) == .banded
             dpDefaults.removeObject(forKey: DiscordPresence.wholeDollarsKey)
             dpDefaults.set(true, forKey: DiscordPresence.wholeDollarsKey)
-            expect(DiscordPresence.costStyle(defaults: dpDefaults) == .wholeDollars,
-                "A25 control: a real Bool true is the cost switch (without this the three above "
-                    + "would pass on an accessor that always returns banded)")
+            expect(
+                dpCostAbsent && dpCostString && dpCostInt
+                    && DiscordPresence.costStyle(defaults: dpDefaults) == .wholeDollars,
+                "A25: the cost switch refuses an absent key, the string and the integer — "
+                    + "banded is the safe direction — and a real Bool true does turn it on "
+                    + "(mutation: a second, looser reader for this key fails here)")
             dpDefaults.removeObject(forKey: DiscordPresence.wholeDollarsKey)
         } else {
             expect(false, "A2: the isolated defaults suite could not be created")
@@ -5193,121 +5163,86 @@ enum SelfTest {
             files.reduce(0) { $0 + $1.text.components(separatedBy: needle).count - 1 }
         }
         let dpSources = dpSourceFiles()
-        expect(dpSources.count > 20 && dpSources.contains { $0.name == "DiscordPresence.swift" },
-            "the source scan found the tree this binary was built from (without this every "
-                + "structural assertion below would pass on an empty list)")
-        // Occurrences, not files: counting files let a second declaration in
-        // the SAME file through, which is the easier mistake of the two.
-        let dpStorageSites = dpSources.filter {
-            $0.text.contains("@AppStorage(DiscordPresence.enabledKey)")
-        }
-        expect(
-            dpOccurrences("@AppStorage(DiscordPresence.enabledKey)", in: dpSources) == 1
-                && dpStorageSites.first?.name == "SettingsPanel.swift",
-            "A2b: exactly one view declares the switch, so no second `@AppStorage` default can "
-                + "disagree with the accessor (mutation: adding a second declaration anywhere — "
-                + "the trap `tokenbar.limits.enabled` already fell into — fails here)")
-        expect(dpOccurrences("\"\(DiscordPresence.enabledKey)\"", in: dpSources) == 1,
-            "A2b: the key string is written once, in `DiscordPresence.enabledKey` "
-                + "(mutation: a hard-coded copy of the key evades the check above)")
-        expect(
-            dpOccurrences("@AppStorage(DiscordPresence.wholeDollarsKey)", in: dpSources) == 1
-                && dpOccurrences("\"\(DiscordPresence.wholeDollarsKey)\"", in: dpSources) == 1,
-            "A2b: the cost switch gets the same treatment as the on/off switch — one "
-                + "`@AppStorage` declaration, one written key")
-        // The reason `DiscordPresence` takes the style as a parameter: the
-        // manual acceptance flow writes preferences from the command line into
-        // the same defaults domain the selftest runs in, so a payload path that
-        // read one would make every assertion above depend on the machine.
-        // Counted on `.object(forKey:` rather than `defaults.object(forKey:`,
-        // and that is the whole assertion. The first draft matched the
-        // receiver name, so it could only see a read written against the
-        // `defaults` parameter — but `payload()` has no such parameter, so the
-        // natural way to violate this is `UserDefaults.standard.object(forKey:)`
-        // and the scan looked straight past it. Measured: that mutation
-        // survived the whole suite. A guard that cannot catch the mutation
-        // named in its own message is not a guard.
-        let dpPayloadLayer = dpSources.first { $0.name == "DiscordPresence.swift" }
-        expect(
-            dpPayloadLayer.map { $0.text.components(separatedBy: ".object(forKey:").count - 1 } == 1
-                && dpPayloadLayer.map { $0.text.contains("UserDefaults.standard") } == false,
-            "A2b: exactly one preference read exists in the payload layer, it is the shared strict "
-                + "reader the two accessors call, and nothing there reaches for "
-                + "`UserDefaults.standard` (mutation: reading the cost switch inside payload() "
-                + "makes every privacy assertion depend on the machine running the suite)")
-        // Whitespace-normalized, and covering `.init` and an alias of the type,
-        // because `PresenceClient.init(connect : ...)` compiles and matched
-        // none of the literal forms. A source scan can always be evaded by
-        // someone trying; what it has to survive is an ordinary refactor.
+        // Whitespace-normalized copy, so `PresenceClient.init(connect : ...)`
+        // cannot slip past a literal match. A source scan can always be evaded
+        // by someone trying; what it has to survive is an ordinary refactor.
         let dpNormalized = dpSources.map {
             (name: $0.name, text: $0.text.filter { !$0.isWhitespace })
         }
+        // The Settings binding. Nothing else observes it: the accessor
+        // assertions above supply their own keys against an isolated suite, so
+        // a `SettingsPanel` key that diverges from `enabledKey` leaves the whole
+        // suite green while the toggle writes a key nobody reads — the feature
+        // never enables, or a live presence cannot be switched off. Occurrences
+        // rather than files, because a second declaration in the SAME file is
+        // the easier mistake.
+        expect(
+            dpOccurrences("@AppStorage(DiscordPresence.enabledKey)", in: dpSources) == 1
+                && dpSources.first(where: {
+                    $0.text.contains("@AppStorage(DiscordPresence.enabledKey)")
+                })?.name == "SettingsPanel.swift"
+                && dpOccurrences("\"\(DiscordPresence.enabledKey)\"", in: dpSources) == 1
+                && dpOccurrences("@AppStorage(DiscordPresence.wholeDollarsKey)", in: dpSources) == 1
+                && dpOccurrences("\"\(DiscordPresence.wholeDollarsKey)\"", in: dpSources) == 1,
+            "A2b: each switch is declared by exactly one view, in SettingsPanel, and each key "
+                + "string is written exactly once (mutation: a second `@AppStorage` default, or "
+                + "a hard-coded copy of the key — the trap `tokenbar.limits.enabled` already "
+                + "fell into — fails here)")
+        // The payload layer reads NO defaults domain, asserted at runtime rather
+        // than by scanning for `.object(forKey:`. The scan's first draft matched
+        // the receiver name and looked straight past
+        // `UserDefaults.standard.object(forKey:)`, which is exactly the natural
+        // way to violate this, and that mutation survived the whole suite.
+        // Written into the process's own domain because "reads no domain" is
+        // only observable by making the real one disagree with the parameter,
+        // and reverted immediately: the manual acceptance flow reads it.
+        let dpPriorWholeDollars = UserDefaults.standard.object(
+            forKey: DiscordPresence.wholeDollarsKey)
+        UserDefaults.standard.set(true, forKey: DiscordPresence.wholeDollarsKey)
+        let dpBandedUnderTrue = DiscordPresence.payload(
+            graph: dpGrainGraph, hidden: [], today: dpToday, costStyle: .banded)
+        if let dpPriorWholeDollars {
+            UserDefaults.standard.set(dpPriorWholeDollars, forKey: DiscordPresence.wholeDollarsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: DiscordPresence.wholeDollarsKey)
+        }
+        expect(dpBandedUnderTrue?.state.hasSuffix("<$10") == true,
+            "A2b: the payload honours the costStyle it is passed and reads no preference of its "
+                + "own, with the process's own domain saying the opposite "
+                + "(mutation: reading the cost switch inside payload() makes every privacy "
+                + "assertion depend on the machine running the suite)")
+        // The gate is the only path to a client. All three are shape claims —
+        // "constructed in exactly one place", "not aliased", "not handed
+        // curated arguments" — which no runtime value can express: a second
+        // construction site is invisible until the day it runs, and SelfTest
+        // cannot reach the app lifecycle.
         let dpCtorForms = ["DiscordIPCClient(connect:", "DiscordIPCClient.init(connect:"]
         expect(
-            dpCtorForms.reduce(0) { $0 + dpOccurrences($1, in: dpNormalized) } == 1,
-            "A1: exactly one production site constructs a client, and it is the gated factory "
-                + "(mutation: constructing one anywhere else — including via `.init` — bypasses "
-                + "the demo/test gate)")
-        // A16 — structural, because the behaviour it guards needs a real app
-        // lifecycle: `applicationWillTerminate` waits out the queued clear
-        // behind `if let discord`, so dropping the reference on the disable
-        // path silently skips that wait. Switching Discord off and quitting
-        // immediately then abandons the clear as the process exits, and the
-        // last activity stays on the profile after consent was withdrawn.
-        // This does not prove the drain works — A7c proves `stop()` writes the
-        // clear, and the drain is what gives it time to leave. It proves the
-        // drain still has something to drain.
-        expect(dpOccurrences("discord=nil", in: dpNormalized) == 0,
-            "A16: the disable path keeps the client reference until termination drains its clear "
-                + "(mutation: re-adding `discord = nil` after `stop()` abandons the clear on an "
-                + "off-then-quit, because the drain is guarded on the reference)")
-        // A26c — the button constants are pinned as literal DECLARATIONS, not
-        // only as literal values on the wire.
-        //
-        // Pinning the wire value catches a URL that is wrong everywhere. It
-        // does not catch one that is right where the suite looks: measured,
-        // both of these pass all 659 assertions —
+            dpCtorForms.reduce(0) { $0 + dpOccurrences($1, in: dpNormalized) } == 1
+                && dpOccurrences("typealias", in: dpNormalized.filter {
+                    $0.text.contains("DiscordIPCClient")
+                }) == 0
+                && !dpNormalized.contains { $0.text.contains("makeDiscordClient(arguments:") },
+            "A1: exactly one production site constructs a client and it is the gated factory, "
+                + "the type is not aliased, and no call site substitutes its own arguments for "
+                + "the process's (mutations: constructing one elsewhere including via `.init`, "
+                + "renaming the type, or passing a curated array, each bypass the demo/test gate)")
+        // A26c — the button constants, pinned as literal DECLARATIONS and as a
+        // file compiled identically in every configuration. Neither half covers
+        // the other's survivor, and both were measured to pass all 659
+        // assertions before these existed:
         //
         //     #if DEBUG  …literal…  #else  …+ "?ref=" + NSUserName()  #endif
         //     static var buttonURL: String { Bundle.main.bundleIdentifier == nil
         //         ? literal : literal + "?ref=" + hash(NSUserName()) }
         //
-        // — because the suite runs under `swift build` as a bare executable
-        // while shipping runs `make bundle`, release configuration, inside an
-        // .app. The assertions are structurally blind to that difference. What
-        // would then reach every viewer's click, and GitHub's request logs, is
-        // the account name of the person whose profile it is.
-        //
-        // Asserting the declaration text closes both: a `var`, a conditional,
-        // an interpolation or a concatenation is no longer the same string.
-        // This does not lift the ceiling in general — the same trick still
-        // works on `pid()` and `nonce()` — but the button is the first leaf
-        // whose legitimate value is a URL a third party parses, which is what
-        // turns that ceiling into a route.
-        expect(
-            dpOccurrences(
-                "static let buttonURL = \"https://github.com/Nanako0129/TokenBar\"",
-                in: dpSources.filter { $0.name == "DiscordIPC.swift" }) == 1
-                && dpOccurrences(
-                    "static let buttonLabel = \"View on GitHub\"",
-                    in: dpSources.filter { $0.name == "DiscordIPC.swift" }) == 1,
-            "A26c: both button constants are declared as `static let` with a literal string "
-                + "(mutation: a computed `var` reading Bundle.main fails here)")
-        // The other half, and the reason the clause above is not enough on its
-        // own: a `#if DEBUG` that keeps the literal declaration in the tested
-        // branch satisfies the count while shipping something else. Measured —
-        // it survived A26c until this line existed.
-        //
-        // `DiscordIPC.swift` already holds this policy in prose: its selftest
-        // seams are internal rather than `#if DEBUG` because "a symbol that
-        // exists only in one configuration is a symbol that breaks the release
-        // build the first time someone calls it without the guard". This turns
-        // that sentence into something checked.
-        //
-        // Counted as DIRECTIVES — lines whose first non-space characters are
-        // `#if`/`#else`/`#endif` — not as the substring. The only `#if` in that
-        // file today is inside the very comment quoted above, and a substring
-        // scan fails on the prose that states the policy it is enforcing.
+        // The suite runs under `swift build` as a bare executable while shipping
+        // runs `make bundle`, release configuration, inside an .app, so the wire
+        // assertions are structurally blind to the difference. What would reach
+        // every viewer's click, and GitHub's request logs, is the account name
+        // of the person whose profile it is. Directives are counted as lines
+        // starting with `#if`/`#else`/`#endif`, not as a substring: the only
+        // `#if` in that file is inside the comment stating this policy.
         let dpTransportDirectives = dpSources
             .filter { $0.name == "DiscordIPC.swift" }
             .flatMap { $0.text.split(separator: "\n", omittingEmptySubsequences: false) }
@@ -5317,19 +5252,17 @@ enum SelfTest {
                     || trimmed.hasPrefix("#endif")
             }
         expect(
-            dpTransportDirectives.isEmpty,
-            "A26c: the transport is compiled identically in every configuration, so what this "
-                + "suite observes is what ships (mutation: `#if DEBUG` yielding the literal under "
-                + "test and a user-derived URL in release passes every other assertion here)")
-
-        expect(dpOccurrences("typealias", in: dpNormalized.filter {
-            $0.text.contains("DiscordIPCClient")
-        }) == 0,
-            "A1: the client type is not aliased, so the construction scan above cannot be "
-                + "sidestepped by giving it another name")
-        expect(!dpNormalized.contains { $0.text.contains("makeDiscordClient(arguments:") },
-            "A1: no production call site substitutes its own arguments for the process's "
-                + "(mutation: passing a curated array turns the gate into a formality)")
+            dpOccurrences(
+                "static let buttonURL = \"https://github.com/Nanako0129/TokenBar\"",
+                in: dpSources.filter { $0.name == "DiscordIPC.swift" }) == 1
+                && dpOccurrences(
+                    "static let buttonLabel = \"View on GitHub\"",
+                    in: dpSources.filter { $0.name == "DiscordIPC.swift" }) == 1
+                && dpTransportDirectives.isEmpty,
+            "A26c: both button constants are literal `static let` declarations and the transport "
+                + "compiles identically in every configuration, so what this suite observes is "
+                + "what ships (mutations: a computed `var` reading Bundle.main, or a `#if DEBUG` "
+                + "yielding the literal under test and a user-derived URL in release)")
         // M6's gap: the wiring layer's choice of hidden set had no assertion at
         // all, and the payload fixtures cannot see it — they are handed a set.
         // `quotaExcludedClients()` and `hiddenLimitsClients()` are different
@@ -5355,8 +5288,7 @@ enum SelfTest {
         dpAbsentClient.reconnectDelay = 0.01
         let dpAbsentBegan = DispatchTime.now()
         dpAbsentClient.start()
-        dpAbsentClient.publish(DiscordPresence.Payload(
-            details: "12K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+        dpAbsentClient.publish(dpP("12K tokens today", state: "Amp · $1-5"))
         let dpAbsentBlocked = Double(
             DispatchTime.now().uptimeNanoseconds - dpAbsentBegan.uptimeNanoseconds) / 1_000_000_000
         _ = dpWaitUntil { dpAbsentAttempts.value > DiscordIPCClient.maxReconnectAttempts }
