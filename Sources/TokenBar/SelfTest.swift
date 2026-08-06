@@ -462,21 +462,11 @@ enum SelfTest {
             "linear mode ignores available historical")
         expect(UsagePace.compute(window: availableWindow, now: now)?.basis == .linear,
             "direct pace compute stays linear")
-        // The warning color is basis-independent (codexbar semantics): a Linear
-        // estimate in deficit is colored exactly like a Historical one, so the
-        // marker cannot blink out when the Historical fit stops re-qualifying.
-        // `linear` is the 50%/50% available window — on track, so not colored.
-        let linearDeficit = UsagePace.compute(
-            window: v3Window(used: 80, state: .available, historicalPace: historicalLasts),
-            mode: .linear, now: now)
         expect(
-            AgentLimitsCard.PacePresentation.isDeficit(risky)
-                && AgentLimitsCard.PacePresentation.isDeficit(learningEstimate)
-                && AgentLimitsCard.PacePresentation.isDeficit(linearDeficit)
-                && linearDeficit?.basis == .linear
-                && !AgentLimitsCard.PacePresentation.isDeficit(linear)
-                && !AgentLimitsCard.PacePresentation.isDeficit(hist),
-            "UI warning color follows the deficit stage, not the pace basis")
+            AgentLimitsCard.PacePresentation.isHistoricalDeficit(risky)
+                && !AgentLimitsCard.PacePresentation.isHistoricalDeficit(learningEstimate)
+                && !AgentLimitsCard.PacePresentation.isHistoricalDeficit(linear),
+            "UI warning color requires historical-basis deficit")
         let unavailableWindow = v3Window(used: 50, state: .unavailable)
         expect(UsagePace.compute(
             window: unavailableWindow, mode: .historical, now: now) == nil,
@@ -2870,7 +2860,7 @@ enum SelfTest {
         expect(
             demoLearningEstimate?.basis == .linear
                 && demoLearningEstimate?.isHistoricalDeficit == false,
-            "demo learning-history estimate stays a Linear basis in the parity contract")
+            "demo learning-history estimate cannot trigger historical warning color")
         expect(
             demoHistoricalAhead?.basis == .historical
                 && demoHistoricalAhead?.stage.isDeficit == true
