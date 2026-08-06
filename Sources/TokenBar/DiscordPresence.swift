@@ -10,17 +10,32 @@ import TokenBarCore
 /// performs file I/O — the transport and the opt-in switch land separately.
 /// `hidden` is a parameter, not a lookup, for the same reason.
 enum DiscordPresence {
-    /// Everything, and only what, would be published to a third party and shown
-    /// on a public profile.
+    /// Everything about the USER that would be published to a third party and
+    /// shown on a public profile — and only that.
+    ///
+    /// Not the whole profile surface: the transport adds four leaves of its own
+    /// (the pid, a nonce, and a repository button's label and URL), all
+    /// constants or process facts with nothing of the user in them, declared
+    /// and asserted in `DiscordIPC`. An audit needs both halves. This type
+    /// bounds what can be said about the person; that file bounds what else can
+    /// ride along.
     struct Payload: Equatable {
         let details: String
         let state: String
         let largeImageKey: String
 
-        /// **The published surface.** These values, and only these, may leave
-        /// the machine: the transport must not add a field, drop one, or alter
-        /// a value, and no property of this struct that is absent here is
-        /// published.
+        /// **The published surface derived from the user.** These values, and
+        /// only these, carry anything about them: the transport must not drop a
+        /// field or alter a value, and no property of this struct that is
+        /// absent here is published.
+        ///
+        /// The transport does add four leaves of its own — the pid, a nonce,
+        /// and a repository button's label and URL — and all four are constants
+        /// or process facts with nothing of the user in them. They are declared
+        /// and asserted in `DiscordIPC`, deliberately not here, because a value
+        /// placed in this dictionary is admitted by the wire assertion by
+        /// definition. Anything that says something about the user belongs
+        /// here, where the scans can reach it.
         ///
         /// Key *naming* is the transport's concern, not this struct's. Discord
         /// nests the asset key as `assets.large_image` rather than carrying it

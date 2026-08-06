@@ -583,12 +583,12 @@ struct SettingsPanel: View {
             // user reads BEFORE opting in, rather than only next to the switch
             // itself. Saying "a cost range" while a setting below can turn it
             // into a figure would describe a state the app may not be in.
-            hint("Off by default. When on, TokenBar sends today's total tokens, your spending as a range like $10-50, and the name of your most-used visible client to the Discord app on this Mac, and Discord publishes them on your profile. The setting below replaces that range with a rounded dollar amount, which says more about you. Anyone who can see your profile — friends and their bots included — can read every update and keep it indefinitely; switching this off stops future updates but cannot take back what was already shared. It also updates while you work, so your active hours are visible too. Hidden clients are never included.")
+            hint("Off by default. Publishes today's tokens, a cost range — or a rounded figure, if you turn that on below — your most-used visible client, and a link to TokenBar's source to your Discord profile. It updates while you work, so your active hours show too. Anyone who can see your profile can read and keep every update; switching this off stops new ones but cannot unshare what already went out. Hidden clients are never included.")
             toggleRow("Show cost as a figure instead of a range", isOn: $discordWholeDollars)
             // Says what the trade is, not that there is one. A range puts you
             // in a group; a figure is closer to a value only you have, and a
             // sequence of them across weeks is closer still.
-            hint("Ranges like $10-50 keep you among everyone else in that band. A figure is rounded to the dollar — never cents, which over a month would be close to a unique fingerprint — but a daily figure still says more about you than a range does, and it says it every day.")
+            hint("A range keeps you among everyone else in that band. A figure is rounded to the dollar, never cents, but still says more about you — every day.")
         }
 
         section("Language") {
