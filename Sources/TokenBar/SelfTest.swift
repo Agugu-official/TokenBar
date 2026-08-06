@@ -3554,10 +3554,9 @@ enum SelfTest {
 
         // MARK: - Discord Rich Presence payload (DISCORD-PRESENCE M1)
         //
-        // This payload is published to a third party and shown on a public
-        // profile, so these are privacy regression guards, not display tests.
-        // Every assertion goes through `DiscordPresence.payload(...)` — the
-        // published bytes — not through the core fold alone.
+        // Published to a third party on a public profile: privacy regression
+        // guards, not display tests. Every assertion goes through
+        // `DiscordPresence.payload(...)` — the published bytes.
         func dpGraph(_ json: String) -> UsagePayload {
             try! JSONDecoder().decode(UsagePayload.self, from: Data(json.utf8))
         }
@@ -3591,29 +3590,27 @@ enum SelfTest {
         }
         let dpToday = "2026-08-04"
 
-        // A3a — the hidden set reaches the published payload. The day-level
-        // `totals` here (1.2M) deliberately differs from the visible-only sum
-        // (200K): a builder that read `Contribution.totals`/`tokenBreakdown`
-        // instead of the surviving stripes cannot subtract a client and would
-        // publish "1.2M".
+        // Hidden clients are excluded from the published totals. The day-level
+        // `totals` (1.2M) differs from the visible-only sum (200K) on purpose: a
+        // builder reading `totals`/`tokenBreakdown` cannot subtract a client.
         let dpHiddenGraph = dpGraph(dpPayload(dpDay(
             dpToday, 1_200_000, 6.0,
             dpStripe("claude", 1_000_000, 5.0) + "," + dpStripe("codex", 200_000, 1.0))))
         let dpHidden = DiscordPresence.payload(
             graph: dpHiddenGraph, hidden: ["claude"], today: dpToday, costStyle: .banded)
-        expect(dpHidden?.details == "200K tokens today",
-            "discord payload tokens exclude the hidden client (mutation: reading the day-level "
-                + "totals publishes 1.2M)")
-        expect(dpHidden.map { !$0.fields.values.joined().contains("1.2M") } == true,
-            "discord payload never carries the mixed day-level total")
+        expect(
+            dpHidden?.details == "200K tokens today"
+                && dpHidden.map { !$0.fields.values.joined().contains("1.2M") } == true,
+            "published tokens are the visible-only sum, and the mixed day-level total reaches "
+                + "no field (mutation: reading the day-level totals publishes 1.2M)")
         expect(dpHidden?.state.contains("Codex CLI") == true
             && dpHidden?.state.contains("Claude Code") == false,
-            "discord top client skips the hidden client (mutation: dropping the hidden filter "
-                + "from the fold publishes Claude Code)")
+            "the top client skips the hidden client (mutation: dropping the hidden filter from "
+                + "the fold publishes Claude Code)")
 
-        // A4 — outbound label allowlist. The busiest visible client is an
-        // UNREGISTERED id whose suffix comes from a user's local config file;
-        // a second, hidden client carries a sentinel too. Nothing may escape.
+        // Outbound label allowlist: the busiest visible client is an
+        // UNREGISTERED id whose suffix comes from a local config file, and the
+        // hidden one carries a sentinel too.
         let dpSecretGraph = dpGraph(dpPayload(dpDay(
             dpToday, 1_400_000, 12.0,
             dpStripe("cc-mirror/SECRET_VARIANT", 500_000, 3.0,
@@ -3623,50 +3620,42 @@ enum SelfTest {
         let dpSecret = DiscordPresence.payload(
             graph: dpSecretGraph, hidden: ["SECRET_HIDDEN"], today: dpToday, costStyle: .banded)
         let dpSecretText = (dpSecret?.fields.values ?? [:].values).joined(separator: "|")
-        expect(dpSecret != nil && !dpSecretText.contains("SECRET_"),
-            "discord payload redacts an unregistered client id (mutation: using "
-                + "ClientRegistry.style().displayName without the allowlist gate leaks it)")
-        // Literal, not `DiscordPresence.neutralClientLabel`: an assertion whose
-        // expected value is read out of the constant it guards passes no matter
-        // what that constant becomes.
-        expect(dpSecret?.state.contains("an AI tool") == true,
-            "an unregistered top client publishes the neutral label")
-        // A5 — forbidden fields. modelId/providerId values are covered by the
-        // SECRET_ assertion above; these cover shapes rather than values.
+        // The expected label is a literal: an assertion reading it out of the
+        // constant it guards passes whatever that constant becomes.
+        expect(
+            dpSecret != nil && !dpSecretText.contains("SECRET_")
+                && dpSecret?.state.contains("an AI tool") == true,
+            "an unregistered top client publishes the neutral label and its id reaches no field "
+                + "(mutation: ClientRegistry.style().displayName without the allowlist gate)")
         expect(!dpSecretText.contains("/"),
-            "discord payload carries no path-like segment (mutation: adding any raw-id or path "
-                + "field to Payload.fields fails here)")
-        // Pinned by KEY on the published surface itself. `fields` is what the
-        // transport serializes, so this covers exactly what leaves the machine:
-        // a new outbound field must add a key here and fails, while a property
-        // that is not in `fields` publishes nothing and correctly does not.
-        // Asserting over anything else — a parallel list of values, or
-        // reflection over the stored properties — reintroduces the gap between
-        // the published surface and the asserted one that let a computed
+            "no path-like segment is published (mutation: adding any raw-id or path field to "
+                + "Payload.fields fails here)")
+        // Pinned by KEY on `fields`, which is what the transport serializes.
+        // Asserting over anything else reopens the gap that let a computed
         // `startTimestamp` through.
         expect(dpSecret.map { Set($0.fields.keys) } == ["details", "state", "largeImageKey"],
-            "the discord payload publishes exactly three named fields "
-                + "(mutation: adding a key to Payload.fields, or dropping one, fails here)")
+            "exactly three named fields are published (mutation: adding a key to Payload.fields, "
+                + "or dropping one, fails here)")
 
-        // A11 — published granularity. Exact figures must not survive: neither
-        // the raw token count nor cent-precision cost.
+        // Published granularity: neither the raw token count nor cent-precision
+        // cost may survive.
         let dpGrainGraph = dpGraph(dpPayload(dpDay(
             dpToday, 1_234_567, 7.89, dpStripe("claude", 1_234_567, 7.89))))
         let dpGrain = DiscordPresence.payload(
             graph: dpGrainGraph, hidden: [], today: dpToday, costStyle: .banded)
         let dpGrainText = (dpGrain?.fields.values ?? [:].values).joined(separator: "|")
-        expect(dpGrain?.details == "1.2M tokens today",
-            "discord tokens publish as a compact string (mutation: String(todayTokens) fails here)")
-        expect(dpGrain != nil && !dpGrainText.contains("1234567"),
-            "discord payload never carries the raw token count")
-        expect(dpGrain != nil && !dpGrainText.contains("7.89"),
-            "discord payload never carries cent-precision cost (mutation: Format.usd fails here)")
-        expect(dpGrain?.state.hasSuffix("<$10") == true, "cost publishes as a coarse band")
+        expect(dpGrain?.details == "1.2M tokens today" && !dpGrainText.contains("1234567"),
+            "tokens publish as a compact string and the raw count reaches no field "
+                + "(mutation: String(todayTokens) fails here)")
+        expect(dpGrain?.state.hasSuffix("<$10") == true && !dpGrainText.contains("7.89"),
+            "cost publishes as a coarse band and cents reach no field "
+                + "(mutation: Format.usd fails here)")
 
-        // A21 — the band table, by equality on every boundary. Not "returns a
-        // finite band": every band string is finite, so that phrasing passes on
-        // an implementation that hands a zero-cost day to the top band.
+        // Equality on every boundary, non-finite included: those must land in
+        // the LOWEST band. "Returns a finite band" passes on an implementation
+        // that hands a zero-cost day to the top one.
         let dpBands: [(Double, String)] = [
+            (.nan, "<$10"), (.infinity, "<$10"), (-.infinity, "<$10"),
             (-1, "<$10"), (0, "<$10"), (9.99, "<$10"),
             (10, "$10-50"), (49.99, "$10-50"),
             (50, "$50-100"), (99.99, "$50-100"),
@@ -3677,20 +3666,14 @@ enum SelfTest {
         ]
         for (cost, band) in dpBands {
             expect(DiscordPresence.costBucket(cost) == band,
-                "A21: cost \(cost) bands as \(band) "
-                    + "(mutation: shifting a bound, or flipping a bound to exclusive, fails here)")
+                "cost \(cost) bands as \(band) "
+                    + "(mutation: shifting a bound, flipping one to exclusive, or dropping the "
+                    + "isFinite guard, fails here)")
         }
-        expect(DiscordPresence.costBucket(.nan) == "<$10"
-            && DiscordPresence.costBucket(.infinity) == "<$10",
-            "A21: a non-finite cost bands as the LOWEST band "
-                + "(mutation: dropping the isFinite guard sends it to the default arm, which "
-                + "publishes the top band for a value that means nothing)")
 
-        // A22 — whole-dollar mode is total. These are the inputs that abort the
-        // process rather than failing: `Int(.infinity)` and `Int(1e308)` both
-        // trap, and a trap prints no FAIL line and reaches no verdict — the run
-        // just disappears. So the assertion has to be reachable past the
-        // conversion at all.
+        // Whole-dollar mode is a total function. `Int(.infinity)` and
+        // `Int(1e308)` trap rather than fail, and a trap reaches no verdict at
+        // all, so the assertion must be reachable past the conversion.
         let dpDollars: [(Double, String)] = [
             (.nan, "$0"), (.infinity, "$0"), (-.infinity, "$0"),
             (-5, "$0"), (0, "$0"), (0.4, "$0"), (0.5, "$1"),
@@ -3703,105 +3686,88 @@ enum SelfTest {
         ]
         for (cost, text) in dpDollars {
             expect(DiscordPresence.wholeDollars(cost) == text,
-                "A22: cost \(cost) renders as \(text) "
+                "cost \(cost) renders as \(text) "
                     + "(mutation: `\"$\" + Int(max(0, cost).rounded())` traps here rather than "
                     + "failing, because max() folds only NaN and -infinity)")
         }
 
-        // A23 — the two modes disagree on the same fixture, which is the only
-        // thing that makes either assertion able to fail. An earlier draft
-        // checked "banded contains no 7.89" and "whole dollars contains no
-        // '.'" — both true of BOTH modes, so a build that ignored the
-        // parameter passed both.
+        // The two cost modes must DISAGREE on one fixture, asserted as equality
+        // on both: "banded has no 7.89" and "dollars has no '.'" are true of
+        // BOTH modes, so a build ignoring the parameter passed them.
         let dpModeGraph = dpGraph(dpPayload(dpDay(
             dpToday, 12_000, 7.89, dpStripe("claude", 12_000, 7.89))))
         let dpBanded = DiscordPresence.payload(
             graph: dpModeGraph, hidden: [], today: dpToday, costStyle: .banded)
         let dpExact = DiscordPresence.payload(
             graph: dpModeGraph, hidden: [], today: dpToday, costStyle: .wholeDollars)
-        expect(dpBanded?.state == "Claude Code · <$10",
-            "A23: the banded parameter publishes the band "
-                + "(mutation: ignoring costStyle and always rendering whole dollars fails here)")
-        expect(dpExact?.state == "Claude Code · $8",
-            "A23: the whole-dollar parameter publishes the rounded figure "
-                + "(mutation: ignoring costStyle and always rendering the band fails here)")
-        expect(dpBanded?.state != dpExact?.state,
-            "A23 control: the two modes actually differ on this fixture — without that neither "
-                + "assertion above could fail")
-        expect(dpBanded.map { !$0.fields.values.joined().contains("7.89") } ?? false,
-            "A23: cents never reach the payload in banded mode")
-        expect(dpExact.map { !$0.fields.values.joined().contains("7.89") } ?? false,
-            "A23: cents never reach the payload in whole-dollar mode either — rounding is to "
-                + "the dollar, and a fractional daily figure is what makes a month of them a "
-                + "fingerprint")
+        expect(
+            dpBanded?.state == "Claude Code · <$10" && dpExact?.state == "Claude Code · $8"
+                && dpBanded.map { !$0.fields.values.joined().contains("7.89") } == true
+                && dpExact.map { !$0.fields.values.joined().contains("7.89") } == true,
+            "the two cost modes render the same fixture differently and neither publishes cents "
+                + "(mutation: ignoring costStyle and always rendering one of them fails here)")
 
-        // A24 — the cost switch is read as strictly as the on/off switch, and
-        // reducing precision is classified so it does not queue behind the
-        // publish floor.
+        // Which cost-mode change earns the floor bypass: reducing precision must
+        // not queue behind the publish floor with the precise figure still up.
         expect(AppDelegate.costStyleChange(previous: .wholeDollars, current: .banded) == .reducing,
-            "A24: turning the figure back into a range is a reduction, so it does not wait out "
-                + "the floor with the precise figure still on the profile "
+            "turning the figure back into a range is a reduction, so it does not wait out the "
+                + "floor with the precise figure still on the profile "
                 + "(mutation: returning .none queues it behind the floor)")
         expect(AppDelegate.costStyleChange(previous: .banded, current: .wholeDollars)
             == .increasing,
-            "A24: adding precision is throttled like any other sample")
+            "adding precision is throttled like any other sample")
         expect(AppDelegate.costStyleChange(previous: .banded, current: .banded) == .none,
-            "A24: no change is neither")
+            "no cost-mode change is neither")
         expect(DiscordIPC.VisibilityChange.increasing.combined(with: .reducing) == .reducing
-            && DiscordIPC.VisibilityChange.reducing.combined(with: .increasing) == .reducing,
-            "A24: a turn that both hides and adds precision is a reduction — removed content "
-                + "outranks the sampling rate, and the combination is order-independent")
-        expect(DiscordIPC.VisibilityChange.none.combined(with: .increasing) == .increasing
+            && DiscordIPC.VisibilityChange.reducing.combined(with: .increasing) == .reducing
+            && DiscordIPC.VisibilityChange.none.combined(with: .increasing) == .increasing
             && DiscordIPC.VisibilityChange.none.combined(with: .none) == .none,
-            "A24 control: combining does not invent a change that neither side reported")
-        // A11 (cont.) — the two inputs where the SHARED tray formatter would
-        // publish an exact figure. `Format.compactTokens` returns `String(count)`
-        // below 1000 and for every negative value, which is right for the menu
-        // bar and wrong on a public profile.
+            "a turn that both hides and adds precision is a reduction, order-independently, and "
+                + "combining invents no change neither side reported")
+
+        // The two inputs where the SHARED tray formatter publishes an exact
+        // figure: `Format.compactTokens` returns `String(count)` below 1000 and
+        // for negatives. Negative totals are reachable — the aggregator clamps
+        // per lane, so the re-summed slow path can go negative.
         let dpSmall = DiscordPresence.payload(
             graph: dpGraph(dpPayload(dpDay(dpToday, 850, 0.4, dpStripe("claude", 850, 0.4)))),
             hidden: [], today: dpToday, costStyle: .banded)
-        expect(dpSmall?.details == "<1K tokens today",
-            "a light day publishes a band, not the exact count (mutation: calling "
-                + "Format.compactTokens directly publishes \"850\")")
-        // Negative day totals are reachable: the aggregator clamps per lane, so
-        // the re-summed slow path can go negative (trayTotals' doc comment).
-        // Hiding a non-existent id forces that slow path.
         let dpNegative = DiscordPresence.payload(
             graph: dpGraph(dpPayload(dpDay(
                 dpToday, 0, 1.0,
                 dpStripe("claude", -1_234_567, 0.0) + "," + dpStripe("codex", 1_000, 1.0)))),
             hidden: ["nobody"], today: dpToday, costStyle: .banded)
-        expect(dpNegative.map { !$0.fields.values.joined().contains("1233567") } ?? true,
-            "a negative day total never publishes its signed digits")
-
-        // A12 — zero usage publishes nothing (no "machine is on" beacon), and a
-        // day absent from the graph publishes nothing either.
-        let dpZeroGraph = dpGraph(dpPayload(dpDay(dpToday, 0, 0, dpStripe("claude", 0, 0))))
         expect(
-            DiscordPresence.payload(
-                graph: dpZeroGraph, hidden: [], today: dpToday, costStyle: .banded) == nil,
-            "zero usage publishes nothing (mutation: dropping the guard publishes an idle beacon)")
-        expect(
-            DiscordPresence.payload(
-                graph: dpGrainGraph, hidden: [], today: "2099-01-01",
-                costStyle: .banded) == nil,
-            "a day with no contribution publishes nothing")
-        // The isFinite guard, made reachable. JSON cannot express NaN, but the
-        // slow path sums Double costs, so two finite stripes overflow to +inf —
-        // which costBucket would happily publish as "$100+".
-        let dpInfinite = DiscordPresence.payload(
-            graph: dpGraph(dpPayload(dpDay(
-                dpToday, 10, 1e308,
-                dpStripe("claude", 10, 1e308) + "," + dpStripe("codex", 10, 1e308)))),
-            hidden: ["nobody"], today: dpToday, costStyle: .banded)
-        expect(dpInfinite == nil,
-            "an overflowed cost publishes nothing (mutation: dropping the isFinite guard in "
-                + "payload() publishes the band costBucket returns for a non-finite cost)")
+            dpSmall?.details == "<1K tokens today"
+                && dpNegative.map { !$0.fields.values.joined().contains("1233567") } ?? true,
+            "a light day publishes a band and a negative total publishes no signed digits "
+                + "(mutation: calling Format.compactTokens directly publishes \"850\")")
 
-        // A14 — the top client is the busiest CLIENT, not the biggest single
-        // stripe. `Contribution.clients` holds per client×model×provider
-        // stripes, so claude's 30+30 must beat codex's single 50.
+        // Three inputs that publish nothing: an idle day (no "machine is on"
+        // beacon), a day absent from the graph, and an overflowed cost — JSON
+        // cannot express NaN, but two finite stripes sum to +inf.
+        let dpSilent: [(String, DiscordPresence.Payload?)] = [
+            ("zero usage", DiscordPresence.payload(
+                graph: dpGraph(dpPayload(dpDay(dpToday, 0, 0, dpStripe("claude", 0, 0)))),
+                hidden: [], today: dpToday, costStyle: .banded)),
+            ("a day with no contribution", DiscordPresence.payload(
+                graph: dpGrainGraph, hidden: [], today: "2099-01-01", costStyle: .banded)),
+            ("an overflowed cost", DiscordPresence.payload(
+                graph: dpGraph(dpPayload(dpDay(
+                    dpToday, 10, 1e308,
+                    dpStripe("claude", 10, 1e308) + "," + dpStripe("codex", 10, 1e308)))),
+                hidden: ["nobody"], today: dpToday, costStyle: .banded)),
+        ]
+        for (label, payload) in dpSilent {
+            expect(payload == nil,
+                "\(label) publishes nothing (mutation: dropping the zero guard publishes an idle "
+                    + "beacon; dropping the isFinite guard publishes a band for a meaningless "
+                    + "value)")
+        }
+
+        // The top client is the busiest CLIENT, not the biggest stripe:
+        // `clients` holds per client×model×provider stripes, so claude's 30+30
+        // must beat codex's single 50.
         let dpFoldGraph = dpGraph(dpPayload(dpDay(
             dpToday, 110, 1.1,
             dpStripe("claude", 30, 0.3, model: "m1") + ","
@@ -3810,61 +3776,38 @@ enum SelfTest {
         let dpFold = DiscordPresence.payload(
             graph: dpFoldGraph, hidden: [], today: dpToday, costStyle: .banded)
         expect(dpFold?.state.hasPrefix("Claude Code") == true,
-            "top client folds stripes per client first (mutation: max over raw stripes picks "
+            "the top client folds stripes per client first (mutation: max over raw stripes picks "
                 + "Codex CLI's single 50 over Claude Code's 30+30)")
-        let dpFoldHidden = DiscordPresence.payload(
-            graph: dpFoldGraph, hidden: ["claude"], today: dpToday, costStyle: .banded)
-        expect(dpFoldHidden?.state.hasPrefix("Codex CLI") == true,
-            "hiding the busiest client promotes the next visible one")
 
-        // A15 — deterministic tie-break: tokens, then higher cost, then the
-        // lexicographically smallest id. A wobbling label would flip between
-        // publishes.
-        let dpTieCost = dpGraph(dpPayload(dpDay(
-            dpToday, 200, 3.0, dpStripe("amp", 100, 1.0) + "," + dpStripe("zed", 100, 2.0))))
-        expect(DiscordPresence.payload(
-            graph: dpTieCost, hidden: [], today: dpToday, costStyle: .banded)?.state
-            == "Zed · <$10",
-            "equal tokens break to the higher cost")
-        // Six-way tie on purpose, and the fixture lists the ids in REVERSE
-        // order so input order cannot supply the answer.
-        //
-        // Two mutations threaten this, and they are not equally provable:
-        //   `>=` in the fold comparison        → picks Zed, fails every run.
-        //   `keys.sorted()` → `keys`           → PROBABILISTIC. Swift seeds
-        //     Dictionary hashing per process, so an unsorted walk lands on the
-        //     right id by luck roughly 1 run in 6. The pair of assertions below
-        //     feed the SAME six clients in opposite orders — a different
-        //     insertion sequence is a different iteration order — so the
-        //     mutation has to get lucky twice to survive. It is still not a
-        //     hard proof, and no in-process check can make it one: repeatedly
-        //     calling the fold inside one run cannot see the wobble, because
-        //     the seed does not change until the process does.
+        // Deterministic tie-break: tokens, then higher cost, then the smallest
+        // id. The six-way tie is fed in both orders because an unsorted key walk
+        // is only probabilistically wrong — Swift seeds Dictionary hashing per
+        // process, so it must get lucky twice.
         let dpTieIds = ["zed", "warp", "goose", "droid", "codex", "amp"]
-        let dpTieId = dpGraph(dpPayload(dpDay(
-            dpToday, 600, 6.0, dpTieIds.map { dpStripe($0, 100, 1.0) }.joined(separator: ","))))
-        expect(
-            DiscordPresence.payload(
-                graph: dpTieId, hidden: [], today: dpToday, costStyle: .banded)?.state
-                == "Amp · <$10",
-            "a full tie breaks to the lexicographically smallest id")
-        let dpTieIdReversed = dpGraph(dpPayload(dpDay(
-            dpToday, 600, 6.0,
-            dpTieIds.reversed().map { dpStripe($0, 100, 1.0) }.joined(separator: ","))))
-        expect(
-            DiscordPresence.payload(
-                graph: dpTieIdReversed, hidden: [], today: dpToday, costStyle: .banded)?.state
-                == "Amp · <$10",
-            "the tie-break does not depend on the order the stripes arrive in")
+        let dpTies: [(String, String, String)] = [
+            ("equal tokens break to the higher cost",
+             dpStripe("amp", 100, 1.0) + "," + dpStripe("zed", 100, 2.0), "Zed · <$10"),
+            ("a full tie breaks to the lexicographically smallest id",
+             dpTieIds.map { dpStripe($0, 100, 1.0) }.joined(separator: ","), "Amp · <$10"),
+            ("the tie-break ignores the order the stripes arrive in",
+             dpTieIds.reversed().map { dpStripe($0, 100, 1.0) }.joined(separator: ","),
+             "Amp · <$10"),
+        ]
+        for (label, stripes, expected) in dpTies {
+            expect(
+                DiscordPresence.payload(
+                    graph: dpGraph(dpPayload(dpDay(dpToday, 600, 6.0, stripes))),
+                    hidden: [], today: dpToday, costStyle: .banded)?.state == expected,
+                "\(label) (mutation: `>=` in the fold comparison, or an unsorted key walk)")
+        }
 
         // MARK: - Discord Rich Presence transport (DISCORD-PRESENCE M2a)
         //
-        // Nothing in the app calls this transport yet. These are the framing,
-        // lifecycle and privacy guards for the code that will carry the payload
-        // off the machine, and they run against real syscalls: the client's
-        // connect factory is handed one end of a `socketpair(AF_UNIX,
-        // SOCK_STREAM)`, so the framing, the fd lifetime and the SIGPIPE
-        // behaviour are the production ones, not a mock's.
+        // Nothing in the app calls this transport yet. These run against real
+        // syscalls — a `socketpair(AF_UNIX, SOCK_STREAM)` end, not a mock — so
+        // framing, fd lifetime and SIGPIPE behaviour are the production ones.
+        // Contracts: C3 wire framing, C1 payload/privacy on the wire, C4
+        // lifecycle, C5 privacy-sensitive ordering (throttle vs. consent).
 
         /// Frames built independently of `DiscordIPC.encode`, so the decoder is
         /// never checked against its own mirror image.
@@ -3879,13 +3822,21 @@ enum SelfTest {
             let body = Data(text.utf8)
             return dpRaw(op, UInt32(body.count), body)
         }
+        /// Incomplete frame prefixes carried between `dpFrames` polls, per
+        /// descriptor. Declared here because `dpSocketPair` clears it: see
+        /// there for why clearing happens at birth rather than at close.
+        var dpPartial: [Int32: Data] = [:]
         func dpSocketPair() -> (Int32, Int32) {
             var fds: [Int32] = [-1, -1]
             _ = socketpair(AF_UNIX, SOCK_STREAM, 0, &fds)
-            // The peer end is only ever read by the test; the timeout keeps a
-            // missing frame a FAIL rather than a hung selftest, and
-            // SO_NOSIGPIPE keeps a write after the client closes from killing
-            // the harness itself.
+            // Descriptor numbers are recycled the moment a fixture closes one,
+            // and a one-shot `dpFrames` that lands between fragments of a frame
+            // leaves a non-empty entry behind. Clearing at birth covers every
+            // teardown path — `dpFinish`, `dpScenario`, and the scenarios that
+            // call `close` directly — where clearing at close would have to be
+            // remembered at each of them.
+            dpPartial[fds[0]] = nil
+            dpPartial[fds[1]] = nil
             var timeout = timeval(tv_sec: 1, tv_usec: 0)
             setsockopt(fds[1], SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
             var on: Int32 = 1
@@ -3897,11 +3848,9 @@ enum SelfTest {
             let count = recv(fd, &buf, buf.count, 0)
             return count > 0 ? Data(buf[0..<count]) : Data()
         }
-        /// Non-blocking, unlike `dpRecv`. The peer ends carry `SO_RCVTIMEO` of
-        /// one second, so a poll loop built on the blocking read spends up to a
-        /// second per turn and can outlast the very delay it is trying to
-        /// detect — which is exactly how a throttle assertion ends up unable to
-        /// fail.
+        /// Non-blocking, unlike `dpRecv`: a poll loop built on the blocking read
+        /// can spend up to the peer's 1s `SO_RCVTIMEO` per turn and outlast the
+        /// very delay it is trying to detect.
         func dpRecvNow(_ fd: Int32) -> Data {
             var buf = [UInt8](repeating: 0, count: 4096)
             let count = recv(fd, &buf, buf.count, MSG_DONTWAIT)
@@ -3922,131 +3871,231 @@ enum SelfTest {
             }
             return ready()
         }
+        /// Decodes every complete frame currently sitting in `fd`'s buffer,
+        /// non-blocking. Replaces the hand-rolled `while case .frame(...) =
+        /// decode(...)` loop that most scenarios below used to repeat.
+        ///
+        /// The leftover is CARRIED between calls, per descriptor. `SOCK_STREAM`
+        /// does not preserve write boundaries, so a frame can be split across
+        /// `recv` calls; discarding the prefix would leave every later poll
+        /// starting in the middle of a frame and reporting it missing —
+        /// intermittently, and only under the timing that splits the write.
+        /// Only a `needMore` remainder is carried, and only that. A first
+        /// attempt kept whatever the `while case .frame` loop stopped on, which
+        /// exhausted memory: `fatal` consumes nothing, so the loop halted on
+        /// the same bytes every turn while each poll appended more, and
+        /// `dpFrameArrives` polls in a tight loop. Retaining a decodable
+        /// remainder is bounded by one frame; retaining an undecodable one is
+        /// not bounded at all. The entry is dropped when empty so a recycled
+        /// descriptor never inherits another socket's bytes — and `dpSocketPair`
+        /// clears the entry at birth, which covers the case where a one-shot
+        /// call leaves a real prefix behind on a descriptor about to be closed.
+        func dpFrames(_ fd: Int32) -> [(DiscordIPC.Opcode, Data)] {
+            var buf = (dpPartial[fd] ?? Data()) + dpRecvNow(fd)
+            var out: [(DiscordIPC.Opcode, Data)] = []
+            decoding: while !buf.isEmpty {
+                switch DiscordIPC.decode(from: &buf) {
+                case .frame(let op, let body): out.append((op, body))
+                case .discard: continue
+                case .needMore: break decoding
+                // Unrecoverable by definition, so there is nothing to carry.
+                case .fatal: buf.removeAll()
+                }
+            }
+            dpPartial[fd] = buf.isEmpty ? nil : buf
+            return out
+        }
         /// Counts calls to an injected connect factory. Mutated on the client's
         /// serial queue and read after `drainForTesting()`/`dpWaitUntil`, which
         /// is what orders the two.
         final class DPCounter: @unchecked Sendable {
             var value = 0
         }
+        /// The common shape roughly twenty scenarios below repeat: one socket
+        /// pair, a plain connect factory, start, drain the handshake, run
+        /// `body`, then stop and close. Scenarios that need two socket pairs, a
+        /// mode-counting connect factory, or `holdQueueForTesting` keep their
+        /// own setup instead — this shape does not fit them.
+        ///
+        /// `peerClosedByBody` hands descriptor ownership to the body. The
+        /// SIGPIPE scenario closes the peer itself to provoke the write
+        /// failure, and closing it again here would be a double close: in a
+        /// harness with a live serial queue the number can already have been
+        /// reused, so the second `close` can take an unrelated socket out from
+        /// under `stop()` and make later scenarios fail unpredictably.
+        @discardableResult
+        func dpScenario<T>(
+            peerClosedByBody: Bool = false, _ body: (Int32, DiscordIPCClient) -> T
+        ) -> T {
+            let (local, peer) = dpSocketPair()
+            let client = DiscordIPCClient(connect: { local })
+            client.start()
+            client.drainForTesting()
+            _ = dpRecv(peer) // the handshake
+            let result = body(peer, client)
+            client.stop()
+            client.drainForTesting()
+            if !peerClosedByBody { close(peer) }
+            return result
+        }
+        /// The cases `dpScenario` excludes: several socket pairs handed out in
+        /// order, so a scenario can break one connection and watch the client
+        /// arrive on the next. Local funcs rather than a type, because a type
+        /// declared in a function body cannot capture the helpers above it.
+        func dpRig(peers count: Int) -> ([Int32], DiscordIPCClient, DPCounter) {
+            let pairs = (0..<count).map { _ in dpSocketPair() }
+            let handed = DPCounter()
+            let client = DiscordIPCClient(connect: {
+                let i = min(handed.value, pairs.count - 1)
+                handed.value += 1
+                return pairs[i].0
+            })
+            return (pairs.map { $0.1 }, client, handed)
+        }
+        /// The READY frame Discord actually sends, sentinels included: the
+        /// account's username, id and avatar, none of which may be read, kept
+        /// or echoed. Declared here rather than beside its first assertion
+        /// because the helpers below capture it, and a local `let` cannot be
+        /// captured before its declaration.
+        let dpReadyBody = "{\"cmd\":\"DISPATCH\",\"evt\":\"READY\",\"data\":{\"v\":1,"
+            + "\"user\":{\"username\":\"SECRET_USERNAME\",\"id\":\"SECRET_ID\","
+            + "\"avatar\":\"SECRET_AVATAR\",\"discriminator\":\"0001\"}}}"
+        /// Answers a handshake the client has already sent. The client only
+        /// leaves `ready` on an inbound READY, so every scenario past the
+        /// connect path needs this.
+        func dpSendReady(_ peer: Int32) {
+            dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+                _ = send(peer, raw.baseAddress!, raw.count, 0)
+            }
+        }
+        /// Drains the handshake, answers READY, and waits for the client to
+        /// record it. The Bool is the liveness half of every conjunction below:
+        /// without it an absence assertion passes on a client that never
+        /// connected.
+        func dpReachReady(_ peer: Int32, _ client: DiscordIPCClient) -> Bool {
+            _ = dpRecv(peer)
+            dpSendReady(peer)
+            return dpWaitUntil { client.inboundTokenForTesting == "ready" }
+        }
+        /// Parks the client's queue so several calls can be enqueued behind one
+        /// another and released together. Signal the returned semaphore to let
+        /// them run.
+        func dpHold(_ client: DiscordIPCClient) -> DispatchSemaphore {
+            let gate = DispatchSemaphore(value: 0)
+            client.holdQueueForTesting(until: gate)
+            return gate
+        }
+        func dpFinish(_ client: DiscordIPCClient, _ peers: [Int32]) {
+            client.stop()
+            client.drainForTesting()
+            for peer in peers where peer >= 0 { close(peer) }
+        }
+        /// The payload shape every lifecycle scenario publishes. Only `details`
+        /// varies, and it is what the assertions look for on the wire.
+        func dpP(_ details: String, state: String = "Amp · $10-25") -> DiscordPresence.Payload {
+            DiscordPresence.Payload(details: details, state: state, largeImageKey: "tokenbar")
+        }
 
-        // A6 — framing resilience. `encode` is pinned against an independently
-        // built frame first, so a byte-order regression cannot hide behind a
-        // symmetric decoder.
+        // A6 — framing resilience, pinned against a frame built independently
+        // of the encoder.
         expect(DiscordIPC.encode(.handshake, Data("{}".utf8)) == dpRaw(0, 2, Data("{}".utf8)),
             "the frame encoder emits LE opcode, LE length, then body")
 
         // A6a — an absurd length is refused before the completeness check, so
-        // no allocation is ever sized from the wire. Dropping the bound check
-        // does not blow up here; it silently turns this into `needMore`, which
-        // is a connection that waits forever for 4 GiB that will never arrive.
+        // no allocation is ever sized from the wire; the cap is exactly 64 KiB.
         var dpOversize = dpRaw(1, 0xFFFF_FFFF, Data())
         expect(DiscordIPC.decode(from: &dpOversize) == .fatal && dpOversize.count == 8,
             "A6a: an oversized frame length is fatal and consumes nothing "
-                + "(mutation: dropping the maxFrameLength check yields needMore)")
-        // Literal bounds, not the constant they guard: 64 KiB is the contract.
+                + "(mutation: dropping the maxFrameLength check yields needMore forever)")
         var dpAtCap = dpRaw(1, 65_536, Data())
-        expect(DiscordIPC.decode(from: &dpAtCap) == .needMore,
-            "a length exactly at the 64 KiB cap is allowed")
         var dpOverCap = dpRaw(1, 65_537, Data())
-        expect(DiscordIPC.decode(from: &dpOverCap) == .fatal,
-            "one byte over the 64 KiB cap is fatal")
+        expect(DiscordIPC.decode(from: &dpAtCap) == .needMore
+                && DiscordIPC.decode(from: &dpOverCap) == .fatal,
+            "a length exactly at the 64 KiB cap is allowed, one byte over is fatal")
 
         // A6b — opcode allowlist.
         var dpOpFive = dpFrameBytes(5, "{}")
-        expect(DiscordIPC.decode(from: &dpOpFive) == .discard && dpOpFive.isEmpty,
-            "A6b: opcode 5 is discarded and consumed "
-                + "(mutation: dropping the Opcode allowlist surfaces it as a frame)")
         var dpOpMax = dpFrameBytes(0xFFFF_FFFF, "{}")
-        expect(DiscordIPC.decode(from: &dpOpMax) == .discard && dpOpMax.isEmpty,
-            "A6b: opcode 0xFFFFFFFF is discarded, not read as a negative int")
+        expect(DiscordIPC.decode(from: &dpOpFive) == .discard && dpOpFive.isEmpty
+                && DiscordIPC.decode(from: &dpOpMax) == .discard && dpOpMax.isEmpty,
+            "A6b: an unknown opcode is discarded and consumed, whether small or "
+                + "0xFFFFFFFF read as a negative int "
+                + "(mutation: dropping the Opcode allowlist surfaces it as a frame)")
 
         // A6c — partial reads never block and never consume.
         var dpHeaderOnly = dpRaw(1, 2, Data())
-        expect(DiscordIPC.decode(from: &dpHeaderOnly) == .needMore && dpHeaderOnly.count == 8,
-            "A6c: a header with no body needs more and leaves the buffer intact "
-                + "(mutation: consuming on an incomplete frame loses the header)")
         var dpHalfHeader = Data([1, 0, 0, 0])
-        expect(DiscordIPC.decode(from: &dpHalfHeader) == .needMore && dpHalfHeader.count == 4,
-            "A6c: fewer than 8 bytes needs more")
+        expect(DiscordIPC.decode(from: &dpHeaderOnly) == .needMore && dpHeaderOnly.count == 8
+                && DiscordIPC.decode(from: &dpHalfHeader) == .needMore && dpHalfHeader.count == 4,
+            "A6c: a header with no body, or fewer than 8 bytes, needs more and leaves the buffer "
+                + "intact (mutation: consuming on an incomplete frame loses the header)")
 
-        // A6d — malformed bodies are dropped silently. One validity check
-        // covers both cases: JSONSerialization rejects a body that is not valid
-        // UTF-8 as well as one that is not valid JSON.
+        // A6d — malformed bodies are dropped silently. One check covers both:
+        // JSONSerialization rejects invalid UTF-8 the same way it rejects
+        // invalid JSON.
         var dpNonUTF8 = dpRaw(1, 3, Data([0xFF, 0xFE, 0xFD]))
-        expect(DiscordIPC.decode(from: &dpNonUTF8) == .discard && dpNonUTF8.isEmpty,
-            "A6d: a non-UTF-8 body is discarded "
-                + "(mutation: dropping the body validity check surfaces it as a frame)")
         var dpBadJSON = dpFrameBytes(1, "{not json")
-        expect(DiscordIPC.decode(from: &dpBadJSON) == .discard && dpBadJSON.isEmpty,
-            "A6d: an unparseable JSON body is discarded")
+        expect(DiscordIPC.decode(from: &dpNonUTF8) == .discard && dpNonUTF8.isEmpty
+                && DiscordIPC.decode(from: &dpBadJSON) == .discard && dpBadJSON.isEmpty,
+            "A6d: a non-UTF-8 or unparseable-JSON body is discarded "
+                + "(mutation: dropping the body validity check surfaces it as a frame)")
 
-        // A6e — several frames in one read are taken one at a time, in order.
+        // A6e — several frames in one read are taken one at a time, in order,
+        // and the bad middle frame does not desync the buffer.
         var dpStream = dpFrameBytes(1, "{\"a\":1}")
             + dpFrameBytes(5, "{}")
             + dpFrameBytes(0, "{\"b\":2}")
         expect(DiscordIPC.decode(from: &dpStream) == .frame(.frame, Data("{\"a\":1}".utf8)),
             "A6e: the first of three concatenated frames comes out intact")
-        expect(DiscordIPC.decode(from: &dpStream) == .discard,
-            "A6e: the bad middle frame is skipped without disturbing the rest")
-        expect(DiscordIPC.decode(from: &dpStream) == .frame(.handshake, Data("{\"b\":2}".utf8)),
-            "A6e: the third frame follows "
+        expect(DiscordIPC.decode(from: &dpStream) == .discard
+                && DiscordIPC.decode(from: &dpStream) == .frame(.handshake, Data("{\"b\":2}".utf8)),
+            "A6e: the bad middle frame is skipped and the third follows intact "
                 + "(mutation: advancing the buffer by the wrong amount fails here)")
         expect(DiscordIPC.decode(from: &dpStream) == .needMore && dpStream.isEmpty,
             "A6e: the buffer is fully drained afterwards")
 
         // A-wire — the published surface and the serialized bytes are the same
-        // set. `leafStrings` walks the real JSON, nesting included, and renders
-        // numbers too, so a field smuggled in as a number is just as visible.
+        // set. `leafStrings`/`leafKeys` walk the real JSON, nesting included,
+        // so a field or key smuggled in anywhere is visible — including one
+        // whose VALUE repeats an existing leaf, which a Set would erase.
         let dpWirePayload = DiscordPresence.Payload(
             details: "12K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar")
         let dpWire = DiscordIPC.activityJSON(dpWirePayload, pid: 4242, nonce: "NONCE-1")
-        // Sorted arrays, not Sets: a Set erases multiplicity, so a smuggled
-        // field whose value merely REPEATS an existing leaf — assets
-        // .small_image = the same "tokenbar", or a numeric field equal to the
-        // pid — left the set unchanged and escaped entirely. Counting leaves
-        // is what closes that.
-        expect(
-            DiscordIPC.leafStrings(dpWire).sorted()
-                == (Array(dpWirePayload.fields.values)
-                    // Literals, not the constants. The button is carried by the
-                    // transport rather than the payload so that a value derived
-                    // from anything — a `?ref=` parameter being the obvious one
-                    // — fails right here instead of being admitted as just
-                    // another field. Pinning it to the constant would defeat
-                    // that: the constant would move and the assertion with it.
-                    + ["View on GitHub", "https://github.com/Nanako0129/TokenBar"]
-                    + ["SET_ACTIVITY", "NONCE-1", "4242"]).sorted(),
-            "A-wire: the activity's leaves are exactly Payload.fields plus Discord's structural "
-                + "constants, counted (mutation: adding any field — hostname, startTimestamp, or "
-                + "one whose value duplicates an existing leaf — fails here)")
         let dpWireObject = (try? JSONSerialization.jsonObject(with: dpWire)) as? [String: Any]
         let dpWireArgs = dpWireObject?["args"] as? [String: Any]
         let dpWireActivity = dpWireArgs?["activity"] as? [String: Any]
         let dpWireAssets = dpWireActivity?["assets"] as? [String: Any]
-        expect(dpWireAssets?["large_image"] as? String == "tokenbar",
-            "A-wire: largeImageKey is published as assets.large_image, renamed but unaltered")
-        expect(dpWireActivity?["details"] as? String == "12K tokens today"
-            && dpWireActivity?["state"] as? String == "Amp · $1-5",
-            "A-wire: details and state go out verbatim")
-        expect(dpWireActivity?.count == 4,
-            "A-wire: the activity object holds exactly details, state, assets and buttons")
-        // The nested level needs its own count: `activity.count` only sees the
-        // top level, so a field added under `assets` kept it at 3.
-        // Keys are a channel of their own. A leaf scan cannot see them, and an
-        // empty container has no leaves at all, so `"x-<hostname>": [:]` was
-        // published with all 517 assertions green until this landed. Sorted
-        // array, not a Set, so a key repeated at another level shows too.
         expect(
-            DiscordIPC.leafKeys(dpWire).sorted() == [
-                "activity", "args", "assets", "buttons", "cmd", "details",
-                "label", "large_image", "nonce", "pid", "state", "url",
-            ],
-            "A-wire: the frame's keys are exactly the protocol's (mutation: adding a key whose "
-                + "VALUE is an empty object smuggles the key text out with no new leaf — this is "
-                + "the only assertion that sees it)")
-        expect(dpWireAssets?.count == 1,
-            "A-wire: assets holds exactly large_image (mutation: adding assets.small_image, "
-                + "even with a value that duplicates an existing leaf, fails here)")
+            DiscordIPC.leafStrings(dpWire).sorted()
+                == (Array(dpWirePayload.fields.values)
+                    // Literals, not the constants: the button is carried by the
+                    // transport, not the payload, so a value derived from
+                    // anything — a `?ref=` parameter being the obvious one —
+                    // fails right here instead of being admitted as just
+                    // another field.
+                    + ["View on GitHub", "https://github.com/Nanako0129/TokenBar"]
+                    + ["SET_ACTIVITY", "NONCE-1", "4242"]).sorted()
+                && DiscordIPC.leafKeys(dpWire).sorted() == [
+                    "activity", "args", "assets", "buttons", "cmd", "details",
+                    "label", "large_image", "nonce", "pid", "state", "url",
+                ]
+                && dpWireAssets?.count == 1
+                // Per KEY, not only as a sorted multiset. Swapping `details`
+                // and `state` in `activityJSON` preserves the sorted leaves,
+                // the sorted keys and the object counts, so every clause above
+                // still passes while Discord renders the token summary in the
+                // cost field and the client name in the other.
+                && dpWireActivity?["details"] as? String == dpWirePayload.details
+                && dpWireActivity?["state"] as? String == dpWirePayload.state
+                && dpWireAssets?["large_image"] as? String == dpWirePayload.largeImageKey,
+            "A-wire: the activity's leaves are exactly Payload.fields plus Discord's structural "
+                + "constants, counted; each field keeps its own key; its keys are exactly the "
+                + "protocol's; and assets holds "
+                + "exactly large_image (mutation: adding any field or key — even one whose value "
+                + "or an empty-object value duplicates an existing leaf — fails one of these three)")
+        expect(dpWireActivity?.count == 4 && dpWireAssets?["large_image"] as? String == "tokenbar",
+            "A-wire: the activity holds exactly details, state, assets and buttons, and "
+                + "largeImageKey is published as assets.large_image, renamed but unaltered")
         expect(dpWireObject?["cmd"] as? String == "SET_ACTIVITY"
             && dpWireArgs?["pid"] as? Int == 4242 && dpWireObject?["nonce"] as? String == "NONCE-1",
             "A-wire: the envelope is SET_ACTIVITY with the given pid and nonce")
@@ -4054,64 +4103,54 @@ enum SelfTest {
             .contains("\"activity\":null"),
             "clearing the presence sends activity: null")
 
-        // A-wire, the OTHER outbound frames. The activity frame is not the
-        // only thing that leaves this machine: the handshake goes out on every
-        // connect, and the clear goes out on every stop. Both are serialized
-        // by the same helper and neither had a single assertion — the same key
-        // and leaf channels were wide open there while the activity frame was
-        // being tightened four times over. Pinning what leaves means pinning
-        // every frame, not the one that happened to be under review.
+        // The handshake and the clear are serialized by the same helper and
+        // deserve the same pin — the activity frame is not the only thing that
+        // leaves this machine.
         let dpShake = DiscordIPC.handshakeJSON()
-        expect(DiscordIPC.leafKeys(dpShake).sorted() == ["client_id", "v"],
-            "A-wire: the handshake's keys are exactly v and client_id")
-        expect(DiscordIPC.leafStrings(dpShake).sorted()
-            == [DiscordIPC.applicationID, "1"].sorted(),
-            "A-wire: the handshake carries the application id and the protocol version, and "
-                + "nothing else (mutation: adding any field, or a key with an empty value, fails "
-                + "one of these two)")
+        expect(DiscordIPC.leafKeys(dpShake).sorted() == ["client_id", "v"]
+                && DiscordIPC.leafStrings(dpShake).sorted() == [DiscordIPC.applicationID, "1"].sorted(),
+            "A-wire: the handshake's keys are exactly v and client_id, and it carries the "
+                + "application id and protocol version — nothing else")
         let dpClear = DiscordIPC.activityJSON(nil, pid: 4242, nonce: "NONCE-2")
-        expect(DiscordIPC.leafKeys(dpClear).sorted()
-            == ["activity", "args", "cmd", "nonce", "pid"],
-            "A-wire: the clear frame's keys are exactly the protocol's")
-        expect(DiscordIPC.leafStrings(dpClear).sorted()
-            == ["4242", "NONCE-2", "SET_ACTIVITY", "null"].sorted(),
-            "A-wire: the clear frame carries no payload data at all")
+        expect(DiscordIPC.leafKeys(dpClear).sorted() == ["activity", "args", "cmd", "nonce", "pid"]
+                && DiscordIPC.leafStrings(dpClear).sorted()
+                    == ["4242", "NONCE-2", "SET_ACTIVITY", "null"].sorted(),
+            "A-wire: the clear frame's keys are exactly the protocol's, and it carries no payload "
+                + "data at all")
 
-        // A13 — nothing from an inbound frame may be read, kept or echoed. The
-        // READY frame Discord actually sends carries the account's username, id
-        // and avatar.
-        let dpReadyBody = "{\"cmd\":\"DISPATCH\",\"evt\":\"READY\",\"data\":{\"v\":1,"
-            + "\"user\":{\"username\":\"SECRET_USERNAME\",\"id\":\"SECRET_ID\","
-            + "\"avatar\":\"SECRET_AVATAR\",\"discriminator\":\"0001\"}}}"
+        // A13 — nothing from an inbound frame may be read, kept or echoed.
+        // `dpReadyBody` above is the frame Discord actually sends, sentinels
+        // and all.
         let dpInboundToken = DiscordIPC.inbound(Data(dpReadyBody.utf8))
         // Literal "ready", not DiscordIPC.readyEvent: an expectation read out of
         // the constant it guards passes whatever that constant becomes.
-        expect(dpInboundToken == "ready" && !dpInboundToken.contains("SECRET_"),
-            "A13: a READY frame yields a fixed token and no frame content "
+        expect(dpInboundToken == "ready" && !dpInboundToken.contains("SECRET_")
+                && DiscordIPC.inbound(Data("{\"evt\":\"ERROR\",\"data\":{}}".utf8)) == "other",
+            "A13: a READY frame yields a fixed token and no frame content, and a non-READY event "
+                + "is not mistaken for it "
                 + "(mutation: returning the parsed user object, or the raw body, leaks SECRET_)")
-        expect(DiscordIPC.inbound(Data("{\"evt\":\"ERROR\",\"data\":{}}".utf8)) == "other",
-            "A13: a non-READY event is not mistaken for READY")
 
         // A-path — sun_path is 104 bytes and truncation does not fail, it
         // connects somewhere else.
         func dpAddressFits(_ path: String) -> Bool {
             DiscordIPC.unixSocketAddress(path: path).map { _ in true } ?? false
         }
-        expect(!dpAddressFits(String(repeating: "a", count: 200)),
-            "A-path: an over-long socket path is refused "
-                + "(mutation: truncating to fit connects to a different path)")
-        expect(!dpAddressFits(String(repeating: "a", count: 104)),
-            "A-path: a path filling sun_path exactly leaves no room for the NUL")
-        expect(dpAddressFits(String(repeating: "a", count: 103)),
-            "A-path: 103 bytes still fits")
         var dpAddress = DiscordIPC.unixSocketAddress(path: "/tmp/discord-ipc-0")!
         let dpAddressPath = withUnsafeBytes(of: &dpAddress.sun_path) {
             String(cString: $0.bindMemory(to: CChar.self).baseAddress!)
         }
-        expect(dpAddressPath == "/tmp/discord-ipc-0",
-            "A-path: the address carries the path verbatim")
+        expect(
+            !dpAddressFits(String(repeating: "a", count: 200))
+                && !dpAddressFits(String(repeating: "a", count: 104))
+                && dpAddressFits(String(repeating: "a", count: 103))
+                && dpAddressPath == "/tmp/discord-ipc-0",
+            "A-path: an over-long path or one filling sun_path exactly is refused, 103 bytes "
+                + "fits, and the accepted path round-trips verbatim "
+                + "(mutation: truncating to fit connects to a different path)")
 
-        // A7a/A7c/A13 over a real socket pair.
+        // A7a/A7c/A13 over a real socket pair, reused across the button and
+        // privacy checks below — this fixture inspects the handshake bytes
+        // itself, so it does not go through dpScenario.
         let (dpLocal, dpPeer) = dpSocketPair()
         let dpConnects = DPCounter()
         let dpClient = DiscordIPCClient(connect: {
@@ -4143,8 +4182,7 @@ enum SelfTest {
             "A13: nothing from the READY frame survives in the client's state")
 
         dpClient.publish(dpWirePayload)
-        dpClient.publish(DiscordPresence.Payload(
-            details: "999K tokens today", state: "Zed · $50-100", largeImageKey: "tokenbar"))
+        dpClient.publish(dpP("999K tokens today", state: "Zed · $50-100"))
         dpClient.drainForTesting()
         var dpActivityBuffer = dpRecv(dpPeer)
         var dpActivityText = ""
@@ -4153,49 +4191,47 @@ enum SelfTest {
             dpActivityText = String(decoding: body, as: UTF8.self)
             dpActivityBody = body
         }
-        expect(dpActivityText.contains("12K tokens today"),
-            "the first publish reaches the socket immediately")
-
-        // The bytes that actually left the socket, pinned the same way the
-        // pure-function frames are. Every A-wire assertion above calls
-        // `activityJSON` with `pid: 4242, nonce: "NONCE-1"`, so `pid()` and
-        // `nonce()` — which supply every real frame — were executed by no
-        // assertion at all. A `nonce()` returning
-        // `NSUserName() + "@" + hostName` shipped the username and this
-        // machine's reverse-DNS name on every publish with all 525 green.
-        // Guarding a serializer is not guarding what it is called with.
-        expect(
-            DiscordIPC.leafKeys(dpActivityBody).sorted() == [
-                "activity", "args", "assets", "buttons", "cmd", "details",
-                "label", "large_image", "nonce", "pid", "state", "url",
-            ],
-            "the frame on the wire carries exactly the protocol's keys")
+        // Every A-wire assertion above calls `activityJSON` with a fixed pid
+        // and nonce, so the real `pid()`/`nonce()` that supply every actual
+        // frame were exercised by none of them; this checks the bytes that
+        // left the socket, not just the pure function.
+        expect(dpActivityText.contains("12K tokens today")
+                && DiscordIPC.leafKeys(dpActivityBody).sorted() == [
+                    "activity", "args", "assets", "buttons", "cmd", "details",
+                    "label", "large_image", "nonce", "pid", "state", "url",
+                ],
+            "the first publish reaches the socket immediately, carrying exactly the protocol's "
+                + "keys")
 
         // A26 — the button's shape, against Discord's documented limits and
         // against the one way this constant could become a channel.
         if let dpWireButtons = (((try? JSONSerialization.jsonObject(with: dpActivityBody))
             as? [String: Any])?["args"] as? [String: Any])?["activity"] as? [String: Any],
             let dpButtons = dpWireButtons["buttons"] as? [[String: String]] {
-            expect(dpButtons.count == 1,
-                "A26: exactly one button goes out, well inside Discord's limit of two")
             let dpLabel = dpButtons.first?["label"] ?? ""
             let dpURL = dpButtons.first?["url"] ?? ""
-            expect(!dpLabel.isEmpty && dpLabel.count <= 32,
-                "A26: the label is within Discord's 1-32 characters (mutation: a longer label is "
-                    + "silently dropped by Discord, so the button would simply not appear)")
-            expect(!dpURL.isEmpty && dpURL.count <= 512,
-                "A26: the URL is within Discord's 1-512 characters")
+            expect(dpButtons.count == 1 && !dpLabel.isEmpty && dpLabel.count <= 32
+                    && !dpURL.isEmpty && dpURL.count <= 512,
+                "A26: exactly one button goes out, label and URL within Discord's 1-32/1-512 "
+                    + "character limits (a longer value is silently dropped by Discord, so the "
+                    + "button would simply not appear)")
             let dpURLParts = URLComponents(string: dpURL)
             expect(
                 dpURLParts?.scheme == "https" && dpURLParts?.host == "github.com"
                     && dpURLParts?.query == nil && dpURLParts?.fragment == nil
                     && dpURLParts?.user == nil && dpURLParts?.password == nil,
-                "A26: the URL is a bare https://github.com link with no query, fragment or "
+                "A26-URL: the URL is a bare https://github.com link with no query, fragment or "
                     + "credentials (mutation: `buttonURL + \"?ref=\" + installID` — the shape a "
                     + "per-user tracking parameter takes — fails here, and it is the reason this "
                     + "constant lives in the transport rather than in the payload)")
         } else {
-            expect(false, "A26: the activity on the wire carries a buttons array at all")
+            // Not a formality. The cast above is what asserts the wire shape:
+            // if `buttons` regressed from an array to an OBJECT carrying the
+            // same `label` and `url`, this block would simply be skipped, and
+            // every other check still passes — the leaf-key and leaf-value
+            // assertions see identical leaves from both shapes. Discord renders
+            // nothing for the object form, so the button would silently vanish.
+            expect(false, "A26: the activity carries `buttons` as an ARRAY of objects")
         }
 
         // A26b — buttons ride with an activity, never with a clear. A cleared
@@ -4209,30 +4245,25 @@ enum SelfTest {
             "A26b: a clear carries no buttons (mutation: attaching them outside the `if let "
                 + "payload` sends a link on the frame that withdraws the presence)")
         let dpLiveLeaves = DiscordIPC.leafStrings(dpActivityBody)
-        // Literals, not the constants they pin — the same rule the pid and the
-        // nonce follow below. The button is a transport-layer constant
-        // precisely so that a future non-constant value, a `?ref=` parameter
-        // being the obvious one, fails HERE in the strongest assertion in this
-        // file rather than riding along as one more payload field.
+        // Literals, not the constants they pin, for the same reason the button
+        // URL above is: a future non-constant value fails HERE rather than
+        // riding along as one more payload field.
         let dpLivePayloadLeaves = [
             "12K tokens today", "Amp · $1-5", "tokenbar", "SET_ACTIVITY",
             "View on GitHub", "https://github.com/Nanako0129/TokenBar",
         ]
-        expect(
-            dpLiveLeaves.count == dpLivePayloadLeaves.count + 2
-                && dpLivePayloadLeaves.allSatisfy(dpLiveLeaves.contains),
-            "the frame on the wire carries the payload, the envelope constant, and exactly two "
-                + "more leaves — the pid and the nonce")
         let dpLiveExtra = dpLiveLeaves.filter { !dpLivePayloadLeaves.contains($0) }
-        expect(dpLiveExtra.contains(String(ProcessInfo.processInfo.processIdentifier)),
-            "the pid on the wire is this process's own (mutation: deriving it from a hostname "
-                + "hash, or anything else, fails here)")
         let dpLiveNonce = dpLiveExtra.first {
             $0 != String(ProcessInfo.processInfo.processIdentifier)
         }
-        expect(dpLiveNonce.map { UUID(uuidString: $0) != nil } == true,
-            "the nonce on the wire is a bare UUID and carries nothing else (mutation: building it "
-                + "from NSUserName() or the host name fails here)")
+        expect(
+            dpLiveLeaves.count == dpLivePayloadLeaves.count + 2
+                && dpLivePayloadLeaves.allSatisfy(dpLiveLeaves.contains)
+                && dpLiveExtra.contains(String(ProcessInfo.processInfo.processIdentifier))
+                && dpLiveNonce.map { UUID(uuidString: $0) != nil } == true,
+            "the frame on the wire carries the payload, the envelope constant, and exactly two "
+                + "more leaves — this process's own pid and a bare UUID nonce "
+                + "(mutation: deriving either from NSUserName() or a hostname hash fails here)")
         expect(!dpActivityText.contains("999K") && dpActivityBuffer.isEmpty,
             "a second publish inside the 15s floor is coalesced rather than sent")
 
@@ -4245,30 +4276,24 @@ enum SelfTest {
                 dpClearSeen = true
             }
         }
-        expect(dpClearSeen,
+        expect(dpClearSeen && !dpClient.isConnectedForTesting,
             "A7c: stop() sends the activity clear before closing the socket "
                 + "(mutation: closing first loses the frame entirely)")
-        expect(!dpClient.isConnectedForTesting, "A7c: stop() closes the socket")
         close(dpPeer)
 
         // A9 — SIGPIPE. The connection is established first (SO_NOSIGPIPE only
-        // applies to a live socket — on a dead one setsockopt returns EINVAL),
-        // then the peer is closed and a frame written in the same queue item so
-        // the EOF handler cannot get there first. With SO_NOSIGPIPE removed
-        // this does not fail, it kills the selftest process: no FAIL line, no
-        // "selftest passed", exit status 141.
-        let (dpDeadLocal, dpDeadPeer) = dpSocketPair()
-        let dpSigClient = DiscordIPCClient(connect: { dpDeadLocal })
-        dpSigClient.start()
-        dpSigClient.drainForTesting()
-        _ = dpRecv(dpDeadPeer)
-        dpSigClient.probeWriteForTesting { close(dpDeadPeer) }
-        expect(dpSigClient.writeErrnoForTesting == EPIPE,
-            "A9: a write to a closed socket returns EPIPE and the process survives "
+        // applies to a live socket), then the peer is closed and a frame
+        // written in the same queue item so the EOF handler cannot get there
+        // first. With SO_NOSIGPIPE removed this does not fail, it kills the
+        // selftest process: no FAIL line, no "selftest passed", exit 141.
+        let dpSigOK = dpScenario(peerClosedByBody: true) { peer, client in
+            client.probeWriteForTesting { close(peer) }
+            return client.writeErrnoForTesting == EPIPE && !client.isConnectedForTesting
+        }
+        expect(dpSigOK,
+            "A9: a write to a closed socket returns EPIPE, tearing the connection down, and the "
+                + "process survives "
                 + "(mutation: dropping SO_NOSIGPIPE terminates the selftest on signal 13)")
-        expect(!dpSigClient.isConnectedForTesting,
-            "A9: the failed write tears the connection down")
-        dpSigClient.stop()
 
         // A7b, part 1 — retries are bounded. Every connection here is born
         // broken (peer closed immediately), so the retry path runs to its limit.
@@ -4282,17 +4307,16 @@ enum SelfTest {
         })
         dpRetryClient.reconnectDelay = 0.02
         dpRetryClient.start()
-        expect(dpWaitUntil { dpRetries.value >= 2 },
-            "a broken connection is retried at all (without this the bound below is vacuous)")
-        expect(dpWaitUntil { dpRetries.value == 6 },
-            "the retry budget is the initial attempt plus five")
+        let dpRetriesBudgeted = dpWaitUntil { dpRetries.value >= 2 }
+            && dpWaitUntil { dpRetries.value == 6 }
         usleep(300_000)
-        expect(dpRetries.value == 6,
-            "A7b: reconnection stops at the attempt limit "
-                + "(mutation: dropping the maxReconnectAttempts guard retries forever)")
+        expect(dpRetriesBudgeted && dpRetries.value == 6,
+            "A7b: a broken connection retries, and the budget is exactly the initial attempt "
+                + "plus five (mutation: dropping maxReconnectAttempts retries forever)")
         dpRetryClient.stop()
 
-        // A7b, part 2 — stop() cancels the armed retry.
+        // A7b, part 2 — stop() cancels the armed retry, and idempotence has to
+        // hold while a retry is armed too, where `fd < 0` no longer covers it.
         let dpCancelCount = DPCounter()
         let dpCancelClient = DiscordIPCClient(connect: {
             dpCancelCount.value += 1
@@ -4303,22 +4327,19 @@ enum SelfTest {
         })
         dpCancelClient.reconnectDelay = 0.5
         dpCancelClient.start()
-        expect(dpWaitUntil { dpCancelClient.reconnectPendingForTesting },
-            "the disconnect arms a retry")
-        // A7a, second half: idempotence has to hold while a retry is armed too,
-        // where `fd < 0` no longer covers it.
+        let dpArmed = dpWaitUntil { dpCancelClient.reconnectPendingForTesting }
         dpCancelClient.start()
         dpCancelClient.drainForTesting()
-        expect(dpCancelCount.value == 1,
+        expect(dpArmed && dpCancelCount.value == 1,
             "A7a: start() during an armed retry does not open a second connection "
                 + "(mutation: dropping the `!running` guard in start() connects immediately)")
         dpCancelClient.stop()
         dpCancelClient.drainForTesting()
-        expect(!dpCancelClient.reconnectPendingForTesting,
-            "A7b: stop() cancels the armed retry "
-                + "(mutation: dropping reconnectWork?.cancel() leaves it armed)")
+        let dpCancelled = !dpCancelClient.reconnectPendingForTesting
         usleep(700_000)
-        expect(dpCancelCount.value == 1, "A7b: the cancelled retry never fires")
+        expect(dpCancelled && dpCancelCount.value == 1,
+            "A7b: stop() cancels the armed retry, and the cancelled retry never fires "
+                + "(mutation: dropping reconnectWork?.cancel() leaves it armed)")
 
         // A7b, part 3 — after stop(), no path rebuilds the connection. Driven
         // directly, because once stop() has closed the socket there is no
@@ -4332,160 +4353,76 @@ enum SelfTest {
         dpStopClient.reconnectDelay = 0.02
         dpStopClient.start()
         dpStopClient.drainForTesting()
-        expect(dpStopConnects.value == 1, "the stopped-client fixture connected once")
         dpStopClient.stop()
         dpStopClient.drainForTesting()
         dpStopClient.scheduleReconnectForTesting()
         usleep(300_000)
         expect(dpStopConnects.value == 1,
-            "A7b: no path reconnects after stop() "
+            "A7b: no path rebuilds the connection after stop() "
                 + "(mutation: dropping the running guard in openConnection reconnects here)")
         close(dpStopPeer)
 
-        // A14 — consent withdrawn while a publish is already queued. `stop()`
-        // flips its flag off-queue precisely because the block it enqueues runs
-        // *after* that publish, and by then the frame has already gone out; the
-        // clear that follows cannot take back what Discord clients and bots may
-        // have observed in between.
-        let (dpConsentLocal, dpConsentPeer) = dpSocketPair()
-        let dpConsentClient = DiscordIPCClient(connect: { dpConsentLocal })
-        dpConsentClient.start()
-        dpConsentClient.drainForTesting()
-        _ = dpRecv(dpConsentPeer)
-        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
-            _ = send(dpConsentPeer, raw.baseAddress!, raw.count, 0)
-        }
-        expect(dpWaitUntil { dpConsentClient.inboundTokenForTesting == "ready" },
-            "the consent fixture reached READY (without this nothing would flush and the "
-                + "assertion below could not fail)")
-        let dpConsentGate = DispatchSemaphore(value: 0)
-        dpConsentClient.holdQueueForTesting(until: dpConsentGate)
-        // Nothing has been published on this connection yet, so this one is not
-        // throttled — it would go out the moment the queue moves.
-        dpConsentClient.publish(DiscordPresence.Payload(
-            details: "77K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
-        dpConsentClient.stop()
-        dpConsentGate.signal()
-        dpConsentClient.drainForTesting()
-        let dpConsentTail = String(decoding: dpDrainToEOF(dpConsentPeer), as: UTF8.self)
-        expect(!dpConsentTail.contains("77K tokens today"),
-            "A14: a publish already queued when the switch went off never reaches the socket "
-                + "(mutation: flipping consent inside stop()'s queued block publishes it anyway)")
-        expect(dpConsentTail.contains("\"activity\":null"),
-            "A14 control: the clear still goes out, so the assertion above is not passing on a "
-                + "socket that was simply dead")
-        close(dpConsentPeer)
-
-        // A14b — the same withdrawal, but reproducing the ONE ordering
-        // production actually produces. `applyDiscordPresence` is always
-        // `start()` then `publish()` back to back, so every window in which a
-        // publish sits queued has a start block queued ahead of it. A14 above
-        // does not cover that: it publishes without a paired start, and a
-        // client whose `start()` re-arms consent from inside its queued block
-        // passes A14 while re-arming after the user's `stop()` and letting the
-        // publish behind it flush anyway. One line's difference from A14, and
-        // it is the line that decides whether the fix holds where it is used.
+        // A14b — consent withdrawn while a publish is queued behind its own
+        // paired start(). This is the ONE ordering `applyDiscordPresence`
+        // actually produces; A14's bare `stop()` with no paired start ahead
+        // of the publish is not, and is subsumed by this fixture's mutation.
         let (dpPairedLocal, dpPairedPeer) = dpSocketPair()
         let dpPairedClient = DiscordIPCClient(connect: { dpPairedLocal })
         dpPairedClient.start()
         dpPairedClient.drainForTesting()
-        _ = dpRecv(dpPairedPeer)
-        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
-            _ = send(dpPairedPeer, raw.baseAddress!, raw.count, 0)
-        }
-        expect(dpWaitUntil { dpPairedClient.inboundTokenForTesting == "ready" },
-            "the paired-call fixture reached READY")
-        let dpPairedGate = DispatchSemaphore(value: 0)
-        dpPairedClient.holdQueueForTesting(until: dpPairedGate)
+        let dpPairedReady = dpReachReady(dpPairedPeer, dpPairedClient)
+        let dpPairedGate = dpHold(dpPairedClient)
         dpPairedClient.start()
-        dpPairedClient.publish(DiscordPresence.Payload(
-            details: "99K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpPairedClient.publish(dpP("99K tokens today"))
         dpPairedClient.stop()
         dpPairedGate.signal()
         dpPairedClient.drainForTesting()
         let dpPairedTail = String(decoding: dpDrainToEOF(dpPairedPeer), as: UTF8.self)
-        expect(!dpPairedTail.contains("99K tokens today"),
-            "A14b: a publish queued behind its paired start() never reaches the socket either "
-                + "(mutation: re-arming consent inside start()'s queued block publishes it, and "
-                + "A14 stays green throughout)")
-        expect(dpPairedTail.contains("\"activity\":null"),
-            "A14b control: the clear still goes out")
+        expect(dpPairedReady && !dpPairedTail.contains("99K tokens today")
+                && dpPairedTail.contains("\"activity\":null"),
+            "A14b: a publish queued behind its paired start() never reaches the socket, though "
+                + "the clear still does "
+                + "(mutation: re-arming consent inside start()'s queued block publishes it anyway)")
         close(dpPairedPeer)
 
-        // A14c — switching the feature off and straight back on while a publish
-        // is still queued. A single consent Bool cannot survive this: `stop()`
-        // clears it, `start()` sets it again, and the publish enqueued before
-        // either of them then flushes with consent nominally granted. What
-        // reaches Discord is a payload computed BEFORE the withdrawal — which
-        // may name a client the user hid in between — and the user's off/on is
-        // exactly the moment they were most explicit about what they wanted.
-        //
-        // The epoch is what a later `start()` cannot undo: the publish carries
-        // the grant it was made under, and `stop()` retired that one.
-        let dpEpochPairs = [dpSocketPair(), dpSocketPair()]
-        let dpEpochIdx = DPCounter()
-        let dpEpochClient = DiscordIPCClient(connect: {
-            let i = min(dpEpochIdx.value, dpEpochPairs.count - 1)
-            dpEpochIdx.value += 1
-            return dpEpochPairs[i].0
-        })
+        // A14c — off then straight back on while a publish is still queued. A
+        // single consent Bool cannot survive this: `start()` re-arms it and
+        // the pre-withdrawal payload flushes. The epoch a later `start()`
+        // cannot undo is what `stop()` retired.
+        let (dpEpochPeers, dpEpochClient, dpEpochHanded) = dpRig(peers: 2)
         dpEpochClient.start()
         dpEpochClient.drainForTesting()
-        _ = dpRecv(dpEpochPairs[0].1)
-        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
-            _ = send(dpEpochPairs[0].1, raw.baseAddress!, raw.count, 0)
-        }
-        expect(dpWaitUntil { dpEpochClient.inboundTokenForTesting == "ready" },
-            "the epoch fixture reached READY")
-        let dpEpochGate = DispatchSemaphore(value: 0)
-        dpEpochClient.holdQueueForTesting(until: dpEpochGate)
-        // Queued under the grant that the stop below retires. Nothing has been
-        // published on this connection, so it is not throttled: it would go out
-        // the moment the queue moves.
-        dpEpochClient.publish(DiscordPresence.Payload(
-            details: "41K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        let dpEpochReady = dpReachReady(dpEpochPeers[0], dpEpochClient)
+        let dpEpochGate = dpHold(dpEpochClient)
+        dpEpochClient.publish(dpP("41K tokens today"))
         dpEpochClient.stop()
         dpEpochClient.start()
-        dpEpochClient.publish(DiscordPresence.Payload(
-            details: "42K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpEpochClient.publish(dpP("42K tokens today"))
         dpEpochGate.signal()
         dpEpochClient.drainForTesting()
-        let dpEpochOld = String(decoding: dpDrainToEOF(dpEpochPairs[0].1), as: UTF8.self)
-        expect(!dpEpochOld.contains("41K tokens today"),
-            "A14c: a publish made before the switch went off is not re-authorized by switching it "
-                + "back on (mutation: a single consent Bool is set again by start() and this "
-                + "payload — computed before the withdrawal — reaches Discord)")
-        expect(dpEpochOld.contains("\"activity\":null"),
-            "A14c control: the off half still cleared the activity, so the assertion above is not "
-                + "passing on a fixture that never ran the stop")
-        close(dpEpochPairs[0].1)
-        // The on half is a working client, not a casualty of the epoch: the
-        // publish made after it must still arrive.
-        expect(dpWaitUntil { dpEpochIdx.value >= 2 }, "A14c control: the on half reconnected")
-        _ = dpRecv(dpEpochPairs[1].1)
-        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
-            _ = send(dpEpochPairs[1].1, raw.baseAddress!, raw.count, 0)
-        }
-        expect(dpFrameArrives(dpEpochPairs[1].1, "42K tokens today", within: 2),
-            "A14c control: the publish made after the switch came back on does arrive — without "
-                + "it, a client that refused everything would satisfy the assertion above")
-        dpEpochClient.stop()
-        dpEpochClient.drainForTesting()
-        close(dpEpochPairs[1].1)
+        let dpEpochOld = String(decoding: dpDrainToEOF(dpEpochPeers[0]), as: UTF8.self)
+        let dpEpochOldOK = !dpEpochOld.contains("41K tokens today")
+            && dpEpochOld.contains("\"activity\":null")
+        close(dpEpochPeers[0])
+        let dpEpochReconnected = dpWaitUntil { dpEpochHanded.value >= 2 }
+        _ = dpReachReady(dpEpochPeers[1], dpEpochClient)
+        let dpEpochNewArrived = dpFrameArrives(dpEpochPeers[1], "42K tokens today", within: 2)
+        dpFinish(dpEpochClient, [dpEpochPeers[1]])
+        expect(dpEpochReady && dpEpochOldOK && dpEpochReconnected && dpEpochNewArrived,
+            "A14c: a publish made before the switch went off is not re-authorized by switching "
+                + "it back on, though the off half still cleared the activity and the on half "
+                + "kept working "
+                + "(mutation: a single consent Bool is set again by start() and the stale "
+                + "payload reaches Discord)")
 
-        // A18 — the invariant with no exceptions: after a withdrawal the only
-        // thing this process sends Discord is the clear. A ping that arrived
-        // before the user opted out has its read handler queued ahead of
-        // `stop()`'s block, and answering it is a write to a third party after
-        // consent was withdrawn — small, but it is the difference between a
-        // rule and a rule with a footnote.
+        // A18 — after a withdrawal the only thing this process sends is the
+        // clear, even for a ping whose read handler queued ahead of `stop()`.
         let (dpPingLocal, dpPingPeer) = dpSocketPair()
         let dpPingClient = DiscordIPCClient(connect: { dpPingLocal })
         dpPingClient.start()
         dpPingClient.drainForTesting()
         _ = dpRecv(dpPingPeer)
-        let dpPingGate = DispatchSemaphore(value: 0)
-        dpPingClient.holdQueueForTesting(until: dpPingGate)
+        let dpPingGate = dpHold(dpPingClient)
         dpFrameBytes(3, "{\"ping\":1}").withUnsafeBytes { raw in
             _ = send(dpPingPeer, raw.baseAddress!, raw.count, 0)
         }
@@ -4495,121 +4432,70 @@ enum SelfTest {
         dpPingClient.stop()
         dpPingGate.signal()
         dpPingClient.drainForTesting()
-        var dpPingTail = dpDrainToEOF(dpPingPeer)
-        var dpPongSeen = false
-        var dpPingClearSeen = false
-        while case .frame(let op, let body) = DiscordIPC.decode(from: &dpPingTail) {
-            if op == .pong { dpPongSeen = true }
-            if String(decoding: body, as: UTF8.self).contains("\"activity\":null") {
-                dpPingClearSeen = true
-            }
+        let dpPingFrames = dpFrames(dpPingPeer)
+        let dpPongSeen = dpPingFrames.contains { $0.0 == .pong }
+        let dpPingClearSeen = dpPingFrames.contains {
+            String(decoding: $0.1, as: UTF8.self).contains("\"activity\":null")
         }
-        expect(!dpPongSeen,
-            "A18: a ping whose handler was queued before the switch went off is not answered "
+        expect(!dpPongSeen && dpPingClearSeen,
+            "A18: a ping whose handler was queued before the switch went off is not answered, "
+                + "though the clear still goes out "
                 + "(mutation: an ungated writeFrame(.pong,) replies to Discord after opt-out)")
-        expect(dpPingClearSeen,
-            "A18 control: the clear still goes out, so the assertion above is not passing on a "
-                + "fixture where nothing was written at all")
         close(dpPingPeer)
 
-        // A20 — a reduction retires what was computed before it. The defaults
-        // observer coalesces, so "switch off, hide a client, switch on" can
-        // reach `AppDelegate` as a single apply that only ever sees the final
-        // `true`: no `stop()`, no withdrawal for the transport to see. What is
-        // always visible is the hide itself, so that is what retires the stale
-        // payload — the one still naming the client the user just hid.
+        // A20 — a reduction retires what was computed before it. "Switch off,
+        // hide a client, switch on" coalesces to one apply with no `stop()`,
+        // so the hide itself has to retire the stale payload.
         let (dpStaleLocal, dpStalePeer) = dpSocketPair()
         let dpStaleClient = DiscordIPCClient(connect: { dpStaleLocal })
         dpStaleClient.start()
         dpStaleClient.drainForTesting()
-        _ = dpRecv(dpStalePeer)
-        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
-            _ = send(dpStalePeer, raw.baseAddress!, raw.count, 0)
-        }
-        expect(dpWaitUntil { dpStaleClient.inboundTokenForTesting == "ready" },
-            "the stale-payload fixture reached READY")
-        let dpStaleGate = DispatchSemaphore(value: 0)
-        dpStaleClient.holdQueueForTesting(until: dpStaleGate)
-        // Computed while the hidden client was still visible. Nothing has been
-        // published on this connection, so it is not throttled either: it would
-        // go out the moment the queue moves.
-        dpStaleClient.publish(DiscordPresence.Payload(
-            details: "70K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
-        dpStaleClient.publish(
-            DiscordPresence.Payload(
-                details: "71K tokens today", state: "Zed · $10-25", largeImageKey: "tokenbar"),
-            visibility: .reducing)
+        let dpStaleReady = dpReachReady(dpStalePeer, dpStaleClient)
+        let dpStaleGate = dpHold(dpStaleClient)
+        dpStaleClient.publish(dpP("70K tokens today"))
+        dpStaleClient.publish(dpP("71K tokens today", state: "Zed · $10-25"), visibility: .reducing)
         dpStaleGate.signal()
         dpStaleClient.drainForTesting()
         let dpStaleSeen = dpFramesNow(dpStalePeer)
-        expect(!dpStaleSeen.contains("70K tokens today"),
-            "A20: a payload computed before the hide never reaches the socket "
+        expect(dpStaleReady && !dpStaleSeen.contains("70K tokens today")
+                && dpStaleSeen.contains("71K tokens today"),
+            "A20: a payload computed before the hide never reaches the socket, though the "
+                + "reduction itself does "
                 + "(mutation: without the reduction retiring earlier work it is written first, "
                 + "putting the client the user just hid back on the profile)")
-        expect(dpStaleSeen.contains("71K tokens today"),
-            "A20 control: the reduction itself does go out, so the assertion above is not passing "
-                + "on a client that refused both")
-        dpStaleClient.stop()
-        dpStaleClient.drainForTesting()
-        close(dpStalePeer)
+        dpFinish(dpStaleClient, [dpStalePeer])
 
-        // A19 — a clear that lost its socket is retried on the next connection.
-        // `nil` is a payload here: it is the clear. One `nil` standing for both
-        // "this connection has been given nothing" and "this connection has
-        // been given the clear" makes a fresh connection claim it already holds
-        // it, so the clear is dropped instead of retried — and what stays up is
-        // the activity of the clients the user had just hidden.
-        let dpReclearPairs = [dpSocketPair(), dpSocketPair()]
-        let dpReclearIdx = DPCounter()
-        let dpReclearClient = DiscordIPCClient(connect: {
-            let i = min(dpReclearIdx.value, dpReclearPairs.count - 1)
-            dpReclearIdx.value += 1
-            return dpReclearPairs[i].0
-        })
+        // A19 — a clear that lost its socket is retried on the next
+        // connection. `nil` stands for both "nothing given yet" and "the
+        // clear was given", so a fresh connection can wrongly claim it holds
+        // one already and drop it.
+        let (dpReclearPeers, dpReclearClient, dpReclearHanded) = dpRig(peers: 2)
         dpReclearClient.reconnectDelay = 0.02
         dpReclearClient.start()
         _ = dpWaitUntil { dpReclearClient.isConnectedForTesting }
-        _ = dpRecv(dpReclearPairs[0].1)
-        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
-            _ = send(dpReclearPairs[0].1, raw.baseAddress!, raw.count, 0)
-        }
-        expect(dpWaitUntil { dpReclearClient.inboundTokenForTesting == "ready" },
-            "the clear-retry fixture reached READY")
-        dpReclearClient.publish(DiscordPresence.Payload(
-            details: "60K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        let dpReclearReady = dpReachReady(dpReclearPeers[0], dpReclearClient)
+        dpReclearClient.publish(dpP("60K tokens today"))
         dpReclearClient.drainForTesting()
-        expect(dpFramesNow(dpReclearPairs[0].1).contains("60K tokens today"),
-            "A19 control: the fixture published a real payload first, so there is something on "
-                + "the profile for the clear to have to remove")
+        let dpReclearPublished = dpFramesNow(dpReclearPeers[0]).contains("60K tokens today")
         // Park the queue, put the clear behind it, then break the socket. The
-        // clear's write is attempted against a peer that is already gone, so it
-        // fails and tears the connection down with the clear still pending.
-        let dpReclearGate = DispatchSemaphore(value: 0)
-        dpReclearClient.holdQueueForTesting(until: dpReclearGate)
+        // clear's write is attempted against a peer that is already gone, so
+        // it fails and tears the connection down with the clear still pending.
+        let dpReclearGate = dpHold(dpReclearClient)
         dpReclearClient.publish(nil, visibility: .reducing)
-        close(dpReclearPairs[0].1)
+        close(dpReclearPeers[0])
         dpReclearGate.signal()
         dpReclearClient.drainForTesting()
-        expect(dpWaitUntil { dpReclearIdx.value >= 2 },
-            "A19 control: the fixture reconnected, so there is a second connection for the clear "
-                + "to be retried on")
-        _ = dpRecv(dpReclearPairs[1].1)
-        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
-            _ = send(dpReclearPairs[1].1, raw.baseAddress!, raw.count, 0)
-        }
-        expect(dpFrameArrives(dpReclearPairs[1].1, "\"activity\":null", within: 2),
+        let dpReclearReconnected = dpWaitUntil { dpReclearHanded.value >= 2 }
+        _ = dpReachReady(dpReclearPeers[1], dpReclearClient)
+        let dpReclearArrived = dpFrameArrives(dpReclearPeers[1], "\"activity\":null", within: 2)
+        dpFinish(dpReclearClient, [dpReclearPeers[1]])
+        expect(dpReclearReady && dpReclearPublished && dpReclearReconnected && dpReclearArrived,
             "A19: a clear that lost its socket is retried on the next connection "
                 + "(mutation: one `nil` for both \"nothing delivered yet\" and \"the clear was "
                 + "delivered\" makes the fresh connection treat it as already held and drop it)")
-        dpReclearClient.stop()
-        dpReclearClient.drainForTesting()
-        close(dpReclearPairs[1].1)
 
-        // A17 — switching the feature on and then off before the queue has run
-        // the start. The publish behind it is epoch-gated and carries nothing
-        // out, but a socket and a handshake would still reach Discord after the
-        // user opted out, and the gate's contract — `makeDiscordClient`
-        // returning nil — is that this process may not connect at all.
+        // A17 — on then off before the queue has run the start: the gate's
+        // contract is that this process may not connect at all.
         let dpOptOutConnects = DPCounter()
         let dpOptOutClient = DiscordIPCClient(connect: {
             dpOptOutConnects.value += 1
@@ -4618,20 +4504,14 @@ enum SelfTest {
             close(fds[1])
             return fds[0]
         })
-        let dpOptOutGate = DispatchSemaphore(value: 0)
-        dpOptOutClient.holdQueueForTesting(until: dpOptOutGate)
+        let dpOptOutGate = dpHold(dpOptOutClient)
         dpOptOutClient.start()
-        dpOptOutClient.publish(DiscordPresence.Payload(
-            details: "51K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpOptOutClient.publish(dpP("51K tokens today"))
         dpOptOutClient.stop()
         dpOptOutGate.signal()
         dpOptOutClient.drainForTesting()
-        expect(dpOptOutConnects.value == 0,
-            "A17: a start queued before the switch went off never opens a socket "
-                + "(mutation: guarding openConnection on the queue-local `running` alone hands "
-                + "Discord a connection and a handshake after the user opted out)")
-        // Without this the assertion above passes on a client that cannot
-        // connect at all, which is every client whose factory never runs.
+        // A control fixture without the opt-out: without it, the assertion
+        // below would pass on a client that simply never connects at all.
         let dpOptInConnects = DPCounter()
         let dpOptInClient = DiscordIPCClient(connect: {
             dpOptInConnects.value += 1
@@ -4640,84 +4520,51 @@ enum SelfTest {
             close(fds[1])
             return fds[0]
         })
-        let dpOptInGate = DispatchSemaphore(value: 0)
-        dpOptInClient.holdQueueForTesting(until: dpOptInGate)
+        let dpOptInGate = dpHold(dpOptInClient)
         dpOptInClient.start()
-        dpOptInClient.publish(DiscordPresence.Payload(
-            details: "51K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpOptInClient.publish(dpP("51K tokens today"))
         dpOptInGate.signal()
         dpOptInClient.drainForTesting()
-        expect(dpOptInConnects.value == 1,
-            "A17 control: the same fixture without the opt-out does connect")
         dpOptInClient.stop()
         dpOptInClient.drainForTesting()
+        expect(dpOptOutConnects.value == 0 && dpOptInConnects.value == 1,
+            "A17: a start queued before the switch went off never opens a socket, though the "
+                + "same fixture without the opt-out does connect "
+                + "(mutation: guarding openConnection on the queue-local `running` alone hands "
+                + "Discord a connection and a handshake after the user opted out)")
 
         // A15 — a privacy-reducing update is not throttled. Same client, same
-        // floor, same 15s window; the flag is the only difference between the
-        // control below and the assertion after it.
+        // floor, same 15s window; the visibility flag is the only difference
+        // between the control steps and the final one.
         let (dpBypassLocal, dpBypassPeer) = dpSocketPair()
         let dpBypassClient = DiscordIPCClient(connect: { dpBypassLocal })
         dpBypassClient.start()
         dpBypassClient.drainForTesting()
-        _ = dpRecv(dpBypassPeer)
-        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
-            _ = send(dpBypassPeer, raw.baseAddress!, raw.count, 0)
-        }
-        expect(dpWaitUntil { dpBypassClient.inboundTokenForTesting == "ready" },
-            "the throttle fixture reached READY")
-        dpBypassClient.publish(DiscordPresence.Payload(
-            details: "10K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+        let dpBypassReady = dpReachReady(dpBypassPeer, dpBypassClient)
+        dpBypassClient.publish(dpP("10K tokens today", state: "Amp · $1-5"))
         dpBypassClient.drainForTesting()
-        expect(String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self).contains("10K tokens today"),
-            "the throttle fixture published its first payload and armed the floor")
-        dpBypassClient.publish(DiscordPresence.Payload(
-            details: "11K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+        let dpBypassArmed = String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self)
+            .contains("10K tokens today")
+        dpBypassClient.publish(dpP("11K tokens today", state: "Amp · $1-5"))
         dpBypassClient.drainForTesting()
-        expect(!String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self).contains("11K"),
-            "A15 control: an ordinary update inside the floor waits (without this the assertion "
-                + "below would pass on a client that never throttles anything)")
-        dpBypassClient.publish(
-            DiscordPresence.Payload(
-                details: "12K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"),
-            visibility: .reducing)
+        let dpBypassWaited = !String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self)
+            .contains("11K")
+        dpBypassClient.publish(dpP("12K tokens today", state: "Amp · $1-5"), visibility: .reducing)
         dpBypassClient.drainForTesting()
-        expect(String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self).contains("12K tokens today"),
-            "A15: hiding a client republishes immediately instead of waiting out the 15s floor "
+        let dpBypassSent = String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self)
+            .contains("12K tokens today")
+        dpFinish(dpBypassClient, [dpBypassPeer])
+        expect(dpBypassReady && dpBypassArmed && dpBypassWaited && dpBypassSent,
+            "A15: hiding a client republishes immediately instead of waiting out the 15s floor, "
+                + "unlike an ordinary update inside it "
                 + "(mutation: dropping the floorBypass grant throttles it like any other sample)")
-        dpBypassClient.stop()
-        dpBypassClient.drainForTesting()
-        close(dpBypassPeer)
 
-        // A15c — the bypass is one shot, and it does not reset the floor's
-        // clock. Hiding EVERY visible client publishes a clear, and a clear
-        // carries no new information, so it does not re-arm the clock on its
-        // way out. An implementation that grants the bypass by clearing
-        // `lastSent` therefore leaves the clock cleared: the unhide a second
-        // later goes out with no floor at all, which is a sub-15s sample of the
-        // user's activity — the exact thing the floor exists to prevent.
-        //
-        // A shortened interval, so "held" and "sent" are distinguishable
-        // without the assertion taking fifteen seconds to make its point.
-        //
-        // Everything between arming the clock and the measurement is read
-        // synchronously, and the windows below are bounded by wall clock rather
-        // than by a turn count. Both because the first version of this was a
-        // timed assertion with an unbounded wait inside it: it polled for the
-        // two intermediate frames with a 400ms ceiling each, which is nothing
-        // on this machine and was over a second on CI — by which point the 1s
-        // floor being measured had already expired and the assertion was
-        // measuring nothing. It passed locally and failed in CI. A poll loop
-        // is unnecessary for a frame the CLIENT writes: `drainForTesting()` is
-        // `queue.sync`, so the bytes are in the socket buffer when it returns.
-        // Poll only for what the peer has to wait on — here, the deferred
-        // flush that fires when the floor expires.
+        // A15c — the bypass is one shot: a clear carries no new information
+        // and must not re-arm the floor's clock, or the unhide behind it goes
+        // out sub-floor. Windows below are wall-clock, not a turn count.
         func dpFramesNow(_ fd: Int32) -> String {
-            var buf = dpRecvNow(fd)
-            var out = ""
-            while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
-                if op == .frame { out += String(decoding: body, as: UTF8.self) }
-            }
-            return out
+            dpFrames(fd).filter { $0.0 == .frame }
+                .map { String(decoding: $0.1, as: UTF8.self) }.joined()
         }
         func dpFrameArrives(_ fd: Int32, _ needle: String, within seconds: Double) -> Bool {
             let deadline = DispatchTime.now() + seconds
@@ -4732,177 +4579,115 @@ enum SelfTest {
         dpOneShotClient.publishInterval = 1.0
         dpOneShotClient.start()
         dpOneShotClient.drainForTesting()
-        _ = dpRecv(dpOneShotPeer)
-        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
-            _ = send(dpOneShotPeer, raw.baseAddress!, raw.count, 0)
-        }
-        expect(dpWaitUntil { dpOneShotClient.inboundTokenForTesting == "ready" },
-            "the one-shot fixture reached READY")
-        dpOneShotClient.publish(DiscordPresence.Payload(
-            details: "20K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+        let dpOneShotReady = dpReachReady(dpOneShotPeer, dpOneShotClient)
+        dpOneShotClient.publish(dpP("20K tokens today", state: "Amp · $1-5"))
         dpOneShotClient.drainForTesting()
-        let dpOneShotArmed = DispatchTime.now()
-        expect(dpFramesNow(dpOneShotPeer).contains("20K tokens today"),
-            "the one-shot fixture published a real sample and armed the clock")
+        let dpOneShotArmedAt = DispatchTime.now()
+        let dpOneShotArmed = dpFramesNow(dpOneShotPeer).contains("20K tokens today")
         // Every client hidden: the payload is nil and what goes out is a clear.
         dpOneShotClient.publish(nil, visibility: .reducing)
         dpOneShotClient.drainForTesting()
-        expect(dpFramesNow(dpOneShotPeer).contains("\"activity\":null"),
-            "A15c control: the clear itself is not throttled (without this the assertion below "
-                + "would pass on a client that simply never sent the clear)")
-        let dpUnhidden = DiscordPresence.Payload(
-            details: "21K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar")
-        dpOneShotClient.publish(dpUnhidden)
+        let dpOneShotCleared = dpFramesNow(dpOneShotPeer).contains("\"activity\":null")
+        dpOneShotClient.publish(dpP("21K tokens today", state: "Amp · $1-5"))
         dpOneShotClient.drainForTesting()
-        // The fixture has to still be inside the floor for the next assertion to
-        // mean anything. Asserted rather than assumed: a machine slow enough to
-        // spend the whole interval on the two reads above would otherwise turn
-        // the measurement into a vacuous pass instead of a visible failure.
+        // The fixture has to still be inside the 1s floor here, or the
+        // assertions below would be reporting payloads that were simply due.
         let dpOneShotSpent = Double(
-            DispatchTime.now().uptimeNanoseconds - dpOneShotArmed.uptimeNanoseconds) / 1_000_000_000
-        expect(dpOneShotSpent < 0.5,
-            "A15c fixture: the clear and the unhide were published well inside the 1s floor "
-                + "(spent \(String(format: "%.3f", dpOneShotSpent))s — over the interval, the "
-                + "assertion below would pass on a payload that was simply due)")
+            DispatchTime.now().uptimeNanoseconds - dpOneShotArmedAt.uptimeNanoseconds)
+            / 1_000_000_000
+        let dpOneShotFast = dpOneShotSpent < 0.5
         // 300ms: well inside the 1s floor, well over the time a due frame needs.
-        expect(!dpFrameArrives(dpOneShotPeer, "21K tokens today", within: 0.3),
-            "A15c: the unhide that follows a clear still waits out the floor "
-                + "(mutation: granting the bypass by clearing `lastSent` leaves the clock cleared "
-                + "through the clear, and this payload goes out sub-interval)")
-        expect(dpFrameArrives(dpOneShotPeer, "21K tokens today", within: 3),
-            "A15c control: it does arrive once the floor expires, so the assertion above is not "
-                + "passing on a payload that was dropped outright")
-        dpOneShotClient.stop()
-        dpOneShotClient.drainForTesting()
-        close(dpOneShotPeer)
+        let dpOneShotHeld = !dpFrameArrives(dpOneShotPeer, "21K tokens today", within: 0.3)
+        let dpOneShotArrivedLater = dpFrameArrives(dpOneShotPeer, "21K tokens today", within: 3)
+        dpFinish(dpOneShotClient, [dpOneShotPeer])
+        expect(dpOneShotReady && dpOneShotArmed && dpOneShotCleared && dpOneShotFast
+                && dpOneShotHeld && dpOneShotArrivedLater,
+            "A15c: the unhide that follows a clear still waits out the floor, and does arrive "
+                + "once it expires (fixture spent \(String(format: "%.3f", dpOneShotSpent))s "
+                + "arming; mutation: granting the bypass by clearing `lastSent` leaves the clock "
+                + "cleared through the clear, and this payload goes out sub-interval)")
 
-        // A15d — what a superseding publish does to a grant that was never
-        // spent. A `.reducing` publish can still be waiting when the next one
-        // overwrites `pending`: the connection dropped and its replacement has
-        // not finished its handshake, so `flush()` returns at the ready guard
-        // with the grant still armed. What the later payload deserves depends
-        // on what the USER did, and the two answers are opposite — so both are
-        // driven from one fixture that differs by a single argument.
-        //
-        // The reduction is a clear (`nil`), which is the case where the two
-        // come apart: an ordinary sample would still exclude the hidden client
-        // and carry the reduction forward, but an unhide puts it back.
+        // A15d — a superseding publish can still hold an unspent bypass grant
+        // when it is written: an ordinary sample should inherit it, an unhide
+        // should not. One fixture, differing by a single argument.
         func dpSupersede(
             _ visibility: DiscordIPC.VisibilityChange
         ) -> (early: Bool, spent: Double, held: Bool) {
-            let pairs = [dpSocketPair(), dpSocketPair()]
-            let idx = DPCounter()
-            let client = DiscordIPCClient(connect: {
-                let i = min(idx.value, pairs.count - 1)
-                idx.value += 1
-                return pairs[i].0
-            })
+            let (peers, client, handed) = dpRig(peers: 2)
             client.publishInterval = 3.0
             client.reconnectDelay = 0.02
             client.start()
             _ = dpWaitUntil { client.isConnectedForTesting }
-            _ = dpFrameBytes(1, dpReadyBody).withUnsafeBytes {
-                send(pairs[0].1, $0.baseAddress, $0.count, 0)
-            }
+            dpSendReady(peers[0])
             _ = dpWaitUntil { client.inboundTokenForTesting == "ready" }
-            client.publish(DiscordPresence.Payload(
-                details: "30K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+            client.publish(dpP("30K tokens today", state: "Amp · $1-5"))
             client.drainForTesting()
-            _ = dpFramesNow(pairs[0].1)
+            _ = dpFramesNow(peers[0])
             let armed = DispatchTime.now()
             // Break it. The retry lands on the second socket, which is never
             // made READY, so everything below is held at the ready guard.
-            close(pairs[0].1)
-            _ = dpWaitUntil { idx.value >= 2 }
+            close(peers[0])
+            _ = dpWaitUntil { handed.value >= 2 }
             client.publish(nil, visibility: .reducing)
             client.drainForTesting()
-            client.publish(
-                DiscordPresence.Payload(
-                    details: "31K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"),
-                visibility: visibility)
+            client.publish(dpP("31K tokens today", state: "Amp · $1-5"), visibility: visibility)
             client.drainForTesting()
             let spent = Double(
                 DispatchTime.now().uptimeNanoseconds - armed.uptimeNanoseconds) / 1_000_000_000
-            // The state the whole fixture claims to be in. If anything reached
-            // the replacement socket before READY, neither publish was held at
-            // the ready guard and the measurement below is about something
-            // else entirely.
-            let beforeReady = dpFramesNow(pairs[1].1)
-            _ = dpFrameBytes(1, dpReadyBody).withUnsafeBytes {
-                send(pairs[1].1, $0.baseAddress, $0.count, 0)
-            }
-            let early = dpFrameArrives(pairs[1].1, "31K tokens today", within: 0.3)
-            client.stop()
-            client.drainForTesting()
-            close(pairs[1].1)
+            // If anything reached the replacement socket before READY, neither
+            // publish was held at the ready guard and the measurement below is
+            // about something else entirely.
+            let beforeReady = dpFramesNow(peers[1])
+            dpSendReady(peers[1])
+            let early = dpFrameArrives(peers[1], "31K tokens today", within: 0.3)
+            dpFinish(client, [peers[1]])
             return (early, spent, beforeReady.isEmpty)
         }
         let dpAfterOrdinary = dpSupersede(DiscordIPC.VisibilityChange.none)
         let dpAfterUnhide = dpSupersede(.increasing)
-        expect(dpAfterOrdinary.held && dpAfterUnhide.held,
-            "A15d fixture: neither run wrote anything to the replacement socket before READY, so "
-                + "both publishes really were held at the ready guard — which is the only state "
-                + "in which an unspent grant can be superseded at all")
-        expect(max(dpAfterOrdinary.spent, dpAfterUnhide.spent) < 1.5,
-            "A15d fixture: both runs reached the measurement well inside the 3s floor "
-                + "(spent \(String(format: "%.3f", dpAfterOrdinary.spent))s and "
-                + "\(String(format: "%.3f", dpAfterUnhide.spent))s — over the interval, both "
-                + "assertions below would be reporting payloads that were simply due)")
-        expect(dpAfterOrdinary.early,
-            "A15d control: an ordinary sample inherits the unspent bypass — the mechanism this "
-                + "fixture pins, and the half that fails if `.none` is made to clear the grant. "
-                + "Why inheriting is the RIGHT answer is a fact about production and not about "
-                + "this fixture, whose payloads are literals: the one production publish site "
-                + "passes `discordPayload()`, which reads the hidden set live on every call, so "
-                + "a sample that supersedes a pending reduction still embodies it and throttling "
-                + "it would leave a client the user hid on a public profile for the rest of the "
-                + "floor")
-        expect(!dpAfterUnhide.early,
-            "A15d: an unhide takes the bypass with it and waits out the floor "
+        expect(dpAfterOrdinary.held && dpAfterUnhide.held
+                && max(dpAfterOrdinary.spent, dpAfterUnhide.spent) < 1.5
+                && dpAfterOrdinary.early && !dpAfterUnhide.early,
+            "A15d: a superseding publish waits at the ready guard in both runs (spent "
+                + "\(String(format: "%.3f", dpAfterOrdinary.spent))s / "
+                + "\(String(format: "%.3f", dpAfterUnhide.spent))s of the 3s floor), and an "
+                + "ordinary sample still inherits the unspent bypass while an unhide waits out "
+                + "the floor instead "
                 + "(mutation: treating `.increasing` like `.none` lets it inherit a pending "
-                + "reduction's bypass and publish a sample sub-floor)")
+                + "reduction's bypass and publish a sample sub-floor; production's one publish "
+                + "site passes `discordPayload()`, which reads the hidden set live on every "
+                + "call, so a sample superseding a pending reduction still embodies it)")
 
-        // A2 — the two behaviours the previous review found unguarded.
+        // A2 — the two behaviours a previous review found unguarded.
 
-        // Superseding a live connection must close the old socket, not leak
-        // it. Checked from the OLD PEER, never from the fd number: descriptors
-        // get reused, so "is fd N still open" can be true simply because N is
-        // now the NEW socket. Only the peer reaching EOF proves every copy of
-        // the old local end is gone.
-        let dpSupA = dpSocketPair()
-        let dpSupB = dpSocketPair()
-        let dpSupIdx = DPCounter()
-        let dpSupFDs: [Int32] = [dpSupA.0, dpSupB.0]
-        let dpSupClient = DiscordIPCClient(connect: {
-            let i = min(dpSupIdx.value, dpSupFDs.count - 1)
-            dpSupIdx.value += 1
-            return dpSupFDs[i]
-        })
+        // Superseding a live connection must close the old socket, checked
+        // from the OLD PEER reaching EOF — an fd number can be reused, so "is
+        // fd N still open" proves nothing.
+        let (dpSupPeers, dpSupClient, dpSupIdx) = dpRig(peers: 2)
         dpSupClient.reconnectDelay = 0.02
         dpSupClient.start()
         _ = dpWaitUntil { dpSupClient.isConnectedForTesting }
         // Drain the handshake first, or the peer has bytes waiting and can
         // never report EOF.
-        _ = dpRecv(dpSupA.1)
+        _ = dpRecv(dpSupPeers[0])
         dpSupClient.scheduleReconnectForTesting()
         _ = dpWaitUntil { dpSupIdx.value >= 2 }
         let dpSupClosed = dpWaitUntil {
             var byte: UInt8 = 0
-            return recv(dpSupA.1, &byte, 1, MSG_DONTWAIT) == 0
+            return recv(dpSupPeers[0], &byte, 1, MSG_DONTWAIT) == 0
         }
         expect(dpSupClosed,
             "reconnecting over a live connection closes the superseded socket (mutation: dropping "
                 + "openConnection's `if fd >= 0 { teardown() }` leaks the descriptor and the old "
                 + "peer never sees EOF)")
         dpSupClient.stop()
-        close(dpSupA.1)
-        close(dpSupB.1)
+        close(dpSupPeers[0])
+        close(dpSupPeers[1])
 
-        // The retry budget resets once a connection reaches READY, so a long
-        // session survives more than `maxReconnectAttempts` Discord restarts.
-        // The peer answers READY and only then drops: a fixture that closes
-        // immediately never reaches READY and would pass even with the reset
-        // removed, which is exactly the trap that made this look untestable.
+        // The retry budget resets on READY, so a long session survives more
+        // than `maxReconnectAttempts` restarts — the peer must answer READY
+        // before dropping, or a fixture that closes immediately would pass
+        // even with the reset removed.
         let dpReadyFrame = dpFrameBytes(1, "{\"evt\":\"READY\"}")
         let dpReadyCount = DPCounter()
         let dpReadyClient = DiscordIPCClient(connect: {
@@ -4924,17 +4709,10 @@ enum SelfTest {
             dpReadyCount.value > DiscordIPCClient.maxReconnectAttempts + 1
         }
         dpReadyClient.stop()
-        expect(dpReadyBeyondCap,
-            "reaching READY resets the retry budget (mutation: dropping `attempts = 0` from the "
-                + "READY branch caps reconnects at maxReconnectAttempts for the whole start() "
-                + "lifetime, so the presence never returns after enough restarts)")
 
-        // The mirror image, and the one that pins the reset's TIMING rather
-        // than its existence: a peer that connects, says nothing, and drops.
-        // That is Discord running but refusing us, and it must still exhaust
-        // the budget. Resetting on the socket opening instead of on READY
-        // would reconnect against it forever — the assertion above cannot see
-        // that difference, because its connections do reach READY.
+        // The mirror image: a peer that connects, says nothing, and drops
+        // must still exhaust the budget — the reset has to be on READY, not
+        // on socket-open, or this reconnects forever.
         let dpMuteCount = DPCounter()
         let dpMuteClient = DiscordIPCClient(connect: {
             var fds: [Int32] = [-1, -1]
@@ -4954,28 +4732,21 @@ enum SelfTest {
         // pad the suite.
         for _ in 0..<60 where dpMuteCount.value <= dpMuteCap { usleep(5_000) }
         dpMuteClient.stop()
-        expect(dpMuteCount.value <= dpMuteCap,
-            "a peer that never reaches READY still exhausts the retry budget (mutation: resetting "
-                + "`attempts` when the socket opens instead of when READY arrives reconnects "
-                + "forever against a peer that accepts and immediately drops)")
+        expect(dpReadyBeyondCap && dpMuteCount.value <= dpMuteCap,
+            "reaching READY resets the retry budget, and a peer that never reaches READY still "
+                + "exhausts it as normal "
+                + "(mutation: dropping `attempts = 0` from the READY branch caps reconnects at "
+                + "maxReconnectAttempts for the whole start() lifetime; resetting on socket-open "
+                + "instead reconnects forever against a peer that accepts and immediately drops)")
 
         // Codex round 1 on the transport PR — four findings that were all the
         // same root: the lifecycle treated "connected, published, dropped" as
         // the end of the story instead of something that has to come back.
 
-        // Reconnecting republishes the last activity. Discord restarting is
-        // ordinary; before this the payload was marked sent, `hasPending` went
-        // false, and the READY on the replacement connection flushed nothing —
-        // the presence stayed missing until the producer happened to publish
-        // again, up to the tray's 5-minute poll away.
+        // Reconnecting republishes the last activity, or the presence stays
+        // missing until the producer happens to publish again.
         let dpRepubReady = dpFrameBytes(1, "{\"evt\":\"READY\"}")
-        let dpRepubPairs = [dpSocketPair(), dpSocketPair()]
-        let dpRepubIdx = DPCounter()
-        let dpRepubClient = DiscordIPCClient(connect: {
-            let i = min(dpRepubIdx.value, dpRepubPairs.count - 1)
-            dpRepubIdx.value += 1
-            return dpRepubPairs[i].0
-        })
+        let (dpRepubPeers, dpRepubClient, dpRepubIdx) = dpRig(peers: 2)
         dpRepubClient.reconnectDelay = 0.02
         // Deliberately high: a restore re-sends bytes Discord already has, so
         // it must not queue behind the sampling floor. With the throttle
@@ -4984,27 +4755,23 @@ enum SelfTest {
         dpRepubClient.publishInterval = 30
         dpRepubClient.start()
         _ = dpWaitUntil { dpRepubClient.isConnectedForTesting }
-        _ = dpRepubReady.withUnsafeBytes { send(dpRepubPairs[0].1, $0.baseAddress, $0.count, 0) }
+        _ = dpRepubReady.withUnsafeBytes { send(dpRepubPeers[0], $0.baseAddress, $0.count, 0) }
         _ = dpWaitUntil { dpRepubClient.inboundTokenForTesting == DiscordIPC.readyEvent }
         dpRepubClient.publish(dpWirePayload)
         dpRepubClient.drainForTesting()
-        _ = dpDrainToEOF(dpRepubPairs[0].1)
+        _ = dpDrainToEOF(dpRepubPeers[0])
         // Break the first connection; the client retries onto the second pair.
-        close(dpRepubPairs[0].1)
+        close(dpRepubPeers[0])
         _ = dpWaitUntil { dpRepubIdx.value >= 2 }
-        _ = dpRepubReady.withUnsafeBytes { send(dpRepubPairs[1].1, $0.baseAddress, $0.count, 0) }
+        _ = dpRepubReady.withUnsafeBytes { send(dpRepubPeers[1], $0.baseAddress, $0.count, 0) }
         dpRepubClient.drainForTesting()
         // No second `publish()` anywhere: whatever arrives here was resent by
         // the client itself.
         var dpRepubSeen = false
         _ = dpWaitUntil {
-            var buf = dpRecv(dpRepubPairs[1].1)
-            while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
-                if op == .frame,
-                   String(decoding: body, as: UTF8.self).contains("12K tokens today") {
-                    dpRepubSeen = true
-                }
-            }
+            if dpFrames(dpRepubPeers[1]).contains(where: {
+                $0.0 == .frame && String(decoding: $0.1, as: UTF8.self).contains("12K tokens today")
+            }) { dpRepubSeen = true }
             return dpRepubSeen
         }
         expect(dpRepubSeen,
@@ -5012,7 +4779,7 @@ enum SelfTest {
                 + "(mutation: dropping the READY branch's `hasPending = true` leaves the presence "
                 + "missing until the next producer update)")
         dpRepubClient.stop()
-        close(dpRepubPairs[1].1)
+        close(dpRepubPeers[1])
 
         // Exhausting the retry budget returns the client to a state a later
         // start() can act on. Leaving `running` true made start() hit the
@@ -5062,19 +4829,15 @@ enum SelfTest {
 
         // Codex round 2 — both findings are consequences of round 1's fixes.
 
-        // The kill switch clears the queued payload even when the retry budget
-        // already gave up. `giveUp()` keeps `pending` on purpose so a later
-        // start() can restore, and `stop()` used to bail on `!running`, which
-        // left that payload alive to be republished after the user turned the
-        // feature off.
+        // The kill switch clears the queued payload even when the retry
+        // budget already gave up (`giveUp()` keeps `pending` on purpose so a
+        // later start() can restore).
         let dpAbandonReady = dpFrameBytes(1, "{\"evt\":\"READY\"}")
         let dpAbandonPairs = [dpSocketPair(), dpSocketPair()]
         // The counter doubles as the fixture's mode: 0 hands out the first
         // socket, anything below `dpAbandonRevive` fails so the budget is
-        // genuinely exhausted, and the test raises it later to let the second
-        // start() connect. An earlier version simply indexed the pair array,
-        // which handed out the second socket on the first retry and never
-        // reached the given-up state the assertion is about.
+        // genuinely exhausted, and the test raises it later for the second
+        // start() to connect.
         let dpAbandonIdx = DPCounter()
         let dpAbandonRevive = DPCounter()
         dpAbandonRevive.value = 1_000_000
@@ -5110,13 +4873,9 @@ enum SelfTest {
         dpAbandonClient.drainForTesting()
         var dpAbandonRepublished = false
         for _ in 0..<60 where !dpAbandonRepublished {
-            var buf = dpRecvNow(dpAbandonPairs[1].1)
-            while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
-                if op == .frame,
-                   String(decoding: body, as: UTF8.self).contains("12K tokens today") {
-                    dpAbandonRepublished = true
-                }
-            }
+            if dpFrames(dpAbandonPairs[1].1).contains(where: {
+                $0.0 == .frame && String(decoding: $0.1, as: UTF8.self).contains("12K tokens today")
+            }) { dpAbandonRepublished = true }
             usleep(5_000)
         }
         dpAbandonClient.stop()
@@ -5130,31 +4889,24 @@ enum SelfTest {
         // sampling floor: delaying one keeps a stale presence public for up to
         // the whole interval after the user hid the clients that produced it.
         let dpClearReady = dpFrameBytes(1, "{\"evt\":\"READY\"}")
-        let dpClearPair = dpSocketPair()
-        let dpClearClient = DiscordIPCClient(connect: { dpClearPair.0 })
-        dpClearClient.publishInterval = 30
-        dpClearClient.start()
-        _ = dpWaitUntil { dpClearClient.isConnectedForTesting }
-        _ = dpClearReady.withUnsafeBytes { send(dpClearPair.1, $0.baseAddress, $0.count, 0) }
-        _ = dpWaitUntil { dpClearClient.inboundTokenForTesting == DiscordIPC.readyEvent }
-        dpClearClient.publish(dpWirePayload)
-        dpClearClient.drainForTesting()
-        _ = dpDrainToEOF(dpClearPair.1)
-        dpClearClient.publish(nil)
-        dpClearClient.drainForTesting()
-        var dpClearSent = false
-        for _ in 0..<60 where !dpClearSent {
-            var buf = dpRecvNow(dpClearPair.1)
-            while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
-                if op == .frame,
-                   String(decoding: body, as: UTF8.self).contains("\"activity\":null") {
-                    dpClearSent = true
-                }
+        let dpClearSent = dpScenario { peer, client in
+            client.publishInterval = 30
+            _ = dpClearReady.withUnsafeBytes { send(peer, $0.baseAddress, $0.count, 0) }
+            _ = dpWaitUntil { client.inboundTokenForTesting == DiscordIPC.readyEvent }
+            client.publish(dpWirePayload)
+            client.drainForTesting()
+            _ = dpDrainToEOF(peer)
+            client.publish(nil)
+            client.drainForTesting()
+            var sent = false
+            for _ in 0..<60 where !sent {
+                if dpFrames(peer).contains(where: {
+                    $0.0 == .frame && String(decoding: $0.1, as: UTF8.self).contains("\"activity\":null")
+                }) { sent = true }
+                usleep(5_000)
             }
-            usleep(5_000)
+            return sent
         }
-        dpClearClient.stop()
-        close(dpClearPair.1)
         expect(dpClearSent,
             "a clear goes out immediately rather than waiting for the publish floor (mutation: "
                 + "throttling it unconditionally leaves a stale presence public for the whole "
@@ -5191,8 +4943,7 @@ enum SelfTest {
         close(dpIntentPairs[0].1)
         _ = dpWaitUntil { dpIntentIdx.value > DiscordIPCClient.maxReconnectAttempts + 1 }
         // The producer moves on while the client is abandoned.
-        let dpIntentNewer = DiscordPresence.Payload(
-            details: "77K tokens today", state: "Zed · $1-5", largeImageKey: "tokenbar")
+        let dpIntentNewer = dpP("77K tokens today", state: "Zed · $1-5")
         dpIntentClient.publish(dpIntentNewer)
         dpIntentRevive.value = dpIntentIdx.value
         dpIntentClient.start()
@@ -5202,11 +4953,10 @@ enum SelfTest {
         var dpIntentGotNewer = false
         var dpIntentGotStale = false
         for _ in 0..<60 where !dpIntentGotNewer {
-            var buf = dpRecvNow(dpIntentPairs[1].1)
-            while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
+            for (op, body) in dpFrames(dpIntentPairs[1].1) where op == .frame {
                 let text = String(decoding: body, as: UTF8.self)
-                if op == .frame, text.contains("77K tokens today") { dpIntentGotNewer = true }
-                if op == .frame, text.contains("12K tokens today") { dpIntentGotStale = true }
+                if text.contains("77K tokens today") { dpIntentGotNewer = true }
+                if text.contains("12K tokens today") { dpIntentGotStale = true }
             }
             usleep(5_000)
         }
@@ -5217,9 +4967,8 @@ enum SelfTest {
                 + "(mutation: having giveUp() clear `running` makes publish() drop it and the "
                 + "reconnect republishes the pre-give-up payload)")
 
-        // The socket must not survive into a child process. The Rust core
-        // spawns helpers, and an inherited descriptor keeps Discord seeing a
-        // connection this app has already torn down.
+        // The socket must not survive into a child process the Rust core
+        // spawns, checked both as adopted and from the moment it is created.
         let dpCloexecPair = dpSocketPair()
         let dpCloexecClient = DiscordIPCClient(connect: { dpCloexecPair.0 })
         dpCloexecClient.start()
@@ -5227,120 +4976,88 @@ enum SelfTest {
         let dpCloexecFlags = fcntl(dpCloexecPair.0, F_GETFD)
         dpCloexecClient.stop()
         close(dpCloexecPair.1)
-        expect(dpCloexecFlags >= 0 && (dpCloexecFlags & FD_CLOEXEC) != 0,
-            "the adopted socket is close-on-exec (mutation: dropping the fcntl leaks the "
-                + "connection into every helper the Rust core spawns)")
 
         // Publishing the same payload twice on one connection sends it once.
         // Round 2's throttle bypass is for restores; without a per-connection
         // record it also let a duplicate through immediately, which resets the
         // floor's clock and delays the next real payload behind a no-op.
         let dpDupReady = dpFrameBytes(1, "{\"evt\":\"READY\"}")
-        let dpDupPair = dpSocketPair()
-        let dpDupClient = DiscordIPCClient(connect: { dpDupPair.0 })
-        dpDupClient.publishInterval = 0
-        dpDupClient.start()
-        _ = dpWaitUntil { dpDupClient.isConnectedForTesting }
-        _ = dpDupReady.withUnsafeBytes { send(dpDupPair.1, $0.baseAddress, $0.count, 0) }
-        _ = dpWaitUntil { dpDupClient.inboundTokenForTesting == DiscordIPC.readyEvent }
-        dpDupClient.publish(dpWirePayload)
-        dpDupClient.drainForTesting()
-        _ = dpDrainToEOF(dpDupPair.1)
-        dpDupClient.publish(dpWirePayload)
-        dpDupClient.drainForTesting()
-        var dpDupResent = false
-        for _ in 0..<40 where !dpDupResent {
-            var buf = dpRecvNow(dpDupPair.1)
-            while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
-                if op == .frame,
-                   String(decoding: body, as: UTF8.self).contains("12K tokens today") {
-                    dpDupResent = true
-                }
+        let dpDupResent = dpScenario { peer, client in
+            client.publishInterval = 0
+            _ = dpDupReady.withUnsafeBytes { send(peer, $0.baseAddress, $0.count, 0) }
+            _ = dpWaitUntil { client.inboundTokenForTesting == DiscordIPC.readyEvent }
+            client.publish(dpWirePayload)
+            client.drainForTesting()
+            _ = dpDrainToEOF(peer)
+            client.publish(dpWirePayload)
+            client.drainForTesting()
+            var resent = false
+            for _ in 0..<40 where !resent {
+                if dpFrames(peer).contains(where: {
+                    $0.0 == .frame && String(decoding: $0.1, as: UTF8.self).contains("12K tokens today")
+                }) { resent = true }
+                usleep(5_000)
             }
-            usleep(5_000)
+            return resent
         }
-        dpDupClient.stop()
-        close(dpDupPair.1)
         expect(!dpDupResent,
             "an identical payload on the same connection is not sent twice (mutation: dropping "
                 + "the deliveredOnThisConnection check resends it immediately, past the floor)")
 
         // Codex round 4 — the connect path itself, which every earlier round
         // had treated as a detail that either works or throws.
-
-        // Close-on-exec from birth. The previous round set the flag after
-        // `connectFD()` returned, which left `socket()` and `connect()` inside
-        // the window an exec can inherit through — and `connect()` is exactly
-        // the call the next assertion shows can take a while.
         let dpBornFD = DiscordIPC.makeSocket()
         let dpBornFlags = fcntl(dpBornFD, F_GETFD)
         close(dpBornFD)
-        expect(dpBornFD >= 0 && (dpBornFlags & FD_CLOEXEC) != 0,
-            "the socket is close-on-exec before connect() runs (mutation: moving the fcntl back "
-                + "out of makeSocket leaves the whole connect window inheritable)")
+        expect((dpCloexecFlags >= 0 && (dpCloexecFlags & FD_CLOEXEC) != 0)
+                && (dpBornFD >= 0 && (dpBornFlags & FD_CLOEXEC) != 0),
+            "the socket is close-on-exec both as adopted and from the moment makeSocket() "
+                + "creates it (mutation: dropping either fcntl leaks the descriptor into helpers "
+                + "the Rust core spawns, or leaves the connect() window inheritable)")
 
         // Codex round 5 — the bypass skipped the floor but still moved its
         // clock, so a restore delayed the next real payload by a full
         // interval measured from the restore instead of from the last sample.
         let dpFloorReady = dpFrameBytes(1, "{\"evt\":\"READY\"}")
-        let dpFloorPairs = [dpSocketPair(), dpSocketPair()]
-        let dpFloorIdx = DPCounter()
-        let dpFloorClient = DiscordIPCClient(connect: {
-            let i = min(dpFloorIdx.value, dpFloorPairs.count - 1)
-            dpFloorIdx.value += 1
-            return dpFloorPairs[i].0
-        })
+        let (dpFloorPeers, dpFloorClient, dpFloorIdx) = dpRig(peers: 2)
         dpFloorClient.reconnectDelay = 0.02
         dpFloorClient.publishInterval = 1.0
         dpFloorClient.start()
         _ = dpWaitUntil { dpFloorClient.isConnectedForTesting }
-        _ = dpFloorReady.withUnsafeBytes { send(dpFloorPairs[0].1, $0.baseAddress, $0.count, 0) }
+        _ = dpFloorReady.withUnsafeBytes { send(dpFloorPeers[0], $0.baseAddress, $0.count, 0) }
         _ = dpWaitUntil { dpFloorClient.inboundTokenForTesting == DiscordIPC.readyEvent }
         dpFloorClient.publish(dpWirePayload)
         dpFloorClient.drainForTesting()
-        _ = dpDrainToEOF(dpFloorPairs[0].1)
+        _ = dpDrainToEOF(dpFloorPeers[0])
         // Let the interval elapse against the real sample, so the payload that
         // follows the restore is due immediately if the clock was left alone.
         usleep(1_200_000)
-        close(dpFloorPairs[0].1)
+        close(dpFloorPeers[0])
         _ = dpWaitUntil { dpFloorIdx.value >= 2 }
-        _ = dpFloorReady.withUnsafeBytes { send(dpFloorPairs[1].1, $0.baseAddress, $0.count, 0) }
-        // Wait for the restore to actually reach the socket before publishing
-        // the next payload. `drainForTesting` only syncs the queue, and the
-        // READY read event may not be on it yet — publishing early lets the
-        // new payload flush before the restore ever runs, at which point both
-        // the fixed and the broken build send it immediately and the
-        // assertion measures nothing.
+        _ = dpFloorReady.withUnsafeBytes { send(dpFloorPeers[1], $0.baseAddress, $0.count, 0) }
+        // Wait for the restore to actually reach the socket before
+        // publishing next, or both builds send it immediately and this
+        // measures nothing.
         var dpFloorRestored = false
         for _ in 0..<200 where !dpFloorRestored {
-            var buf = dpRecvNow(dpFloorPairs[1].1)
-            while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
-                if op == .frame,
-                   String(decoding: body, as: UTF8.self).contains("12K tokens today") {
-                    dpFloorRestored = true
-                }
-            }
+            if dpFrames(dpFloorPeers[1]).contains(where: {
+                $0.0 == .frame && String(decoding: $0.1, as: UTF8.self).contains("12K tokens today")
+            }) { dpFloorRestored = true }
             usleep(5_000)
         }
-        let dpFloorNewer = DiscordPresence.Payload(
-            details: "55K tokens today", state: "Amp · $5-10", largeImageKey: "tokenbar")
-        dpFloorClient.publish(dpFloorNewer)
+        dpFloorClient.publish(dpP("55K tokens today", state: "Amp · $5-10"))
         dpFloorClient.drainForTesting()
         // 400ms: comfortably under the 1s the buggy path would defer by, and
         // comfortably over the time a due payload needs to reach the socket.
         var dpFloorPrompt = false
         for _ in 0..<80 where !dpFloorPrompt {
-            var buf = dpRecvNow(dpFloorPairs[1].1)
-            while case .frame(let op, let body) = DiscordIPC.decode(from: &buf) {
-                if op == .frame,
-                   String(decoding: body, as: UTF8.self).contains("55K tokens today") {
-                    dpFloorPrompt = true
-                }
-            }
+            if dpFrames(dpFloorPeers[1]).contains(where: {
+                $0.0 == .frame && String(decoding: $0.1, as: UTF8.self).contains("55K tokens today")
+            }) { dpFloorPrompt = true }
             usleep(5_000)
         }
         dpFloorClient.stop()
-        close(dpFloorPairs[1].1)
+        close(dpFloorPeers[1])
         expect(dpFloorRestored && dpFloorPrompt,
             "a restore does not consume the publish interval (mutation: advancing lastSent on a "
                 + "write that carries no new information throttles the next real payload from the "
@@ -5360,76 +5077,60 @@ enum SelfTest {
         // delegate method — that seam is what makes this assertion possible at
         // all.
         //
-        // The control comes first on purpose: without it, every assertion below
-        // would also pass on a factory that refuses everything unconditionally.
-        expect(AppDelegate.makeDiscordClient(arguments: ["TokenBar"], enabled: true) != nil,
-            "A1 control: an ordinary run with the switch on does build a client")
-        expect(AppDelegate.makeDiscordClient(arguments: ["TokenBar"], enabled: false) == nil,
-            "A1 control: the switch off builds nothing")
+        // The flag SET is pinned separately from the behaviour: every assertion
+        // below iterates `testArguments`, so all of them pass trivially on a
+        // shortened array. `--icon-gallery` is in it because that debug window
+        // enters the normal lifecycle and refreshes the live graph.
         let dpTestFlags = DiscordPresence.testArguments
         expect(dpTestFlags.sorted() == ["--demo", "--icon-gallery", "--selftest", "--smoke"],
-            "A1: the refused arguments are demo, smoke, selftest and the icon gallery — the last "
-                + "because it is a debug window nobody runs the app to use, yet it enters the "
-                + "normal lifecycle and refreshes the live graph")
-        expect(
-            dpTestFlags.allSatisfy {
-                AppDelegate.makeDiscordClient(
-                    arguments: ["TokenBar", $0, "--open-popover"], enabled: true) == nil
-            },
-            "A1: no demo/smoke/selftest run builds a client, even with the switch forced on "
-                + "(mutation: reading the preference before the flags — or checking the flags at "
-                + "all — publishes fixture numbers onto the user's real Discord profile, which is "
-                + "the one failure this feature cannot take back)")
-        // The same call with a client already in hand: a run that turns out to
-        // be a demo run must refuse an EXISTING connection too, which is what
-        // makes `applyDiscordPresence` stop it rather than keep publishing.
+            "A1: the refused arguments are exactly demo, smoke, selftest and the icon gallery")
         let dpLiveClient = DiscordIPCClient(connect: { throw DiscordIPC.Failure.unavailable })
         expect(
             dpTestFlags.allSatisfy {
                 AppDelegate.makeDiscordClient(
-                    existing: dpLiveClient, arguments: ["TokenBar", $0], enabled: true) == nil
+                    arguments: ["TokenBar", $0, "--open-popover"], enabled: true) == nil
+                    && AppDelegate.makeDiscordClient(
+                        existing: dpLiveClient, arguments: ["TokenBar", $0], enabled: true) == nil
+                    && !DiscordPresence.mayConnect(arguments: [$0], enabled: true)
             },
-            "A1: a test flag refuses an already-built client as well "
-                + "(mutation: returning `existing` before the gate keeps a live connection alive)")
+            "A1: no demo/smoke/selftest run builds a client or keeps an existing one, even with "
+                + "the switch forced on, and the gate function itself puts the flags above the "
+                + "preference (mutation: reading the preference before the flags publishes "
+                + "fixture numbers onto the user's real Discord profile, which is the one "
+                + "failure this feature cannot take back)")
+        // The control half. Without it every assertion above passes on a
+        // factory that refuses everything unconditionally.
         expect(
-            AppDelegate.makeDiscordClient(
-                existing: dpLiveClient, arguments: ["TokenBar"], enabled: true) === dpLiveClient,
-            "A1 control: an ordinary run reuses the client it was given rather than opening a "
-                + "second connection")
-        expect(DiscordPresence.mayConnect(arguments: [], enabled: true),
-            "A1 control: with no arguments the gate is just the preference")
-        expect(!DiscordPresence.mayConnect(arguments: [], enabled: false),
-            "A1 control: with no arguments and the switch off the gate refuses")
-        expect(
-            dpTestFlags.allSatisfy { !DiscordPresence.mayConnect(arguments: [$0], enabled: true) },
-            "A1: the gate function itself puts the flags above the preference")
+            AppDelegate.makeDiscordClient(arguments: ["TokenBar"], enabled: true) != nil
+                && AppDelegate.makeDiscordClient(arguments: ["TokenBar"], enabled: false) == nil
+                && AppDelegate.makeDiscordClient(
+                    existing: dpLiveClient, arguments: ["TokenBar"], enabled: true) === dpLiveClient
+                && DiscordPresence.mayConnect(arguments: [], enabled: true)
+                && !DiscordPresence.mayConnect(arguments: [], enabled: false),
+            "A1 control: an ordinary run builds a client, reuses the one it was given rather "
+                + "than opening a second connection, and refuses when the switch is off")
 
         // A15b — which visibility change earns the floor bypass. Getting this
         // backwards is not a missed optimisation: it makes an *unhide* jump the
         // floor while a hide waits it out, the exact inversion of the point.
+        // The swap case is the one a strict-subset or size test gets wrong.
         func dpChange(_ previous: String, _ current: String) -> DiscordIPC.VisibilityChange {
             AppDelegate.visibilityChange(previousHiddenRaw: previous, hiddenRaw: current)
         }
-        expect(dpChange("", "amp") == .reducing,
-            "A15b: hiding a client is a privacy reduction")
-        expect(dpChange("amp", "") == .increasing,
-            "A15b: unhiding is the opposite, and is distinguishable from an ordinary sample "
-                + "(mutation: collapsing `.increasing` into `.none` lets an unhide inherit a "
-                + "pending reduction's floor bypass)")
-        expect(dpChange("amp", "amp,zed") == .reducing,
-            "A15b: hiding a second client counts")
-        expect(dpChange("amp,zed", "amp") == .increasing,
-            "A15b: unhiding one of two puts information back")
-        expect(dpChange("amp", "zed") == .reducing,
-            "A15b: hiding one while unhiding another is a reduction — one write of one string "
-                + "carries both, and the content the user removed outranks the sampling rate "
-                + "(mutation: a strict-subset or size test calls this no change and leaves zed "
-                + "named on the profile for the rest of the floor)")
-        expect(dpChange("amp", "amp") == .none,
-            "A15b: no change is neither")
-        expect(dpChange("", "") == .none,
-            "A15b: two empty sets are neither (mutation: returning `.reducing` by default hands "
-                + "every ordinary sample a floor bypass)")
+        let dpChanges: [(String, String, DiscordIPC.VisibilityChange)] = [
+            ("", "amp", .reducing), ("amp", "", .increasing),
+            ("amp", "amp,zed", .reducing), ("amp,zed", "amp", .increasing),
+            ("amp", "zed", .reducing),
+            ("amp", "amp", DiscordIPC.VisibilityChange.none), ("", "", .none),
+        ]
+        for (previous, current, expected) in dpChanges {
+            expect(dpChange(previous, current) == expected,
+                "A15b: \"\(previous)\" -> \"\(current)\" is \(expected) (mutations: collapsing "
+                    + "`.increasing` into `.none` lets an unhide inherit a pending reduction's "
+                    + "bypass; a strict-subset or size test calls the swap no change and leaves "
+                    + "the newly hidden client named for the rest of the floor; `.reducing` by "
+                    + "default hands every ordinary sample a bypass)")
+        }
 
         // A2 — the switch. Read through the authoritative accessor against an
         // isolated suite, never the process's own defaults.
@@ -5446,67 +5147,53 @@ enum SelfTest {
             // calling it on the instance leaves the plist behind, so every run
             // deposited another ~/Library/Preferences file forever.
             defer { UserDefaults.standard.removePersistentDomain(forName: dpSuiteName) }
-            expect(!DiscordPresence.enabled(defaults: dpDefaults),
-                "A2: an absent key is off")
-            // The mutation this shape exists for. `bool(forKey:)` returns true
-            // here, and the Argument Domain — which the manual acceptance flow
-            // in verification.md uses — stores exactly this: `-tokenbar.<key>
-            // true` lands as the STRING "true", not a Bool.
-            dpDefaults.set("true", forKey: DiscordPresence.enabledKey)
-            expect(!DiscordPresence.enabled(defaults: dpDefaults),
-                "A2: the string \"true\" is not the switch "
-                    + "(mutation: `bool(forKey:)` coerces it and turns the feature on)")
-            // 1, not 2. `as? Bool` bridges NSNumber, so the integer that
-            // actually slips through is the one equal to true — picking 2 here
-            // meant the assertion passed on an accessor that accepted 1.
-            dpDefaults.set(1, forKey: DiscordPresence.enabledKey)
-            expect(!DiscordPresence.enabled(defaults: dpDefaults),
-                "A2: the integer 1 is not the switch (mutation: `as? Bool` alone bridges it to "
-                    + "true, and only a CFBoolean check rejects it)")
-            dpDefaults.set(1.0, forKey: DiscordPresence.enabledKey)
-            expect(!DiscordPresence.enabled(defaults: dpDefaults),
-                "A2: the double 1.0 is not the switch either")
-            dpDefaults.set(2, forKey: DiscordPresence.enabledKey)
-            expect(!DiscordPresence.enabled(defaults: dpDefaults),
-                "A2: a non-boolean number is not the switch")
-            dpDefaults.set(["on"], forKey: DiscordPresence.enabledKey)
-            expect(!DiscordPresence.enabled(defaults: dpDefaults),
-                "A2: a wholly wrong type is not the switch")
+            // Every wrong type, by table. The string "true" is the one that
+            // matters most: the Argument Domain, which the manual acceptance
+            // flow in verification.md uses, stores `-tokenbar.<key> true` as
+            // exactly that string, and `bool(forKey:)` coerces it. The integer
+            // is 1 rather than 2 because `as? Bool` bridges NSNumber, so the
+            // one that actually slips through is the one equal to true.
+            let dpWrongTypes: [(String, Any?)] = [
+                ("an absent key", nil), ("the string \"true\"", "true"),
+                ("the integer 1", 1), ("the double 1.0", 1.0),
+                ("a non-boolean number", 2), ("a wholly wrong type", ["on"]),
+            ]
+            for (label, value) in dpWrongTypes {
+                if let value { dpDefaults.set(value, forKey: DiscordPresence.enabledKey) }
+                expect(!DiscordPresence.enabled(defaults: dpDefaults),
+                    "A2: \(label) is not the switch (mutation: `bool(forKey:)` coerces the "
+                        + "string, and `as? Bool` alone bridges the integer — only a CFBoolean "
+                        + "check rejects both)")
+            }
             dpDefaults.set(true, forKey: DiscordPresence.enabledKey)
-            expect(DiscordPresence.enabled(defaults: dpDefaults),
-                "A2 control: a real Bool true is the switch (without this the four assertions "
-                    + "above would pass on an accessor that always returns false)")
+            let dpRealTrue = DiscordPresence.enabled(defaults: dpDefaults)
             dpDefaults.set(false, forKey: DiscordPresence.enabledKey)
-            expect(!DiscordPresence.enabled(defaults: dpDefaults),
-                "A2: an explicit false is off")
-            // A25 — the cost switch reads through the same strict path. Sharing
-            // one reader is what keeps the two from drifting apart, so this
-            // checks the sharing rather than re-testing every wrong type.
-            expect(DiscordPresence.costStyle(defaults: dpDefaults) == .banded,
-                "A25: an absent cost key is banded, the safe direction")
-            dpDefaults.set("true", forKey: DiscordPresence.wholeDollarsKey)
-            expect(DiscordPresence.costStyle(defaults: dpDefaults) == .banded,
-                "A25: the string \"true\" is not the cost switch either "
-                    + "(mutation: a second, looser reader for this key fails here)")
-            dpDefaults.set(1, forKey: DiscordPresence.wholeDollarsKey)
-            expect(DiscordPresence.costStyle(defaults: dpDefaults) == .banded,
-                "A25: the integer 1 is not the cost switch")
-            // Removed, not overwritten, and this is not tidiness. Writing a
-            // real `true` over a stored integer `1` DOES NOT CHANGE THE STORED
-            // TYPE — measured: the value stays a non-CFBoolean NSNumber, so the
-            // control below would fail against a perfectly correct accessor.
-            // A2 above only escapes this because it writes an array in between,
-            // which is true by accident rather than by design.
+            expect(dpRealTrue && !DiscordPresence.enabled(defaults: dpDefaults),
+                "A2 control: a real Bool true is the switch and an explicit false is off — "
+                    + "without this the table above passes on an accessor that always says false")
+            // A25 — the cost switch reads through the SAME strict path. Sharing
+            // one reader is what keeps the two from drifting, so this checks the
+            // sharing rather than re-testing every wrong type.
             //
-            // The production reading is the same and is the safe direction: a
-            // key that somehow holds an integer stays "off" until something
-            // clears it, and the strict reader exists precisely to refuse
-            // anything that is not a Bool the user wrote.
+            // The key is removed rather than overwritten before the control, and
+            // that is not tidiness: writing a real `true` over a stored integer
+            // `1` DOES NOT CHANGE THE STORED TYPE — measured, it stays a
+            // non-CFBoolean NSNumber, so the control would fail against a
+            // perfectly correct accessor. A2 above only escapes this because it
+            // writes an array in between, which is true by accident.
+            let dpCostAbsent = DiscordPresence.costStyle(defaults: dpDefaults) == .banded
+            dpDefaults.set("true", forKey: DiscordPresence.wholeDollarsKey)
+            let dpCostString = DiscordPresence.costStyle(defaults: dpDefaults) == .banded
+            dpDefaults.set(1, forKey: DiscordPresence.wholeDollarsKey)
+            let dpCostInt = DiscordPresence.costStyle(defaults: dpDefaults) == .banded
             dpDefaults.removeObject(forKey: DiscordPresence.wholeDollarsKey)
             dpDefaults.set(true, forKey: DiscordPresence.wholeDollarsKey)
-            expect(DiscordPresence.costStyle(defaults: dpDefaults) == .wholeDollars,
-                "A25 control: a real Bool true is the cost switch (without this the three above "
-                    + "would pass on an accessor that always returns banded)")
+            expect(
+                dpCostAbsent && dpCostString && dpCostInt
+                    && DiscordPresence.costStyle(defaults: dpDefaults) == .wholeDollars,
+                "A25: the cost switch refuses an absent key, the string and the integer — "
+                    + "banded is the safe direction — and a real Bool true does turn it on "
+                    + "(mutation: a second, looser reader for this key fails here)")
             dpDefaults.removeObject(forKey: DiscordPresence.wholeDollarsKey)
         } else {
             expect(false, "A2: the isolated defaults suite could not be created")
@@ -5537,121 +5224,134 @@ enum SelfTest {
             files.reduce(0) { $0 + $1.text.components(separatedBy: needle).count - 1 }
         }
         let dpSources = dpSourceFiles()
-        expect(dpSources.count > 20 && dpSources.contains { $0.name == "DiscordPresence.swift" },
-            "the source scan found the tree this binary was built from (without this every "
-                + "structural assertion below would pass on an empty list)")
-        // Occurrences, not files: counting files let a second declaration in
-        // the SAME file through, which is the easier mistake of the two.
-        let dpStorageSites = dpSources.filter {
-            $0.text.contains("@AppStorage(DiscordPresence.enabledKey)")
-        }
-        expect(
-            dpOccurrences("@AppStorage(DiscordPresence.enabledKey)", in: dpSources) == 1
-                && dpStorageSites.first?.name == "SettingsPanel.swift",
-            "A2b: exactly one view declares the switch, so no second `@AppStorage` default can "
-                + "disagree with the accessor (mutation: adding a second declaration anywhere — "
-                + "the trap `tokenbar.limits.enabled` already fell into — fails here)")
-        expect(dpOccurrences("\"\(DiscordPresence.enabledKey)\"", in: dpSources) == 1,
-            "A2b: the key string is written once, in `DiscordPresence.enabledKey` "
-                + "(mutation: a hard-coded copy of the key evades the check above)")
-        expect(
-            dpOccurrences("@AppStorage(DiscordPresence.wholeDollarsKey)", in: dpSources) == 1
-                && dpOccurrences("\"\(DiscordPresence.wholeDollarsKey)\"", in: dpSources) == 1,
-            "A2b: the cost switch gets the same treatment as the on/off switch — one "
-                + "`@AppStorage` declaration, one written key")
-        // The reason `DiscordPresence` takes the style as a parameter: the
-        // manual acceptance flow writes preferences from the command line into
-        // the same defaults domain the selftest runs in, so a payload path that
-        // read one would make every assertion above depend on the machine.
-        // Counted on `.object(forKey:` rather than `defaults.object(forKey:`,
-        // and that is the whole assertion. The first draft matched the
-        // receiver name, so it could only see a read written against the
-        // `defaults` parameter — but `payload()` has no such parameter, so the
-        // natural way to violate this is `UserDefaults.standard.object(forKey:)`
-        // and the scan looked straight past it. Measured: that mutation
-        // survived the whole suite. A guard that cannot catch the mutation
-        // named in its own message is not a guard.
-        let dpPayloadLayer = dpSources.first { $0.name == "DiscordPresence.swift" }
-        expect(
-            dpPayloadLayer.map { $0.text.components(separatedBy: ".object(forKey:").count - 1 } == 1
-                && dpPayloadLayer.map { $0.text.contains("UserDefaults.standard") } == false,
-            "A2b: exactly one preference read exists in the payload layer, it is the shared strict "
-                + "reader the two accessors call, and nothing there reaches for "
-                + "`UserDefaults.standard` (mutation: reading the cost switch inside payload() "
-                + "makes every privacy assertion depend on the machine running the suite)")
-        // Whitespace-normalized, and covering `.init` and an alias of the type,
-        // because `PresenceClient.init(connect : ...)` compiles and matched
-        // none of the literal forms. A source scan can always be evaded by
-        // someone trying; what it has to survive is an ordinary refactor.
+        // Whitespace-normalized copy, so `PresenceClient.init(connect : ...)`
+        // cannot slip past a literal match. A source scan can always be evaded
+        // by someone trying; what it has to survive is an ordinary refactor.
         let dpNormalized = dpSources.map {
             (name: $0.name, text: $0.text.filter { !$0.isWhitespace })
         }
+        // The Settings binding. Nothing else observes it: the accessor
+        // assertions above supply their own keys against an isolated suite, so
+        // a `SettingsPanel` key that diverges from `enabledKey` leaves the whole
+        // suite green while the toggle writes a key nobody reads — the feature
+        // never enables, or a live presence cannot be switched off. Occurrences
+        // rather than files, because a second declaration in the SAME file is
+        // the easier mistake.
+        expect(
+            dpOccurrences("@AppStorage(DiscordPresence.enabledKey)", in: dpSources) == 1
+                && dpSources.first(where: {
+                    $0.text.contains("@AppStorage(DiscordPresence.enabledKey)")
+                })?.name == "SettingsPanel.swift"
+                && dpOccurrences("\"\(DiscordPresence.enabledKey)\"", in: dpSources) == 1
+                && dpOccurrences("@AppStorage(DiscordPresence.wholeDollarsKey)", in: dpSources) == 1
+                && dpOccurrences("\"\(DiscordPresence.wholeDollarsKey)\"", in: dpSources) == 1,
+            "A2b: each switch is declared by exactly one view, in SettingsPanel, and each key "
+                + "string is written exactly once (mutation: a second `@AppStorage` default, or "
+                + "a hard-coded copy of the key — the trap `tokenbar.limits.enabled` already "
+                + "fell into — fails here)")
+        // The payload layer reads NO defaults domain, asserted at runtime rather
+        // than by scanning for `.object(forKey:`. The scan's first draft matched
+        // the receiver name and looked straight past
+        // `UserDefaults.standard.object(forKey:)`, which is exactly the natural
+        // way to violate this, and that mutation survived the whole suite.
+        //
+        // Structural, and it has to be. The M1 cost-mode conjunction catches an
+        // UNCONDITIONAL replacement of the parameter, because a payload reading
+        // a domain renders both `.banded` and `.wholeDollars` the same way. It
+        // does not catch a CONDITIONAL read — consulting the domain only when
+        // `style == .banded` renders both correctly on a default-off host and
+        // still makes the payload machine-dependent the moment a saved or
+        // command-line whole-dollar value exists.
+        //
+        // Not asserted by writing the process's own domain either, which an
+        // earlier revision did: it read the prior value with `object(forKey:)`,
+        // which searches volatile domains including `NSArgumentDomain`, while
+        // `set` and `removeObject` write the persistent application domain.
+        // Running the suite with `-tokenbar.discord.wholeDollars ...`, which
+        // the manual acceptance flow does, would have copied a command-line
+        // override into the user's saved preferences. A test must not be able
+        // to change what it measures.
+        //
+        // Scoped to the BODY of `payload(...)`, brace-matched, rather than to
+        // the file: the file legitimately declares the accessors, and every
+        // wider form of this check has been evaded in turn. Counting
+        // `.object(forKey:` matched on the receiver name and could only see
+        // reads written against a `defaults` parameter, which `payload()` does
+        // not have. Searching the file for `UserDefaults.standard` missed
+        // `DiscordPresence.costStyle()` — the accessor spells `.standard` as
+        // its own default argument, so calling it introduces no such substring.
+        // Banning the accessor calls inside this one body closes both.
+        let dpPayloadBody: String = {
+            guard let text = dpSources.first(where: { $0.name == "DiscordPresence.swift" })?.text,
+                  let start = text.range(of: "static func payload(") else { return "" }
+            var depth = 0
+            var opened = false
+            var out = ""
+            for character in text[start.lowerBound...] {
+                out.append(character)
+                if character == "{" { depth += 1; opened = true }
+                if character == "}" {
+                    depth -= 1
+                    if opened && depth == 0 { break }
+                }
+            }
+            return out
+        }()
+        expect(
+            !dpPayloadBody.isEmpty
+                && !dpPayloadBody.contains("UserDefaults")
+                && !dpPayloadBody.contains("costStyle(")
+                && !dpPayloadBody.contains("enabled("),
+            "A2b: `payload(...)` reaches no defaults domain, directly or through an accessor, so "
+                + "what it publishes depends on its arguments and not on the machine running it "
+                + "(mutations: `UserDefaults.standard.bool(forKey:)`, or the subtler "
+                + "`costStyle == .banded ? DiscordPresence.costStyle() : costStyle`, which reads "
+                + "correctly on a default-off host and goes machine-dependent the moment a saved "
+                + "whole-dollar value exists)")
+
+        // The gate is the only path to a client. All three are shape claims —
+        // "constructed in exactly one place", "not aliased", "not handed
+        // curated arguments" — which no runtime value can express: a second
+        // construction site is invisible until the day it runs, and SelfTest
+        // cannot reach the app lifecycle.
         let dpCtorForms = ["DiscordIPCClient(connect:", "DiscordIPCClient.init(connect:"]
         expect(
-            dpCtorForms.reduce(0) { $0 + dpOccurrences($1, in: dpNormalized) } == 1,
-            "A1: exactly one production site constructs a client, and it is the gated factory "
-                + "(mutation: constructing one anywhere else — including via `.init` — bypasses "
-                + "the demo/test gate)")
-        // A16 — structural, because the behaviour it guards needs a real app
-        // lifecycle: `applicationWillTerminate` waits out the queued clear
-        // behind `if let discord`, so dropping the reference on the disable
-        // path silently skips that wait. Switching Discord off and quitting
-        // immediately then abandons the clear as the process exits, and the
-        // last activity stays on the profile after consent was withdrawn.
-        // This does not prove the drain works — A7c proves `stop()` writes the
-        // clear, and the drain is what gives it time to leave. It proves the
-        // drain still has something to drain.
+            dpCtorForms.reduce(0) { $0 + dpOccurrences($1, in: dpNormalized) } == 1
+                && dpOccurrences("typealias", in: dpNormalized.filter {
+                    $0.text.contains("DiscordIPCClient")
+                }) == 0
+                && !dpNormalized.contains { $0.text.contains("makeDiscordClient(arguments:") },
+            "A1: exactly one production site constructs a client and it is the gated factory, "
+                + "the type is not aliased, and no call site substitutes its own arguments for "
+                + "the process's (mutations: constructing one elsewhere including via `.init`, "
+                + "renaming the type, or passing a curated array, each bypass the demo/test gate)")
+        // A16 — the same class of claim, and kept for the same reason. The
+        // disable path leaves the stopped client in `discord` on purpose:
+        // `applicationWillTerminate` drains the queued clear inside
+        // `if let discord`, so re-adding `discord = nil` after `stop()` lets an
+        // immediate quit abandon it and leave the withdrawn activity public.
+        // That needs a real app lifecycle to exercise and nothing else in the
+        // suite detects it, so the shape is asserted instead.
         expect(dpOccurrences("discord=nil", in: dpNormalized) == 0,
             "A16: the disable path keeps the client reference until termination drains its clear "
                 + "(mutation: re-adding `discord = nil` after `stop()` abandons the clear on an "
                 + "off-then-quit, because the drain is guarded on the reference)")
-        // A26c — the button constants are pinned as literal DECLARATIONS, not
-        // only as literal values on the wire.
-        //
-        // Pinning the wire value catches a URL that is wrong everywhere. It
-        // does not catch one that is right where the suite looks: measured,
-        // both of these pass all 659 assertions —
+        // A26c — the button constants, pinned as literal DECLARATIONS and as a
+        // file compiled identically in every configuration. Neither half covers
+        // the other's survivor, and both were measured to pass all 659
+        // assertions before these existed:
         //
         //     #if DEBUG  …literal…  #else  …+ "?ref=" + NSUserName()  #endif
         //     static var buttonURL: String { Bundle.main.bundleIdentifier == nil
         //         ? literal : literal + "?ref=" + hash(NSUserName()) }
         //
-        // — because the suite runs under `swift build` as a bare executable
-        // while shipping runs `make bundle`, release configuration, inside an
-        // .app. The assertions are structurally blind to that difference. What
-        // would then reach every viewer's click, and GitHub's request logs, is
-        // the account name of the person whose profile it is.
-        //
-        // Asserting the declaration text closes both: a `var`, a conditional,
-        // an interpolation or a concatenation is no longer the same string.
-        // This does not lift the ceiling in general — the same trick still
-        // works on `pid()` and `nonce()` — but the button is the first leaf
-        // whose legitimate value is a URL a third party parses, which is what
-        // turns that ceiling into a route.
-        expect(
-            dpOccurrences(
-                "static let buttonURL = \"https://github.com/Nanako0129/TokenBar\"",
-                in: dpSources.filter { $0.name == "DiscordIPC.swift" }) == 1
-                && dpOccurrences(
-                    "static let buttonLabel = \"View on GitHub\"",
-                    in: dpSources.filter { $0.name == "DiscordIPC.swift" }) == 1,
-            "A26c: both button constants are declared as `static let` with a literal string "
-                + "(mutation: a computed `var` reading Bundle.main fails here)")
-        // The other half, and the reason the clause above is not enough on its
-        // own: a `#if DEBUG` that keeps the literal declaration in the tested
-        // branch satisfies the count while shipping something else. Measured —
-        // it survived A26c until this line existed.
-        //
-        // `DiscordIPC.swift` already holds this policy in prose: its selftest
-        // seams are internal rather than `#if DEBUG` because "a symbol that
-        // exists only in one configuration is a symbol that breaks the release
-        // build the first time someone calls it without the guard". This turns
-        // that sentence into something checked.
-        //
-        // Counted as DIRECTIVES — lines whose first non-space characters are
-        // `#if`/`#else`/`#endif` — not as the substring. The only `#if` in that
-        // file today is inside the very comment quoted above, and a substring
-        // scan fails on the prose that states the policy it is enforcing.
+        // The suite runs under `swift build` as a bare executable while shipping
+        // runs `make bundle`, release configuration, inside an .app, so the wire
+        // assertions are structurally blind to the difference. What would reach
+        // every viewer's click, and GitHub's request logs, is the account name
+        // of the person whose profile it is. Directives are counted as lines
+        // starting with `#if`/`#else`/`#endif`, not as a substring: the only
+        // `#if` in that file is inside the comment stating this policy.
         let dpTransportDirectives = dpSources
             .filter { $0.name == "DiscordIPC.swift" }
             .flatMap { $0.text.split(separator: "\n", omittingEmptySubsequences: false) }
@@ -5661,19 +5361,17 @@ enum SelfTest {
                     || trimmed.hasPrefix("#endif")
             }
         expect(
-            dpTransportDirectives.isEmpty,
-            "A26c: the transport is compiled identically in every configuration, so what this "
-                + "suite observes is what ships (mutation: `#if DEBUG` yielding the literal under "
-                + "test and a user-derived URL in release passes every other assertion here)")
-
-        expect(dpOccurrences("typealias", in: dpNormalized.filter {
-            $0.text.contains("DiscordIPCClient")
-        }) == 0,
-            "A1: the client type is not aliased, so the construction scan above cannot be "
-                + "sidestepped by giving it another name")
-        expect(!dpNormalized.contains { $0.text.contains("makeDiscordClient(arguments:") },
-            "A1: no production call site substitutes its own arguments for the process's "
-                + "(mutation: passing a curated array turns the gate into a formality)")
+            dpOccurrences(
+                "static let buttonURL = \"https://github.com/Nanako0129/TokenBar\"",
+                in: dpSources.filter { $0.name == "DiscordIPC.swift" }) == 1
+                && dpOccurrences(
+                    "static let buttonLabel = \"View on GitHub\"",
+                    in: dpSources.filter { $0.name == "DiscordIPC.swift" }) == 1
+                && dpTransportDirectives.isEmpty,
+            "A26c: both button constants are literal `static let` declarations and the transport "
+                + "compiles identically in every configuration, so what this suite observes is "
+                + "what ships (mutations: a computed `var` reading Bundle.main, or a `#if DEBUG` "
+                + "yielding the literal under test and a user-derived URL in release)")
         // M6's gap: the wiring layer's choice of hidden set had no assertion at
         // all, and the payload fixtures cannot see it — they are handed a set.
         // `quotaExcludedClients()` and `hiddenLimitsClients()` are different
@@ -5699,8 +5397,7 @@ enum SelfTest {
         dpAbsentClient.reconnectDelay = 0.01
         let dpAbsentBegan = DispatchTime.now()
         dpAbsentClient.start()
-        dpAbsentClient.publish(DiscordPresence.Payload(
-            details: "12K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+        dpAbsentClient.publish(dpP("12K tokens today", state: "Amp · $1-5"))
         let dpAbsentBlocked = Double(
             DispatchTime.now().uptimeNanoseconds - dpAbsentBegan.uptimeNanoseconds) / 1_000_000_000
         _ = dpWaitUntil { dpAbsentAttempts.value > DiscordIPCClient.maxReconnectAttempts }
