@@ -4176,8 +4176,8 @@ enum SelfTest {
         if let dpWireButtons = (((try? JSONSerialization.jsonObject(with: dpActivityBody))
             as? [String: Any])?["args"] as? [String: Any])?["activity"] as? [String: Any],
             let dpButtons = dpWireButtons["buttons"] as? [[String: String]] {
-            expect(dpButtons.count == 1 && dpButtons.count <= 2,
-                "A26: one button goes out, and Discord's limit of two is not exceeded")
+            expect(dpButtons.count == 1,
+                "A26: exactly one button goes out, well inside Discord's limit of two")
             let dpLabel = dpButtons.first?["label"] ?? ""
             let dpURL = dpButtons.first?["url"] ?? ""
             expect(!dpLabel.isEmpty && dpLabel.count <= 32,
@@ -4201,14 +4201,13 @@ enum SelfTest {
         // A26b — buttons ride with an activity, never with a clear. A cleared
         // presence is the user withdrawing; sending them a link at that moment
         // would be the one place this feature turns into advertising.
-        var dpClearFrame = DiscordIPC.activityJSON(nil, pid: 4242, nonce: "NONCE-C")
+        let dpClearFrame = DiscordIPC.activityJSON(nil, pid: 4242, nonce: "NONCE-C")
         expect(!String(decoding: dpClearFrame, as: UTF8.self).contains("buttons")
             && DiscordIPC.leafStrings(dpClearFrame).allSatisfy {
                 $0 != DiscordIPC.buttonURL && $0 != DiscordIPC.buttonLabel
             },
             "A26b: a clear carries no buttons (mutation: attaching them outside the `if let "
                 + "payload` sends a link on the frame that withdraws the presence)")
-        dpClearFrame = Data()
         let dpLiveLeaves = DiscordIPC.leafStrings(dpActivityBody)
         // Literals, not the constants they pin — the same rule the pid and the
         // nonce follow below. The button is a transport-layer constant
@@ -5606,6 +5605,67 @@ enum SelfTest {
             "A16: the disable path keeps the client reference until termination drains its clear "
                 + "(mutation: re-adding `discord = nil` after `stop()` abandons the clear on an "
                 + "off-then-quit, because the drain is guarded on the reference)")
+        // A26c — the button constants are pinned as literal DECLARATIONS, not
+        // only as literal values on the wire.
+        //
+        // Pinning the wire value catches a URL that is wrong everywhere. It
+        // does not catch one that is right where the suite looks: measured,
+        // both of these pass all 659 assertions —
+        //
+        //     #if DEBUG  …literal…  #else  …+ "?ref=" + NSUserName()  #endif
+        //     static var buttonURL: String { Bundle.main.bundleIdentifier == nil
+        //         ? literal : literal + "?ref=" + hash(NSUserName()) }
+        //
+        // — because the suite runs under `swift build` as a bare executable
+        // while shipping runs `make bundle`, release configuration, inside an
+        // .app. The assertions are structurally blind to that difference. What
+        // would then reach every viewer's click, and GitHub's request logs, is
+        // the account name of the person whose profile it is.
+        //
+        // Asserting the declaration text closes both: a `var`, a conditional,
+        // an interpolation or a concatenation is no longer the same string.
+        // This does not lift the ceiling in general — the same trick still
+        // works on `pid()` and `nonce()` — but the button is the first leaf
+        // whose legitimate value is a URL a third party parses, which is what
+        // turns that ceiling into a route.
+        expect(
+            dpOccurrences(
+                "static let buttonURL = \"https://github.com/Nanako0129/TokenBar\"",
+                in: dpSources.filter { $0.name == "DiscordIPC.swift" }) == 1
+                && dpOccurrences(
+                    "static let buttonLabel = \"View on GitHub\"",
+                    in: dpSources.filter { $0.name == "DiscordIPC.swift" }) == 1,
+            "A26c: both button constants are declared as `static let` with a literal string "
+                + "(mutation: a computed `var` reading Bundle.main fails here)")
+        // The other half, and the reason the clause above is not enough on its
+        // own: a `#if DEBUG` that keeps the literal declaration in the tested
+        // branch satisfies the count while shipping something else. Measured —
+        // it survived A26c until this line existed.
+        //
+        // `DiscordIPC.swift` already holds this policy in prose: its selftest
+        // seams are internal rather than `#if DEBUG` because "a symbol that
+        // exists only in one configuration is a symbol that breaks the release
+        // build the first time someone calls it without the guard". This turns
+        // that sentence into something checked.
+        //
+        // Counted as DIRECTIVES — lines whose first non-space characters are
+        // `#if`/`#else`/`#endif` — not as the substring. The only `#if` in that
+        // file today is inside the very comment quoted above, and a substring
+        // scan fails on the prose that states the policy it is enforcing.
+        let dpTransportDirectives = dpSources
+            .filter { $0.name == "DiscordIPC.swift" }
+            .flatMap { $0.text.split(separator: "\n", omittingEmptySubsequences: false) }
+            .filter {
+                let trimmed = $0.drop { $0 == " " || $0 == "\t" }
+                return trimmed.hasPrefix("#if") || trimmed.hasPrefix("#else")
+                    || trimmed.hasPrefix("#endif")
+            }
+        expect(
+            dpTransportDirectives.isEmpty,
+            "A26c: the transport is compiled identically in every configuration, so what this "
+                + "suite observes is what ships (mutation: `#if DEBUG` yielding the literal under "
+                + "test and a user-derived URL in release passes every other assertion here)")
+
         expect(dpOccurrences("typealias", in: dpNormalized.filter {
             $0.text.contains("DiscordIPCClient")
         }) == 0,
