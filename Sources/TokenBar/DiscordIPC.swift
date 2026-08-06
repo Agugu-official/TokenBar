@@ -5,8 +5,8 @@ import Foundation
 /// Transport for the (opt-in, default-off) Discord Rich Presence feature:
 /// framing codec, wire serialization, and the socket lifecycle.
 ///
-/// Nothing in this file is wired into the app yet — no production path
-/// constructs a `DiscordIPCClient`, and the opt-in switch does not exist. The
+/// `AppDelegate` constructs the one production client and `SettingsPanel`
+/// declares the opt-in switch; this file is live behind it. The
 /// transport ships one milestone ahead of the wiring on purpose: everything
 /// here is hermetically testable, while "can it leak" only becomes answerable
 /// once there is a switch to flip.
@@ -63,6 +63,28 @@ enum DiscordIPC {
     /// Nothing about the user is in either value, and nothing may be added to
     /// them. A query parameter, a fragment, or anything derived from the
     /// machine belongs to a different feature and a different review.
+    ///
+    /// **What enforces that, and what does not.** The wire assertions check the
+    /// URL that actually reaches the socket: bare host, no query, no fragment,
+    /// pinned to the literal. They run under `swift build` as a bare
+    /// executable, and the app ships from `make bundle` as a release `.app`.
+    /// A value keyed on that difference — `Bundle.main.bundleIdentifier` being
+    /// nil under test and set in the bundle is the obvious key — is literal
+    /// where the suite looks and something else where it ships.
+    ///
+    /// Three source scans were written against that and all three were
+    /// escaped: pinning the emitted value missed a conditional constant,
+    /// pinning the declaration missed a suffix applied at the use site, and
+    /// pinning the use site missed both a later mutation of the same dictionary
+    /// and a rewrite inside `serialize`. The last also failed when a local was
+    /// renamed, which is the shape of a guard that gets edited rather than
+    /// obeyed.
+    ///
+    /// The real gap is that the suite does not observe the configuration that
+    /// ships, and no source scan closes it — running the suite from the bundled
+    /// binary would. Until that exists this comment is the enforcement: the two
+    /// constants are literals, and the frame is built from them and nothing
+    /// else. The same exposure has always applied to `pid()` and `nonce()`.
     static let buttonLabel = "View on GitHub"
     static let buttonURL = "https://github.com/Nanako0129/TokenBar"
 

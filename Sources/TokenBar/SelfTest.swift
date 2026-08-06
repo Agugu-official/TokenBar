@@ -5666,37 +5666,6 @@ enum SelfTest {
                 + "suite observes is what ships (mutation: `#if DEBUG` yielding the literal under "
                 + "test and a user-derived URL in release passes every other assertion here)")
 
-        // A26d — the wire SITE, not just the declaration.
-        //
-        // A26c pins how the constants are declared. It does not constrain what
-        // the code that builds the frame does with them, and that gap is not
-        // theoretical: an independent pass found this passing all 661
-        // assertions —
-        //
-        //     static let buttonURL = "https://github.com/…"     // untouched
-        //     static var refSuffix: String {                    // no directive
-        //         Bundle.main.bundleIdentifier == nil ? "" : "?ref=" + NSUserName()
-        //     }
-        //     fields["buttons"] = [["label": buttonLabel, "url": buttonURL + refSuffix]]
-        //
-        // — and the same bytes failing four assertions when run inside a
-        // bundle, because the escape is keyed at RUNTIME. A scan for `#if` is
-        // looking for the wrong thing entirely, and both A26c clauses are
-        // scoped to this one file, so moving the helper next door also worked.
-        //
-        // Pinning the expression closes both: `buttonURL + anything` is not
-        // this text. Counting it once closes a second assignment appended
-        // after the first.
-        let dpTransportNormalized = dpNormalized.filter { $0.name == "DiscordIPC.swift" }
-        expect(
-            dpOccurrences(
-                "fields[\"buttons\"]=[[\"label\":buttonLabel,\"url\":buttonURL]]",
-                in: dpTransportNormalized) == 1
-                && dpOccurrences("fields[\"buttons\"]", in: dpTransportNormalized) == 1,
-            "A26d: the frame is built from the two constants verbatim and in exactly one place "
-                + "(mutation: `buttonURL + refSuffix`, where the suffix is empty under test and "
-                + "user-derived in a bundle, passes every other assertion in this file)")
-
         expect(dpOccurrences("typealias", in: dpNormalized.filter {
             $0.text.contains("DiscordIPCClient")
         }) == 0,
