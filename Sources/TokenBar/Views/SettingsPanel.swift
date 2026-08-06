@@ -70,6 +70,11 @@ struct SettingsPanel: View {
     /// its default in two views).
     @AppStorage(DiscordPresence.enabledKey) private var discordEnabled = false
     @AppStorage(DiscordPresence.wholeDollarsKey) private var discordWholeDollars = false
+    /// Stored as the raw comma-separated string the payload layer parses, so
+    /// the view and `DiscordPresence.components()` cannot drift into two
+    /// different ideas of what is selected.
+    @AppStorage(DiscordPresence.componentsKey) private var discordComponentsRaw =
+        DiscordPresence.defaultComponentsRaw
     @State private var showLanguageRestartPrompt = false
     /// 0 = auto (≈60% of the screen). The popover's drag handle writes the
     /// same key, so the two stay in sync.
@@ -583,7 +588,16 @@ struct SettingsPanel: View {
             // user reads BEFORE opting in, rather than only next to the switch
             // itself. Saying "a cost range" while a setting below can turn it
             // into a figure would describe a state the app may not be in.
-            hint("Off by default. Publishes today's tokens, a cost range — or a rounded figure, if you turn that on below — your most-used visible client, and a link to TokenBar's source to your Discord profile. It updates while you work, so your active hours show too. Anyone who can see your profile can read and keep every update; switching this off stops new ones but cannot unshare what already went out. Hidden clients are never included.")
+            hint("Off by default. Publishes what you pick below — today's tokens, your most-used visible client, a cost range or rounded figure — and a link to TokenBar's source to your Discord profile. It updates while you work, so your active hours show too. Anyone who can see your profile can read and keep every update; switching this off stops new ones but cannot unshare what already went out. Hidden clients are never included.")
+            toggleRow("Include today's tokens", isOn: componentBinding(.tokens))
+            toggleRow("Include your most-used client", isOn: componentBinding(.client))
+            toggleRow("Include cost", isOn: componentBinding(.cost))
+            // Not a hint about tidiness. Unticking everything is the one
+            // combination that would otherwise still publish — an activity
+            // carrying the app name, image and button, refreshing while you
+            // work — so it is treated as switching the feature off for as long
+            // as it stays empty.
+            hint("Untick everything and nothing is published at all.")
             toggleRow("Show cost as a figure instead of a range", isOn: $discordWholeDollars)
             // Says what the trade is, not that there is one. A range puts you
             // in a group; a figure is closer to a value only you have, and a
@@ -762,6 +776,31 @@ struct SettingsPanel: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .glassCard(cornerRadius: 8)
+    }
+
+    /// One checkbox over the shared composition string. Written back in
+    /// `Component.allCases` order so the stored value is canonical whatever
+    /// order the boxes were ticked in, and the value gate does not see a
+    /// reordering as a change.
+    private func componentBinding(_ component: DiscordPresence.Component) -> Binding<Bool> {
+        Binding(
+            get: {
+                // `discordComponentsRaw` is read for the SwiftUI dependency
+                // only; the ANSWER comes from the authoritative accessor.
+                // `@AppStorage<String>` substitutes its default for both an
+                // absent key and one holding a non-string, while
+                // `components()` distinguishes them — so reading the wrapper
+                // for the answer would tick all three boxes over a malformed
+                // write while the runtime published nothing, and the next tick
+                // would start from that phantom all-selected state.
+                _ = self.discordComponentsRaw
+                return DiscordPresence.components().contains(component)
+            },
+            set: { isOn in
+                var selected = DiscordPresence.components()
+                if isOn { selected.insert(component) } else { selected.remove(component) }
+                self.discordComponentsRaw = DiscordPresence.rawComponents(selected)
+            })
     }
 
     private func toggleRow(_ label: String, isOn: Binding<Bool>) -> some View {

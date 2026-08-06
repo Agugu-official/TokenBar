@@ -53,8 +53,14 @@ enum DiscordPresence {
         /// through the gap in both directions (a computed property is invisible
         /// to `Mirror`; a shrunk list silently narrows every scan). Keep them
         /// one thing.
+        /// `state` is omitted when empty rather than published as a blank
+        /// string. With one component selected there is nothing to put in it,
+        /// and an empty field is still a field: it reaches the wire, and the
+        /// key-set assertion would have to admit a key carrying nothing.
         var fields: [String: String] {
-            ["details": details, "state": state, "largeImageKey": largeImageKey]
+            var out = ["details": details, "largeImageKey": largeImageKey]
+            if !state.isEmpty { out["state"] = state }
+            return out
         }
     }
 
@@ -121,6 +127,65 @@ enum DiscordPresence {
     static func costStyle(defaults: UserDefaults = .standard) -> CostStyle {
         strictBool(wholeDollarsKey, defaults: defaults) ? .wholeDollars : .banded
     }
+
+    /// What the presence may be built from. The case ORDER is the published
+    /// order: the first selected component becomes `details` and the rest join
+    /// into `state`, so the default set reproduces exactly what was published
+    /// before composition existed.
+    enum Component: String, CaseIterable {
+        case tokens
+        case client
+        case cost
+    }
+
+    static let componentsKey = "tokenbar.discord.components"
+
+    /// Absent means all three. Unlike the two switches the safe direction here
+    /// is not "off": an absent key must not silently empty a presence the user
+    /// already consented to.
+    static let defaultComponents = Set(Component.allCases)
+
+    static func components(defaults: UserDefaults = .standard) -> Set<Component> {
+        // Absent and malformed are different answers on purpose. An ABSENT key
+        // is an upgrade from before this preference existed, and must not
+        // silently empty a presence the user already consented to. A key that
+        // is PRESENT but not a string is a malformed write, and gets the same
+        // answer a string of only unknown tokens gets: nothing. Collapsing the
+        // two would mean `defaults write ... -int 1` publishes all three
+        // components the user never selected, which is the wrong direction for
+        // the same input class.
+        guard let stored = defaults.object(forKey: componentsKey) else {
+            return defaultComponents
+        }
+        guard let raw = stored as? String else { return [] }
+        return parseComponents(raw)
+    }
+
+    /// A fixed allowlist by construction: `Component(rawValue:)` returns nil for
+    /// anything it does not know and `compactMap` drops it.
+    ///
+    /// That is the point. This preference is a user-controlled string flowing
+    /// toward a public profile — the same shape as the `cc-mirror/<name>` client
+    /// id that could once escape as a label. An unknown token must produce
+    /// *nothing*: never echoed, and with no fallback branch passing it through.
+    /// A wrong value here empties the presence, which is the harmless direction.
+    ///
+    /// Shared with the Settings checkboxes so the view and the payload cannot
+    /// drift into two readings of one string.
+    static func parseComponents(_ raw: String) -> Set<Component> {
+        Set(
+            raw.split(separator: ",")
+                .compactMap { Component(rawValue: $0.trimmingCharacters(in: .whitespaces)) })
+    }
+
+    /// Canonical form: `Component.allCases` order, no spaces. Writing it this
+    /// way means a reordering is never stored, so the value gate cannot mistake
+    /// one for a change in what is published.
+    static func rawComponents(_ components: Set<Component>) -> String {
+        Component.allCases.filter(components.contains).map(\.rawValue).joined(separator: ",")
+    }
+
+    static let defaultComponentsRaw = rawComponents(Set(Component.allCases))
 
     /// One reader for both switches, so their strictness cannot drift apart.
     ///
@@ -279,20 +344,47 @@ enum DiscordPresence {
     /// .hiddenClients()` at the call site) — `trayTotals` applies it to the same
     /// stripes the top client is folded from.
     static func payload(
-        graph: UsagePayload, hidden: Set<String>, today: String, costStyle: CostStyle
+        graph: UsagePayload, hidden: Set<String>, today: String, costStyle: CostStyle,
+        components: Set<Component>
     ) -> Payload? {
         let totals = graph.trayTotals(hidden: hidden, today: today)
         // Non-finite numbers must never be published — garbage on a public
-        // profile is worse than no presence at all.
-        guard totals.todayCost.isFinite else { return nil }
+        // profile is worse than no presence at all. Scoped to a cost that will
+        // actually be serialized: `costBucket` maps a non-finite value to the
+        // LOWEST band, so publishing it would assert something false, but a
+        // user who selected only tokens loses their whole presence to an
+        // overflow that was never going to reach the wire.
+        guard components.contains(.cost) ? totals.todayCost.isFinite : true else { return nil }
         // Zero usage would otherwise publish a "this machine is switched on"
         // beacon. Nothing is published, and no startTimestamp is ever emitted.
         // `||`, not `&&`: UsageStats allows a day with cost > 0 and tokens == 0.
         guard totals.todayTokens > 0 || totals.todayCost > 0 else { return nil }
+        // Built in `Component.allCases` order, so the published text does not
+        // depend on the order the user ticked the boxes, and the default set
+        // reproduces the pre-composition output exactly.
+        let parts = Component.allCases.filter(components.contains).map { component -> String in
+            switch component {
+            case .tokens: return "\(tokenBand(totals.todayTokens)) tokens today"
+            case .client: return safeClientLabel(totals.todayTopClient)
+            case .cost: return costText(totals.todayCost, style: costStyle)
+            }
+        }
+        // An empty composition publishes nothing at all, and this is where that
+        // is enforced rather than in the picker — the manual verification flow
+        // writes preferences straight from the command line into the same
+        // defaults domain, so a guard living in the picker would not be in the
+        // path. An activity with no components would still carry the app name,
+        // the image and the button and still refresh on the same cadence: a
+        // purer version of the "this machine is on" beacon the zero-usage rule
+        // exists to prevent, with no usage content to justify it.
+        //
+        // No separate `components.isEmpty` guard above: it would be dead code.
+        // Measured — removing one changed nothing, because an empty selection
+        // produces no parts and this is the line that stops it.
+        guard let details = parts.first else { return nil }
         return Payload(
-            details: "\(tokenBand(totals.todayTokens)) tokens today",
-            state: "\(safeClientLabel(totals.todayTopClient)) · "
-                + costText(totals.todayCost, style: costStyle),
+            details: details,
+            state: parts.dropFirst().joined(separator: " · "),
             largeImageKey: largeImageKey)
     }
 }
