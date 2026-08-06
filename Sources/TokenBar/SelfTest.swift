@@ -3894,6 +3894,63 @@ enum SelfTest {
             close(peer)
             return result
         }
+        /// The cases `dpScenario` excludes: several socket pairs handed out in
+        /// order, so a scenario can break one connection and watch the client
+        /// arrive on the next. Local funcs rather than a type, because a type
+        /// declared in a function body cannot capture the helpers above it.
+        func dpRig(peers count: Int) -> ([Int32], DiscordIPCClient, DPCounter) {
+            let pairs = (0..<count).map { _ in dpSocketPair() }
+            let handed = DPCounter()
+            let client = DiscordIPCClient(connect: {
+                let i = min(handed.value, pairs.count - 1)
+                handed.value += 1
+                return pairs[i].0
+            })
+            return (pairs.map { $0.1 }, client, handed)
+        }
+        /// The READY frame Discord actually sends, sentinels included: the
+        /// account's username, id and avatar, none of which may be read, kept
+        /// or echoed. Declared here rather than beside its first assertion
+        /// because the helpers below capture it, and a local `let` cannot be
+        /// captured before its declaration.
+        let dpReadyBody = "{\"cmd\":\"DISPATCH\",\"evt\":\"READY\",\"data\":{\"v\":1,"
+            + "\"user\":{\"username\":\"SECRET_USERNAME\",\"id\":\"SECRET_ID\","
+            + "\"avatar\":\"SECRET_AVATAR\",\"discriminator\":\"0001\"}}}"
+        /// Answers a handshake the client has already sent. The client only
+        /// leaves `ready` on an inbound READY, so every scenario past the
+        /// connect path needs this.
+        func dpSendReady(_ peer: Int32) {
+            dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
+                _ = send(peer, raw.baseAddress!, raw.count, 0)
+            }
+        }
+        /// Drains the handshake, answers READY, and waits for the client to
+        /// record it. The Bool is the liveness half of every conjunction below:
+        /// without it an absence assertion passes on a client that never
+        /// connected.
+        func dpReachReady(_ peer: Int32, _ client: DiscordIPCClient) -> Bool {
+            _ = dpRecv(peer)
+            dpSendReady(peer)
+            return dpWaitUntil { client.inboundTokenForTesting == "ready" }
+        }
+        /// Parks the client's queue so several calls can be enqueued behind one
+        /// another and released together. Signal the returned semaphore to let
+        /// them run.
+        func dpHold(_ client: DiscordIPCClient) -> DispatchSemaphore {
+            let gate = DispatchSemaphore(value: 0)
+            client.holdQueueForTesting(until: gate)
+            return gate
+        }
+        func dpFinish(_ client: DiscordIPCClient, _ peers: [Int32]) {
+            client.stop()
+            client.drainForTesting()
+            for peer in peers where peer >= 0 { close(peer) }
+        }
+        /// The payload shape every lifecycle scenario publishes. Only `details`
+        /// varies, and it is what the assertions look for on the wire.
+        func dpP(_ details: String, state: String = "Amp · $10-25") -> DiscordPresence.Payload {
+            DiscordPresence.Payload(details: details, state: state, largeImageKey: "tokenbar")
+        }
 
         // A6 — framing resilience, pinned against a frame built independently
         // of the encoder.
@@ -4008,12 +4065,9 @@ enum SelfTest {
             "A-wire: the clear frame's keys are exactly the protocol's, and it carries no payload "
                 + "data at all")
 
-        // A13 — nothing from an inbound frame may be read, kept or echoed. The
-        // READY frame Discord actually sends carries the account's username, id
-        // and avatar.
-        let dpReadyBody = "{\"cmd\":\"DISPATCH\",\"evt\":\"READY\",\"data\":{\"v\":1,"
-            + "\"user\":{\"username\":\"SECRET_USERNAME\",\"id\":\"SECRET_ID\","
-            + "\"avatar\":\"SECRET_AVATAR\",\"discriminator\":\"0001\"}}}"
+        // A13 — nothing from an inbound frame may be read, kept or echoed.
+        // `dpReadyBody` above is the frame Discord actually sends, sentinels
+        // and all.
         let dpInboundToken = DiscordIPC.inbound(Data(dpReadyBody.utf8))
         // Literal "ready", not DiscordIPC.readyEvent: an expectation read out of
         // the constant it guards passes whatever that constant becomes.
@@ -4281,43 +4335,25 @@ enum SelfTest {
         // single consent Bool cannot survive this: `start()` re-arms it and
         // the pre-withdrawal payload flushes. The epoch a later `start()`
         // cannot undo is what `stop()` retired.
-        let dpEpochPairs = [dpSocketPair(), dpSocketPair()]
-        let dpEpochIdx = DPCounter()
-        let dpEpochClient = DiscordIPCClient(connect: {
-            let i = min(dpEpochIdx.value, dpEpochPairs.count - 1)
-            dpEpochIdx.value += 1
-            return dpEpochPairs[i].0
-        })
+        let (dpEpochPeers, dpEpochClient, dpEpochHanded) = dpRig(peers: 2)
         dpEpochClient.start()
         dpEpochClient.drainForTesting()
-        _ = dpRecv(dpEpochPairs[0].1)
-        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
-            _ = send(dpEpochPairs[0].1, raw.baseAddress!, raw.count, 0)
-        }
-        let dpEpochReady = dpWaitUntil { dpEpochClient.inboundTokenForTesting == "ready" }
-        let dpEpochGate = DispatchSemaphore(value: 0)
-        dpEpochClient.holdQueueForTesting(until: dpEpochGate)
-        dpEpochClient.publish(DiscordPresence.Payload(
-            details: "41K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        let dpEpochReady = dpReachReady(dpEpochPeers[0], dpEpochClient)
+        let dpEpochGate = dpHold(dpEpochClient)
+        dpEpochClient.publish(dpP("41K tokens today"))
         dpEpochClient.stop()
         dpEpochClient.start()
-        dpEpochClient.publish(DiscordPresence.Payload(
-            details: "42K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        dpEpochClient.publish(dpP("42K tokens today"))
         dpEpochGate.signal()
         dpEpochClient.drainForTesting()
-        let dpEpochOld = String(decoding: dpDrainToEOF(dpEpochPairs[0].1), as: UTF8.self)
+        let dpEpochOld = String(decoding: dpDrainToEOF(dpEpochPeers[0]), as: UTF8.self)
         let dpEpochOldOK = !dpEpochOld.contains("41K tokens today")
             && dpEpochOld.contains("\"activity\":null")
-        close(dpEpochPairs[0].1)
-        let dpEpochReconnected = dpWaitUntil { dpEpochIdx.value >= 2 }
-        _ = dpRecv(dpEpochPairs[1].1)
-        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
-            _ = send(dpEpochPairs[1].1, raw.baseAddress!, raw.count, 0)
-        }
-        let dpEpochNewArrived = dpFrameArrives(dpEpochPairs[1].1, "42K tokens today", within: 2)
-        dpEpochClient.stop()
-        dpEpochClient.drainForTesting()
-        close(dpEpochPairs[1].1)
+        close(dpEpochPeers[0])
+        let dpEpochReconnected = dpWaitUntil { dpEpochHanded.value >= 2 }
+        _ = dpReachReady(dpEpochPeers[1], dpEpochClient)
+        let dpEpochNewArrived = dpFrameArrives(dpEpochPeers[1], "42K tokens today", within: 2)
+        dpFinish(dpEpochClient, [dpEpochPeers[1]])
         expect(dpEpochReady && dpEpochOldOK && dpEpochReconnected && dpEpochNewArrived,
             "A14c: a publish made before the switch went off is not re-authorized by switching "
                 + "it back on, though the off half still cleared the activity and the on half "
@@ -4391,43 +4427,26 @@ enum SelfTest {
         // connection. `nil` stands for both "nothing given yet" and "the
         // clear was given", so a fresh connection can wrongly claim it holds
         // one already and drop it.
-        let dpReclearPairs = [dpSocketPair(), dpSocketPair()]
-        let dpReclearIdx = DPCounter()
-        let dpReclearClient = DiscordIPCClient(connect: {
-            let i = min(dpReclearIdx.value, dpReclearPairs.count - 1)
-            dpReclearIdx.value += 1
-            return dpReclearPairs[i].0
-        })
+        let (dpReclearPeers, dpReclearClient, dpReclearHanded) = dpRig(peers: 2)
         dpReclearClient.reconnectDelay = 0.02
         dpReclearClient.start()
         _ = dpWaitUntil { dpReclearClient.isConnectedForTesting }
-        _ = dpRecv(dpReclearPairs[0].1)
-        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
-            _ = send(dpReclearPairs[0].1, raw.baseAddress!, raw.count, 0)
-        }
-        let dpReclearReady = dpWaitUntil { dpReclearClient.inboundTokenForTesting == "ready" }
-        dpReclearClient.publish(DiscordPresence.Payload(
-            details: "60K tokens today", state: "Amp · $10-25", largeImageKey: "tokenbar"))
+        let dpReclearReady = dpReachReady(dpReclearPeers[0], dpReclearClient)
+        dpReclearClient.publish(dpP("60K tokens today"))
         dpReclearClient.drainForTesting()
-        let dpReclearPublished = dpFramesNow(dpReclearPairs[0].1).contains("60K tokens today")
+        let dpReclearPublished = dpFramesNow(dpReclearPeers[0]).contains("60K tokens today")
         // Park the queue, put the clear behind it, then break the socket. The
         // clear's write is attempted against a peer that is already gone, so
         // it fails and tears the connection down with the clear still pending.
-        let dpReclearGate = DispatchSemaphore(value: 0)
-        dpReclearClient.holdQueueForTesting(until: dpReclearGate)
+        let dpReclearGate = dpHold(dpReclearClient)
         dpReclearClient.publish(nil, visibility: .reducing)
-        close(dpReclearPairs[0].1)
+        close(dpReclearPeers[0])
         dpReclearGate.signal()
         dpReclearClient.drainForTesting()
-        let dpReclearReconnected = dpWaitUntil { dpReclearIdx.value >= 2 }
-        _ = dpRecv(dpReclearPairs[1].1)
-        dpFrameBytes(1, dpReadyBody).withUnsafeBytes { raw in
-            _ = send(dpReclearPairs[1].1, raw.baseAddress!, raw.count, 0)
-        }
-        let dpReclearArrived = dpFrameArrives(dpReclearPairs[1].1, "\"activity\":null", within: 2)
-        dpReclearClient.stop()
-        dpReclearClient.drainForTesting()
-        close(dpReclearPairs[1].1)
+        let dpReclearReconnected = dpWaitUntil { dpReclearHanded.value >= 2 }
+        _ = dpReachReady(dpReclearPeers[1], dpReclearClient)
+        let dpReclearArrived = dpFrameArrives(dpReclearPeers[1], "\"activity\":null", within: 2)
+        dpFinish(dpReclearClient, [dpReclearPeers[1]])
         expect(dpReclearReady && dpReclearPublished && dpReclearReconnected && dpReclearArrived,
             "A19: a clear that lost its socket is retried on the next connection "
                 + "(mutation: one `nil` for both \"nothing delivered yet\" and \"the clear was "
@@ -4576,50 +4595,34 @@ enum SelfTest {
         func dpSupersede(
             _ visibility: DiscordIPC.VisibilityChange
         ) -> (early: Bool, spent: Double, held: Bool) {
-            let pairs = [dpSocketPair(), dpSocketPair()]
-            let idx = DPCounter()
-            let client = DiscordIPCClient(connect: {
-                let i = min(idx.value, pairs.count - 1)
-                idx.value += 1
-                return pairs[i].0
-            })
+            let (peers, client, handed) = dpRig(peers: 2)
             client.publishInterval = 3.0
             client.reconnectDelay = 0.02
             client.start()
             _ = dpWaitUntil { client.isConnectedForTesting }
-            _ = dpFrameBytes(1, dpReadyBody).withUnsafeBytes {
-                send(pairs[0].1, $0.baseAddress, $0.count, 0)
-            }
+            dpSendReady(peers[0])
             _ = dpWaitUntil { client.inboundTokenForTesting == "ready" }
-            client.publish(DiscordPresence.Payload(
-                details: "30K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"))
+            client.publish(dpP("30K tokens today", state: "Amp · $1-5"))
             client.drainForTesting()
-            _ = dpFramesNow(pairs[0].1)
+            _ = dpFramesNow(peers[0])
             let armed = DispatchTime.now()
             // Break it. The retry lands on the second socket, which is never
             // made READY, so everything below is held at the ready guard.
-            close(pairs[0].1)
-            _ = dpWaitUntil { idx.value >= 2 }
+            close(peers[0])
+            _ = dpWaitUntil { handed.value >= 2 }
             client.publish(nil, visibility: .reducing)
             client.drainForTesting()
-            client.publish(
-                DiscordPresence.Payload(
-                    details: "31K tokens today", state: "Amp · $1-5", largeImageKey: "tokenbar"),
-                visibility: visibility)
+            client.publish(dpP("31K tokens today", state: "Amp · $1-5"), visibility: visibility)
             client.drainForTesting()
             let spent = Double(
                 DispatchTime.now().uptimeNanoseconds - armed.uptimeNanoseconds) / 1_000_000_000
             // If anything reached the replacement socket before READY, neither
             // publish was held at the ready guard and the measurement below is
             // about something else entirely.
-            let beforeReady = dpFramesNow(pairs[1].1)
-            _ = dpFrameBytes(1, dpReadyBody).withUnsafeBytes {
-                send(pairs[1].1, $0.baseAddress, $0.count, 0)
-            }
-            let early = dpFrameArrives(pairs[1].1, "31K tokens today", within: 0.3)
-            client.stop()
-            client.drainForTesting()
-            close(pairs[1].1)
+            let beforeReady = dpFramesNow(peers[1])
+            dpSendReady(peers[1])
+            let early = dpFrameArrives(peers[1], "31K tokens today", within: 0.3)
+            dpFinish(client, [peers[1]])
             return (early, spent, beforeReady.isEmpty)
         }
         let dpAfterOrdinary = dpSupersede(DiscordIPC.VisibilityChange.none)
