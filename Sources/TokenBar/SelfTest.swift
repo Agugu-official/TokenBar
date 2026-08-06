@@ -3695,7 +3695,11 @@ enum SelfTest {
             (.nan, "$0"), (.infinity, "$0"), (-.infinity, "$0"),
             (-5, "$0"), (0, "$0"), (0.4, "$0"), (0.5, "$1"),
             (7.89, "$8"), (1500.2, "$1500"),
-            (999_999.4, "$999999"), (1e6, "$1000000+"), (1e308, "$1000000+"),
+            (999_999.4, "$999999"),
+            // The boundary the cap is judged at. Before the rounding moved
+            // ahead of the comparison these rendered a bare `$1000000`.
+            (999_999.5, "$1000000+"), (1e6.nextDown, "$1000000+"),
+            (1e6, "$1000000+"), (1e308, "$1000000+"),
         ]
         for (cost, text) in dpDollars {
             expect(DiscordPresence.wholeDollars(cost) == text,
@@ -5505,12 +5509,22 @@ enum SelfTest {
         // manual acceptance flow writes preferences from the command line into
         // the same defaults domain the selftest runs in, so a payload path that
         // read one would make every assertion above depend on the machine.
+        // Counted on `.object(forKey:` rather than `defaults.object(forKey:`,
+        // and that is the whole assertion. The first draft matched the
+        // receiver name, so it could only see a read written against the
+        // `defaults` parameter — but `payload()` has no such parameter, so the
+        // natural way to violate this is `UserDefaults.standard.object(forKey:)`
+        // and the scan looked straight past it. Measured: that mutation
+        // survived the whole suite. A guard that cannot catch the mutation
+        // named in its own message is not a guard.
+        let dpPayloadLayer = dpSources.first { $0.name == "DiscordPresence.swift" }
         expect(
-            dpSources.first { $0.name == "DiscordPresence.swift" }
-                .map { $0.text.components(separatedBy: "defaults.object(forKey:").count - 1 } == 1,
-            "A2b: exactly one preference read exists in the payload layer, and it is the shared "
-                + "strict reader the two accessors call (mutation: reading the cost switch inside "
-                + "payload() makes the privacy assertions depend on the running machine)")
+            dpPayloadLayer.map { $0.text.components(separatedBy: ".object(forKey:").count - 1 } == 1
+                && dpPayloadLayer.map { $0.text.contains("UserDefaults.standard") } == false,
+            "A2b: exactly one preference read exists in the payload layer, it is the shared strict "
+                + "reader the two accessors call, and nothing there reaches for "
+                + "`UserDefaults.standard` (mutation: reading the cost switch inside payload() "
+                + "makes every privacy assertion depend on the machine running the suite)")
         // Whitespace-normalized, and covering `.init` and an alias of the type,
         // because `PresenceClient.init(connect : ...)` compiles and matched
         // none of the literal forms. A source scan can always be evaded by

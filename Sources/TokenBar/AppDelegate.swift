@@ -142,6 +142,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// outranks the sampling rate: publishing it late is a client they hid
     /// still visible to everyone, publishing the other one early is a sample
     /// of activity they had already consented to publish.
+    nonisolated static func visibilityChange(
+        previousHiddenRaw: String, hiddenRaw: String
+    ) -> DiscordIPC.VisibilityChange {
+        let previous = ClientRegistry.parseIdSet(previousHiddenRaw)
+        let current = ClientRegistry.parseIdSet(hiddenRaw)
+        if !current.isSubset(of: previous) { return .reducing }
+        if !previous.isSubset(of: current) { return .increasing }
+        return .none
+    }
+
     /// The cost switch read the same way the hidden set is: which direction did
     /// the published content move.
     ///
@@ -157,16 +167,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case (.banded, .wholeDollars): return .increasing
         default: return .none
         }
-    }
-
-    nonisolated static func visibilityChange(
-        previousHiddenRaw: String, hiddenRaw: String
-    ) -> DiscordIPC.VisibilityChange {
-        let previous = ClientRegistry.parseIdSet(previousHiddenRaw)
-        let current = ClientRegistry.parseIdSet(hiddenRaw)
-        if !current.isSubset(of: previous) { return .reducing }
-        if !previous.isSubset(of: current) { return .increasing }
-        return .none
     }
 
     /// Reconcile the presence with the current preferences and the cached

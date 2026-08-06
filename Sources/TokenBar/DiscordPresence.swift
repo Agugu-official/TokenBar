@@ -229,8 +229,13 @@ enum DiscordPresence {
     /// `state` have length limits.
     static func wholeDollars(_ cost: Double) -> String {
         guard cost.isFinite, cost > 0 else { return "$0" }
-        guard cost < 1_000_000 else { return "$1000000+" }
-        return "$\(Int(cost.rounded()))"
+        // Rounded BEFORE the cap is judged, not after. Comparing the raw cost
+        // put `[999999.5, 1_000_000)` on the wrong side of it: those round to
+        // 1000000 and were rendered as `$1000000`, a figure the cap exists to
+        // avoid printing bare. One value, two spellings, for no reason.
+        let dollars = cost.rounded()
+        guard dollars < 1_000_000 else { return "$1000000+" }
+        return "$\(Int(dollars))"
     }
 
     static func costText(_ cost: Double, style: CostStyle) -> String {
