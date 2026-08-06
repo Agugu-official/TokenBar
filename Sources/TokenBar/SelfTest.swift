@@ -3995,6 +3995,25 @@ enum SelfTest {
                 + "hidden is no change at all (mutation: classifying it `.reducing` grants an "
                 + "unbounded floor bypass; comparing raw selections republishes when nothing "
                 + "published actually moved)")
+        // A hidden-set change is classified against what the SELECTION would
+        // publish. With one agent named, hiding an unrelated client cannot move
+        // a published byte, and calling it `.reducing` hands out a bypass an
+        // ordinary update can then spend inside the floor.
+        expect(
+            AppDelegate.visibilityChange(
+                previousHiddenRaw: "", hiddenRaw: "amp", selection: .only("claude")) == .none
+                && AppDelegate.visibilityChange(
+                    previousHiddenRaw: "amp", hiddenRaw: "", selection: .only("claude")) == .none
+                && AppDelegate.visibilityChange(
+                    previousHiddenRaw: "", hiddenRaw: "claude",
+                    selection: .only("claude")) == .reducing
+                && AppDelegate.visibilityChange(
+                    previousHiddenRaw: "", hiddenRaw: "amp", selection: .mostUsed) == .reducing,
+            "hiding a client the selection does not publish is no change, while hiding the "
+                + "selected one is still a reduction (mutation: classifying against the raw "
+                + "hidden set grants a bypass for an unrelated hide, and lets an unrelated "
+                + "unhide clear a grant a real hide is still owed)")
+
         // Absent, malformed and named are three answers. One `as? String` cast
         // would send a key holding a number down the ABSENT branch and widen a
         // one-client selection to every registered client.

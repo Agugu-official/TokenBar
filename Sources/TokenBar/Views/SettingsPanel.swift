@@ -591,7 +591,7 @@ struct SettingsPanel: View {
             // user reads BEFORE opting in, rather than only next to the switch
             // itself. Saying "a cost range" while a setting below can turn it
             // into a figure would describe a state the app may not be in.
-            hint("Off by default. Publishes what you pick below — today's tokens, your most-used visible client, a cost range or rounded figure — and a link to TokenBar's source to your Discord profile. It updates while you work, so your active hours show too. Anyone who can see your profile can read and keep every update; switching this off stops new ones but cannot unshare what already went out. Hidden clients are never included.")
+            hint("Off by default. Publishes what you pick below — today's tokens, a client name, a cost range or rounded figure — for whichever client you choose, and a link to TokenBar's source to your Discord profile. It updates while you work, so your active hours show too. Anyone who can see your profile can read and keep every update; switching this off stops new ones but cannot unshare what already went out. Hidden clients are never included.")
             toggleRow("Include today's tokens", isOn: componentBinding(.tokens))
             toggleRow("Include the client name", isOn: componentBinding(.client))
             toggleRow("Include cost", isOn: componentBinding(.cost))

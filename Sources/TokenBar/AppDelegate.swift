@@ -150,13 +150,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// outranks the sampling rate: publishing it late is a client they hid
     /// still visible to everyone, publishing the other one early is a sample
     /// of activity they had already consented to publish.
+    /// Scoped to the SELECTION, not to the raw hidden set. With one agent
+    /// named, hiding an unrelated client cannot move a published byte — but
+    /// classifying it `.reducing` anyway hands out a floor bypass that an
+    /// ordinary update to the selected client can then spend, publishing
+    /// inside the fifteen-second floor. The inverse is worse: unhiding an
+    /// unrelated client would clear a grant a real hide is still owed.
     nonisolated static func visibilityChange(
-        previousHiddenRaw: String, hiddenRaw: String
+        previousHiddenRaw: String, hiddenRaw: String,
+        selection: DiscordPresence.ClientSelection = .mostUsed
     ) -> DiscordIPC.VisibilityChange {
-        // A GROWN hidden set is the reduction: something left the profile.
+        // A SHRUNK effective set is the reduction: something left the profile.
+        // Same swap as the components caller, for the same reason.
         subsetChange(
-            grownMeansLess: ClientRegistry.parseIdSet(previousHiddenRaw),
-            to: ClientRegistry.parseIdSet(hiddenRaw))
+            grownMeansLess: effectivePublished(
+                selection: selection, hidden: ClientRegistry.parseIdSet(hiddenRaw)),
+            to: effectivePublished(
+                selection: selection, hidden: ClientRegistry.parseIdSet(previousHiddenRaw)))
     }
 
     /// The one direction test both set-shaped preferences use. The parameter
@@ -183,21 +193,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// clients that are both hidden is correctly no change at all. The hidden
     /// set's own movement is classified separately by `visibilityChange`; this
     /// isolates the selection's contribution by holding it fixed.
+    /// What a given selection would actually publish under a given hidden set.
+    /// Every set-shaped classification below compares two of these rather than
+    /// the raw preferences, so a change that cannot move a published byte is
+    /// correctly no change at all.
+    nonisolated static func effectivePublished(
+        selection: DiscordPresence.ClientSelection, hidden: Set<String>
+    ) -> Set<String> {
+        let registered = Set(ClientRegistry.allIds)
+        switch selection {
+        case .mostUsed: return registered.subtracting(hidden)
+        case .only(let id):
+            return registered.contains(id) ? Set([id]).subtracting(hidden) : []
+        case .malformed: return []
+        }
+    }
+
+    /// A selection change replaces what is published rather than narrowing or
+    /// widening it, so it retires earlier work without arming the floor bypass.
     nonisolated static func selectionChange(
         previous: DiscordPresence.ClientSelection,
         current: DiscordPresence.ClientSelection,
         hidden: Set<String>
     ) -> DiscordIPC.VisibilityChange {
-        func effective(_ selection: DiscordPresence.ClientSelection) -> Set<String> {
-            let registered = Set(ClientRegistry.allIds)
-            switch selection {
-            case .mostUsed: return registered.subtracting(hidden)
-            case .only(let id):
-                return registered.contains(id) ? Set([id]).subtracting(hidden) : []
-            case .malformed: return []
-            }
-        }
-        return effective(previous) == effective(current) ? .none : .retiring
+        effectivePublished(selection: previous, hidden: hidden)
+            == effectivePublished(selection: current, hidden: hidden) ? .none : .retiring
     }
 
     nonisolated static func componentsChange(
@@ -336,7 +356,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // one up while the floor expires is the same broken promise in
                 // miniature.
                 let change = AppDelegate.visibilityChange(
-                    previousHiddenRaw: previousHiddenRaw, hiddenRaw: hiddenRaw)
+                    previousHiddenRaw: previousHiddenRaw, hiddenRaw: hiddenRaw,
+                    selection: selection)
                     .combined(with: AppDelegate.costStyleChange(
                         previous: previousCostStyle, current: costStyle,
                         publishedInBoth: previousComponents.contains(.cost)
