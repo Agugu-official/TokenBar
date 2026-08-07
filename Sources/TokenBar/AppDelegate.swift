@@ -183,27 +183,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .none
     }
 
-    /// A floor bypass is owed only when something was actually on the profile
-    /// to take down. With the selected client hidden, or no registered client
-    /// visible, nothing could have been published — so unticking a component
-    /// removes nothing, and arming a grant there leaves one for a later
-    /// selection change to inherit and spend on a client that IS visible,
-    /// inside the floor.
-    ///
-    /// A static rather than a branch inside `applyDiscordPresence`, for the
-    /// same reason `makeDiscordClient` is one: SelfTest returns `Never` before
-    /// the app lifecycle exists, so a rule buried in the delegate cannot be
-    /// asserted at all. It shipped unasserted for one round and a mutation
-    /// proved it: removing the branch changed nothing.
-    ///
-    /// The retire survives — only the claim on the floor is dropped.
-    nonisolated static func withoutUnownedGrant(
-        _ change: DiscordIPC.VisibilityChange, wasPublishing: Bool
-    ) -> DiscordIPC.VisibilityChange {
-        guard change.grant == .arm, !wasPublishing else { return change }
-        return DiscordIPC.VisibilityChange(retires: change.retires, grant: .leave)
-    }
-
     /// The one direction test both set-shaped preferences use. The parameter
     /// names the set whose GROWTH means less is published — the hidden set for
     /// clients, and the complement for components, which is why the component
@@ -221,7 +200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The arguments go into the same subset test swapped, rather than into a
     /// second classifier with its own idea of which way is which.
     /// A selection change replaces what is published rather than narrowing or
-    /// widening it, so it retires earlier work without arming the floor bypass.
+    /// widening it, so anything computed for the previous one is stale.
     ///
     /// Compared as EFFECTIVE published sets — the selection intersected with
     /// what is visible — and not as raw selections, so switching between two
@@ -255,7 +234,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// A selection change replaces what is published rather than narrowing or
-    /// widening it, so it retires earlier work without arming the floor bypass.
+    /// widening it, so anything computed for the previous one is stale.
     nonisolated static func selectionChange(
         previous: DiscordPresence.ClientSelection,
         current: DiscordPresence.ClientSelection,
@@ -280,12 +259,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// throttled like any other sample.
     /// `publishedInBoth` is whether cost is part of the composition on BOTH
     /// sides of the change. When it is not, the style cannot alter a single
-    /// published byte, and classifying it anyway is not merely noise: the
-    /// `.reducing` case carries a publish-floor bypass. A user who ticks a new
-    /// component (throttled, waiting out the floor) and then switches whole
-    /// dollars off while cost stays unticked would combine to `.reducing` and
-    /// push that newly added information out early — a bypass that exists for
-    /// reductions, spent on an addition.
+    /// published byte, so calling it a reduction would retire work that is not
+    /// actually stale.
     ///
     /// Both sides, not just the current one: a cost that was just ticked or
     /// unticked is already classified by `componentsChange`, and the style it
@@ -389,24 +364,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if hiddenChanged || discordEnabled != self.lastDiscordEnabled
                 || costStyle != previousCostStyle || components != previousComponents
                 || selection != previousSelection {
-                // Newly hiding a client means the user took something off the
-                // profile, and that update must not queue behind the publish
-                // floor — the Settings copy promises hidden clients are never
-                // included, and fifteen seconds of still naming one makes that
-                // promise false for as long as it waits. Unhiding puts
-                // information back and is throttled like any other sample.
-                //
-                // Turning whole dollars off is the same shape: the user just
-                // made the published figure coarser, and leaving the precise
-                // one up while the floor expires is the same broken promise in
-                // miniature.
+                // The classification decides only whether earlier queued work
+                // is stale, NOT how fast this reaches the wire. Every change
+                // waits out the publish floor; the Settings copy states that
+                // wait. What a reduction still buys is that a payload computed
+                // before it must not be written after it — that would put the
+                // client the user removed back on the profile rather than
+                // merely being slow.
                 // Today's actual contributors, so a hide of a client with no
                 // usage today is not mistaken for taking something down.
                 let contributors = self.lastGraph.map { graph in
                     Set(graph.contributions.last { $0.date == Format.todayKey() }?
                         .clients.map(\.client) ?? [])
                 }
-                var change = AppDelegate.visibilityChange(
+                let change = AppDelegate.visibilityChange(
                     previousHiddenRaw: previousHiddenRaw, hiddenRaw: hiddenRaw,
                     previousSelection: previousSelection, selection: selection,
                     contributors: contributors)
@@ -419,12 +390,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     .combined(with: AppDelegate.selectionChange(
                         previous: previousSelection, current: selection,
                         hidden: ClientRegistry.parseIdSet(hiddenRaw)))
-                change = AppDelegate.withoutUnownedGrant(
-                    change,
-                    wasPublishing: !AppDelegate.effectivePublished(
-                        selection: previousSelection,
-                        hidden: ClientRegistry.parseIdSet(previousHiddenRaw),
-                        contributors: contributors).isEmpty)
                 self.lastDiscordEnabled = discordEnabled
                 self.lastCostStyle = costStyle
                 self.lastComponents = components
