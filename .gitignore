@@ -7,3 +7,7 @@ target/
 .agent-local/
 dist/
 .omo/
+# Byte-compiled output from running scripts/*.py; `py_compile` writes it as a
+# side effect of the documentation gate, so it is easy to sweep into a commit.
+__pycache__/
+*.pyc
