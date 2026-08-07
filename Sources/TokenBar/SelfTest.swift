@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import SwiftUI
 import TokenBarCore
@@ -44,6 +45,12 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
     /// always matches, and any test about per-generation refetching would pass
     /// no matter what the production code does.
     private var advancingGraphDays: Int?
+    /// Freezes the advance without disabling it: `graph()` keeps replaying the
+    /// CURRENT fixture day instead of moving to the next one. Needed so a
+    /// LP3 restore-gate fixture can call `load()` (a real fetch, satisfying
+    /// the gate) without that fetch itself moving the generation the test is
+    /// trying to hold fixed — see `lagRestored` below.
+    private var advancePaused = false
     private var pendingGraphs: [String: [CheckedContinuation<UsagePayload, Error>]] = [:]
     private var pendingHourly: [String: [PendingHourly]] = [:]
 
@@ -89,6 +96,19 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
         continuation.resume(returning: DemoData.payload(for: year, today: Self.fixtureDay(day)))
     }
 
+    /// Fail exactly ONE parked graph fetch, chosen by park order, leaving the
+    /// rest parked — the failure analog of `releaseGraph(year:index:day:)`,
+    /// needed to fail specifically the OLDER of two overlapping fetches while
+    /// a newer one stays in flight.
+    func failGraph(year: String?, index: Int) {
+        let key = Self.key(year)
+        guard var parked = pendingGraphs[key], parked.indices.contains(index) else { return }
+        let continuation = parked.remove(at: index)
+        pendingGraphs[key] = parked
+        if parked.isEmpty { blockedGraphYears.remove(key) }
+        continuation.resume(throwing: CancellationError())
+    }
+
     /// Release a parked graph fetch as a FAILURE. Needed to land a stale
     /// fetch's error after a newer one has already committed, which no
     /// one-shot `failNextGraph` can order.
@@ -110,11 +130,23 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
         }
     }
 
+    /// Returned verbatim for the NEXT `graph()` call regardless of the year
+    /// requested — simulates the real scenario `apply()`'s empty-year branch
+    /// exists for (the selected year's logs were deleted/moved mid-session),
+    /// which `DemoData.payload(for:)` cannot reproduce on its own since it
+    /// always manufactures data for whatever year it is asked for.
+    private var forcedPayloadOnce: UsagePayload?
+    func forceNextGraphPayload(_ payload: UsagePayload) { forcedPayloadOnce = payload }
+
     func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
         _ = priority
         if failGraphOnce {
             failGraphOnce = false
             throw CancellationError()
+        }
+        if let forced = forcedPayloadOnce {
+            forcedPayloadOnce = nil
+            return forced
         }
         let key = Self.key(year)
         if blockedGraphYears.contains(key) {
@@ -123,11 +155,21 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
             }
         }
         if let day = advancingGraphDays {
-            advancingGraphDays = day + 1
+            if !advancePaused { advancingGraphDays = day + 1 }
             return DemoData.payload(for: year, today: Self.fixtureDay(day))
         }
         return DemoData.payload(for: year)
     }
+
+    /// Freezes the advance AND rewinds it one step, so the next `graph()`
+    /// call (and every one after it, while paused) replays the exact fixture
+    /// day the MOST RECENT call already returned, rather than the day that
+    /// call's own advance had already moved on to.
+    func pauseGraphAdvance() {
+        advancePaused = true
+        if let day = advancingGraphDays, day > 0 { advancingGraphDays = day - 1 }
+    }
+    func resumeGraphAdvance() { advancePaused = false }
 
     /// Deterministic fixture dates far from any real "today" so the advancing
     /// sequence cannot collide with the default fixture.
@@ -2972,6 +3014,23 @@ enum SelfTest {
             await lagSeed.refresh()
             let lagRestored = DashboardModel(
                 cachesSnapshot: true, source: lagSource, initialYear: nil)
+            // Control: the restore really is a lag (payload present, model
+            // absent/stale for it), so LP3's restore gate is installed and
+            // `ensureModelData` below cannot return without going through it.
+            let lagRestoredNeedsGate = lagRestored.payload != nil
+            // LP3 precondition: `ensureModelData`/`ensureModelColors` require
+            // `load()` to have been called first, or the restore gate a lag
+            // installs hangs forever. `pauseGraphAdvance()` holds this load to
+            // the SAME generation the snapshot already carries — the fixture
+            // advances on every call by default, and letting this one move
+            // the generation would make the refetch below ambiguous: caused
+            // by the model lag under test, or merely by the payload moving.
+            await lagSource.pauseGraphAdvance()
+            let lagGenerationBeforeLoad = lagRestored.payload?.meta.generatedAt
+            await lagRestored.load()
+            await lagSource.resumeGraphAdvance()
+            let lagLoadHeldGeneration =
+                lagRestored.payload?.meta.generatedAt == lagGenerationBeforeLoad
             await lagRestored.ensureModelData(for: .overview)
             let lagRefetched = await lagSource.modelCallCount() > lagSeedCalls
 
@@ -3137,6 +3196,8 @@ enum SelfTest {
                 "gradedAfterExpand": gradedAfterExpand,
                 "reentryCoalesced": reentryCoalesced,
                 "coalescedStillPublished": coalescedStillPublished,
+                "lagRestoredNeedsGate": lagRestoredNeedsGate,
+                "lagLoadHeldGeneration": lagLoadHeldGeneration,
                 "lagRefetched": lagRefetched,
                 "newerSliceSupersedes": newerSliceSupersedes,
                 "loadingHeldBySuccessor": loadingHeldBySuccessor,
@@ -3328,6 +3389,12 @@ enum SelfTest {
             turnTransitionChecks?["reentryCoalesced"] == true
                 && turnTransitionChecks?["coalescedStillPublished"] == true,
             "re-entry during an in-flight model scan joins it instead of starting a second")
+        expect(
+            turnTransitionChecks?["lagRestoredNeedsGate"] == true
+                && turnTransitionChecks?["lagLoadHeldGeneration"] == true,
+            "the lag fixture really restores a payload and the restored model's load() "
+                + "holds the SAME generation the snapshot carries — without both the "
+                + "refetch below could not discriminate a lagging model from a moved payload")
         expect(
             turnTransitionChecks?["lagRefetched"] == true,
             "a restored snapshot whose model lags its payload refetches instead of "
@@ -6767,6 +6834,834 @@ enum SelfTest {
             "A8: with Discord absent the caller is never blocked, nothing connects, and the app "
                 + "keeps running (mutation: making start()/publish() synchronous parks the main "
                 + "actor behind a socket that is not there)")
+
+        // MARK: - LP3: restore the last-good dashboard on restart
+
+        let lp3Identity = BuildIdentity(
+            bundleIdentifier: "com.nyanako.tokenbar", shortVersion: "9.9.9", buildNumber: "999")
+        let lp3OtherBuild = BuildIdentity(
+            bundleIdentifier: "com.nyanako.tokenbar", shortVersion: "9.9.9", buildNumber: "1000")
+        let lp3OtherBundle = BuildIdentity(
+            bundleIdentifier: "com.example.other", shortVersion: "9.9.9", buildNumber: "999")
+
+        func lp3TempDir(_ label: String) -> URL {
+            FileManager.default.temporaryDirectory
+                .appendingPathComponent("tokenbar-lp3-\(label)-\(UUID().uuidString)", isDirectory: true)
+        }
+
+        func lp3Envelope(
+            year: String?,
+            identity: BuildIdentity = lp3Identity,
+            schema: Int = SnapshotEnvelope.schemaVersion,
+            savedAt: Date = Date(),
+            payload: UsagePayload? = nil,
+            knownYears: [String]? = nil
+        ) -> SnapshotEnvelope {
+            let p = payload ?? DemoData.payload(for: year)
+            return SnapshotEnvelope(
+                snapshotSchemaVersion: schema, bundleIdentifier: identity.bundleIdentifier,
+                shortVersion: identity.shortVersion, buildNumber: identity.buildNumber,
+                savedAt: savedAt, selectedYear: year, payload: p,
+                knownYears: knownYears ?? p.years.map(\.year))
+        }
+
+        let lp3Encoder: JSONEncoder = {
+            let e = JSONEncoder()
+            e.outputFormatting = [.sortedKeys]
+            return e
+        }()
+        let lp3Decoder = JSONDecoder()
+        func lp3Encode(_ envelope: SnapshotEnvelope) -> Data {
+            (try? lp3Encoder.encode(envelope)) ?? Data()
+        }
+        func lp3PrepareDir(_ dir: URL, mode: Int16 = 0o700) {
+            try? FileManager.default.createDirectory(
+                at: dir, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: mode])
+        }
+        let lp3FileName = "dashboard-snapshot.json"
+
+        // --- SnapshotStore: round trip + validate rejection matrix ---
+
+        let lp3RTDir = lp3TempDir("roundtrip")
+        let lp3RTEnvelope = lp3Envelope(year: "2033")
+        let lp3RTWrote = SnapshotStore.write(lp3Encode(lp3RTEnvelope), in: lp3RTDir)
+        let lp3RTBack = SnapshotStore.readBytes(in: lp3RTDir).flatMap {
+            try? lp3Decoder.decode(SnapshotEnvelope.self, from: $0)
+        }
+        expect(
+            lp3RTWrote
+                && lp3RTBack.map {
+                    SnapshotStore.validate($0, expectedYear: "2033", identity: lp3Identity)
+                } == true
+                && lp3RTBack?.payload.years.map(\.year) == ["2033"],
+            "LP3: a written snapshot round-trips through write/readBytes/decode/validate with "
+                + "a matching payload and year, and reaches .ready not .loading (see the "
+                + "DashboardModel-level disk-restore check below)")
+
+        func lp3ExpectRejected(
+            _ label: String, _ envelope: SnapshotEnvelope,
+            expectedYear: String? = "2033", identity: BuildIdentity = lp3Identity
+        ) {
+            expect(
+                !SnapshotStore.validate(envelope, expectedYear: expectedYear, identity: identity),
+                "LP3 validate rejects: \(label)")
+        }
+
+        lp3ExpectRejected("schema mismatch", lp3Envelope(year: "2033", schema: 999))
+        lp3ExpectRejected(
+            "build-number mismatch", lp3Envelope(year: "2033", identity: lp3OtherBuild))
+        lp3ExpectRejected(
+            "bundle-identifier mismatch", lp3Envelope(year: "2033", identity: lp3OtherBundle))
+        lp3ExpectRejected(
+            "requested-year gate (snapshot 2033, process wants 2034)",
+            lp3Envelope(year: "2033"), expectedYear: "2034")
+        lp3ExpectRejected(
+            "requested-year gate (snapshot all-time, process wants a year)",
+            lp3Envelope(year: nil), expectedYear: "2033")
+        lp3ExpectRejected(
+            "knownYears entry not four-digit ASCII",
+            lp3Envelope(year: "2033", knownYears: ["abcd"]))
+        lp3ExpectRejected(
+            "knownYears duplicated",
+            lp3Envelope(year: "2033", knownYears: ["2033", "2033"]))
+        lp3ExpectRejected(
+            "knownYears oversized",
+            lp3Envelope(
+                year: "2033",
+                knownYears: (0...SnapshotStore.maxKnownYears).map { String(1000 + $0) } + ["2033"]))
+        lp3ExpectRejected(
+            "knownYears does not cover the payload's own years",
+            lp3Envelope(year: "2033", knownYears: []))
+        lp3ExpectRejected(
+            "savedAt in the future beyond the clock-skew allowance",
+            lp3Envelope(
+                year: "2033",
+                savedAt: Date().addingTimeInterval(SnapshotStore.futureSkewAllowance + 30)))
+        lp3ExpectRejected(
+            "savedAt older than the retention bound",
+            lp3Envelope(
+                year: "2033", savedAt: Date().addingTimeInterval(-(SnapshotStore.maxAge + 30))))
+
+        // A contribution date outside the selected year — DemoData always
+        // confines a year-scoped payload's contributions to that year, so this
+        // is hand-built rather than fixture-generated.
+        func lp3PayloadWithForeignContribution() -> UsagePayload? {
+            let json: [String: Any] = [
+                "meta": [
+                    "generatedAt": "2033-06-01T12:00:00Z", "version": "test",
+                    "dateRange": ["start": "2033-01-01", "end": "2033-06-01"],
+                ],
+                "summary": [
+                    "totalTokens": 10, "totalCost": 1.0, "totalDays": 1, "activeDays": 1,
+                    "averagePerDay": 1.0, "maxCostInSingleDay": 1.0,
+                    "clients": ["codex"], "models": ["demo-codex"],
+                ],
+                "years": [[
+                    "year": "2033", "totalTokens": 10, "totalCost": 1.0,
+                    "range": ["start": "2033-01-01", "end": "2033-06-01"],
+                ]],
+                "contributions": [[
+                    // Wrong year on purpose.
+                    "date": "2032-12-31", "totals": ["tokens": 10, "cost": 1.0, "messages": 1],
+                    "intensity": 1,
+                    "tokenBreakdown": [
+                        "input": 5, "output": 5, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0,
+                    ],
+                    "clients": [[
+                        "client": "codex", "modelId": "demo-codex", "providerId": "demo",
+                        "tokens": [
+                            "input": 5, "output": 5, "cacheRead": 0, "cacheWrite": 0,
+                            "reasoning": 0,
+                        ],
+                        "cost": 1.0, "messages": 1,
+                    ]],
+                ]],
+            ]
+            guard let data = try? JSONSerialization.data(withJSONObject: json) else { return nil }
+            return try? JSONDecoder().decode(UsagePayload.self, from: data)
+        }
+        if let foreignPayload = lp3PayloadWithForeignContribution() {
+            lp3ExpectRejected(
+                "a contribution date falls outside the selected year",
+                lp3Envelope(year: "2033", payload: foreignPayload, knownYears: ["2033"]))
+        } else {
+            expect(false, "LP3: the hand-built foreign-contribution fixture failed to decode")
+        }
+
+        // Malformed civil dates. `ISODay.init?` parses with `Int` and then
+        // multiplies, so `era * 146097` on an enormous year OVERFLOWS AND TRAPS
+        // — a file on disk could crash the dashboard at launch. An all-time
+        // snapshot skipped date checking entirely before, which is exactly the
+        // shape such a file would take, so these are all-time envelopes.
+        func lp3PayloadWithDates(
+            range: (String, String), yearRange: (String, String), contribution: String
+        ) -> UsagePayload? {
+            let json: [String: Any] = [
+                "meta": [
+                    "generatedAt": "2033-06-01T12:00:00Z", "version": "test",
+                    "dateRange": ["start": range.0, "end": range.1],
+                ],
+                "summary": [
+                    "totalTokens": 10, "totalCost": 1.0, "totalDays": 1, "activeDays": 1,
+                    "averagePerDay": 1.0, "maxCostInSingleDay": 1.0,
+                    "clients": ["codex"], "models": ["demo-codex"],
+                ],
+                "years": [[
+                    "year": "2033", "totalTokens": 10, "totalCost": 1.0,
+                    "range": ["start": yearRange.0, "end": yearRange.1],
+                ]],
+                "contributions": [[
+                    "date": contribution, "totals": ["tokens": 10, "cost": 1.0, "messages": 1],
+                    "intensity": 1,
+                    "tokenBreakdown": [
+                        "input": 5, "output": 5, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0,
+                    ],
+                    "clients": [] as [Any],
+                ]],
+            ]
+            guard let data = try? JSONSerialization.data(withJSONObject: json) else { return nil }
+            return try? JSONDecoder().decode(UsagePayload.self, from: data)
+        }
+        let lp3Ok = ("2033-01-01", "2033-06-01")
+        let lp3Trapping = "9223372036854775807-01-01"
+        let lp3DateCases: [(String, UsagePayload?)] = [
+            ("meta.dateRange start would trap ISODay",
+             lp3PayloadWithDates(
+                 range: (lp3Trapping, "2033-06-01"), yearRange: lp3Ok,
+                 contribution: "2033-01-01")),
+            ("years[].range end would trap ISODay",
+             lp3PayloadWithDates(
+                 range: lp3Ok, yearRange: ("2033-01-01", lp3Trapping),
+                 contribution: "2033-01-01")),
+            ("a contribution date would trap ISODay",
+             lp3PayloadWithDates(
+                 range: lp3Ok, yearRange: lp3Ok, contribution: lp3Trapping)),
+            ("meta.dateRange runs backwards",
+             lp3PayloadWithDates(
+                 range: ("2033-06-01", "2033-01-01"), yearRange: lp3Ok,
+                 contribution: "2033-01-01")),
+            ("a date outside the computable era",
+             lp3PayloadWithDates(
+                 range: lp3Ok, yearRange: lp3Ok, contribution: "1899-01-01")),
+        ]
+        for (label, payload) in lp3DateCases {
+            guard let payload else {
+                expect(false, "LP3: the \(label) fixture failed to decode")
+                continue
+            }
+            // `expectedYear: nil` matters: the helper defaults to "2033", and
+            // an all-time envelope would then be rejected by the requested-year
+            // gate before any date was looked at — which is exactly how the
+            // first version of these passed while the date validation was
+            // deleted.
+            lp3ExpectRejected(
+                label, lp3Envelope(year: nil, payload: payload, knownYears: ["2033"]),
+                expectedYear: nil)
+        }
+        // Control: the same all-time shape with every date well-formed is
+        // ACCEPTED, so the five rejections above cannot be passing on a
+        // validator that rejects every hand-built payload.
+        if let sane = lp3PayloadWithDates(
+            range: lp3Ok, yearRange: lp3Ok, contribution: "2033-01-01")
+        {
+            expect(
+                SnapshotStore.validate(
+                    lp3Envelope(year: nil, payload: sane, knownYears: ["2033"]),
+                    expectedYear: nil, identity: lp3Identity),
+                "LP3 control: a hand-built all-time payload with well-formed dates is accepted "
+                    + "— without this the malformed-date rejections would pass on a validator "
+                    + "that rejects everything hand-built")
+        } else {
+            expect(false, "LP3: the well-formed control fixture failed to decode")
+        }
+
+        // --- SnapshotStore: raw-file hazards — none may hang, follow, chmod, ---
+        // --- or mutate the external object.                                 ---
+
+        let lp3CorruptDir = lp3TempDir("corrupt")
+        lp3PrepareDir(lp3CorruptDir)
+        try? Data("not json at all".utf8).write(
+            to: lp3CorruptDir.appendingPathComponent(lp3FileName))
+        let lp3CorruptBytes = SnapshotStore.readBytes(in: lp3CorruptDir)
+        let lp3CorruptDecoded = lp3CorruptBytes.flatMap {
+            try? lp3Decoder.decode(SnapshotEnvelope.self, from: $0)
+        }
+        expect(
+            lp3CorruptBytes != nil && lp3CorruptDecoded == nil,
+            "LP3: corrupt (non-JSON) bytes are read as bytes but fail to decode, so the cold "
+                + "fallback triggers at the decode step rather than a crash")
+
+        let lp3CapDir = lp3TempDir("cap")
+        lp3PrepareDir(lp3CapDir)
+        try? Data(repeating: 0x41, count: SnapshotStore.byteCap).write(
+            to: lp3CapDir.appendingPathComponent(lp3FileName))
+        expect(
+            SnapshotStore.readBytes(in: lp3CapDir)?.count == SnapshotStore.byteCap,
+            "LP3: a file at EXACTLY the byte cap is read in full")
+
+        let lp3OverCapDir = lp3TempDir("overcap")
+        lp3PrepareDir(lp3OverCapDir)
+        try? Data(repeating: 0x41, count: SnapshotStore.byteCap + 1).write(
+            to: lp3OverCapDir.appendingPathComponent(lp3FileName))
+        expect(
+            SnapshotStore.readBytes(in: lp3OverCapDir) == nil,
+            "LP3: a file one byte over the cap is rejected rather than truncated")
+
+        let lp3SymlinkFileDir = lp3TempDir("symlink-file")
+        lp3PrepareDir(lp3SymlinkFileDir)
+        let lp3SymlinkTarget = lp3TempDir("symlink-target")
+        lp3PrepareDir(lp3SymlinkTarget)
+        try? Data("target contents".utf8).write(
+            to: lp3SymlinkTarget.appendingPathComponent("real.json"))
+        _ = symlink(
+            lp3SymlinkTarget.appendingPathComponent("real.json").path,
+            lp3SymlinkFileDir.appendingPathComponent(lp3FileName).path)
+        expect(
+            SnapshotStore.readBytes(in: lp3SymlinkFileDir) == nil,
+            "LP3: a symlink where the snapshot file should be is rejected, not followed")
+
+        let lp3SymlinkDirParent = lp3TempDir("symlink-dir-parent")
+        let lp3SymlinkDirTarget = lp3TempDir("symlink-dir-target")
+        lp3PrepareDir(lp3SymlinkDirTarget)
+        _ = symlink(lp3SymlinkDirTarget.path, lp3SymlinkDirParent.path)
+        let lp3SymlinkDirRejectsRead = SnapshotStore.readBytes(in: lp3SymlinkDirParent) == nil
+        let lp3SymlinkDirRejectsWrite =
+            !SnapshotStore.write(Data("x".utf8), in: lp3SymlinkDirParent)
+        expect(
+            lp3SymlinkDirRejectsRead && lp3SymlinkDirRejectsWrite,
+            "LP3: a symlinked app directory is rejected for both read and write, not followed "
+                + "(O_NOFOLLOW constrains only the final path component, and the app directory "
+                + "itself IS that final component)")
+
+        let lp3FifoDir = lp3TempDir("fifo")
+        lp3PrepareDir(lp3FifoDir)
+        _ = mkfifo(lp3FifoDir.appendingPathComponent(lp3FileName).path, 0o600)
+        expect(
+            SnapshotStore.readBytes(in: lp3FifoDir) == nil,
+            "LP3: a FIFO where the snapshot file should be is rejected without blocking on it "
+                + "(O_NONBLOCK on the open makes this provable rather than assumed)")
+
+        let lp3DirInPlaceDir = lp3TempDir("dir-in-place")
+        lp3PrepareDir(lp3DirInPlaceDir)
+        try? FileManager.default.createDirectory(
+            at: lp3DirInPlaceDir.appendingPathComponent(lp3FileName),
+            withIntermediateDirectories: true)
+        expect(
+            SnapshotStore.readBytes(in: lp3DirInPlaceDir) == nil,
+            "LP3: a directory where the snapshot file should be is rejected")
+
+        // "Wrong owner" cannot be reproduced without root in this environment
+        // (chown to another uid requires privilege this sandbox does not have);
+        // "wrong mode" IS reproducible and is the sibling half of the same
+        // defense — a group/world-accessible app directory must be rejected
+        // for both read and write, the same as a symlinked one.
+        let lp3LooseModeDir = lp3TempDir("loose-mode")
+        lp3PrepareDir(lp3LooseModeDir, mode: 0o755)
+        expect(
+            SnapshotStore.readBytes(in: lp3LooseModeDir) == nil
+                && !SnapshotStore.write(Data("x".utf8), in: lp3LooseModeDir),
+            "LP3: a group/world-accessible app directory (not owner-only 0700) is rejected for "
+                + "both read and write")
+
+        // --- Allowlist: the encoded recursive key set, exactly ---
+
+        let lp3AllowlistEnvelope = lp3Envelope(year: "2035")
+        let lp3AllowlistJSON =
+            (try? JSONSerialization.jsonObject(with: lp3Encode(lp3AllowlistEnvelope)))
+                as? [String: Any]
+        func lp3CollectKeys(_ value: Any, parentKey: String?, into set: inout Set<String>) {
+            if let dict = value as? [String: Any] {
+                // `turnsByClient`'s own keys are client ids — DATA, not schema
+                // field names — so only its field name (recorded by the
+                // parent below) belongs in the allowlist, not its contents'
+                // dynamic keys. Every other nested dict is a fixed-shape
+                // struct and recurses normally.
+                if parentKey == "turnsByClient" {
+                    for v in dict.values { lp3CollectKeys(v, parentKey: nil, into: &set) }
+                    return
+                }
+                for (key, v) in dict {
+                    set.insert(key)
+                    lp3CollectKeys(v, parentKey: key, into: &set)
+                }
+            } else if let array = value as? [Any] {
+                for v in array { lp3CollectKeys(v, parentKey: parentKey, into: &set) }
+            }
+        }
+        var lp3ActualKeys: Set<String> = []
+        if let lp3AllowlistJSON { lp3CollectKeys(lp3AllowlistJSON, parentKey: nil, into: &lp3ActualKeys) }
+        let lp3ExpectedKeys: Set<String> = [
+            "snapshotSchemaVersion", "bundleIdentifier", "shortVersion", "buildNumber", "savedAt",
+            "selectedYear", "payload", "knownYears",
+            "meta", "generatedAt", "version", "dateRange", "start", "end",
+            "summary", "totalTokens", "totalCost", "totalDays", "activeDays", "averagePerDay",
+            "maxCostInSingleDay", "clients", "models",
+            "years", "year", "range",
+            "contributions", "date", "totals", "tokens", "cost", "messages", "intensity",
+            "tokenBreakdown", "input", "output", "cacheRead", "cacheWrite", "reasoning",
+            "client", "modelId", "providerId", "turnsByClient",
+        ]
+        expect(
+            !lp3ActualKeys.isEmpty && lp3ActualKeys == lp3ExpectedKeys,
+            "LP3: the encoded snapshot's recursive key set is EXACTLY the allowlist — every "
+                + "extra key means a persisted type stopped being explicit about its "
+                + "CodingKeys, and every missing one means this list is stale (mutation: adding "
+                + "a stored property to any persisted graph type without adding it here)")
+
+        // --- SnapshotWriter: capture-sequence ordering and content dedup ---
+
+        let lp3WriterDir = lp3TempDir("writer-order")
+        let lp3WEnvelopeB = lp3Envelope(year: "2043", savedAt: Date(timeIntervalSince1970: 2_000))
+        // A DIFFERENT year than B, on purpose: same-content-different-savedAt
+        // would also be caught by the digest dedup, which would make this
+        // assertion pass even without the sequence guard under test —
+        // content that genuinely differs isolates the sequence check alone.
+        let lp3WEnvelopeAOlder =
+            lp3Envelope(year: "2098", savedAt: Date(timeIntervalSince1970: 1_000))
+        let lp3WEnvelopeBAgain =
+            lp3Envelope(year: "2043", savedAt: Date(timeIntervalSince1970: 3_000))
+        let lp3WEnvelopeC = lp3Envelope(year: "2044", savedAt: Date(timeIntervalSince1970: 4_000))
+        let lp3WEnvelopeStaleAfterSkip =
+            lp3Envelope(year: "2045", savedAt: Date(timeIntervalSince1970: 5_000))
+        let lp3WEnvelopeFailAttempt =
+            lp3Envelope(year: "2046", savedAt: Date(timeIntervalSince1970: 6_000))
+        let lp3WEnvelopeAfterFail =
+            lp3Envelope(year: "2047", savedAt: Date(timeIntervalSince1970: 7_000))
+        let lp3WriterChecks = awaitValue { () async -> [String: Bool] in
+            var results: [String: Bool] = [:]
+            func bytesNow() -> Data? { SnapshotStore.readBytes(in: lp3WriterDir) }
+
+            await SnapshotWriter.shared.submit(
+                sequence: 2, envelope: lp3WEnvelopeB, directory: lp3WriterDir)
+            let afterB = bytesNow()
+            results["newerWrote"] = afterB != nil
+
+            // An older sequence, even with DIFFERENT content, is rejected —
+            // the file must still hold B's content untouched.
+            await SnapshotWriter.shared.submit(
+                sequence: 1, envelope: lp3WEnvelopeAOlder, directory: lp3WriterDir)
+            results["staleOlderRejected"] = bytesNow() == afterB
+
+            // Identical canonical content (savedAt differs) at a NEWER
+            // sequence must not write again.
+            await SnapshotWriter.shared.submit(
+                sequence: 3, envelope: lp3WEnvelopeBAgain, directory: lp3WriterDir)
+            results["digestSkipDidNotWrite"] = bytesNow() == afterB
+
+            // A real content change at a newer sequence DOES write.
+            await SnapshotWriter.shared.submit(
+                sequence: 4, envelope: lp3WEnvelopeC, directory: lp3WriterDir)
+            let afterC = bytesNow()
+            results["realChangeWrote"] = afterC != nil && afterC != afterB
+
+            // The mark advanced to 3 on the digest-skip above; sequence 3
+            // arriving again (older than the current mark of 4) is rejected.
+            await SnapshotWriter.shared.submit(
+                sequence: 3, envelope: lp3WEnvelopeStaleAfterSkip, directory: lp3WriterDir)
+            results["staleAfterDigestSkipRejected"] = bytesNow() == afterC
+
+            // The mark also advances on a FAILED write: deny write permission
+            // on the directory (read/execute only) so the temp file cannot be
+            // created, submit a real content change at sequence 5 (fails),
+            // restore permission, then confirm an OLDER sequence is rejected
+            // purely by the now-advanced mark rather than being let through
+            // because the write at 5 never actually landed.
+            _ = chmod(lp3WriterDir.path, 0o500)
+            await SnapshotWriter.shared.submit(
+                sequence: 5, envelope: lp3WEnvelopeFailAttempt, directory: lp3WriterDir)
+            _ = chmod(lp3WriterDir.path, 0o700)
+            results["failedWriteLeftPreviousContent"] = bytesNow() == afterC
+
+            await SnapshotWriter.shared.submit(
+                sequence: 4, envelope: lp3WEnvelopeAfterFail, directory: lp3WriterDir)
+            results["staleAfterFailedWriteRejected"] = bytesNow() == afterC
+            return results
+        } ?? [:]
+        try? FileManager.default.removeItem(at: lp3WriterDir)
+
+        expect(
+            lp3WriterChecks["newerWrote"] == true && lp3WriterChecks["realChangeWrote"] == true,
+            "LP3 writer: real content changes at increasing sequences really do write — "
+                + "without this the rejection assertions below could pass on writes that never "
+                + "happened in the first place")
+        expect(
+            lp3WriterChecks["staleOlderRejected"] == true,
+            "LP3 writer: a delayed OLDER capture cannot replace a newer one")
+        expect(
+            lp3WriterChecks["digestSkipDidNotWrite"] == true,
+            "LP3 writer: identical complete content at a newer sequence is deduplicated, not "
+                + "rewritten")
+        expect(
+            lp3WriterChecks["staleAfterDigestSkipRejected"] == true,
+            "LP3 writer: the high-water mark advances on a digest-skip outcome, so a delayed "
+                + "capture older than the SKIPPED sequence is still rejected")
+        expect(
+            lp3WriterChecks["failedWriteLeftPreviousContent"] == true,
+            "LP3 writer: a write that fails (denied directory permission) leaves the previous "
+                + "valid snapshot on disk untouched")
+        expect(
+            lp3WriterChecks["staleAfterFailedWriteRejected"] == true,
+            "LP3 writer: the high-water mark advances on a FAILED write outcome too, so a "
+                + "delayed capture older than the failed sequence is still rejected")
+
+        // --- Isolation: the production directory must never be RESOLVED off ---
+        // --- a shipping identity. Every `swift run` invocation — which is    ---
+        // --- how --demo/--smoke/--selftest/--icon-gallery (and any combined  ---
+        // --- flags) all run — carries a nil `BuildIdentity`, since           ---
+        // --- `BuildIdentity.shipping()` requires the real bundle identifier. ---
+        // --- So this exercises the actual gating mechanism directly: a nil   ---
+        // --- identity, whatever produced it.                                ---
+
+        final class LP3DirectorySpy: @unchecked Sendable {
+            private(set) var resolvedCount = 0
+            private let directory: URL
+            init(directory: URL) { self.directory = directory }
+            func resolve() -> URL? {
+                resolvedCount += 1
+                return directory
+            }
+        }
+        let lp3SpyOff = LP3DirectorySpy(directory: lp3TempDir("spy-off"))
+        _ = awaitMainActorValue { () -> Bool in
+            _ = DashboardModel(
+                cachesSnapshot: true, initialYear: "2099",
+                buildIdentity: nil, snapshotDirectory: lp3SpyOff.resolve())
+            return true
+        }
+        expect(
+            lp3SpyOff.resolvedCount == 0,
+            "LP3 isolation: with no shipping identity the production snapshot directory is "
+                + "never even RESOLVED, not merely unwritten (mutation: hoisting the "
+                + "`snapshotDirectory()` call ahead of the `buildIdentity != nil` check)")
+
+        // The block above assumed in prose that every non-user mode yields a nil
+        // identity. It did not: `shipping()` looked at the bundle identifier
+        // alone, and `scripts/bundle.sh` stamps the production one by default,
+        // so running `--selftest` on a release bundle — an ordinary way to check
+        // one — left fixture-backed models resolving the real directory. The
+        // assumption is a predicate now, and these assert it.
+        expect(
+            BuildIdentity.nonUserRuntimeFlags.sorted()
+                == ["--demo", "--icon-gallery", "--selftest", "--smoke"],
+            "LP3 isolation: the non-user runtime set is exactly the four modes the spy "
+                + "above depends on")
+        // Supply the production bundle triple explicitly. Under `swift run`
+        // there is no bundle, so overriding only `arguments` would leave every
+        // call nil for the bundle reason and the flag check untested — that
+        // mutation survived before this was written.
+        func lp3ShippingIdentity(_ args: [String]) -> BuildIdentity? {
+            BuildIdentity.shipping(
+                arguments: args,
+                bundleIdentifier: "com.nyanako.tokenbar",
+                shortVersion: "1.2.3", buildNumber: "456")
+        }
+        expect(
+            lp3ShippingIdentity(["/Applications/TokenBar.app"]) != nil,
+            "LP3 isolation control: the production bundle triple with no non-user flag DOES "
+                + "yield an identity — without this every assertion below would pass on a "
+                + "function that always returns nil")
+        for flag in BuildIdentity.nonUserRuntimeFlags {
+            expect(
+                lp3ShippingIdentity(["/Applications/TokenBar.app", flag]) == nil,
+                "LP3 isolation: \(flag) yields no shipping identity even on a production "
+                    + "bundle, so no production snapshot path exists for a fixture model")
+        }
+        expect(
+            lp3ShippingIdentity(["/Applications/TokenBar.app", "--demo", "--selftest"]) == nil,
+            "LP3 isolation: combined non-user flags still yield no shipping identity")
+        expect(
+            !BuildIdentity.isNonUserRuntime(["/Applications/TokenBar.app"]),
+            "LP3 isolation control: an ordinary launch is NOT classified as a non-user "
+                + "runtime — without this the assertions above would pass on a predicate "
+                + "that always returns true")
+
+        let lp3SpyOn = LP3DirectorySpy(directory: lp3TempDir("spy-on"))
+        _ = awaitMainActorValue { () -> Bool in
+            _ = DashboardModel(
+                cachesSnapshot: true, initialYear: "2099",
+                buildIdentity: lp3Identity, snapshotDirectory: lp3SpyOn.resolve())
+            return true
+        }
+        expect(
+            lp3SpyOn.resolvedCount == 1,
+            "LP3 isolation control: WITH a shipping identity the directory genuinely is "
+                + "resolved exactly once — without this control the assertion above could pass "
+                + "on an autoclosure that is never evaluated under any circumstance")
+
+        // --- DashboardModel: disk restore, the requested-year gate, and ---
+        // --- ApplyResult's ownership of the restored-age indicator.     ---
+
+        let lp3DiskChecks = awaitMainActorValue { () async -> [String: Bool] in
+            var results: [String: Bool] = [:]
+
+            let diskDir = lp3TempDir("disk-restore")
+            let diskYear = "2036"
+            let diskEnvelope = lp3Envelope(year: diskYear)
+            _ = SnapshotStore.write(lp3Encode(diskEnvelope), in: diskDir)
+            let diskModel = DashboardModel(
+                cachesSnapshot: true, source: ControlledTurnUsageDataSource(),
+                initialYear: diskYear, buildIdentity: lp3Identity, snapshotDirectory: diskDir)
+            if case .ready = diskModel.phase { results["diskRestoreReady"] = true }
+            else { results["diskRestoreReady"] = false }
+            results["diskRestorePayloadMatches"] =
+                diskModel.payload?.meta.generatedAt == diskEnvelope.payload.meta.generatedAt
+            results["diskRestoreYearMatches"] = diskModel.year == diskYear
+            results["diskRestoreNoModel"] =
+                diskModel.payload != nil && diskModel.modelReport == nil
+
+            // The SAME disk snapshot must not surface for a different
+            // requested year — the requested-year gate, exercised through the
+            // full DashboardModel path rather than `validate()` alone.
+            let mismatchModel = DashboardModel(
+                cachesSnapshot: true, source: ControlledTurnUsageDataSource(),
+                initialYear: "2037", buildIdentity: lp3Identity, snapshotDirectory: diskDir)
+            if case .loading = mismatchModel.phase { results["yearGateRejectsMismatch"] = true }
+            else { results["yearGateRejectsMismatch"] = false }
+
+            // ApplyResult: a redirect (empty-year branch) must not clear the
+            // restored age, and the spawned unfiltered reload it triggers
+            // shows kind `.yearSwitch` on the header indicator while it runs
+            // — this is also the "empty-year auto-clear reload" indicator case.
+            let redirectDir = lp3TempDir("redirect")
+            let redirectYear = "2038"
+            let redirectEnvelope = lp3Envelope(year: redirectYear)
+            _ = SnapshotStore.write(lp3Encode(redirectEnvelope), in: redirectDir)
+            let redirectSource = ControlledTurnUsageDataSource()
+            let redirectModel = DashboardModel(
+                cachesSnapshot: true, source: redirectSource, initialYear: redirectYear,
+                buildIdentity: lp3Identity, snapshotDirectory: redirectDir)
+            results["redirectRestored"] = redirectModel.restoredSnapshot != nil
+            await redirectSource.blockGraph(year: nil)
+            // Force the requested-year fetch to return a payload for an
+            // unrelated year, so `apply()` takes the empty-year branch
+            // instead of committing — the real scenario is logs for the
+            // selected year having been deleted or moved.
+            await redirectSource.forceNextGraphPayload(DemoData.payload(for: "1999"))
+            await redirectModel.load()
+            results["redirectDidNotCommit"] = redirectModel.restoredSnapshot != nil
+            results["redirectClearedYear"] = redirectModel.year == nil
+            let redirectSpawnedYearSwitch = await waitUntil {
+                await MainActor.run { redirectModel.backgroundRefresh?.kind == .yearSwitch }
+            }
+            results["redirectSpawnedYearSwitchKind"] = redirectSpawnedYearSwitch
+            await redirectSource.releaseGraph(year: nil)
+            let redirectApplied = await waitUntil {
+                await MainActor.run { redirectModel.restoredSnapshot == nil }
+            }
+            results["redirectEventuallyApplied"] = redirectApplied
+
+            return results
+        } ?? [:]
+
+        expect(
+            lp3DiskChecks["diskRestoreReady"] == true
+                && lp3DiskChecks["diskRestorePayloadMatches"] == true
+                && lp3DiskChecks["diskRestoreYearMatches"] == true,
+            "LP3: a valid disk snapshot restores to .ready with the matching payload and year")
+        expect(
+            lp3DiskChecks["diskRestoreNoModel"] == true,
+            "LP3: a disk restore never carries a model report — the model report is not "
+                + "persisted, so it is always re-requested")
+        expect(
+            lp3DiskChecks["yearGateRejectsMismatch"] == true,
+            "LP3: the requested-year gate rejects a disk snapshot written for a different year "
+                + "than the one this process wants, through the full DashboardModel path")
+        expect(
+            lp3DiskChecks["redirectRestored"] == true,
+            "LP3: the redirect fixture really restores a snapshot with an age to clear — "
+                + "without this the assertions below could pass on nothing being displayed")
+        expect(
+            lp3DiskChecks["redirectDidNotCommit"] == true
+                && lp3DiskChecks["redirectClearedYear"] == true,
+            "LP3: an empty-year redirect does not clear the restored age (only `.applied` "
+                + "does), even though it does clear the year filter")
+        expect(
+            lp3DiskChecks["redirectSpawnedYearSwitchKind"] == true,
+            "LP3: the reload apply() spawns for an emptied year filter shows as the "
+                + "`.yearSwitch` kind on the header indicator")
+        expect(
+            lp3DiskChecks["redirectEventuallyApplied"] == true,
+            "LP3: the spawned unfiltered reload eventually commits and THAT clears the "
+                + "restored age — a redirect defers settling, it does not abandon it")
+
+        // --- DashboardModel: the restore gate, both true task orderings ---
+        // --- (model-task-first without `load()` ever having run first). ---
+
+        let lp3GateChecks = awaitMainActorValue { () async -> [String: Bool] in
+            var results: [String: Bool] = [:]
+
+            let gateDir = lp3TempDir("gate-order")
+            let gateYear = "2039"
+            _ = SnapshotStore.write(lp3Encode(lp3Envelope(year: gateYear)), in: gateDir)
+            let gateSource = ControlledTurnUsageDataSource()
+            let gateModel = DashboardModel(
+                cachesSnapshot: true, source: gateSource, initialYear: gateYear,
+                buildIdentity: lp3Identity, snapshotDirectory: gateDir)
+            results["gateRestoredWithoutModel"] =
+                gateModel.payload != nil && gateModel.modelReport == nil
+            await gateSource.blockGraph(year: gateYear)
+            // `ensureModelData` is called BEFORE `load()` is ever invoked on
+            // this model — true model-task-first ordering. Without the
+            // restore gate, `modelSliceIsCommitted` is already true (restored
+            // payload, year matches) and `graphLoadTask` is nil (nothing has
+            // called `gatedGraph` yet), so the old code fell straight through
+            // every guard and scanned immediately.
+            let gateLens = Task { await gateModel.ensureModelData(for: .overview) }
+            let gateRaced = await waitUntil { await gateSource.modelCallCount() > 0 }
+            results["gateModelTaskFirstDidNotRace"] = !gateRaced
+            // A DIFFERENT caller (not the one awaiting the gate) is what
+            // finally calls load() — proving the gate is fulfilled by ANY
+            // settling fetch, not only one the waiter itself started.
+            let gateLoad = Task { await gateModel.load() }
+            _ = await waitUntil { await gateSource.hasPendingGraph(year: gateYear) }
+            await gateSource.releaseGraph(year: gateYear)
+            await gateLoad.value
+            await gateLens.value
+            results["gateModelArrivedAfterLoad"] = gateModel.modelReport != nil
+
+            // The failure side of the same ordering: the FIRST graph fetch a
+            // restored-without-a-current-model dashboard ever runs fails, so
+            // zero model calls should ever be issued for it.
+            let gateFailDir = lp3TempDir("gate-order-fail")
+            let gateFailYear = "2040"
+            _ = SnapshotStore.write(lp3Encode(lp3Envelope(year: gateFailYear)), in: gateFailDir)
+            let gateFailSource = ControlledTurnUsageDataSource()
+            let gateFailModel = DashboardModel(
+                cachesSnapshot: true, source: gateFailSource, initialYear: gateFailYear,
+                buildIdentity: lp3Identity, snapshotDirectory: gateFailDir)
+            let gateFailLens = Task { await gateFailModel.ensureModelData(for: .overview) }
+            await gateFailSource.failNextGraph()
+            await gateFailModel.load()
+            await gateFailLens.value
+            results["gateFailureIssuedNoScan"] = await gateFailSource.modelCallCount() == 0
+
+            return results
+        } ?? [:]
+
+        expect(
+            lp3GateChecks["gateRestoredWithoutModel"] == true,
+            "LP3: the gate fixture really restores a payload without a current model — "
+                + "without this the race assertions below could pass on a slice with nothing "
+                + "to gate")
+        expect(
+            lp3GateChecks["gateModelTaskFirstDidNotRace"] == true,
+            "LP3: calling ensureModelData BEFORE load() has ever run on a restored model does "
+                + "not race the graph — the restore gate blocks it even with graphLoadTask nil")
+        expect(
+            lp3GateChecks["gateModelArrivedAfterLoad"] == true,
+            "LP3: the gated model request still receives its report once ANY caller's load() "
+                + "settles the slice")
+        expect(
+            lp3GateChecks["gateFailureIssuedNoScan"] == true,
+            "LP3: a restored model whose first-ever graph fetch fails issues zero model calls")
+
+        // --- Header indicator ownership: only the owning token clears ---
+        // --- `backgroundRefresh`, so an overtaken fetch's completion  ---
+        // --- (success or failure) can never clear a NEWER indicator.  ---
+
+        let lp3IndicatorChecks = awaitMainActorValue { () async -> [String: Bool] in
+            var results: [String: Bool] = [:]
+
+            func settle() async { for _ in 0..<50 { await Task.yield() } }
+
+            // initial → manual overtake.
+            let indASource = ControlledTurnUsageDataSource()
+            let indAYear = "2041"
+            let indAModel = DashboardModel(source: indASource, initialYear: indAYear)
+            await indASource.blockGraph(year: indAYear)
+            let indALoad = Task { await indAModel.load() }
+            _ = await waitUntil { await indASource.pendingGraphCount(year: indAYear) == 1 }
+            results["indAInitialKind"] = indAModel.backgroundRefresh?.kind == .initial
+            let indARefresh = Task { await indAModel.refresh() }
+            _ = await waitUntil { await indASource.pendingGraphCount(year: indAYear) == 2 }
+            results["indAManualKind"] = indAModel.backgroundRefresh?.kind == .manual
+            // The OLDER (initial) fetch settles first — must not clear the
+            // manual indicator that overtook it.
+            await indASource.releaseGraph(year: indAYear, index: 0, day: 1)
+            await settle()
+            results["indAOlderSuccessDidNotClear"] = indAModel.backgroundRefresh?.kind == .manual
+            await indASource.releaseGraph(year: indAYear, index: 0, day: 3)
+            await indALoad.value
+            await indARefresh.value
+            results["indAClearedAfterSettle"] = indAModel.backgroundRefresh == nil
+
+            // initial → year-switch overtake, same ownership shape.
+            let indBSource = ControlledTurnUsageDataSource()
+            let indBYear = "2049"
+            let indBModel = DashboardModel(source: indBSource, initialYear: indBYear)
+            await indBSource.blockGraph(year: indBYear)
+            let indBLoad = Task { await indBModel.load() }
+            _ = await waitUntil { await indBSource.pendingGraphCount(year: indBYear) == 1 }
+            results["indBInitialKind"] = indBModel.backgroundRefresh?.kind == .initial
+            await indBSource.blockGraph(year: "2050")
+            let indBSwitch = Task { await indBModel.setYear("2050") }
+            _ = await waitUntil { await indBSource.hasPendingGraph(year: "2050") }
+            results["indBYearSwitchKind"] = indBModel.backgroundRefresh?.kind == .yearSwitch
+            // The OLDER (initial, year 2049) fetch settles — must not clear
+            // the year-switch indicator for the NEW year.
+            await indBSource.releaseGraph(year: indBYear)
+            await settle()
+            results["indBOlderDidNotClear"] = indBModel.backgroundRefresh?.kind == .yearSwitch
+            await indBSource.releaseGraph(year: "2050")
+            await indBLoad.value
+            await indBSwitch.value
+            results["indBClearedAfterSettle"] = indBModel.backgroundRefresh == nil
+
+            // A superseded FAILURE must not clear a newer indicator either.
+            let indCSource = ControlledTurnUsageDataSource()
+            let indCYear = "2042"
+            let indCModel = DashboardModel(source: indCSource, initialYear: indCYear)
+            await indCSource.blockGraph(year: indCYear)
+            let indCLoad = Task { await indCModel.load() }
+            _ = await waitUntil { await indCSource.pendingGraphCount(year: indCYear) == 1 }
+            let indCRefresh = Task { await indCModel.refresh() }
+            _ = await waitUntil { await indCSource.pendingGraphCount(year: indCYear) == 2 }
+            results["indCManualKindBeforeFailure"] = indCModel.backgroundRefresh?.kind == .manual
+            // Fail specifically the OLDER (index 0) parked fetch, leaving the
+            // newer (manual) one still in flight.
+            await indCSource.failGraph(year: indCYear, index: 0)
+            await settle()
+            results["indCFailureDidNotClearManual"] =
+                indCModel.backgroundRefresh?.kind == .manual
+            await indCSource.releaseGraph(year: indCYear, index: 0, day: 5)
+            await indCLoad.value
+            await indCRefresh.value
+            results["indCClearedAfterSettle"] = indCModel.backgroundRefresh == nil
+
+            return results
+        } ?? [:]
+
+        expect(
+            lp3IndicatorChecks["indAInitialKind"] == true
+                && lp3IndicatorChecks["indAManualKind"] == true,
+            "LP3 indicator: the initial→manual fixture really tags each trigger's own kind "
+                + "before either settles")
+        expect(
+            lp3IndicatorChecks["indAOlderSuccessDidNotClear"] == true,
+            "LP3 indicator: an overtaken initial fetch's SUCCESS cannot clear a newer manual "
+                + "request's indicator")
+        expect(
+            lp3IndicatorChecks["indAClearedAfterSettle"] == true,
+            "LP3 indicator: the indicator clears once the OWNING (manual) fetch settles")
+        expect(
+            lp3IndicatorChecks["indBInitialKind"] == true
+                && lp3IndicatorChecks["indBYearSwitchKind"] == true,
+            "LP3 indicator: the initial→year-switch fixture really tags each trigger's own kind")
+        expect(
+            lp3IndicatorChecks["indBOlderDidNotClear"] == true
+                && lp3IndicatorChecks["indBClearedAfterSettle"] == true,
+            "LP3 indicator: an overtaken initial fetch cannot clear a newer year-switch "
+                + "request's indicator, which clears on its own settling")
+        expect(
+            lp3IndicatorChecks["indCManualKindBeforeFailure"] == true,
+            "LP3 indicator: the superseded-failure fixture really has a newer manual request "
+                + "in flight when the older one is failed")
+        expect(
+            lp3IndicatorChecks["indCFailureDidNotClearManual"] == true
+                && lp3IndicatorChecks["indCClearedAfterSettle"] == true,
+            "LP3 indicator: an overtaken fetch's FAILURE cannot clear a newer request's "
+                + "indicator either — ownership applies to both settlement routes")
 
         if failures > 0 {
             print("\(failures) selftest check(s) failed")

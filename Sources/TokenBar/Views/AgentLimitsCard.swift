@@ -17,6 +17,16 @@ struct AgentLimitsCard: View {
     let clients: [String]
     let trace: [TraceBucket]
     let agentUsage: AgentUsagePayload?
+    /// Whether the first quota fetch has finished, successfully or not.
+    ///
+    /// `agentUsage == nil` cannot tell "the first attempt is still in flight"
+    /// from "the attempt finished and produced nothing", and the empty copy
+    /// below asserts the second. Restoring a dashboard from disk makes that
+    /// distinction visible: quota is deliberately never persisted (it carries
+    /// account identity), so the graph renders instantly while these cards wait
+    /// on their own poller. Defaults to true so call sites that always have a
+    /// settled answer stay unchanged.
+    var usageAttempted = true
     var title = "Agent limits"
     var note = "OAuth quota"
     /// When true, show only the passed `clients` (single-client view) instead
@@ -197,7 +207,19 @@ struct AgentLimitsCard: View {
                         opencodeSubs.joined(separator: " · ")))
             }
             let visible = visibleClients
-            if visible.isEmpty {
+            if visible.isEmpty, !usageAttempted {
+                // Say "still asking" rather than "none": claiming no supported
+                // agents while the first request is outstanding is a false
+                // answer, not an empty one.
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Checking agent limits…".localized)
+                }
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 8)
+            } else if visible.isEmpty {
                 Text(
                     opencodeView && !opencodeSubs.isEmpty
                         ? "Subscriptions: %@".localized(
@@ -558,6 +580,17 @@ struct AgentLimitsCard: View {
                     ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
     }
 
+    /// What a row with no quota value should say.
+    ///
+    /// "No data" asserts the provider was asked and had nothing. Before the
+    /// first fetch settles that is a false answer: the client list comes from
+    /// the graph payload, which a disk restore brings back instantly, so every
+    /// row renders while quota is still outstanding. Quota is deliberately
+    /// never persisted, so this window exists on every relaunch.
+    private var placeholderValueLabel: String {
+        usageAttempted ? "No data".localized : "Checking…".localized
+    }
+
     private func placeholderRow(_ label: String, brand: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack {
@@ -565,14 +598,14 @@ struct AgentLimitsCard: View {
                     .font(.caption2.weight(.medium))
                 Spacer()
                 if classic {
-                    Text("No data")
+                    Text(placeholderValueLabel)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
             }
             bar(fillPercent: 0, color: Color(hex: brand), paceLeft: nil, paceIsDeficit: false)
             if !classic {
-                Text("No data")
+                Text(placeholderValueLabel)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }

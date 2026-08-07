@@ -15,6 +15,8 @@ struct OverviewView: View {
     let colors: ModelColorMap
     let trace: [TraceBucket]
     let agentUsage: AgentUsagePayload?
+    /// Forwarded to AgentLimitsCard; see its `usageAttempted` doc.
+    var usageAttempted = true
     /// Set when this view shows a single client's slice.
     var singleClient: String?
     /// Dashboard year filter (nil = all time), forwarded to the chart card.
@@ -40,6 +42,7 @@ struct OverviewView: View {
                 if limitsEnabled && !hiddenLimits.contains(singleClient) {
                     AgentLimitsCard(
                         clients: [singleClient], trace: trace, agentUsage: agentUsage,
+                        usageAttempted: usageAttempted,
                         title: "%@ limits".localized(name),
                         note: "Session / weekly / model limits",
                         restrict: true)
@@ -53,6 +56,7 @@ struct OverviewView: View {
                 if limitsEnabled {
                     AgentLimitsCard(
                         clients: clientIds, trace: trace, agentUsage: agentUsage,
+                        usageAttempted: usageAttempted,
                         reorderable: true)
                 }
                 UsageTraceCard(buckets: trace, windowSecs: 600, hidden: hidden)

@@ -18,7 +18,18 @@ extension Int64 {
     }
 }
 
-public struct TokenBreakdown: Decodable, Sendable {
+public struct TokenBreakdown: Codable, Sendable {
+        // Explicit rather than synthesised: LP3 writes these values to disk, and a
+        // synthesised `Encodable` would silently persist any field added later.
+        // Adding a property here without deciding its persistence fails the
+        // recursive exact-key test instead of leaking it.
+    enum CodingKeys: String, CodingKey {
+        case input
+        case output
+        case cacheRead
+        case cacheWrite
+        case reasoning
+    }
     public let input: Int64
     public let output: Int64
     public let cacheRead: Int64
@@ -38,7 +49,19 @@ public struct TokenBreakdown: Decodable, Sendable {
     }
 }
 
-public struct ContributionClient: Decodable, Sendable {
+public struct ContributionClient: Codable, Sendable {
+        // Explicit rather than synthesised: LP3 writes these values to disk, and a
+        // synthesised `Encodable` would silently persist any field added later.
+        // Adding a property here without deciding its persistence fails the
+        // recursive exact-key test instead of leaking it.
+    enum CodingKeys: String, CodingKey {
+        case client
+        case modelId
+        case providerId
+        case tokens
+        case cost
+        case messages
+    }
     public let client: String
     public let modelId: String
     public let providerId: String
@@ -47,8 +70,29 @@ public struct ContributionClient: Decodable, Sendable {
     public let messages: Int
 }
 
-public struct Contribution: Decodable, Sendable {
-    public struct Totals: Decodable, Sendable {
+public struct Contribution: Codable, Sendable {
+        // Explicit rather than synthesised: LP3 writes these values to disk, and a
+        // synthesised `Encodable` would silently persist any field added later.
+        // Adding a property here without deciding its persistence fails the
+        // recursive exact-key test instead of leaking it.
+    enum CodingKeys: String, CodingKey {
+        case date
+        case totals
+        case intensity
+        case tokenBreakdown
+        case clients
+        case turnsByClient
+    }
+    public struct Totals: Codable, Sendable {
+            // Explicit rather than synthesised: LP3 writes these values to disk, and a
+            // synthesised `Encodable` would silently persist any field added later.
+            // Adding a property here without deciding its persistence fails the
+            // recursive exact-key test instead of leaking it.
+        enum CodingKeys: String, CodingKey {
+            case tokens
+            case cost
+            case messages
+        }
         public let tokens: Int64
         public let cost: Double
         public let messages: Int
@@ -76,26 +120,77 @@ public struct Contribution: Decodable, Sendable {
     }
 }
 
-public struct DateRange: Decodable, Sendable {
+public struct DateRange: Codable, Sendable {
+        // Explicit rather than synthesised: LP3 writes these values to disk, and a
+        // synthesised `Encodable` would silently persist any field added later.
+        // Adding a property here without deciding its persistence fails the
+        // recursive exact-key test instead of leaking it.
+    enum CodingKeys: String, CodingKey {
+        case start
+        case end
+    }
     public let start: String
     public let end: String
 }
 
-public struct YearMeta: Decodable, Sendable {
+public struct YearMeta: Codable, Sendable {
+        // Explicit rather than synthesised: LP3 writes these values to disk, and a
+        // synthesised `Encodable` would silently persist any field added later.
+        // Adding a property here without deciding its persistence fails the
+        // recursive exact-key test instead of leaking it.
+    enum CodingKeys: String, CodingKey {
+        case year
+        case totalTokens
+        case totalCost
+        case range
+    }
     public let year: String
     public let totalTokens: Int64
     public let totalCost: Double
     public let range: DateRange
 }
 
-public struct UsagePayload: Decodable, Sendable {
-    public struct Meta: Decodable, Sendable {
+public struct UsagePayload: Codable, Sendable {
+        // Explicit rather than synthesised: LP3 writes these values to disk, and a
+        // synthesised `Encodable` would silently persist any field added later.
+        // Adding a property here without deciding its persistence fails the
+        // recursive exact-key test instead of leaking it.
+    enum CodingKeys: String, CodingKey {
+        case meta
+        case summary
+        case years
+        case contributions
+    }
+    public struct Meta: Codable, Sendable {
+            // Explicit rather than synthesised: LP3 writes these values to disk, and a
+            // synthesised `Encodable` would silently persist any field added later.
+            // Adding a property here without deciding its persistence fails the
+            // recursive exact-key test instead of leaking it.
+        enum CodingKeys: String, CodingKey {
+            case generatedAt
+            case version
+            case dateRange
+        }
         public let generatedAt: String
         public let version: String
         public let dateRange: DateRange
     }
 
-    public struct Summary: Decodable, Sendable {
+    public struct Summary: Codable, Sendable {
+            // Explicit rather than synthesised: LP3 writes these values to disk, and a
+            // synthesised `Encodable` would silently persist any field added later.
+            // Adding a property here without deciding its persistence fails the
+            // recursive exact-key test instead of leaking it.
+        enum CodingKeys: String, CodingKey {
+            case totalTokens
+            case totalCost
+            case totalDays
+            case activeDays
+            case averagePerDay
+            case maxCostInSingleDay
+            case clients
+            case models
+        }
         public let totalTokens: Int64
         public let totalCost: Double
         public let totalDays: Int

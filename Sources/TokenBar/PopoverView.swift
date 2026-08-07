@@ -304,6 +304,12 @@ struct PopoverView: View {
         .padding(.vertical, 12)
     }
 
+    private static let restoredAgeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter
+    }()
+
     /// Year filter for every lens — the Tauri HeaderBar's year select. "All"
     /// (nil) is the native default; concrete years come from the payloads
     /// seen so far.
@@ -368,25 +374,82 @@ struct PopoverView: View {
         .background(Color.primary.opacity(0.06))
     }
 
-    /// Manual refresh (also ⌘R): forces a full log re-read.
+    /// Manual refresh (also ⌘R), and the freshness signal for every other kind
+    /// of refresh.
+    ///
+    /// One control rather than a second indicator beside it: this corner already
+    /// renders a spinner for a manual refresh, so a background refresh reusing
+    /// it needs no new element and no new place for the eye to learn.
+    ///
+    /// Both kinds disable the button, so both render identically. An earlier
+    /// version left background refreshes clickable to allow pre-empting one by
+    /// hand; that made the same spinner appear at two different weights, since
+    /// a disabled plain button dims its label. Pressing Refresh during a scan
+    /// only supersedes it with another full scan anyway, so the consistency is
+    /// worth more than the interruption.
     private var refreshButton: some View {
         Button {
             Task { await model.refresh() }
         } label: {
-            if model.refreshing {
+            if model.refreshing || backgroundRefreshRunning {
                 ProgressView()
                     .controlSize(.small)
                     .frame(width: 16, height: 16)
             } else {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    // A restored dashboard whose refresh FAILED is the one state
+                    // where the data is stale and nothing is running to fix it.
+                    // Tinting the existing glyph says so without adding a
+                    // control; the age itself is in the tooltip.
+                    .foregroundStyle(showingStaleRestore ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
                     .frame(width: 16, height: 16)
             }
         }
         .buttonStyle(.plain)
-        .disabled(model.refreshing)
-        .help("Refresh usage data (⌘R)")
+        .disabled(refreshDisabled)
+        .help(refreshHelp)
+        // The SAME condition that drives the spinner and the disabled state.
+        // Keying the label on `backgroundRefreshRunning` alone announced
+        // "Refresh usage data" during a manual refresh, when the control is
+        // spinning and disabled — the opposite of what a screen reader user
+        // would be told by the visual state.
+        .accessibilityLabel(
+            model.refreshing || backgroundRefreshRunning
+                ? "Updating usage data".localized : "Refresh usage data".localized)
+    }
+
+    /// One source for the button's disabled state and the ⌘R shortcut, so the
+    /// keyboard path cannot outlive a restriction the visible control shows.
+    private var refreshDisabled: Bool {
+        model.refreshing || backgroundRefreshRunning
+    }
+
+    /// A graph fetch that the user did not start. `refreshing` already owns the
+    /// manual kind, so including it here would just double-count it.
+    private var backgroundRefreshRunning: Bool {
+        guard let refresh = model.backgroundRefresh else { return false }
+        return refresh.kind != .manual
+    }
+
+    /// Restored data still on screen after the live refresh failed.
+    private var showingStaleRestore: Bool {
+        model.restoredSnapshot?.failed == true
+    }
+
+    /// Built from localized format strings rather than interpolation.
+    ///
+    /// `.help` treats a String LITERAL as a `LocalizedStringKey` and translates
+    /// it for free; a computed `String` bypasses that entirely. Moving the
+    /// tooltip behind this property therefore silently turned it English for
+    /// every zh-Hant user until the keys below were added.
+    private var refreshHelp: String {
+        guard let restored = model.restoredSnapshot else {
+            return "Refresh usage data (⌘R)".localized
+        }
+        let age = Self.restoredAgeFormatter.localizedString(
+            for: restored.savedAt, relativeTo: Date())
+        return "Refresh usage data (⌘R) — showing data from %@".localized(age)
     }
 
     private var liveRateBadge: some View {
@@ -477,6 +540,7 @@ struct PopoverView: View {
                     modelReport: model.modelReport, modelLoading: model.modelLoading,
                     colors: model.colors,
                     trace: model.trace, agentUsage: model.agentUsage,
+                    usageAttempted: model.agentUsageAttempted,
                     singleClient: singleClient, year: model.year,
                     hidden: ClientRegistry.parseIdSet(hiddenRaw))
             case .models:
@@ -641,6 +705,19 @@ struct PopoverView: View {
         case "q":
             NSApp.terminate(nil)
         case "r":
+            // The same condition the button uses. Gating only the button left
+            // the shortcut able to launch a forced scan alongside a running
+            // background one: the ownership token stops the older result from
+            // committing, but it does not cancel the FFI work, so two full
+            // scans contend on the bounded pool while the control says it is
+            // disabled and updating.
+            //
+            // Gated here rather than inside `DashboardModel.refresh()` on
+            // purpose. Overlapping fetches are a capability the model must keep
+            // — several regressions drive `load()` and `refresh()` concurrently
+            // to prove the supersession rules — so the restriction belongs to
+            // the user-facing control, not to the API.
+            guard !refreshDisabled else { return true }
             Task { await model.refresh() }
         case "g":
             // Round 6, FIX 1: cycle order lives on `ChartView` (bars →

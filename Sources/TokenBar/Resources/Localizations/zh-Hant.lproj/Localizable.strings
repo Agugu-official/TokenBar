@@ -25,6 +25,9 @@
 "All" = "全部";
 "Filter usage by year" = "依年份篩選用量";
 "Refresh usage data (⌘R)" = "重新整理用量資料（⌘R）";
+"Refresh usage data" = "重新整理用量資料";
+"Refresh usage data (⌘R) — showing data from %@" = "重新整理用量資料（⌘R）— 顯示的是%@的資料";
+"Updating usage data" = "正在更新用量資料";
 "Loading usage…" = "正在載入用量…";
 "Loading…" = "載入中…";
 "Settings" = "設定";
@@ -43,8 +46,10 @@
 "No agent activity in this range" = "這個區間沒有 Agent 活動";
 "No activity in this window" = "這個時間窗內沒有活動";
 "No data" = "沒有資料";
+"Checking…" = "查詢中…";
 "No clients with usage data yet." = "目前沒有任何用戶端有用量資料。";
 "No supported agents yet" = "目前沒有支援的 Agent";
+"Checking agent limits…" = "正在查詢額度…";
 
 /* ===== 卡片標題 ===== */
 "Token Usage" = "Token 用量";
