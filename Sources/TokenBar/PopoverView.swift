@@ -409,8 +409,13 @@ struct PopoverView: View {
         .buttonStyle(.plain)
         .disabled(model.refreshing || backgroundRefreshRunning)
         .help(refreshHelp)
+        // The SAME condition that drives the spinner and the disabled state.
+        // Keying the label on `backgroundRefreshRunning` alone announced
+        // "Refresh usage data" during a manual refresh, when the control is
+        // spinning and disabled — the opposite of what a screen reader user
+        // would be told by the visual state.
         .accessibilityLabel(
-            backgroundRefreshRunning
+            model.refreshing || backgroundRefreshRunning
                 ? "Updating usage data".localized : "Refresh usage data".localized)
     }
 

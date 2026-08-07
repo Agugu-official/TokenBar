@@ -231,9 +231,48 @@ enum SnapshotStore {
         guard Set(envelope.payload.years.map(\.year)).isSubset(of: Set(envelope.knownYears))
         else { return false }
 
+        // Every persisted civil date, not only the ones a year filter covers.
+        // An all-time snapshot skipped this entirely before, which is the shape
+        // a malformed file would take.
+        let range = envelope.payload.meta.dateRange
+        guard isBoundedCivilDate(range.start), isBoundedCivilDate(range.end),
+              range.start <= range.end
+        else { return false }
+        for year in envelope.payload.years {
+            guard isFourDigitYear(year.year),
+                  isBoundedCivilDate(year.range.start), isBoundedCivilDate(year.range.end),
+                  year.range.start <= year.range.end
+            else { return false }
+        }
+        for contribution in envelope.payload.contributions {
+            guard isBoundedCivilDate(contribution.date) else { return false }
+        }
+
         let age = now.timeIntervalSince(envelope.savedAt)
         guard age > -futureSkewAllowance, age < maxAge else { return false }
         return true
+    }
+
+    /// A `YYYY-MM-DD` date inside an era the rest of the app can compute on.
+    ///
+    /// `ISODay.init?` parses with `Int` and then multiplies — `era * 146097` on
+    /// a year like `9223372036854775807` overflows and TRAPS, so a malformed
+    /// file on disk could crash the dashboard at launch. Less extreme but still
+    /// huge spans make the streak computation walk an impractical number of
+    /// days. Bounding the era closes both, and it is the payload's own dates
+    /// that need it, not just the ones the year filter happens to cover.
+    static let earliestYear = 1970
+    static let latestYear = 2200
+
+    static func isBoundedCivilDate(_ value: String) -> Bool {
+        let parts = value.split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 3,
+              parts[0].count == 4, parts[1].count == 2, parts[2].count == 2,
+              value.allSatisfy({ $0 == "-" || ($0.isASCII && $0.isNumber) }),
+              let year = Int(parts[0]), let month = Int(parts[1]), let day = Int(parts[2])
+        else { return false }
+        return (earliestYear...latestYear).contains(year)
+            && (1...12).contains(month) && (1...31).contains(day)
     }
 
     private static func isFourDigitYear(_ value: String) -> Bool {
@@ -313,11 +352,21 @@ actor SnapshotWriter {
         /// a failed write must never poison the next real change into being
         /// silently dropped.
         var lastWrittenCanonicalBytes: Data?
+        /// When the file on disk was last stamped. Content dedup alone lets an
+        /// idle machine keep a byte-identical payload until `maxAge` rejects
+        /// it, restoring the blank startup this slice exists to remove — even
+        /// though every live fetch in between succeeded. Freshness is a
+        /// separate question from content identity.
+        var lastWrittenAt: Date?
     }
 
     private var states: [String: State] = [:]
 
     private static let canonicalDate = Date(timeIntervalSince1970: 0)
+    /// Re-stamp an unchanged snapshot no less often than this. Well inside
+    /// `SnapshotStore.maxAge`, and at roughly 117 KB it costs one write a week
+    /// on a machine with no new usage at all.
+    static let renewalInterval: TimeInterval = 60 * 60 * 24 * 7
     private static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -347,9 +396,17 @@ actor SnapshotWriter {
             payload: envelope.payload,
             knownYears: envelope.knownYears)
         guard let canonicalBytes = try? Self.encoder.encode(canonical) else { return }
-        guard canonicalBytes != state.lastWrittenCanonicalBytes else { return }
+        // Skip only when the content is unchanged AND the stamp is still fresh.
+        // Dedup on content alone would let an idle machine keep the same bytes
+        // past `maxAge`, at which point restore rejects a snapshot whose live
+        // fetches had all succeeded.
+        let stale = state.lastWrittenAt.map {
+            envelope.savedAt.timeIntervalSince($0) >= Self.renewalInterval
+        } ?? true
+        guard canonicalBytes != state.lastWrittenCanonicalBytes || stale else { return }
         guard let bytes = try? Self.encoder.encode(envelope) else { return }
         guard SnapshotStore.write(bytes, in: directory) else { return }
         state.lastWrittenCanonicalBytes = canonicalBytes
+        state.lastWrittenAt = envelope.savedAt
     }
 }

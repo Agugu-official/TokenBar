@@ -6989,6 +6989,93 @@ enum SelfTest {
             expect(false, "LP3: the hand-built foreign-contribution fixture failed to decode")
         }
 
+        // Malformed civil dates. `ISODay.init?` parses with `Int` and then
+        // multiplies, so `era * 146097` on an enormous year OVERFLOWS AND TRAPS
+        // — a file on disk could crash the dashboard at launch. An all-time
+        // snapshot skipped date checking entirely before, which is exactly the
+        // shape such a file would take, so these are all-time envelopes.
+        func lp3PayloadWithDates(
+            range: (String, String), yearRange: (String, String), contribution: String
+        ) -> UsagePayload? {
+            let json: [String: Any] = [
+                "meta": [
+                    "generatedAt": "2033-06-01T12:00:00Z", "version": "test",
+                    "dateRange": ["start": range.0, "end": range.1],
+                ],
+                "summary": [
+                    "totalTokens": 10, "totalCost": 1.0, "totalDays": 1, "activeDays": 1,
+                    "averagePerDay": 1.0, "maxCostInSingleDay": 1.0,
+                    "clients": ["codex"], "models": ["demo-codex"],
+                ],
+                "years": [[
+                    "year": "2033", "totalTokens": 10, "totalCost": 1.0,
+                    "range": ["start": yearRange.0, "end": yearRange.1],
+                ]],
+                "contributions": [[
+                    "date": contribution, "totals": ["tokens": 10, "cost": 1.0, "messages": 1],
+                    "intensity": 1,
+                    "tokenBreakdown": [
+                        "input": 5, "output": 5, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0,
+                    ],
+                    "clients": [] as [Any],
+                ]],
+            ]
+            guard let data = try? JSONSerialization.data(withJSONObject: json) else { return nil }
+            return try? JSONDecoder().decode(UsagePayload.self, from: data)
+        }
+        let lp3Ok = ("2033-01-01", "2033-06-01")
+        let lp3Trapping = "9223372036854775807-01-01"
+        let lp3DateCases: [(String, UsagePayload?)] = [
+            ("meta.dateRange start would trap ISODay",
+             lp3PayloadWithDates(
+                 range: (lp3Trapping, "2033-06-01"), yearRange: lp3Ok,
+                 contribution: "2033-01-01")),
+            ("years[].range end would trap ISODay",
+             lp3PayloadWithDates(
+                 range: lp3Ok, yearRange: ("2033-01-01", lp3Trapping),
+                 contribution: "2033-01-01")),
+            ("a contribution date would trap ISODay",
+             lp3PayloadWithDates(
+                 range: lp3Ok, yearRange: lp3Ok, contribution: lp3Trapping)),
+            ("meta.dateRange runs backwards",
+             lp3PayloadWithDates(
+                 range: ("2033-06-01", "2033-01-01"), yearRange: lp3Ok,
+                 contribution: "2033-01-01")),
+            ("a date outside the computable era",
+             lp3PayloadWithDates(
+                 range: lp3Ok, yearRange: lp3Ok, contribution: "1899-01-01")),
+        ]
+        for (label, payload) in lp3DateCases {
+            guard let payload else {
+                expect(false, "LP3: the \(label) fixture failed to decode")
+                continue
+            }
+            // `expectedYear: nil` matters: the helper defaults to "2033", and
+            // an all-time envelope would then be rejected by the requested-year
+            // gate before any date was looked at — which is exactly how the
+            // first version of these passed while the date validation was
+            // deleted.
+            lp3ExpectRejected(
+                label, lp3Envelope(year: nil, payload: payload, knownYears: ["2033"]),
+                expectedYear: nil)
+        }
+        // Control: the same all-time shape with every date well-formed is
+        // ACCEPTED, so the five rejections above cannot be passing on a
+        // validator that rejects every hand-built payload.
+        if let sane = lp3PayloadWithDates(
+            range: lp3Ok, yearRange: lp3Ok, contribution: "2033-01-01")
+        {
+            expect(
+                SnapshotStore.validate(
+                    lp3Envelope(year: nil, payload: sane, knownYears: ["2033"]),
+                    expectedYear: nil, identity: lp3Identity),
+                "LP3 control: a hand-built all-time payload with well-formed dates is accepted "
+                    + "— without this the malformed-date rejections would pass on a validator "
+                    + "that rejects everything hand-built")
+        } else {
+            expect(false, "LP3: the well-formed control fixture failed to decode")
+        }
+
         // --- SnapshotStore: raw-file hazards — none may hang, follow, chmod, ---
         // --- or mutate the external object.                                 ---
 
