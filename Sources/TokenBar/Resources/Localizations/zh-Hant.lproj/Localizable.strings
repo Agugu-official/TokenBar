@@ -25,6 +25,9 @@
 "All" = "全部";
 "Filter usage by year" = "依年份篩選用量";
 "Refresh usage data (⌘R)" = "重新整理用量資料（⌘R）";
+"Refresh usage data" = "重新整理用量資料";
+"Refresh usage data (⌘R) — showing data from %@" = "重新整理用量資料（⌘R）— 顯示的是%@的資料";
+"Updating usage data" = "正在更新用量資料";
 "Loading usage…" = "正在載入用量…";
 "Loading…" = "載入中…";
 "Settings" = "設定";

@@ -410,7 +410,8 @@ struct PopoverView: View {
         .disabled(model.refreshing || backgroundRefreshRunning)
         .help(refreshHelp)
         .accessibilityLabel(
-            backgroundRefreshRunning ? "Updating usage data" : "Refresh usage data")
+            backgroundRefreshRunning
+                ? "Updating usage data".localized : "Refresh usage data".localized)
     }
 
     /// A graph fetch that the user did not start. `refreshing` already owns the
@@ -425,13 +426,19 @@ struct PopoverView: View {
         model.restoredSnapshot?.failed == true
     }
 
+    /// Built from localized format strings rather than interpolation.
+    ///
+    /// `.help` treats a String LITERAL as a `LocalizedStringKey` and translates
+    /// it for free; a computed `String` bypasses that entirely. Moving the
+    /// tooltip behind this property therefore silently turned it English for
+    /// every zh-Hant user until the keys below were added.
     private var refreshHelp: String {
         guard let restored = model.restoredSnapshot else {
-            return "Refresh usage data (⌘R)"
+            return "Refresh usage data (⌘R)".localized
         }
         let age = Self.restoredAgeFormatter.localizedString(
             for: restored.savedAt, relativeTo: Date())
-        return "Refresh usage data (⌘R) — showing data from \(age)"
+        return "Refresh usage data (⌘R) — showing data from %@".localized(age)
     }
 
     private var liveRateBadge: some View {
