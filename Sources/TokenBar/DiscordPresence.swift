@@ -138,6 +138,35 @@ enum DiscordPresence {
         case cost
     }
 
+    /// Which client's usage is published: the busiest one, or a named agent.
+    enum ClientSelection: Equatable {
+        case mostUsed
+        case only(String)
+        /// The key is present but holds something that is not a string — a
+        /// malformed `defaults write`. Publishes nothing, the same answer an
+        /// unknown id gets, rather than widening to every registered client.
+        case malformed
+    }
+
+    static let selectionKey = "tokenbar.discord.client"
+
+    /// Matches no radio option, so a malformed stored value ticks nothing
+    /// rather than claiming a selection the payload path does not agree with.
+    static let malformedSelectionLabel = "\u{0}malformed"
+
+    /// Absent or empty means the busiest visible client, which is what the
+    /// feature published before this preference existed.
+    /// Absent, malformed and named are three different answers, for the same
+    /// reason `components()` distinguishes them: one `as? String` cast would
+    /// send a key holding a number down the ABSENT branch and silently widen a
+    /// one-client selection to every registered client, while an unknown
+    /// string id correctly publishes nothing.
+    static func selection(defaults: UserDefaults = .standard) -> ClientSelection {
+        guard let stored = defaults.object(forKey: selectionKey) else { return .mostUsed }
+        guard let id = stored as? String else { return .malformed }
+        return id.isEmpty ? .mostUsed : .only(id)
+    }
+
     static let componentsKey = "tokenbar.discord.components"
 
     /// Absent means all three. Unlike the two switches the safe direction here
@@ -345,9 +374,38 @@ enum DiscordPresence {
     /// stripes the top client is folded from.
     static func payload(
         graph: UsagePayload, hidden: Set<String>, today: String, costStyle: CostStyle,
-        components: Set<Component>
+        components: Set<Component>, selection: ClientSelection = .mostUsed
     ) -> Payload? {
-        let totals = graph.trayTotals(hidden: hidden, today: today)
+        // Derived HERE, not in the wiring. Putting it in `AppDelegate` would
+        // repeat the earlier breach word for word: logic the payload fixtures
+        // cannot see, guarded only by a source scan that keeps passing while
+        // the derivation underneath it changes.
+        //
+        // A positive allowlist in BOTH modes, which is what makes
+        // `safeClientLabel`'s neutral branch unreachable from here. An
+        // unregistered id — `cc-mirror/<user-chosen name>`, or any agent the
+        // aggregator detects before the registry catches up — no longer
+        // publishes under a neutral label; it contributes nothing at all.
+        //
+        // The consequence is deliberate and belongs in the Settings copy, not
+        // in a bug report: the presence total can differ from the tray total
+        // whenever an unregistered client has usage.
+        let only: Set<String>
+        switch selection {
+        case .mostUsed:
+            only = Set(ClientRegistry.allIds)
+        case .only(let id):
+            // Not a fallback to most-used. A selection the registry no longer
+            // knows — a rename, a typo written from the command line — would
+            // otherwise silently widen "one agent" to "all of them", which is
+            // the wrong direction; and if it matched an unregistered id it
+            // would target exactly that client's figures under a neutral label.
+            guard ClientRegistry.allIds.contains(id) else { return nil }
+            only = [id]
+        case .malformed:
+            return nil
+        }
+        let totals = graph.trayTotals(hidden: hidden, today: today, only: only)
         // Non-finite numbers must never be published — garbage on a public
         // profile is worse than no presence at all. Scoped to a cost that will
         // actually be serialized: `costBucket` maps a non-finite value to the

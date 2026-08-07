@@ -92,25 +92,60 @@ enum DiscordIPC {
     /// Three states, not a Bool: see `DiscordIPCClient.publish(_:visibility:)`
     /// for why the middle one — an ordinary sample that changed nothing — has
     /// to be distinguishable from an unhide.
-    enum VisibilityChange {
+    /// Two independent effects, which is why this is a struct and not an enum.
+    /// A single coalesced turn can both replace what is published and put
+    /// information back, and those want opposite things from the grant: the
+    /// replacement must retire the old payload, while the addition must clear
+    /// any bypass so it cannot go out inside the floor. An enum forced one of
+    /// them to be dropped, and dropping the clear is the privacy failure.
+    struct VisibilityChange: Equatable {
+        /// What this change does to the one-shot permission to skip the
+        /// publish floor.
+        enum Grant: Equatable {
+            /// The user removed content: skip the floor, it is owed to them.
+            case arm
+            /// The user put content back: it must not ride an unspent grant.
+            case clear
+            /// Neither claim. An ordinary sample inherits whatever is pending.
+            case leave
+        }
+
+        /// Whether earlier queued work was computed against a state that no
+        /// longer holds and must not reach the socket.
+        var retires: Bool
+        var grant: Grant
+
         /// An ordinary sample. Whatever the current hidden set is, this payload
         /// was built from it.
-        case none
+        static let none = VisibilityChange(retires: false, grant: .leave)
         /// The user hid something. Must not queue behind the publish floor.
-        case reducing
+        static let reducing = VisibilityChange(retires: true, grant: .arm)
         /// The user unhid something, putting information back on the profile.
-        case increasing
+        static let increasing = VisibilityChange(retires: false, grant: .clear)
+        /// The published content was replaced rather than narrowed or widened —
+        /// a change of which agent is published. It retires earlier work, since
+        /// those payloads were built for a different client, but earns no grant
+        /// of its own: hide and unhide alternate so a reduction's bypass is
+        /// self-limiting, while A→B→C→A does not, and four bypasses is a full
+        /// per-client breakdown pushed out in one second.
+        static let retiring = VisibilityChange(retires: true, grant: .leave)
 
-        /// Two preference changes landing in one coalesced turn. A reduction
-        /// anywhere wins, for the same reason a single write that both hides
-        /// and unhides is a reduction: the content the user removed outranks
-        /// the sampling rate.
+        /// Two preference changes landing in one coalesced turn. The retire is
+        /// the union — losing one lets a payload built against a state that no
+        /// longer holds reach the socket — and the grant takes the strongest
+        /// claim, `arm` over `clear` over `leave`, for the same reason a single
+        /// write that both hides and unhides is a reduction: the content the
+        /// user removed outranks the sampling rate.
         func combined(with other: VisibilityChange) -> VisibilityChange {
-            switch (self, other) {
-            case (.reducing, _), (_, .reducing): return .reducing
-            case (.increasing, _), (_, .increasing): return .increasing
-            default: return .none
+            let strongest: Grant
+            if grant == .arm || other.grant == .arm {
+                strongest = .arm
+            } else if grant == .clear || other.grant == .clear {
+                strongest = .clear
+            } else {
+                strongest = .leave
             }
+            return VisibilityChange(retires: retires || other.retires, grant: strongest)
         }
     }
 
@@ -432,6 +467,22 @@ final class DiscordIPCClient: @unchecked Sendable {
     private struct Consent {
         var granted: Bool
         var epoch: UInt64
+        /// The one-shot permission to skip the publish floor.
+        ///
+        /// It lives HERE, under the lock, rather than as queue-owned state,
+        /// and that placement is the whole design. An earlier revision armed it
+        /// inside the queued block while every decision about it was taken
+        /// off-queue, which opened a window between "a reduction was requested"
+        /// and "the grant exists" — and five review rounds found four distinct
+        /// defects living in that window: a retire retiring the block before it
+        /// could arm, a withdrawal abandoning it, an older block clearing a
+        /// newer epoch's grant, and a rejected clear being read as no grant.
+        ///
+        /// Set at publish time under the same lock as the epoch, there is no
+        /// window, no ownership question, and nothing for a later publish to
+        /// inherit or destroy: whatever the last caller asked for is simply
+        /// what is true.
+        var floorBypass = false
     }
     private let consentLock = OSAllocatedUnfairLock(
         initialState: Consent(granted: true, epoch: 0))
@@ -499,7 +550,7 @@ final class DiscordIPCClient: @unchecked Sendable {
     /// from `lastSent` on purpose: the bypass is about one update, the clock is
     /// about the sampling rate, and collapsing the two lets a clear leave the
     /// rate unbounded. See `publish(_:privacyReducing:)`.
-    private var floorBypass = false
+
     private var inboundToken = ""
     private var writeErrno: Int32 = 0
 
@@ -540,7 +591,15 @@ final class DiscordIPCClient: @unchecked Sendable {
         // Before the block, not inside it: everything already queued has to see
         // this, and queued work is exactly what the block cannot reach back to.
         // The epoch bump is what a later `start()` cannot undo.
-        consentLock.withLock { $0.granted = false; $0.epoch &+= 1 }
+        // The grant goes with it. A hide that never reached the socket is
+        // withdrawn along with consent, so carrying its bypass into a later
+        // re-enable would let the next payload skip the floor on a promise
+        // nobody is owed any more.
+        consentLock.withLock {
+            $0.granted = false
+            $0.epoch &+= 1
+            $0.floorBypass = false
+        }
         queue.async {
             let wasRunning = self.running
             self.running = false
@@ -555,7 +614,11 @@ final class DiscordIPCClient: @unchecked Sendable {
             // alive to be republished after the user turned the feature off.
             self.hasPending = false
             self.pending = nil
-            self.floorBypass = false
+            // The grant is NOT cleared here. It is cleared off-queue in
+            // `stop()` itself, at the moment consent is withdrawn, because this
+            // block runs later: a `start()` and a reducing `publish()` can both
+            // land in between, and clearing here would take that new grant
+            // instead of the withdrawn one.
             self.lastSampledPayload = nil
             self.deliveredOnThisConnection = .nothing
             if wasRunning, self.fd >= 0 {
@@ -610,8 +673,19 @@ final class DiscordIPCClient: @unchecked Sendable {
         // `AppDelegate` ever sees the `false` — but the hide inside it always
         // surfaces as `.reducing`. Retiring stale work on a fact that is always
         // observable beats retiring it on a transition that sometimes is not.
+        // `inheritsReduction` carries a hide's grant across a retire. The
+        // retire's own payload already contains the new hidden set, so the
+        // grant is still owed even though the block that would have armed it
+        // has been retired.
         let ticket = consentLock.withLock { state -> UInt64 in
-            if case .reducing = visibility { state.epoch &+= 1 }
+            if visibility.retires { state.epoch &+= 1 }
+            switch visibility.grant {
+            case .arm: state.floorBypass = true
+            // An unhide puts information back and must not ride a grant.
+            case .clear: state.floorBypass = false
+            // A retire earns nothing of its own and destroys nothing either.
+            case .leave: break
+            }
             return state.epoch
         }
         queue.async {
@@ -630,11 +704,6 @@ final class DiscordIPCClient: @unchecked Sendable {
             // payload — an unhide a second later — went out with no floor at
             // all. That is a sub-15s sample of the user's activity, which is
             // the one thing the floor exists to prevent.
-            switch visibility {
-            case .reducing: self.floorBypass = true
-            case .increasing: self.floorBypass = false
-            case .none: break
-            }
             self.flush()
         }
     }
@@ -931,11 +1000,11 @@ final class DiscordIPCClient: @unchecked Sendable {
             // Consumed here too: the reduction is already on the wire, so the
             // permission has nothing left to do, and leaving it armed would
             // hand the floor bypass to whatever ordinary sample comes next.
-            floorBypass = false
+            consentLock.withLock { $0.floorBypass = false }
             return
         }
         let carriesNewInformation = pending != nil && pending != lastSampledPayload
-        if carriesNewInformation, !floorBypass, let lastSent {
+        if carriesNewInformation, !consentLock.withLock({ $0.floorBypass }), let lastSent {
             let elapsed = Double(DispatchTime.now().uptimeNanoseconds - lastSent.uptimeNanoseconds)
                 / 1_000_000_000
             if elapsed < publishInterval {
@@ -968,7 +1037,7 @@ final class DiscordIPCClient: @unchecked Sendable {
             if carriesNewInformation { lastSent = .now() }
             // One shot, spent on the write it was granted for. Left armed it
             // would let the next ordinary sample skip the floor as well.
-            floorBypass = false
+            consentLock.withLock { $0.floorBypass = false }
             lastSampledPayload = pending
             deliveredOnThisConnection = .payload(pending)
         }

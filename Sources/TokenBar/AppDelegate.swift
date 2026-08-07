@@ -45,6 +45,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Same discipline again. Compared as a parsed SET, so a reordered or
     /// respaced write is not read as a change to what gets published.
     private var lastComponents = DiscordPresence.defaultComponents
+    /// Fifth value gate. Without it a selection change would wait out the tray
+    /// poll, publishing the previous agent's figures for up to five minutes.
+    private var lastSelection = DiscordPresence.ClientSelection.mostUsed
 
     private static func readIntervalMin() -> Int {
         max(1, UserDefaults.standard.object(forKey: intervalKey).flatMap { $0 as? Int } ?? 30)
@@ -112,6 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastDiscordEnabled = DiscordPresence.enabled()
         lastCostStyle = DiscordPresence.costStyle()
         lastComponents = DiscordPresence.components()
+        lastSelection = DiscordPresence.selection()
         applyDiscordPresence()
     }
 
@@ -146,13 +150,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// outranks the sampling rate: publishing it late is a client they hid
     /// still visible to everyone, publishing the other one early is a sample
     /// of activity they had already consented to publish.
+    /// Did the user take something off the profile, or put something back?
+    ///
+    /// Asked directly, against the clients published at EITHER endpoint,
+    /// rather than by comparing two effective sets. A set comparison cannot
+    /// tell "removed because hidden" from "removed because deselected", and
+    /// those want different answers: only the first is a promise with a
+    /// deadline. Coalescing makes the distinction load-bearing — switching
+    /// from claude to codex while newly hiding claude is one turn, and
+    /// classifying its hidden delta under codex alone reports no change while
+    /// the old payload keeps claude on the profile for the rest of the floor.
     nonisolated static func visibilityChange(
-        previousHiddenRaw: String, hiddenRaw: String
+        previousHiddenRaw: String, hiddenRaw: String,
+        previousSelection: DiscordPresence.ClientSelection = .mostUsed,
+        selection: DiscordPresence.ClientSelection = .mostUsed,
+        contributors: Set<String>? = nil
     ) -> DiscordIPC.VisibilityChange {
-        // A GROWN hidden set is the reduction: something left the profile.
-        subsetChange(
-            grownMeansLess: ClientRegistry.parseIdSet(previousHiddenRaw),
-            to: ClientRegistry.parseIdSet(hiddenRaw))
+        let previousHidden = ClientRegistry.parseIdSet(previousHiddenRaw)
+        let currentHidden = ClientRegistry.parseIdSet(hiddenRaw)
+        let wasPublished = effectivePublished(
+            selection: previousSelection, hidden: previousHidden, contributors: contributors)
+        let isPublished = effectivePublished(
+            selection: selection, hidden: currentHidden, contributors: contributors)
+        // Something that WAS on the profile is now hidden.
+        if !wasPublished.isDisjoint(with: currentHidden.subtracting(previousHidden)) {
+            return .reducing
+        }
+        // Something just unhidden is on it now.
+        if !isPublished.isDisjoint(with: previousHidden.subtracting(currentHidden)) {
+            return .increasing
+        }
+        return .none
+    }
+
+    /// A floor bypass is owed only when something was actually on the profile
+    /// to take down. With the selected client hidden, or no registered client
+    /// visible, nothing could have been published — so unticking a component
+    /// removes nothing, and arming a grant there leaves one for a later
+    /// selection change to inherit and spend on a client that IS visible,
+    /// inside the floor.
+    ///
+    /// A static rather than a branch inside `applyDiscordPresence`, for the
+    /// same reason `makeDiscordClient` is one: SelfTest returns `Never` before
+    /// the app lifecycle exists, so a rule buried in the delegate cannot be
+    /// asserted at all. It shipped unasserted for one round and a mutation
+    /// proved it: removing the branch changed nothing.
+    ///
+    /// The retire survives — only the claim on the floor is dropped.
+    nonisolated static func withoutUnownedGrant(
+        _ change: DiscordIPC.VisibilityChange, wasPublishing: Bool
+    ) -> DiscordIPC.VisibilityChange {
+        guard change.grant == .arm, !wasPublishing else { return change }
+        return DiscordIPC.VisibilityChange(retires: change.retires, grant: .leave)
     }
 
     /// The one direction test both set-shaped preferences use. The parameter
@@ -171,6 +220,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// something off the profile, so a shrinking selection is the reduction.
     /// The arguments go into the same subset test swapped, rather than into a
     /// second classifier with its own idea of which way is which.
+    /// A selection change replaces what is published rather than narrowing or
+    /// widening it, so it retires earlier work without arming the floor bypass.
+    ///
+    /// Compared as EFFECTIVE published sets — the selection intersected with
+    /// what is visible — and not as raw selections, so switching between two
+    /// clients that are both hidden is correctly no change at all. The hidden
+    /// set's own movement is classified separately by `visibilityChange`; this
+    /// isolates the selection's contribution by holding it fixed.
+    /// What a given selection would actually publish under a given hidden set.
+    /// Every set-shaped classification below compares two of these rather than
+    /// the raw preferences, so a change that cannot move a published byte is
+    /// correctly no change at all.
+    /// `contributors` narrows this to the clients that actually have a stripe
+    /// today. Without it `.mostUsed` expands to the entire registry, so hiding
+    /// a registered client that contributed nothing reads as a reduction —
+    /// and while Discord is offline that grant cannot be spent, so a later
+    /// payload carrying genuinely new activity inherits it and goes out inside
+    /// the floor. Nil means "do not narrow", which is what the pure-function
+    /// assertions use.
+    nonisolated static func effectivePublished(
+        selection: DiscordPresence.ClientSelection, hidden: Set<String>,
+        contributors: Set<String>? = nil
+    ) -> Set<String> {
+        let registered = Set(ClientRegistry.allIds)
+        let selected: Set<String>
+        switch selection {
+        case .mostUsed: selected = registered
+        case .only(let id): selected = registered.contains(id) ? [id] : []
+        case .malformed: selected = []
+        }
+        let visible = selected.subtracting(hidden)
+        return contributors.map(visible.intersection) ?? visible
+    }
+
+    /// A selection change replaces what is published rather than narrowing or
+    /// widening it, so it retires earlier work without arming the floor bypass.
+    nonisolated static func selectionChange(
+        previous: DiscordPresence.ClientSelection,
+        current: DiscordPresence.ClientSelection,
+        hidden: Set<String>
+    ) -> DiscordIPC.VisibilityChange {
+        effectivePublished(selection: previous, hidden: hidden)
+            == effectivePublished(selection: current, hidden: hidden) ? .none : .retiring
+    }
+
     nonisolated static func componentsChange(
         previous: Set<DiscordPresence.Component>, current: Set<DiscordPresence.Component>
     ) -> DiscordIPC.VisibilityChange {
@@ -251,7 +345,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // preference lookup of its own, so the privacy assertions cannot
             // come to depend on the defaults of whatever machine runs them.
             costStyle: DiscordPresence.costStyle(),
-            components: DiscordPresence.components())
+            components: DiscordPresence.components(),
+            selection: DiscordPresence.selection())
     }
 
     private func scheduleDefaultsApply() {
@@ -289,8 +384,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let previousCostStyle = self.lastCostStyle
             let components = DiscordPresence.components()
             let previousComponents = self.lastComponents
+            let selection = DiscordPresence.selection()
+            let previousSelection = self.lastSelection
             if hiddenChanged || discordEnabled != self.lastDiscordEnabled
-                || costStyle != previousCostStyle || components != previousComponents {
+                || costStyle != previousCostStyle || components != previousComponents
+                || selection != previousSelection {
                 // Newly hiding a client means the user took something off the
                 // profile, and that update must not queue behind the publish
                 // floor — the Settings copy promises hidden clients are never
@@ -302,17 +400,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // made the published figure coarser, and leaving the precise
                 // one up while the floor expires is the same broken promise in
                 // miniature.
-                let change = AppDelegate.visibilityChange(
-                    previousHiddenRaw: previousHiddenRaw, hiddenRaw: hiddenRaw)
+                // Today's actual contributors, so a hide of a client with no
+                // usage today is not mistaken for taking something down.
+                let contributors = self.lastGraph.map { graph in
+                    Set(graph.contributions.last { $0.date == Format.todayKey() }?
+                        .clients.map(\.client) ?? [])
+                }
+                var change = AppDelegate.visibilityChange(
+                    previousHiddenRaw: previousHiddenRaw, hiddenRaw: hiddenRaw,
+                    previousSelection: previousSelection, selection: selection,
+                    contributors: contributors)
                     .combined(with: AppDelegate.costStyleChange(
                         previous: previousCostStyle, current: costStyle,
                         publishedInBoth: previousComponents.contains(.cost)
                             && components.contains(.cost)))
                     .combined(with: AppDelegate.componentsChange(
                         previous: previousComponents, current: components))
+                    .combined(with: AppDelegate.selectionChange(
+                        previous: previousSelection, current: selection,
+                        hidden: ClientRegistry.parseIdSet(hiddenRaw)))
+                change = AppDelegate.withoutUnownedGrant(
+                    change,
+                    wasPublishing: !AppDelegate.effectivePublished(
+                        selection: previousSelection,
+                        hidden: ClientRegistry.parseIdSet(previousHiddenRaw),
+                        contributors: contributors).isEmpty)
                 self.lastDiscordEnabled = discordEnabled
                 self.lastCostStyle = costStyle
                 self.lastComponents = components
+                self.lastSelection = selection
                 self.applyDiscordPresence(visibility: change)
             }
         }

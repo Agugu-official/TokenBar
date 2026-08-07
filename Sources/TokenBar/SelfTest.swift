@@ -3612,25 +3612,35 @@ enum SelfTest {
             "the top client skips the hidden client (mutation: dropping the hidden filter from "
                 + "the fold publishes Claude Code)")
 
-        // Outbound label allowlist: the busiest visible client is an
-        // UNREGISTERED id whose suffix comes from a local config file, and the
-        // hidden one carries a sentinel too.
+        // Outbound allowlist, at the PRODUCER. The busiest stripe by far is an
+        // UNREGISTERED id whose suffix comes from a local config file; a
+        // registered client sits underneath it with a fifth of the tokens, and
+        // a second unregistered id is hidden as well. Under a positive filter
+        // the secret contributes nothing at all — not a neutral label, not a
+        // token, not a cent — so the registered client is what publishes.
+        //
+        // This is the fixture the complement design fails: `hidden ∪ (allIds −
+        // {selected})` cannot subtract an id it has never heard of, so
+        // `cc-mirror/SECRET_VARIANT` would survive and, being the largest,
+        // would take the label.
         let dpSecretGraph = dpGraph(dpPayload(dpDay(
             dpToday, 1_400_000, 12.0,
-            dpStripe("cc-mirror/SECRET_VARIANT", 500_000, 3.0,
+            dpStripe("cc-mirror/SECRET_VARIANT", 900_000, 9.0,
                 model: "SECRET_MODEL", provider: "SECRET_PROVIDER")
-                + "," + dpStripe("SECRET_HIDDEN", 900_000, 9.0,
+                + "," + dpStripe("claude", 200_000, 1.0)
+                + "," + dpStripe("SECRET_HIDDEN", 300_000, 2.0,
                     model: "SECRET_MODEL2", provider: "SECRET_PROVIDER2"))))
         let dpSecret = DiscordPresence.payload(
             graph: dpSecretGraph, hidden: ["SECRET_HIDDEN"], today: dpToday, costStyle: .banded, components: dpAllComponents)
         let dpSecretText = dpSecret.map { Array($0.fields.values).joined(separator: "|") } ?? ""
-        // The expected label is a literal: an assertion reading it out of the
-        // constant it guards passes whatever that constant becomes.
         expect(
-            dpSecret != nil && !dpSecretText.contains("SECRET_")
-                && dpSecret?.state.contains("an AI tool") == true,
-            "an unregistered top client publishes the neutral label and its id reaches no field "
-                + "(mutation: ClientRegistry.style().displayName without the allowlist gate)")
+            dpSecret?.details == "200K tokens today"
+                && dpSecret?.state.hasPrefix("Claude Code") == true
+                && !dpSecretText.contains("SECRET_"),
+            "an unregistered id reaches neither the figures nor the label — the registered "
+                + "client publishes its own 200K, not the 1.1M the day holds "
+                + "(mutation: a complement filter cannot subtract an id it has never heard of, "
+                + "so cc-mirror/SECRET_VARIANT survives and takes the label)")
         expect(!dpSecretText.contains("/"),
             "no path-like segment is published (mutation: adding any raw-id or path field to "
                 + "Payload.fields fails here)")
@@ -3640,6 +3650,20 @@ enum SelfTest {
         expect(dpSecret.map { Set($0.fields.keys) } == ["details", "state", "largeImageKey"],
             "exactly three named fields are published (mutation: adding a key to Payload.fields, "
                 + "or dropping one, fails here)")
+        // The neutral label is now unreachable from `payload()` — kept in
+        // `safeClientLabel` as defence, asserted here as dead. A graph of only
+        // unregistered ids publishes nothing rather than "an AI tool".
+        expect(
+            DiscordPresence.payload(
+                graph: dpGraph(dpPayload(dpDay(
+                    dpToday, 500_000, 5.0,
+                    dpStripe("cc-mirror/one", 300_000, 3.0) + ","
+                        + dpStripe("brand-new-agent", 200_000, 2.0)))),
+                hidden: [], today: dpToday, costStyle: .banded,
+                components: dpAllComponents) == nil,
+            "a graph holding only unregistered ids publishes nothing at all, so the neutral "
+                + "label cannot reach the wire (mutation: filtering only at the label leaves "
+                + "their tokens and cost in the figures under `an AI tool`)")
 
         // Published granularity: neither the raw token count nor cent-precision
         // cost may survive.
@@ -3817,11 +3841,11 @@ enum SelfTest {
             graph: dpSecretGraph, hidden: ["SECRET_HIDDEN"], today: dpToday,
             costStyle: .banded, components: [.client])
         expect(
-            dpClientOnly?.details == "an AI tool"
+            dpClientOnly?.details == "Claude Code"
                 && dpClientOnly.map { Array($0.fields.values).joined().contains("SECRET_") } == false
                 && dpClientOnly?.fields.keys.sorted() == ["details", "largeImageKey"],
-            "one selected component becomes `details`, an unregistered id still publishes the "
-                + "neutral label, and no empty `state` key reaches the wire "
+            "one selected component becomes `details`, an unregistered id reaches no field, and "
+                + "no empty `state` key reaches the wire "
                 + "(mutation: composing without the allowlist gate leaks the id; publishing "
                 + "`state` unconditionally adds a blank field)")
         // The composition is a user-controlled string flowing toward a public
@@ -3913,6 +3937,164 @@ enum SelfTest {
             "an overflowed cost blocks only a composition that publishes cost "
                 + "(mutation: guarding before the composition is read silently blanks the "
                 + "presence of a tokens-only selection)")
+
+        // Agent selection. Survival is `id ∈ only && id ∉ hidden`, and BOTH
+        // conditions holding is what makes "a selection cannot defeat hiding"
+        // structural rather than a guard someone has to remember.
+        expect(
+            DiscordPresence.payload(
+                graph: dpSecretGraph, hidden: ["claude"], today: dpToday, costStyle: .banded,
+                components: dpAllComponents, selection: .only("claude")) == nil,
+            "selecting a client that is also hidden publishes nothing (mutation: applying the "
+                + "selection instead of intersecting it lets a selection override a hide)")
+        // The same hostile graph with a REGISTERED client selected. The secret
+        // is larger than the selection, so a filter that lets it through would
+        // be visible in the figures as well as the label.
+        let dpSelected = DiscordPresence.payload(
+            graph: dpSecretGraph, hidden: [], today: dpToday, costStyle: .banded,
+            components: dpAllComponents, selection: .only("claude"))
+        expect(
+            dpSelected?.details == "200K tokens today"
+                && dpSelected?.state.hasPrefix("Claude Code") == true
+                && dpSelected.map { Array($0.fields.values).joined().contains("SECRET") } == false,
+            "a selected client publishes only its own figures, with an unregistered stripe "
+                + "excluded from the totals (mutation: a complement filter cannot subtract "
+                + "cc-mirror/SECRET_VARIANT, so it is aggregated in and its 900K is published)")
+        expect(
+            DiscordPresence.payload(
+                graph: dpSecretGraph, hidden: [], today: dpToday, costStyle: .banded,
+                components: dpAllComponents, selection: .only("renamed-since-release")) == nil,
+            "a selection the registry does not know publishes nothing (mutation: falling back to "
+                + "most-used silently widens `one agent` to `all of them` on a rename)")
+        // The re-summed slow path can go negative, and it is reachable here
+        // because a positive filter never takes the fast path.
+        expect(
+            DiscordPresence.payload(
+                graph: dpGraph(dpPayload(dpDay(
+                    dpToday, 0, 1.0,
+                    dpStripe("claude", -1_234_567, 0.0) + "," + dpStripe("codex", 1_000, 1.0)))),
+                hidden: [], today: dpToday, costStyle: .banded,
+                components: dpAllComponents, selection: .only("codex"))?.state
+                .hasSuffix("<$10") == true,
+            "a negative stripe elsewhere still leaves the selected client a finite band")
+        // Selection changes retire earlier work WITHOUT arming the floor
+        // bypass. Hide and unhide alternate, so a reduction's bypass is
+        // naturally rate-limited; A->B->C->A does not alternate, and four
+        // bypasses is a per-client breakdown pushed out in one second.
+        expect(
+            AppDelegate.selectionChange(
+                previous: .mostUsed, current: .only("claude"), hidden: []) == .retiring
+                && AppDelegate.selectionChange(
+                    previous: .only("claude"), current: .only("codex"), hidden: []) == .retiring
+                && AppDelegate.selectionChange(
+                    previous: .only("claude"), current: .only("claude"), hidden: []) == .none
+                && AppDelegate.selectionChange(
+                    previous: .only("claude"), current: .only("codex"),
+                    hidden: ["claude", "codex"]) == .none,
+            "a selection change is `.retiring`, and switching between two clients that are both "
+                + "hidden is no change at all (mutation: classifying it `.reducing` grants an "
+                + "unbounded floor bypass; comparing raw selections republishes when nothing "
+                + "published actually moved)")
+        // A hidden-set change is judged against the clients published at EITHER
+        // endpoint. With one agent named, hiding an unrelated client cannot
+        // move a published byte; hiding the selected one is still a reduction;
+        // and a turn that BOTH switches selection and hides the outgoing client
+        // is a reduction too — that one is only visible if the previous
+        // selection is consulted, and it is the case coalescing produces.
+        func dpVis(
+            _ previousHidden: String, _ hidden: String,
+            _ previousSelection: DiscordPresence.ClientSelection = .mostUsed,
+            _ selection: DiscordPresence.ClientSelection = .mostUsed
+        ) -> DiscordIPC.VisibilityChange {
+            AppDelegate.visibilityChange(
+                previousHiddenRaw: previousHidden, hiddenRaw: hidden,
+                previousSelection: previousSelection, selection: selection)
+        }
+        expect(
+            dpVis("", "amp", .only("claude"), .only("claude")) == .none
+                && dpVis("amp", "", .only("claude"), .only("claude")) == .none
+                && dpVis("", "claude", .only("claude"), .only("claude")) == .reducing
+                && dpVis("", "amp") == .reducing
+                && dpVis("amp", "") == .increasing
+                && dpVis("", "claude", .only("claude"), .only("codex")) == .reducing,
+            "hiding a client the selection does not publish is no change, hiding the selected one "
+                + "is a reduction, and switching selection while hiding the outgoing client is "
+                + "still a reduction (mutation: judging the hidden delta under the CURRENT "
+                + "selection alone reports no change and leaves the just-hidden client on the "
+                + "profile for the rest of the floor)")
+
+        // `.mostUsed` is not "every registered client" — it is whichever of
+        // them actually has usage today. Hiding a registered client with no
+        // stripe removes nothing from the profile, and while Discord is offline
+        // that grant cannot be spent, so a later payload carrying genuinely new
+        // activity would inherit it and go out inside the floor.
+        expect(
+            AppDelegate.visibilityChange(
+                previousHiddenRaw: "", hiddenRaw: "amp",
+                contributors: ["claude", "codex"]) == .none
+                && AppDelegate.visibilityChange(
+                    previousHiddenRaw: "", hiddenRaw: "claude",
+                    contributors: ["claude", "codex"]) == .reducing
+                && AppDelegate.effectivePublished(
+                    selection: .mostUsed, hidden: [], contributors: ["claude"]) == ["claude"],
+            "hiding a registered client with no usage today is no change, while hiding one that "
+                + "contributed is a reduction (mutation: expanding `.mostUsed` to the whole "
+                + "registry grants a bypass for a hide that removed nothing published)")
+
+        // A reduction that removed nothing published earns no bypass. If the
+        // selected client is hidden there is no payload, so unticking a
+        // component takes nothing off the profile — and a grant armed there
+        // waits for a later selection change to inherit and spend it on a
+        // client that IS visible.
+        expect(
+            AppDelegate.withoutUnownedGrant(.reducing, wasPublishing: false)
+                == DiscordIPC.VisibilityChange(retires: true, grant: .leave)
+                && AppDelegate.withoutUnownedGrant(.reducing, wasPublishing: true) == .reducing
+                && AppDelegate.withoutUnownedGrant(.increasing, wasPublishing: false)
+                    == .increasing
+                && AppDelegate.withoutUnownedGrant(.retiring, wasPublishing: false) == .retiring,
+            "a reduction with nothing published keeps its retire and loses its floor claim, while "
+                + "a real one is untouched (mutation: arming it anyway leaves a grant for a later "
+                + "selection change to spend inside the floor)")
+
+        // Absent, malformed and named are three answers. One `as? String` cast
+        // would send a key holding a number down the ABSENT branch and widen a
+        // one-client selection to every registered client.
+        let dpSelSuite = "TokenBar.SelfTest.DiscordSelection"
+        if let dpSelDefaults = UserDefaults(suiteName: dpSelSuite) {
+            defer { UserDefaults.standard.removePersistentDomain(forName: dpSelSuite) }
+            let dpSelAbsent = DiscordPresence.selection(defaults: dpSelDefaults)
+            dpSelDefaults.set(1, forKey: DiscordPresence.selectionKey)
+            let dpSelWrong = DiscordPresence.selection(defaults: dpSelDefaults)
+            dpSelDefaults.set("claude", forKey: DiscordPresence.selectionKey)
+            let dpSelNamed = DiscordPresence.selection(defaults: dpSelDefaults)
+            expect(
+                dpSelAbsent == .mostUsed && dpSelWrong == .malformed && dpSelNamed == .only("claude")
+                    && DiscordPresence.payload(
+                        graph: dpSecretGraph, hidden: [], today: dpToday, costStyle: .banded,
+                        components: dpAllComponents, selection: .malformed) == nil,
+                "an absent selection key is most-used, a present non-string publishes nothing, and "
+                    + "a named one selects (mutation: one `as? String` cast for both widens a "
+                    + "malformed one-client selection to every registered client)")
+        } else {
+            expect(false, "the isolated selection suite could not be created")
+        }
+        // The two effects combine independently, which is why this is a struct.
+        // An earlier revision made it a four-case enum with a total order and
+        // collapsed `retiring + increasing` to `retiring` — keeping the retire
+        // and DROPPING the clear. That is the wrong half to lose: `.increasing`
+        // exists precisely to stop newly added information riding an unspent
+        // grant out inside the floor.
+        let dpRetireUnhide = DiscordIPC.VisibilityChange.retiring.combined(with: .increasing)
+        expect(
+            dpRetireUnhide.retires && dpRetireUnhide.grant == .clear
+                && DiscordIPC.VisibilityChange.retiring.combined(with: .reducing) == .reducing
+                && DiscordIPC.VisibilityChange.retiring.combined(with: .none) == .retiring
+                && DiscordIPC.VisibilityChange.reducing.combined(with: .increasing) == .reducing,
+            "a turn that both retires and adds information keeps BOTH effects — the old payload "
+                + "is retired and the bypass is cleared — while a reduction still outranks an "
+                + "unhide (mutation: a total order over four cases has to drop one of them, and "
+                + "dropping the clear publishes the addition sub-floor)")
 
         // MARK: - Discord Rich Presence transport (DISCORD-PRESENCE M2a)
         //
@@ -4671,6 +4853,72 @@ enum SelfTest {
             "A15: hiding a client republishes immediately instead of waiting out the 15s floor, "
                 + "unlike an ordinary update inside it "
                 + "(mutation: dropping the floorBypass grant throttles it like any other sample)")
+
+        // A hide's grant survives a selection change that supersedes it. The
+        // hide publishes `.reducing` but its queued block has not run, so
+        // `floorBypass` is not armed yet; the selection change publishes
+        // `.retiring`, whose epoch bump retires that block. Without the grant
+        // being carried, the replacement — which already contains the new
+        // hidden set — waits out the floor while the just-hidden client stays
+        // public. The control run is the same fixture with no reduction in
+        // front, which must still be throttled.
+        func dpSupersededHide(withReduction: Bool) -> Bool {
+            let (local, peer) = dpSocketPair()
+            let client = DiscordIPCClient(connect: { local })
+            client.publishInterval = 3.0
+            client.start()
+            client.drainForTesting()
+            _ = dpReachReady(peer, client)
+            client.publish(dpP("20K tokens today", state: "Amp · $1-5"))
+            client.drainForTesting()
+            _ = dpFramesNow(peer) // consume the sample that arms the clock
+            let gate = dpHold(client)
+            if withReduction {
+                client.publish(dpP("21K tokens today", state: "Amp · $1-5"), visibility: .reducing)
+            }
+            client.publish(dpP("22K tokens today", state: "Zed · $1-5"), visibility: .retiring)
+            gate.signal()
+            client.drainForTesting()
+            let arrived = dpFrameArrives(peer, "22K tokens today", within: 0.4)
+            dpFinish(client, [peer])
+            return arrived
+        }
+        // The deferred grant does not survive a withdrawal. A hide queued but
+        // never run is abandoned by `stop()`'s epoch bump, so re-enabling and
+        // then changing the selection must NOT inherit its bypass — the hide
+        // was withdrawn along with consent, and the new client's activity would
+        // otherwise publish inside the floor.
+        func dpGrantAcrossStop() -> Bool {
+            let (peers, client, _) = dpRig(peers: 2)
+            client.publishInterval = 3.0
+            client.start()
+            client.drainForTesting()
+            _ = dpReachReady(peers[0], client)
+            client.publish(dpP("30K tokens today", state: "Amp · $1-5"))
+            client.drainForTesting()
+            _ = dpFramesNow(peers[0])
+            let gate = dpHold(client)
+            client.publish(dpP("31K tokens today", state: "Amp · $1-5"), visibility: .reducing)
+            client.stop()
+            gate.signal()
+            client.drainForTesting()
+            client.start()
+            _ = dpReachReady(peers[1], client)
+            client.publish(dpP("32K tokens today", state: "Zed · $1-5"), visibility: .retiring)
+            client.drainForTesting()
+            let early = dpFrameArrives(peers[1], "32K tokens today", within: 0.4)
+            dpFinish(client, peers)
+            return early
+        }
+        expect(!dpGrantAcrossStop(),
+            "a reduction abandoned by stop() leaves no grant behind, so a later selection change "
+                + "is throttled like any other sample (mutation: leaving `unspentReduction` set "
+                + "across the withdrawal lets the new client publish inside the floor)")
+        expect(dpSupersededHide(withReduction: true) && !dpSupersededHide(withReduction: false),
+            "a retire inherits the grant of a reduction it superseded, and earns none on its own "
+                + "(mutation: dropping the inheritance leaves the just-hidden client public for "
+                + "the rest of the floor; arming one for every retire hands a selection change "
+                + "an unbounded bypass)")
 
         // A15c — the bypass is one shot: a clear carries no new information
         // and must not re-arm the floor's clock, or the unhide behind it goes
