@@ -1,5 +1,5 @@
 use crate::agent_account_scope::{
-    self, AccountScope, AccountScopeError, AuthoritativeIdKind, RefreshCheckpoint,
+    self, AccountScope, AccountScopeError, AuthoritativeIdKind, HistoryScope, RefreshCheckpoint,
     RefreshScopeTransaction,
 };
 use crate::agent_antigravity;
@@ -106,6 +106,11 @@ pub struct AgentUsageSnapshot {
     identity: Option<AgentIdentity>,
     #[serde(skip)]
     pub(crate) account_scope: Result<AccountScope, AccountScopeError>,
+    /// Identity for the durable pace history only. Distinct from `account_scope`
+    /// on purpose: the cache binding and the plan label must fragment when the
+    /// credential rotates, and a weeks-long series must not.
+    #[serde(skip)]
+    pub(crate) history_scope: Result<HistoryScope, AccountScopeError>,
     windows: Vec<UsageWindow>,
     credits: Option<CreditsSnapshot>,
     error: Option<String>,
@@ -1234,6 +1239,7 @@ fn empty_error_snapshot(
         updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
         identity: None,
         account_scope: Err(AccountScopeError::NoTrustedEvidence),
+        history_scope: Err(AccountScopeError::NoTrustedEvidence),
         windows: Vec::new(),
         credits: None,
         error: Some(display),
@@ -1407,6 +1413,8 @@ async fn fetch_grok() -> Option<AgentUsageSnapshot> {
                 updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
                 identity: data.identity,
                 account_scope: data.account_scope,
+                // Grok has no authoritative owner ID in anything TokenBar fetches.
+                history_scope: agent_account_scope::resolve_history_scope("grok", None),
                 windows: data.windows,
                 credits: None,
                 error: None,
@@ -1438,6 +1446,8 @@ async fn fetch_copilot() -> Option<AgentUsageSnapshot> {
                         updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
                         identity: data.identity,
                         account_scope: data.account_scope,
+                        // Copilot has no authoritative owner ID either.
+                        history_scope: agent_account_scope::resolve_history_scope("copilot", None),
                         windows: data.windows,
                         credits: None,
                         error: None,
@@ -1462,6 +1472,7 @@ async fn fetch_antigravity() -> AgentUsageSnapshot {
                 updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
                 identity: fetched.identity,
                 account_scope: fetched.account_scope,
+                history_scope: fetched.history_scope,
                 windows: fetched.windows,
                 credits: None,
                 error: None,
@@ -1699,10 +1710,17 @@ async fn fetch_codex_inner() -> ProviderFetchOutcome {
         ));
     }
 
-    if let Some(request_account_id) = request_account_id {
+    let history_scope = codex_history_scope(&credentials);
+
+    if let (Some(request_account_id), Ok(history_scope)) =
+        (request_account_id, history_scope.as_ref())
+    {
+        // The importer keys on the same history scope as the live path. Keying
+        // it on the account scope would let imported v2 samples land in a series
+        // the live path never touches again, the moment the two diverge.
         let _ = crate::agent_quota_history::migrate_codex_v2(
             request_account_id,
-            account_scope.as_str(),
+            history_scope,
             now.timestamp(),
         );
     }
@@ -1714,6 +1732,7 @@ async fn fetch_codex_inner() -> ProviderFetchOutcome {
             updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
             identity,
             account_scope: Ok(account_scope),
+            history_scope,
             windows,
             credits: usage.credits.map(|credits| CreditsSnapshot {
                 remaining: credits.balance,
@@ -1724,6 +1743,31 @@ async fn fetch_codex_inner() -> ProviderFetchOutcome {
         },
         cache_binding: Some(cache_binding),
     }
+}
+
+/// Codex is one of the two routes with an authoritative owner ID today. Its
+/// history scope must consume the same `ChatGPT-Account-Id` the cache binding
+/// corroborates on, so two accounts on one installation keep two series.
+fn codex_history_scope(credentials: &CodexCredentials) -> Result<HistoryScope, AccountScopeError> {
+    codex_history_scope_with(credentials, agent_account_scope::resolve_history_scope)
+}
+
+fn codex_history_scope_with<R>(
+    credentials: &CodexCredentials,
+    resolve: R,
+) -> Result<HistoryScope, AccountScopeError>
+where
+    R: FnOnce(&str, Option<(AuthoritativeIdKind, &str)>) -> Result<HistoryScope, AccountScopeError>,
+{
+    resolve(
+        "codex",
+        credentials
+            .account_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|account_id| (AuthoritativeIdKind::OpaqueId, account_id)),
+    )
 }
 
 fn resolve_codex_cache_binding(
@@ -2115,6 +2159,8 @@ async fn fetch_claude_oauth_usage_request(
                         }),
                 }),
                 account_scope: Ok(account_scope),
+                // Claude exposes no stable owner ID on any route it serves today.
+                history_scope: agent_account_scope::resolve_history_scope("claude", None),
                 windows,
                 credits: claude_credits(usage.extra_usage.as_ref()),
                 error: None,
@@ -2393,6 +2439,7 @@ async fn claude_header_snapshot(
                 .map(clean_plan),
             }),
             account_scope,
+            history_scope: agent_account_scope::resolve_history_scope("claude", None),
             windows,
             credits: None,
             error: None,
@@ -3636,7 +3683,12 @@ where
         true
     });
 
-    let Ok(account_scope) = snapshot.account_scope.as_ref() else {
+    // Retained from before the history-identity split, and deliberately still
+    // keyed on `account_scope`: this is the sole suppressor of durable history
+    // for an identity that was never verified. `history_scope` resolves whenever
+    // the installation key is readable, so re-keying this guard on it would
+    // start recording per-account history for an unverified identity.
+    let Ok(_account_scope) = snapshot.account_scope.as_ref() else {
         for window in &mut snapshot.windows {
             if window.window_key.is_some() {
                 window.unavailable("accountScope");
@@ -3644,7 +3696,14 @@ where
         }
         return;
     };
-    let account_scope = account_scope.as_str();
+    let Ok(history_scope) = snapshot.history_scope.as_ref() else {
+        for window in &mut snapshot.windows {
+            if window.window_key.is_some() {
+                window.unavailable("accountScope");
+            }
+        }
+        return;
+    };
     let mut active_keys = Vec::new();
     let mut observations = Vec::new();
     let mut mapped_indices = Vec::new();
@@ -3654,7 +3713,7 @@ where
             // The provider already classified this card as windowIdentity.
             continue;
         };
-        let key = SeriesKey::new(snapshot.client_id.clone(), account_scope, window_key);
+        let key = SeriesKey::new(snapshot.client_id.clone(), history_scope, window_key);
         active_keys.push(key.clone());
         if matches!(window.pace_status.state, PaceState::Unavailable) {
             // Emission protects existing history from capacity eviction, but
@@ -4997,6 +5056,10 @@ mod tests {
                 email: Some("fixture@example.invalid".to_string()),
                 plan: Some("Fixture".to_string()),
             }),
+            history_scope: account_scope
+                .as_ref()
+                .map(|scope| HistoryScope::for_test(scope.as_str()))
+                .map_err(|error| *error),
             account_scope,
             windows: vec![UsageWindow::from_provider_used_percent(
                 "Session".to_string(),
@@ -5406,6 +5469,7 @@ mod tests {
                     source: "oauth".to_string(),
                     updated_at: response_at.to_rfc3339_opts(SecondsFormat::Millis, true),
                     identity: Some(AgentIdentity { email: None, plan }),
+                    history_scope: Ok(HistoryScope::for_test(account_scope.as_str())),
                     account_scope: Ok(account_scope),
                     windows,
                     credits: None,
@@ -6522,6 +6586,7 @@ mod tests {
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
+            history_scope: Ok(HistoryScope::for_test(account_scope.as_str())),
             account_scope: Ok(account_scope),
             windows,
             credits: None,
@@ -7608,6 +7673,7 @@ mod tests {
             source: "oauth".to_string(),
             updated_at: String::new(),
             identity: None,
+            history_scope: Ok(HistoryScope::for_test(account_scope.as_str())),
             account_scope: Ok(account_scope),
             windows: vec![window],
             credits: None,
@@ -7619,7 +7685,11 @@ mod tests {
             calls.set(calls.get() + 1);
             assert_eq!(
                 active,
-                &[SeriesKey::new("claude", &expected_scope, "extra_usage.v1")]
+                &[SeriesKey::new(
+                    "claude",
+                    &HistoryScope::for_test(&expected_scope),
+                    "extra_usage.v1"
+                )]
             );
             assert!(observations.is_empty());
             Ok(Vec::new())
@@ -7648,13 +7718,17 @@ mod tests {
             .join(crate::agent_quota_history::HISTORY_FILE_NAME);
         let seed_now = 1_800_000_000_i64;
         let seed_reset = seed_now + 86_400;
-        let weekly_key = SeriesKey::new("claude", &account_scope_value, "weekly.v1");
+        let weekly_key = SeriesKey::new(
+            "claude",
+            &HistoryScope::for_test(&account_scope_value),
+            "weekly.v1",
+        );
         let mut seeded_keys = vec![weekly_key.clone()];
         seeded_keys.extend(
             (0..crate::agent_quota_history::MAX_SERIES - 1).map(|index| {
                 SeriesKey::new(
                     "claude",
-                    &account_scope_value,
+                    &HistoryScope::for_test(&account_scope_value),
                     format!("zzzz.{index:04}.v1"),
                 )
             }),
@@ -7719,6 +7793,7 @@ mod tests {
             source: "oauth".to_string(),
             updated_at: String::new(),
             identity: None,
+            history_scope: Ok(HistoryScope::for_test(account_scope.as_str())),
             account_scope: Ok(account_scope),
             windows: vec![weekly, new_window],
             credits: None,
@@ -9245,6 +9320,7 @@ mod tests {
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
+            history_scope: Ok(HistoryScope::for_test(account_scope.as_str())),
             account_scope: Ok(account_scope),
             windows: vec![
                 make_window("First", "shared-card.v1", "first.v1", 10.0),
@@ -9301,6 +9377,7 @@ mod tests {
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
+            history_scope: Ok(HistoryScope::for_test(account_scope.as_str())),
             account_scope: Ok(account_scope),
             windows: vec![
                 make_window("A/X", "a.v1", "x.v1", 10.0),
@@ -9373,6 +9450,7 @@ mod tests {
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
+            history_scope: Ok(HistoryScope::for_test(account_scope.as_str())),
             account_scope: Ok(account_scope),
             windows: vec![
                 UsageWindow::from_provider_used_percent(
@@ -9459,6 +9537,7 @@ mod tests {
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
+            history_scope: Ok(HistoryScope::for_test(account_scope.as_str())),
             account_scope: Ok(account_scope),
             windows: vec![UsageWindow::from_provider_used_percent(
                 "Weekly".to_string(),
@@ -9512,6 +9591,7 @@ mod tests {
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
+            history_scope: Ok(HistoryScope::for_test(account_scope.as_str())),
             account_scope: Ok(account_scope),
             windows: vec![UsageWindow::from_provider_used_percent(
                 "Weekly".to_string(),
@@ -9633,6 +9713,10 @@ mod tests {
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
+            // The one field this slice is forced to add to a test it must not
+            // otherwise modify. `Ok` on purpose: it keeps this test proving that
+            // the account-scope guard alone suppresses history.
+            history_scope: Ok(HistoryScope::for_test("stage4-history-scope")),
             account_scope: Err(AccountScopeError::MetadataWrite),
             windows: vec![
                 UsageWindow::from_provider_used_percent(
@@ -9679,6 +9763,237 @@ mod tests {
         );
         assert!(snapshot.windows[1].pace_status.window_key.is_none());
         assert!(serde_json::to_value(&snapshot).is_ok());
+    }
+
+    fn histid_window(used_percent: f64, reset_at: i64, sampled_at: i64) -> UsageWindow {
+        UsageWindow::from_provider_used_percent(
+            "Session".to_string(),
+            used_percent,
+            Some(Utc.timestamp_opt(reset_at, 0).single().unwrap()),
+            Utc.timestamp_opt(sampled_at, 0).single().unwrap(),
+        )
+        .with_identity(
+            "session.v1",
+            Some("session.v1".to_string()),
+            None,
+            Some(DurationEvidence::contract(5 * 3_600)),
+        )
+    }
+
+    /// Issue #183: a sibling application rotating the shared OAuth refresh token
+    /// used to mint a fresh lineage, a fresh account scope, a fresh `SeriesKey`
+    /// and therefore a history that restarts from zero.
+    #[test]
+    fn histid_a_history_survives_three_external_credential_rotations() {
+        let scope = TestRefreshScope::new("claude", "histid-rotation");
+        let history_path = scope
+            .root()
+            .join(crate::agent_quota_history::HISTORY_FILE_NAME);
+        let start = 1_800_000_000_i64;
+        let reset = start + 5 * 3_600;
+        let mut account_scopes = Vec::new();
+        let mut observed_keys = Vec::new();
+
+        for (index, marker) in [
+            b"rotation-one".as_slice(),
+            b"rotation-two".as_slice(),
+            b"rotation-three".as_slice(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let account_scope = scope
+                .resolve_current("fixture", "histid-rotation", marker)
+                .unwrap();
+            let history_scope = scope.resolve_history("claude", None).unwrap();
+            account_scopes.push(account_scope.as_str().to_string());
+            let sampled_at = start + index as i64 * 900;
+            let mut snapshot = AgentUsageSnapshot {
+                client_id: "claude".to_string(),
+                source: "oauth".to_string(),
+                updated_at: String::new(),
+                identity: None,
+                account_scope: Ok(account_scope),
+                history_scope: Ok(history_scope),
+                windows: vec![histid_window(10.0 + index as f64 * 10.0, reset, sampled_at)],
+                credits: None,
+                error: None,
+                transport_diagnostic: None,
+            };
+            enrich_snapshot_with(&mut snapshot, sampled_at, |active, observations, now| {
+                observed_keys.extend(active.iter().cloned());
+                crate::agent_quota_history::record_observations_at_path_and_evaluate(
+                    active,
+                    observations,
+                    now,
+                    &history_path,
+                )
+            });
+        }
+
+        // Precondition: the three markers really did fragment the account scope.
+        // Without this the rest of the fixture could pass for the wrong reason.
+        assert_ne!(account_scopes[0], account_scopes[1]);
+        assert_ne!(account_scopes[1], account_scopes[2]);
+        assert_ne!(account_scopes[0], account_scopes[2]);
+
+        assert_eq!(observed_keys.len(), 3);
+        assert!(observed_keys.windows(2).all(|pair| pair[0] == pair[1]));
+        assert!(account_scopes
+            .iter()
+            .all(|value| value != &observed_keys[0].account_scope));
+
+        let store: Value = serde_json::from_slice(&fs::read(&history_path).unwrap()).unwrap();
+        let series = store["series"].as_array().unwrap();
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0]["samples"].as_array().unwrap().len(), 3);
+        scope.cleanup();
+    }
+
+    /// The other half of the split: the two short-lived consumers must keep
+    /// fragmenting on the same rotation, because that is what refuses to serve
+    /// another account's cached data.
+    #[test]
+    fn histid_a_rotation_still_fragments_cache_binding_and_plan_cache() {
+        let _cache_guard = CLAUDE_PROFILE_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let scope = TestRefreshScope::new("claude", "histid-binding");
+        let account_scopes = [
+            b"binding-one".as_slice(),
+            b"binding-two".as_slice(),
+            b"binding-three".as_slice(),
+        ]
+        .into_iter()
+        .map(|marker| {
+            scope
+                .resolve_current("fixture", "histid-binding", marker)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+
+        let bindings = account_scopes
+            .iter()
+            .cloned()
+            .map(ProviderCacheBinding::primary)
+            .collect::<Vec<_>>();
+        assert_ne!(bindings[0], bindings[1]);
+        assert_ne!(bindings[1], bindings[2]);
+        assert_ne!(bindings[0], bindings[2]);
+
+        let now = Utc::now();
+        for (index, account) in account_scopes.iter().enumerate() {
+            *CLAUDE_PROFILE_CACHE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some((
+                now,
+                account.as_str().to_string(),
+                Some(format!("Plan {index}")),
+            ));
+            assert_eq!(
+                claude_cached_plan(now, account),
+                Ok(Some(format!("Plan {index}")))
+            );
+            for other in account_scopes
+                .iter()
+                .filter(|other| other.as_str() != account.as_str())
+            {
+                assert_eq!(claude_cached_plan(now, other), Err(None));
+            }
+        }
+        *CLAUDE_PROFILE_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        scope.cleanup();
+    }
+
+    /// A5: the account-scope guard is the sole suppressor. The Antigravity local
+    /// route reaches here with non-empty windows and `Err(NoTrustedEvidence)`
+    /// (`agent_antigravity.rs` `parse_user_status`, admitted by
+    /// `apply_provider_outcome_with`), while its history scope resolves fine.
+    #[test]
+    fn histid_a_unverified_account_records_no_history_even_with_a_resolvable_history_scope() {
+        let scope = TestRefreshScope::new("antigravity", "histid-fail-closed");
+        let history_scope = scope.resolve_history("antigravity", None).unwrap();
+        let start = 1_800_000_000_i64;
+        let mut snapshot = AgentUsageSnapshot {
+            client_id: "antigravity".to_string(),
+            source: "cli".to_string(),
+            updated_at: String::new(),
+            identity: None,
+            account_scope: Err(AccountScopeError::NoTrustedEvidence),
+            history_scope: Ok(history_scope),
+            windows: vec![histid_window(20.0, start + 5 * 3_600, start)],
+            credits: None,
+            error: None,
+            transport_diagnostic: None,
+        };
+        let calls = std::cell::Cell::new(0);
+        enrich_snapshot_with(&mut snapshot, start, |_, _, _| {
+            calls.set(calls.get() + 1);
+            Ok(Vec::new())
+        });
+        assert_eq!(calls.get(), 0);
+        assert_eq!(
+            snapshot.windows[0].pace_status.reason.as_deref(),
+            Some("accountScope")
+        );
+        assert_eq!(
+            snapshot.windows[0].pace_status.state,
+            PaceState::Unavailable
+        );
+        scope.cleanup();
+    }
+
+    fn histid_codex_credentials(account_id: Option<&str>) -> CodexCredentials {
+        CodexCredentials {
+            access_token: "codex-access".to_string(),
+            refresh_token: Some("codex-refresh".to_string()),
+            id_token: None,
+            account_id: account_id.map(str::to_string),
+            last_refresh: None,
+            auth_path: PathBuf::new(),
+            raw_json: Value::Null,
+            scope_slot: CredentialSlot {
+                semantic_source: "fixture",
+                canonical_location: "fixture".to_string(),
+            },
+        }
+    }
+
+    /// A2: Codex resolves authoritatively today and must keep doing so. Its
+    /// history scope has to stay byte-equal to the account scope the cache
+    /// binding corroborates on, or two accounts would share one series.
+    #[test]
+    fn histid_a_codex_history_scope_consumes_the_authoritative_account_id() {
+        let scope = TestRefreshScope::new("codex", "histid-codex");
+        let resolve = |provider: &str, authoritative: Option<(AuthoritativeIdKind, &str)>| {
+            scope.resolve_history(provider, authoritative)
+        };
+
+        let one = codex_history_scope_with(&histid_codex_credentials(Some("acct-1")), resolve)
+            .expect("authoritative history scope");
+        let expected = scope
+            .resolve_authoritative("codex", AuthoritativeIdKind::OpaqueId, "acct-1")
+            .unwrap();
+        assert_eq!(one.as_str(), expected.as_str());
+
+        let two = codex_history_scope_with(&histid_codex_credentials(Some("acct-2")), resolve)
+            .expect("second authoritative history scope");
+        assert_ne!(
+            SeriesKey::new("codex", &one, "main.weekly.v1"),
+            SeriesKey::new("codex", &two, "main.weekly.v1")
+        );
+
+        let constant = scope.resolve_history("codex", None).unwrap();
+        for absent in [None, Some(""), Some("   ")] {
+            let fallback = codex_history_scope_with(&histid_codex_credentials(absent), resolve)
+                .expect("account-id-less Codex must fall back to the constant, not error");
+            assert_eq!(fallback.as_str(), constant.as_str());
+            assert_ne!(fallback.as_str(), one.as_str());
+            assert_ne!(fallback.as_str(), two.as_str());
+        }
+        scope.cleanup();
     }
 
     #[test]
@@ -9789,6 +10104,7 @@ mod tests {
                 source: "fixture.invalid".to_string(),
                 updated_at: "2026-07-10T12:00:00.000Z".to_string(),
                 identity: None,
+                history_scope: Err(AccountScopeError::NoTrustedEvidence),
                 account_scope: Err(AccountScopeError::NoTrustedEvidence),
                 windows: vec![
                     window(
