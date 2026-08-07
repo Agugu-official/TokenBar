@@ -156,17 +156,22 @@ struct HourlyView: View {
     private var modeToggle: some View {
         HStack(spacing: 2) {
             ForEach([Mode.timeline, Mode.profile], id: \.rawValue) { m in
-                Button(m.label) {
+                Button {
                     modeRaw = m.rawValue
+                } label: {
+                    Text(m.label)
+                        .font(.caption2.weight(mode == m ? .semibold : .regular))
+                        .foregroundStyle(mode == m ? .primary : .secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            mode == m
+                                ? AnyShapeStyle(Color.primary.opacity(0.16))
+                                : AnyShapeStyle(.clear),
+                            in: RoundedRectangle(cornerRadius: 4))
+                        .contentShape(RoundedRectangle(cornerRadius: 4))
                 }
                 .buttonStyle(.plain)
-                .font(.caption2.weight(mode == m ? .semibold : .regular))
-                .foregroundStyle(mode == m ? .primary : .secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(
-                    mode == m ? AnyShapeStyle(Color.primary.opacity(0.16)) : AnyShapeStyle(.clear),
-                    in: RoundedRectangle(cornerRadius: 4))
             }
         }
         .padding(1)

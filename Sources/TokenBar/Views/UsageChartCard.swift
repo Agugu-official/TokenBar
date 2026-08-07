@@ -187,19 +187,26 @@ struct UsageChartCard: View {
     private func picker(selection: Binding<String>, options: [(String, String)]) -> some View {
         HStack(spacing: 2) {
             ForEach(options, id: \.0) { value, label in
-                Button(label.localized) { selection.wrappedValue = value }
-                    .buttonStyle(.plain)
-                    .lineLimit(1)
-                    .fixedSize()
-                    .font(.caption2.weight(selection.wrappedValue == value ? .semibold : .regular))
-                    .foregroundStyle(selection.wrappedValue == value ? .primary : .secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(
-                        selection.wrappedValue == value
-                            ? AnyShapeStyle(Color.primary.opacity(0.16))
-                            : AnyShapeStyle(.clear),
-                        in: RoundedRectangle(cornerRadius: 4))
+                Button {
+                    selection.wrappedValue = value
+                } label: {
+                    Text(label.localized)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .font(
+                            .caption2.weight(selection.wrappedValue == value ? .semibold : .regular)
+                        )
+                        .foregroundStyle(selection.wrappedValue == value ? .primary : .secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            selection.wrappedValue == value
+                                ? AnyShapeStyle(Color.primary.opacity(0.16))
+                                : AnyShapeStyle(.clear),
+                            in: RoundedRectangle(cornerRadius: 4))
+                        .contentShape(RoundedRectangle(cornerRadius: 4))
+                }
+                .buttonStyle(.plain)
             }
         }
         .padding(1)
