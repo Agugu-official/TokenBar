@@ -9,7 +9,9 @@ struct StatsView: View {
     /// The active tab's client slice.
     let clientIds: [String]
     let stats: UsageStats
-    let loadedModelReport: LoadedModelReport?
+    let modelReport: ModelReport?
+    /// The year `modelReport` was fetched for, in identity form.
+    var modelYear: String?
     let colors: ModelColorMap
     /// Dashboard year filter (nil = all time), forwarded to the chart card.
     var year: String?
@@ -20,11 +22,11 @@ struct StatsView: View {
     var singleClient: String?
     /// Forwarded to the attribution card so a terminal nil report reads as
     /// unavailable rather than as a request still in flight.
-    var reportAttempted = false
+    var reportLoading = false
 
     private var favorite: ModelReportEntry? {
         let allow = Set(clientIds)
-        return (loadedModelReport?.report.modelLevelEntries ?? [])
+        return (modelReport?.modelLevelEntries ?? [])
             .filter { allow.contains($0.client) }
             .max { $0.cost < $1.cost }
     }
@@ -36,8 +38,8 @@ struct StatsView: View {
                 year: year)
             summaryCard
             UsageAttributionBreakdownCard(
-                loadedModelReport: loadedModelReport, clientIds: clientIds,
-                singleClient: singleClient, reportAttempted: reportAttempted)
+                report: modelReport, reportYear: modelYear, clientIds: clientIds,
+                singleClient: singleClient, reportLoading: reportLoading)
         }
     }
 

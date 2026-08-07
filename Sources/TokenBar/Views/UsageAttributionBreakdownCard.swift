@@ -2,18 +2,23 @@ import SwiftUI
 import TokenBarCore
 
 /// API-list-price equivalent split by the user's confirmed subscription
-/// declarations. The report carries the year it was loaded for; the subtitle
-/// keeps that actual range visible without inventing a new window.
+/// declarations. The subtitle states the range the report actually covers,
+/// which is not always the selected year — a failed reload can move the
+/// selection while this report stands.
 struct UsageAttributionBreakdownCard: View {
-    let loadedModelReport: LoadedModelReport?
+    let report: ModelReport?
+    /// The year the report was fetched for, in `DashboardModel`'s identity form
+    /// where empty means all time. Paired with the report rather than read from
+    /// the current selection, so stale rows are never labelled with a range they
+    /// do not cover.
+    var reportYear: String?
     let clientIds: [String]
     /// The client tab this card is scoped to, or nil on Overview.
     var singleClient: String?
-    /// Whether the report request has finished, however it finished. `load()`
-    /// fetches the report with `try?` and still reaches `.ready` on the graph
-    /// alone, so a nil report is not by itself an in-flight request — without
-    /// this the card spins forever whenever the report keeps failing.
-    var reportAttempted = false
+    /// True while the report request is in flight. A nil report is otherwise two
+    /// states at once — still loading, or finished with nothing — and treating
+    /// the second as the first spins forever against a persistent failure.
+    var reportLoading = false
 
     /// Bound rather than read, because a computed read of `UserDefaults` is not
     /// a view dependency: saving a classification in Settings left an already
@@ -36,13 +41,16 @@ struct UsageAttributionBreakdownCard: View {
         case rows
     }
 
-    static func contentState(rowCount: Int?, reportAttempted: Bool) -> ContentState {
-        guard let rowCount else { return reportAttempted ? .unavailable : .loading }
+    static func contentState(rowCount: Int?, reportLoading: Bool) -> ContentState {
+        guard let rowCount else { return reportLoading ? .loading : .unavailable }
         return rowCount == 0 ? .empty : .rows
     }
 
-    static func rangeLabel(for loadedModelReport: LoadedModelReport?) -> String {
-        loadedModelReport?.year ?? "All years"
+    /// Empty is the identity form's all-time marker, so it reads the same as a
+    /// report that was never scoped.
+    static func rangeLabel(reportYear: String?) -> String {
+        guard let reportYear, !reportYear.isEmpty else { return "All years" }
+        return reportYear
     }
 
     /// The card states both scopes that change its figures. Naming only the
@@ -50,30 +58,27 @@ struct UsageAttributionBreakdownCard: View {
     /// which is exactly the misreading the whole feature exists to prevent.
     /// Parts are localized before composing because `DashCard` looks the
     /// finished subtitle up once, and a composed string is never a key.
-    static func subtitle(
-        for loadedModelReport: LoadedModelReport?, singleClient: String?
-    ) -> String {
-        let range = rangeLabel(for: loadedModelReport).localized
+    static func subtitle(reportYear: String?, singleClient: String?) -> String {
+        let range = rangeLabel(reportYear: reportYear).localized
         guard let singleClient else { return range }
         return UsageAttributionSettings.Copy.source.localized(
             range, ClientRegistry.shortName(singleClient))
     }
 
     var body: some View {
-        let rows = loadedModelReport.map {
+        let rows = report.map {
             // Use raw entries: modelLevelEntries folds providers and erases the
             // dimension the attribution declarations resolve against.
             UsageAttributionBreakdown.rows(
-                entries: $0.report.entries, clientIds: clientIds, confirmed: confirmed)
+                entries: $0.entries, clientIds: clientIds, confirmed: confirmed)
         }
 
         DashCard(
             UsageAttributionBreakdown.Copy.title,
-            subtitle: Self.subtitle(
-                for: loadedModelReport, singleClient: singleClient)
+            subtitle: Self.subtitle(reportYear: reportYear, singleClient: singleClient)
         ) {
             switch Self.contentState(
-                rowCount: rows?.count, reportAttempted: reportAttempted)
+                rowCount: rows?.count, reportLoading: reportLoading)
             {
             case .loading:
                 LoadingLine(title: "Loading…")

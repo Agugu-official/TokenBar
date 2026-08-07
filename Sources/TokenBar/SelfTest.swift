@@ -1236,7 +1236,7 @@ enum SelfTest {
         UserDefaults.standard.set(cardRaw, forKey: UsageAttribution.confirmedKey)
         let cardState = awaitMainActorValue { () -> UsageAttribution.State? in
             let card = UsageAttributionBreakdownCard(
-                loadedModelReport: nil, clientIds: [], singleClient: nil)
+                report: nil, clientIds: [], singleClient: nil)
             return UsageAttribution.resolve(
                 client: "claude", provider: "openai", model: nil, records: card.confirmed)
         }
@@ -1247,7 +1247,7 @@ enum SelfTest {
         // creates it, so assert the storage itself is present.
         let cardObservesStore = awaitMainActorValue { () -> Bool in
             let card = UsageAttributionBreakdownCard(
-                loadedModelReport: nil, clientIds: [], singleClient: nil)
+                report: nil, clientIds: [], singleClient: nil)
             return Mirror(reflecting: card).children.contains {
                 String(describing: type(of: $0.value)).hasPrefix("AppStorage<")
             }
@@ -1278,13 +1278,13 @@ enum SelfTest {
         let cardStates = awaitMainActorValue { () -> [UsageAttributionBreakdownCard.ContentState] in
             [
                 UsageAttributionBreakdownCard.contentState(
-                    rowCount: nil, reportAttempted: false),
+                    rowCount: nil, reportLoading: true),
                 UsageAttributionBreakdownCard.contentState(
-                    rowCount: nil, reportAttempted: true),
+                    rowCount: nil, reportLoading: false),
                 UsageAttributionBreakdownCard.contentState(
-                    rowCount: 0, reportAttempted: true),
+                    rowCount: 0, reportLoading: false),
                 UsageAttributionBreakdownCard.contentState(
-                    rowCount: 3, reportAttempted: true),
+                    rowCount: 3, reportLoading: false),
             ]
         }
         expect(
@@ -2364,37 +2364,48 @@ enum SelfTest {
             settingsModelUsesAllTime,
             "Settings can pin its client universe to the all-time graph")
 
-        // The selected year may move ahead of a stale report while reload is
-        // failing. The card must keep the report's own range and rows paired.
+        // The invariant is that the card never labels rows with a range they do
+        // not cover. `invalidateModel()` drops the report the moment the slice
+        // changes — deliberately, so a late in-flight scan cannot publish the
+        // previous year's models — so on a failed switch there are no rows left
+        // to mislabel and the subtitle falls back to the unscoped form. The two
+        // successful switches are where the pairing is actually exercised.
         let dashboardYearKey = "tokenbar.dashboard.year"
         let savedDashboardYear = UserDefaults.standard.object(forKey: dashboardYearKey)
         let reportRangeSequence: [DashboardModelTestObservation] = awaitMainActorValue {
             let source = DashboardModelTestSource(failingGraphYear: "2022")
             let model = DashboardModel(source: source, initialYear: "2024")
             await model.load()
+            // PR #187 took the model report off the critical path: `load()`
+            // fetches the graph alone and a model-dependent lens asks for the
+            // report when it appears. The Stats lens is where this card lives,
+            // so that is the call that has to drive this sequence now.
+            await model.ensureModelData(for: .stats)
             let initial = DashboardModelTestObservation(
                 selectedYear: model.year,
-                loadedYear: model.loadedModelReport?.year,
-                loadedModel: model.loadedModelReport?.report.entries.first?.model,
-                loadedTokens: model.loadedModelReport?.report.entries.first?.total,
+                loadedYear: model.modelYear,
+                loadedModel: model.modelReport?.entries.first?.model,
+                loadedTokens: model.modelReport?.entries.first?.total,
                 cardRangeLabel: UsageAttributionBreakdownCard.rangeLabel(
-                    for: model.loadedModelReport))
+                    reportYear: model.modelYear))
             await model.setYear("2023")
+            await model.ensureModelData(for: .stats)
             let successfulSwitch = DashboardModelTestObservation(
                 selectedYear: model.year,
-                loadedYear: model.loadedModelReport?.year,
-                loadedModel: model.loadedModelReport?.report.entries.first?.model,
-                loadedTokens: model.loadedModelReport?.report.entries.first?.total,
+                loadedYear: model.modelYear,
+                loadedModel: model.modelReport?.entries.first?.model,
+                loadedTokens: model.modelReport?.entries.first?.total,
                 cardRangeLabel: UsageAttributionBreakdownCard.rangeLabel(
-                    for: model.loadedModelReport))
+                    reportYear: model.modelYear))
             await model.setYear("2022")
+            await model.ensureModelData(for: .stats)
             let failedSwitch = DashboardModelTestObservation(
                 selectedYear: model.year,
-                loadedYear: model.loadedModelReport?.year,
-                loadedModel: model.loadedModelReport?.report.entries.first?.model,
-                loadedTokens: model.loadedModelReport?.report.entries.first?.total,
+                loadedYear: model.modelYear,
+                loadedModel: model.modelReport?.entries.first?.model,
+                loadedTokens: model.modelReport?.entries.first?.total,
                 cardRangeLabel: UsageAttributionBreakdownCard.rangeLabel(
-                    for: model.loadedModelReport))
+                    reportYear: model.modelYear))
             return [initial, successfulSwitch, failedSwitch]
         } ?? []
         if let savedDashboardYear {
@@ -2405,35 +2416,37 @@ enum SelfTest {
         expect(
             reportRangeSequence.count == 3
                 && reportRangeSequence.map(\.selectedYear) == ["2024", "2023", "2022"]
-                && reportRangeSequence.map(\.loadedYear) == ["2024", "2023", "2023"]
+                && reportRangeSequence.map(\.loadedYear) == ["2024", "2023", nil]
                 && reportRangeSequence.map(\.loadedModel)
-                    == ["loaded-2024", "loaded-2023", "loaded-2023"]
-                && reportRangeSequence.map(\.loadedTokens) == [24, 23, 23]
+                    == ["loaded-2024", "loaded-2023", nil]
+                && reportRangeSequence.map(\.loadedTokens) == [24, 23, nil]
+                // Never "2022": the label always states the range the rows come
+                // from, and with no rows it states no range at all.
                 && reportRangeSequence.map(\.cardRangeLabel)
-                    == ["2024", "2023", "2023"],
-            "attribution report range follows new data and stays with stale rows on failure")
+                    == ["2024", "2023", "All years"],
+            "attribution card labels rows only with the range they come from |"
+                + " selected=\(reportRangeSequence.map(\.selectedYear))"
+                + " loaded=\(reportRangeSequence.map(\.loadedYear))"
+                + " model=\(reportRangeSequence.map(\.loadedModel))"
+                + " label=\(reportRangeSequence.map(\.cardRangeLabel))")
 
         // The card's figures change with BOTH the year and the client tab, so
         // naming only the year let a client subtotal read as an account-wide
         // breakdown. Overview passes nil rather than relying on a one-element
         // clientIds, which Overview can legitimately produce.
-        let scopedReport = LoadedModelReport(
-            report: try! JSONDecoder().decode(
-                ModelReport.self,
-                from: Data("""
-                {"entries":[],"totalInput":0,"totalOutput":0,"totalCacheRead":0,
-                 "totalCacheWrite":0,"totalMessages":0,"totalCost":0}
-                """.utf8)),
-            year: "2026")
         expect(
             UsageAttributionBreakdownCard.subtitle(
-                for: scopedReport, singleClient: nil) == "2026"
+                reportYear: "2026", singleClient: nil) == "2026"
                 && UsageAttributionBreakdownCard.subtitle(
-                    for: scopedReport, singleClient: "claude")
+                    reportYear: "2026", singleClient: "claude")
                     == "2026 · \(ClientRegistry.shortName("claude"))"
                 && UsageAttributionBreakdownCard.subtitle(
-                    for: nil, singleClient: "claude")
-                    == "All years · \(ClientRegistry.shortName("claude"))",
+                    reportYear: nil, singleClient: "claude")
+                    == "All years · \(ClientRegistry.shortName("claude"))"
+                // Empty is the identity form's all-time marker, so it must read
+                // the same as never having been scoped.
+                && UsageAttributionBreakdownCard.subtitle(
+                    reportYear: "", singleClient: nil) == "All years",
             "attribution card subtitle names the client scope, not only the year")
 
         // Browsing a client inside the MAIN popover must not decide what that
