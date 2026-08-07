@@ -43,8 +43,10 @@
 "No agent activity in this range" = "這個區間沒有 Agent 活動";
 "No activity in this window" = "這個時間窗內沒有活動";
 "No data" = "沒有資料";
+"Checking…" = "查詢中…";
 "No clients with usage data yet." = "目前沒有任何用戶端有用量資料。";
 "No supported agents yet" = "目前沒有支援的 Agent";
+"Checking agent limits…" = "正在查詢額度…";
 
 /* ===== 卡片標題 ===== */
 "Token Usage" = "Token 用量";
