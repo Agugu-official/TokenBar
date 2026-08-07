@@ -115,9 +115,6 @@ struct AgentLimitsCard: View {
         "grok": ["Weekly"],
     ]
 
-    /// Maps opencode subscription labels (from the backend) to the agent
-    /// client ids whose quota cards represent them.
-
     /// Every client id that can show a row in the multi-agent Agent-limits
     /// card. Thin wrapper over `ClientRegistry.knownLimitsClients` (the one
     /// implementation) that supplies this card's placeholder-row keys, so the
