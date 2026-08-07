@@ -163,13 +163,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     nonisolated static func visibilityChange(
         previousHiddenRaw: String, hiddenRaw: String,
         previousSelection: DiscordPresence.ClientSelection = .mostUsed,
-        selection: DiscordPresence.ClientSelection = .mostUsed
+        selection: DiscordPresence.ClientSelection = .mostUsed,
+        contributors: Set<String>? = nil
     ) -> DiscordIPC.VisibilityChange {
         let previousHidden = ClientRegistry.parseIdSet(previousHiddenRaw)
         let currentHidden = ClientRegistry.parseIdSet(hiddenRaw)
         let wasPublished = effectivePublished(
-            selection: previousSelection, hidden: previousHidden)
-        let isPublished = effectivePublished(selection: selection, hidden: currentHidden)
+            selection: previousSelection, hidden: previousHidden, contributors: contributors)
+        let isPublished = effectivePublished(
+            selection: selection, hidden: currentHidden, contributors: contributors)
         // Something that WAS on the profile is now hidden.
         if !wasPublished.isDisjoint(with: currentHidden.subtracting(previousHidden)) {
             return .reducing
@@ -230,16 +232,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Every set-shaped classification below compares two of these rather than
     /// the raw preferences, so a change that cannot move a published byte is
     /// correctly no change at all.
+    /// `contributors` narrows this to the clients that actually have a stripe
+    /// today. Without it `.mostUsed` expands to the entire registry, so hiding
+    /// a registered client that contributed nothing reads as a reduction —
+    /// and while Discord is offline that grant cannot be spent, so a later
+    /// payload carrying genuinely new activity inherits it and goes out inside
+    /// the floor. Nil means "do not narrow", which is what the pure-function
+    /// assertions use.
     nonisolated static func effectivePublished(
-        selection: DiscordPresence.ClientSelection, hidden: Set<String>
+        selection: DiscordPresence.ClientSelection, hidden: Set<String>,
+        contributors: Set<String>? = nil
     ) -> Set<String> {
         let registered = Set(ClientRegistry.allIds)
+        let selected: Set<String>
         switch selection {
-        case .mostUsed: return registered.subtracting(hidden)
-        case .only(let id):
-            return registered.contains(id) ? Set([id]).subtracting(hidden) : []
-        case .malformed: return []
+        case .mostUsed: selected = registered
+        case .only(let id): selected = registered.contains(id) ? [id] : []
+        case .malformed: selected = []
         }
+        let visible = selected.subtracting(hidden)
+        return contributors.map(visible.intersection) ?? visible
     }
 
     /// A selection change replaces what is published rather than narrowing or
@@ -388,9 +400,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // made the published figure coarser, and leaving the precise
                 // one up while the floor expires is the same broken promise in
                 // miniature.
+                // Today's actual contributors, so a hide of a client with no
+                // usage today is not mistaken for taking something down.
+                let contributors = self.lastGraph.map { graph in
+                    Set(graph.contributions.last { $0.date == Format.todayKey() }?
+                        .clients.map(\.client) ?? [])
+                }
                 var change = AppDelegate.visibilityChange(
                     previousHiddenRaw: previousHiddenRaw, hiddenRaw: hiddenRaw,
-                    previousSelection: previousSelection, selection: selection)
+                    previousSelection: previousSelection, selection: selection,
+                    contributors: contributors)
                     .combined(with: AppDelegate.costStyleChange(
                         previous: previousCostStyle, current: costStyle,
                         publishedInBoth: previousComponents.contains(.cost)
@@ -404,7 +423,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     change,
                     wasPublishing: !AppDelegate.effectivePublished(
                         selection: previousSelection,
-                        hidden: ClientRegistry.parseIdSet(previousHiddenRaw)).isEmpty)
+                        hidden: ClientRegistry.parseIdSet(previousHiddenRaw),
+                        contributors: contributors).isEmpty)
                 self.lastDiscordEnabled = discordEnabled
                 self.lastCostStyle = costStyle
                 self.lastComponents = components

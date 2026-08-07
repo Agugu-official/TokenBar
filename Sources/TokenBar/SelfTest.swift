@@ -4023,6 +4023,24 @@ enum SelfTest {
                 + "selection alone reports no change and leaves the just-hidden client on the "
                 + "profile for the rest of the floor)")
 
+        // `.mostUsed` is not "every registered client" — it is whichever of
+        // them actually has usage today. Hiding a registered client with no
+        // stripe removes nothing from the profile, and while Discord is offline
+        // that grant cannot be spent, so a later payload carrying genuinely new
+        // activity would inherit it and go out inside the floor.
+        expect(
+            AppDelegate.visibilityChange(
+                previousHiddenRaw: "", hiddenRaw: "amp",
+                contributors: ["claude", "codex"]) == .none
+                && AppDelegate.visibilityChange(
+                    previousHiddenRaw: "", hiddenRaw: "claude",
+                    contributors: ["claude", "codex"]) == .reducing
+                && AppDelegate.effectivePublished(
+                    selection: .mostUsed, hidden: [], contributors: ["claude"]) == ["claude"],
+            "hiding a registered client with no usage today is no change, while hiding one that "
+                + "contributed is a reduction (mutation: expanding `.mostUsed` to the whole "
+                + "registry grants a bypass for a hide that removed nothing published)")
+
         // A reduction that removed nothing published earns no bypass. If the
         // selected client is hidden there is no payload, so unticking a
         // component takes nothing off the profile — and a grant armed there
