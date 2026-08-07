@@ -99,6 +99,33 @@ Security review 與 2026-07-17 live prompt 後的修訂已把 Mac protocol 鎖�
 | 2 | Credential marker lineage | HMAC of provider與 random 128-bit lineage ID | Unseen external replacement建立新 lineage；已知 app refresh明確 transfer |
 | 3 | No trusted evidence | None | `unavailable(accountScope)`；不得讀寫 provider history |
 
+### History identity 與 account scope 是兩個不同的身分（2026-08-07）
+
+上面那張表定義的是 **`accountScope`**，它服務三個消費者，而其中兩個對「碎裂」的要求與第三個相反：
+
+| 消費者 | 存活時間 | credential 輪替時碎裂的後果 |
+|---|---|---|
+| `ProviderCacheBinding`（本體就是 `AccountScope`） | 一次 refresh | **正確**——碎裂即丟棄快取，這正是拒絕端出其他帳號快照的機制 |
+| Claude plan 標籤快取 | 1 小時 | **正確**——同上 |
+| Quota-pace history 的 `SeriesKey` | 數週 | **摧毀模型**——這是 issue #183 |
+
+因此 durable history 另有一個身分 **`HistoryScope`**，由 `resolve_history_scope` 產生，與 `accountScope` 是**不可互轉的獨立型別**（傳錯不會編譯）。解析規則只有兩級：
+
+| Priority | Evidence | `HistoryScope` |
+|---|---|---|
+| 1 | 與上表 priority 1 相同的 authoritative identifier | 沿用同一個 domain-separated HMAC |
+| 2 | 無 authoritative evidence | `HMAC(K, "scope-history-v1" ‖ provider)`——per-installation、per-provider 常數，不讀 metadata |
+
+**Priority 2 不會因 evidence 不足而失敗**，只會因 installation key 或 storage 失敗。但這不會放寬 fail-closed：`agent_usage.rs` 保留原本那道以 `accountScope` 為判準的 early return，它才是「身分未驗證就不寫入永久歷史」的唯一守門員（`parse_user_status` 會回傳 `accountScope` 為 `Err(NoTrustedEvidence)` 但 windows 非空的快照）。
+
+> **產品決策（2026-08-07，owner 拍板）：** pace 曲線模型的是「這個人如何在一個 window 內消耗額度」，那是操作者的性質，不是帳單歸屬的屬性。**分得出來就分，分不出來就不要硬分。**
+>
+> 接受的後果：在沒有 authoritative ID 的 provider 上，同一台機器的兩個帳號共用一條 pace series。影響 Claude 全部路線、Grok、Copilot、Antigravity remote，以及 `ChatGPT-Account-Id` 缺席時的 Codex。
+>
+> 一併接受的模型代價：series 存的是 `usedPercent` 對 phase，同一個人在不同規模的方案上斜率不同，合併會讓曲線失真。判斷是「失真的模型遠勝於永遠學不起來的模型」。**刻意不把 plan tier 放進 `windowKey`**，那會重新引入碎片化。
+
+下方 `:581`／`:591`／§Account scope resolver 開頭「不得自行換成 token hash、path／slot-only identity」等規則，約束的是 **`accountScope`**，不是 history identity；history identity 走的就是上表 priority 2 的 provider-only 常數，那是記錄在案的決策而非默默放寬。
+
 Antigravity local IDE 的 email 來自 authenticated `GetUserStatus`，可走 authoritative route。Remote OAuth quota 使用 Google credential，但目前 email 來自另一份 `google_accounts.active` state，兩者未綁定；remote 必須走 credential lineage，且該 local email不得再用來標示或 scope remote quota。Local／remote history 只有在未來同一 authenticated response證明相同 provider ID，或有明確 trusted binding 時才能 merge；目前安全地分開學習。
 
 | Current provider route | Frozen account evidence |
@@ -514,8 +541,8 @@ Mac-owned [`provider-quota-pace-v3.json`](../../../Fixtures/CrossCheck/provider-
 | Case | Required result |
 |---|---|
 | Credential refresh | Same account history continues across app-controlled rotation；每個 transaction crash point有 fail-closed proof |
-| Account switch | Same auth slot切換帳號後不可讀到前一個 account series |
-| No safe identity | Fail closed with visible status；history 不使用 provider-only default key |
+| Account switch | **History**：在沒有 authoritative ID 的 provider 上，同一 installation 的帳號切換依設計**共用**同一條 series（見 History identity 一節的產品決策）。**非-history 屬性必須維持隔離**，並以兩個面證明：`ProviderCacheBinding` 仍隨 credential 改變而改變，Claude plan 標籤快取仍拒絕服務另一個 scope。有 authoritative ID 的路線（Codex、Antigravity local IDE）仍然分開 |
+| No safe identity | `accountScope` 仍 fail closed with visible status。History identity 走 provider-only 常數是記錄在案的決策；缺少 `accountScope` 時仍不寫入 history |
 | Antigravity identity binding | Remote OAuth不得使用 unbound `google_accounts.active` email；local／remote未證明同 owner前不 merge |
 | Duration variance | 28–31 day cycles保留各自 duration，phase curve可共同評估 |
 | Short cycles | 5h history可在 bounded retention與 observation-span gate後達到 expected／risk confidence |
