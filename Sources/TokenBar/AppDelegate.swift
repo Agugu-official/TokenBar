@@ -183,27 +183,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .none
     }
 
-    /// A floor bypass is owed only when something was actually on the profile
-    /// to take down. With the selected client hidden, or no registered client
-    /// visible, nothing could have been published — so unticking a component
-    /// removes nothing, and arming a grant there leaves one for a later
-    /// selection change to inherit and spend on a client that IS visible,
-    /// inside the floor.
-    ///
-    /// A static rather than a branch inside `applyDiscordPresence`, for the
-    /// same reason `makeDiscordClient` is one: SelfTest returns `Never` before
-    /// the app lifecycle exists, so a rule buried in the delegate cannot be
-    /// asserted at all. It shipped unasserted for one round and a mutation
-    /// proved it: removing the branch changed nothing.
-    ///
-    /// The retire survives — only the claim on the floor is dropped.
-    nonisolated static func withoutUnownedGrant(
-        _ change: DiscordIPC.VisibilityChange, wasPublishing: Bool
-    ) -> DiscordIPC.VisibilityChange {
-        guard change.grant == .arm, !wasPublishing else { return change }
-        return DiscordIPC.VisibilityChange(retires: change.retires, grant: .leave)
-    }
-
     /// The one direction test both set-shaped preferences use. The parameter
     /// names the set whose GROWTH means less is published — the hidden set for
     /// clients, and the complement for components, which is why the component
@@ -406,7 +385,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     Set(graph.contributions.last { $0.date == Format.todayKey() }?
                         .clients.map(\.client) ?? [])
                 }
-                var change = AppDelegate.visibilityChange(
+                let change = AppDelegate.visibilityChange(
                     previousHiddenRaw: previousHiddenRaw, hiddenRaw: hiddenRaw,
                     previousSelection: previousSelection, selection: selection,
                     contributors: contributors)
@@ -419,12 +398,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     .combined(with: AppDelegate.selectionChange(
                         previous: previousSelection, current: selection,
                         hidden: ClientRegistry.parseIdSet(hiddenRaw)))
-                change = AppDelegate.withoutUnownedGrant(
-                    change,
-                    wasPublishing: !AppDelegate.effectivePublished(
-                        selection: previousSelection,
-                        hidden: ClientRegistry.parseIdSet(previousHiddenRaw),
-                        contributors: contributors).isEmpty)
                 self.lastDiscordEnabled = discordEnabled
                 self.lastCostStyle = costStyle
                 self.lastComponents = components

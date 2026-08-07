@@ -4041,22 +4041,6 @@ enum SelfTest {
                 + "contributed is a reduction (mutation: expanding `.mostUsed` to the whole "
                 + "registry grants a bypass for a hide that removed nothing published)")
 
-        // A reduction that removed nothing published earns no bypass. If the
-        // selected client is hidden there is no payload, so unticking a
-        // component takes nothing off the profile — and a grant armed there
-        // waits for a later selection change to inherit and spend it on a
-        // client that IS visible.
-        expect(
-            AppDelegate.withoutUnownedGrant(.reducing, wasPublishing: false)
-                == DiscordIPC.VisibilityChange(retires: true, grant: .leave)
-                && AppDelegate.withoutUnownedGrant(.reducing, wasPublishing: true) == .reducing
-                && AppDelegate.withoutUnownedGrant(.increasing, wasPublishing: false)
-                    == .increasing
-                && AppDelegate.withoutUnownedGrant(.retiring, wasPublishing: false) == .retiring,
-            "a reduction with nothing published keeps its retire and loses its floor claim, while "
-                + "a real one is untouched (mutation: arming it anyway leaves a grant for a later "
-                + "selection change to spend inside the floor)")
-
         // Absent, malformed and named are three answers. One `as? String` cast
         // would send a key holding a number down the ABSENT branch and widen a
         // one-client selection to every registered client.
@@ -4079,23 +4063,15 @@ enum SelfTest {
         } else {
             expect(false, "the isolated selection suite could not be created")
         }
-        // The two effects combine independently, which is why this is a struct.
-        // An earlier revision made it a four-case enum with a total order and
-        // collapsed `retiring + increasing` to `retiring` — keeping the retire
-        // and DROPPING the clear. That is the wrong half to lose: `.increasing`
-        // exists precisely to stop newly added information riding an unspent
-        // grant out inside the floor.
-        let dpRetireUnhide = DiscordIPC.VisibilityChange.retiring.combined(with: .increasing)
+        // Combining is the union of the retire. Losing one would let a payload
+        // built against a state that no longer holds reach the socket.
         expect(
-            dpRetireUnhide.retires && dpRetireUnhide.grant == .clear
-                && DiscordIPC.VisibilityChange.retiring.combined(with: .reducing) == .reducing
-                && DiscordIPC.VisibilityChange.retiring.combined(with: .none) == .retiring
-                && DiscordIPC.VisibilityChange.reducing.combined(with: .increasing) == .reducing,
-            "a turn that both retires and adds information keeps BOTH effects — the old payload "
-                + "is retired and the bypass is cleared — while a reduction still outranks an "
-                + "unhide (mutation: a total order over four cases has to drop one of them, and "
-                + "dropping the clear publishes the addition sub-floor)")
-
+            DiscordIPC.VisibilityChange.retiring.combined(with: .increasing).retires
+                && DiscordIPC.VisibilityChange.reducing.combined(with: .increasing).retires
+                && !DiscordIPC.VisibilityChange.increasing.combined(with: .none).retires,
+            "a turn that both replaces content and adds some still retires the old payload, "
+                + "while a turn that only adds does not (mutation: an AND instead of an OR lets "
+                + "a payload built for the previous selection reach the socket)")
         // MARK: - Discord Rich Presence transport (DISCORD-PRESENCE M2a)
         //
         // Nothing in the app calls this transport yet. These run against real
@@ -4828,97 +4804,33 @@ enum SelfTest {
                 + "(mutation: guarding openConnection on the queue-local `running` alone hands "
                 + "Discord a connection and a handshake after the user opted out)")
 
-        // A15 — a privacy-reducing update is not throttled. Same client, same
-        // floor, same 15s window; the visibility flag is the only difference
-        // between the control steps and the final one.
-        let (dpBypassLocal, dpBypassPeer) = dpSocketPair()
-        let dpBypassClient = DiscordIPCClient(connect: { dpBypassLocal })
-        dpBypassClient.start()
-        dpBypassClient.drainForTesting()
-        let dpBypassReady = dpReachReady(dpBypassPeer, dpBypassClient)
-        dpBypassClient.publish(dpP("10K tokens today", state: "Amp · $1-5"))
-        dpBypassClient.drainForTesting()
-        let dpBypassArmed = String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self)
+        // The floor applies to every NEW sample, including one caused by a
+        // hide. That is the whole behavioural change of removing the bypass,
+        // and it is what the consent copy now states. A clear is different and
+        // still is not throttled: it carries no new information, and delaying
+        // one would keep a stale presence public after the user switched off.
+        let (dpNoBypassLocal, dpNoBypassPeer) = dpSocketPair()
+        let dpNoBypassClient = DiscordIPCClient(connect: { dpNoBypassLocal })
+        dpNoBypassClient.start()
+        dpNoBypassClient.drainForTesting()
+        let dpNoBypassReady = dpReachReady(dpNoBypassPeer, dpNoBypassClient)
+        dpNoBypassClient.publish(dpP("10K tokens today", state: "Amp · $1-5"))
+        dpNoBypassClient.drainForTesting()
+        let dpNoBypassArmed = String(decoding: dpRecvNow(dpNoBypassPeer), as: UTF8.self)
             .contains("10K tokens today")
-        dpBypassClient.publish(dpP("11K tokens today", state: "Amp · $1-5"))
-        dpBypassClient.drainForTesting()
-        let dpBypassWaited = !String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self)
-            .contains("11K")
-        dpBypassClient.publish(dpP("12K tokens today", state: "Amp · $1-5"), visibility: .reducing)
-        dpBypassClient.drainForTesting()
-        let dpBypassSent = String(decoding: dpRecvNow(dpBypassPeer), as: UTF8.self)
-            .contains("12K tokens today")
-        dpFinish(dpBypassClient, [dpBypassPeer])
-        expect(dpBypassReady && dpBypassArmed && dpBypassWaited && dpBypassSent,
-            "A15: hiding a client republishes immediately instead of waiting out the 15s floor, "
-                + "unlike an ordinary update inside it "
-                + "(mutation: dropping the floorBypass grant throttles it like any other sample)")
-
-        // A hide's grant survives a selection change that supersedes it. The
-        // hide publishes `.reducing` but its queued block has not run, so
-        // `floorBypass` is not armed yet; the selection change publishes
-        // `.retiring`, whose epoch bump retires that block. Without the grant
-        // being carried, the replacement — which already contains the new
-        // hidden set — waits out the floor while the just-hidden client stays
-        // public. The control run is the same fixture with no reduction in
-        // front, which must still be throttled.
-        func dpSupersededHide(withReduction: Bool) -> Bool {
-            let (local, peer) = dpSocketPair()
-            let client = DiscordIPCClient(connect: { local })
-            client.publishInterval = 3.0
-            client.start()
-            client.drainForTesting()
-            _ = dpReachReady(peer, client)
-            client.publish(dpP("20K tokens today", state: "Amp · $1-5"))
-            client.drainForTesting()
-            _ = dpFramesNow(peer) // consume the sample that arms the clock
-            let gate = dpHold(client)
-            if withReduction {
-                client.publish(dpP("21K tokens today", state: "Amp · $1-5"), visibility: .reducing)
-            }
-            client.publish(dpP("22K tokens today", state: "Zed · $1-5"), visibility: .retiring)
-            gate.signal()
-            client.drainForTesting()
-            let arrived = dpFrameArrives(peer, "22K tokens today", within: 0.4)
-            dpFinish(client, [peer])
-            return arrived
-        }
-        // The deferred grant does not survive a withdrawal. A hide queued but
-        // never run is abandoned by `stop()`'s epoch bump, so re-enabling and
-        // then changing the selection must NOT inherit its bypass — the hide
-        // was withdrawn along with consent, and the new client's activity would
-        // otherwise publish inside the floor.
-        func dpGrantAcrossStop() -> Bool {
-            let (peers, client, _) = dpRig(peers: 2)
-            client.publishInterval = 3.0
-            client.start()
-            client.drainForTesting()
-            _ = dpReachReady(peers[0], client)
-            client.publish(dpP("30K tokens today", state: "Amp · $1-5"))
-            client.drainForTesting()
-            _ = dpFramesNow(peers[0])
-            let gate = dpHold(client)
-            client.publish(dpP("31K tokens today", state: "Amp · $1-5"), visibility: .reducing)
-            client.stop()
-            gate.signal()
-            client.drainForTesting()
-            client.start()
-            _ = dpReachReady(peers[1], client)
-            client.publish(dpP("32K tokens today", state: "Zed · $1-5"), visibility: .retiring)
-            client.drainForTesting()
-            let early = dpFrameArrives(peers[1], "32K tokens today", within: 0.4)
-            dpFinish(client, peers)
-            return early
-        }
-        expect(!dpGrantAcrossStop(),
-            "a reduction abandoned by stop() leaves no grant behind, so a later selection change "
-                + "is throttled like any other sample (mutation: leaving `unspentReduction` set "
-                + "across the withdrawal lets the new client publish inside the floor)")
-        expect(dpSupersededHide(withReduction: true) && !dpSupersededHide(withReduction: false),
-            "a retire inherits the grant of a reduction it superseded, and earns none on its own "
-                + "(mutation: dropping the inheritance leaves the just-hidden client public for "
-                + "the rest of the floor; arming one for every retire hands a selection change "
-                + "an unbounded bypass)")
+        dpNoBypassClient.publish(dpP("11K tokens today", state: "Amp · $1-5"), visibility: .reducing)
+        dpNoBypassClient.drainForTesting()
+        let dpNoBypassHeld = !String(decoding: dpRecvNow(dpNoBypassPeer), as: UTF8.self).contains("11K")
+        dpNoBypassClient.publish(nil, visibility: .reducing)
+        dpNoBypassClient.drainForTesting()
+        let dpNoBypassCleared = String(decoding: dpRecvNow(dpNoBypassPeer), as: UTF8.self)
+            .contains("\"activity\":null")
+        dpFinish(dpNoBypassClient, [dpNoBypassPeer])
+        expect(dpNoBypassReady && dpNoBypassArmed && dpNoBypassHeld && dpNoBypassCleared,
+            "a hide waits out the publish floor like any other new sample, while a clear still "
+                + "goes out immediately (mutation: re-adding a bypass republishes the hide "
+                + "sub-interval; throttling the clear leaves a stale presence public)")
+        // The superseded-grant fixture is gone with the grant: nothing is armed, so nothing can be inherited or destroyed.
 
         // A15c — the bypass is one shot: a clear carries no new information
         // and must not re-arm the floor's clock, or the unhide behind it goes
@@ -4968,56 +4880,7 @@ enum SelfTest {
                 + "arming; mutation: granting the bypass by clearing `lastSent` leaves the clock "
                 + "cleared through the clear, and this payload goes out sub-interval)")
 
-        // A15d — a superseding publish can still hold an unspent bypass grant
-        // when it is written: an ordinary sample should inherit it, an unhide
-        // should not. One fixture, differing by a single argument.
-        func dpSupersede(
-            _ visibility: DiscordIPC.VisibilityChange
-        ) -> (early: Bool, spent: Double, held: Bool) {
-            let (peers, client, handed) = dpRig(peers: 2)
-            client.publishInterval = 3.0
-            client.reconnectDelay = 0.02
-            client.start()
-            _ = dpWaitUntil { client.isConnectedForTesting }
-            dpSendReady(peers[0])
-            _ = dpWaitUntil { client.inboundTokenForTesting == "ready" }
-            client.publish(dpP("30K tokens today", state: "Amp · $1-5"))
-            client.drainForTesting()
-            _ = dpFramesNow(peers[0])
-            let armed = DispatchTime.now()
-            // Break it. The retry lands on the second socket, which is never
-            // made READY, so everything below is held at the ready guard.
-            close(peers[0])
-            _ = dpWaitUntil { handed.value >= 2 }
-            client.publish(nil, visibility: .reducing)
-            client.drainForTesting()
-            client.publish(dpP("31K tokens today", state: "Amp · $1-5"), visibility: visibility)
-            client.drainForTesting()
-            let spent = Double(
-                DispatchTime.now().uptimeNanoseconds - armed.uptimeNanoseconds) / 1_000_000_000
-            // If anything reached the replacement socket before READY, neither
-            // publish was held at the ready guard and the measurement below is
-            // about something else entirely.
-            let beforeReady = dpFramesNow(peers[1])
-            dpSendReady(peers[1])
-            let early = dpFrameArrives(peers[1], "31K tokens today", within: 0.3)
-            dpFinish(client, [peers[1]])
-            return (early, spent, beforeReady.isEmpty)
-        }
-        let dpAfterOrdinary = dpSupersede(DiscordIPC.VisibilityChange.none)
-        let dpAfterUnhide = dpSupersede(.increasing)
-        expect(dpAfterOrdinary.held && dpAfterUnhide.held
-                && max(dpAfterOrdinary.spent, dpAfterUnhide.spent) < 1.5
-                && dpAfterOrdinary.early && !dpAfterUnhide.early,
-            "A15d: a superseding publish waits at the ready guard in both runs (spent "
-                + "\(String(format: "%.3f", dpAfterOrdinary.spent))s / "
-                + "\(String(format: "%.3f", dpAfterUnhide.spent))s of the 3s floor), and an "
-                + "ordinary sample still inherits the unspent bypass while an unhide waits out "
-                + "the floor instead "
-                + "(mutation: treating `.increasing` like `.none` lets it inherit a pending "
-                + "reduction's bypass and publish a sample sub-floor; production's one publish "
-                + "site passes `discordPayload()`, which reads the hidden set live on every "
-                + "call, so a sample superseding a pending reduction still embodies it)")
+        // A15d is gone with the grant it tested — an armed-but-unspent state cannot occur.
 
         // A2 — the two behaviours a previous review found unguarded.
 
