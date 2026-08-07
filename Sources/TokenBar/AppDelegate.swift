@@ -200,7 +200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The arguments go into the same subset test swapped, rather than into a
     /// second classifier with its own idea of which way is which.
     /// A selection change replaces what is published rather than narrowing or
-    /// widening it, so it retires earlier work without arming the floor bypass.
+    /// widening it, so anything computed for the previous one is stale.
     ///
     /// Compared as EFFECTIVE published sets — the selection intersected with
     /// what is visible — and not as raw selections, so switching between two
@@ -234,7 +234,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// A selection change replaces what is published rather than narrowing or
-    /// widening it, so it retires earlier work without arming the floor bypass.
+    /// widening it, so anything computed for the previous one is stale.
     nonisolated static func selectionChange(
         previous: DiscordPresence.ClientSelection,
         current: DiscordPresence.ClientSelection,
@@ -259,12 +259,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// throttled like any other sample.
     /// `publishedInBoth` is whether cost is part of the composition on BOTH
     /// sides of the change. When it is not, the style cannot alter a single
-    /// published byte, and classifying it anyway is not merely noise: the
-    /// `.reducing` case carries a publish-floor bypass. A user who ticks a new
-    /// component (throttled, waiting out the floor) and then switches whole
-    /// dollars off while cost stays unticked would combine to `.reducing` and
-    /// push that newly added information out early — a bypass that exists for
-    /// reductions, spent on an addition.
+    /// published byte, so calling it a reduction would retire work that is not
+    /// actually stale.
     ///
     /// Both sides, not just the current one: a cost that was just ticked or
     /// unticked is already classified by `componentsChange`, and the style it
@@ -368,17 +364,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if hiddenChanged || discordEnabled != self.lastDiscordEnabled
                 || costStyle != previousCostStyle || components != previousComponents
                 || selection != previousSelection {
-                // Newly hiding a client means the user took something off the
-                // profile, and that update must not queue behind the publish
-                // floor — the Settings copy promises hidden clients are never
-                // included, and fifteen seconds of still naming one makes that
-                // promise false for as long as it waits. Unhiding puts
-                // information back and is throttled like any other sample.
-                //
-                // Turning whole dollars off is the same shape: the user just
-                // made the published figure coarser, and leaving the precise
-                // one up while the floor expires is the same broken promise in
-                // miniature.
+                // The classification decides only whether earlier queued work
+                // is stale, NOT how fast this reaches the wire. Every change
+                // waits out the publish floor; the Settings copy states that
+                // wait. What a reduction still buys is that a payload computed
+                // before it must not be written after it — that would put the
+                // client the user removed back on the profile rather than
+                // merely being slow.
                 // Today's actual contributors, so a hide of a client with no
                 // usage today is not mistaken for taking something down.
                 let contributors = self.lastGraph.map { graph in

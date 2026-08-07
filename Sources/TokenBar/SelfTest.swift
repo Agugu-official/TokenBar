@@ -3735,15 +3735,16 @@ enum SelfTest {
             "the two cost modes render the same fixture differently and neither publishes cents "
                 + "(mutation: ignoring costStyle and always rendering one of them fails here)")
 
-        // Which cost-mode change earns the floor bypass: reducing precision must
-        // not queue behind the publish floor with the precise figure still up.
+        // Which cost-mode change retires earlier work. Coarsening the figure
+        // makes anything computed before it stale — writing one of those after
+        // the change puts the precise figure back on the profile. Adding
+        // precision invalidates nothing.
         expect(AppDelegate.costStyleChange(previous: .wholeDollars, current: .banded) == .reducing,
-            "turning the figure back into a range is a reduction, so it does not wait out the "
-                + "floor with the precise figure still on the profile "
-                + "(mutation: returning .none queues it behind the floor)")
+            "turning the figure back into a range retires work computed before it "
+                + "(mutation: returning .none lets the precise figure be written afterwards)")
         expect(AppDelegate.costStyleChange(previous: .banded, current: .wholeDollars)
             == .increasing,
-            "adding precision is throttled like any other sample")
+            "adding precision invalidates nothing computed before it")
         expect(AppDelegate.costStyleChange(previous: .banded, current: .banded) == .none,
             "no cost-mode change is neither")
         expect(DiscordIPC.VisibilityChange.increasing.combined(with: .reducing) == .reducing
@@ -3888,8 +3889,7 @@ enum SelfTest {
                 + "leaves the unticked component on the profile for the rest of the floor)")
         // A cost-style change cannot alter a byte when cost is not published,
         // and classifying it anyway is not just noise: `.reducing` carries a
-        // floor bypass, so ticking a component and then switching whole dollars
-        // off would push the newly added information out early.
+        // stale, so calling it a change would retire work that is still valid.
         expect(
             AppDelegate.costStyleChange(
                 previous: .wholeDollars, current: .banded, publishedInBoth: false) == .none
@@ -3898,8 +3898,7 @@ enum SelfTest {
                 && AppDelegate.costStyleChange(
                     previous: .wholeDollars, current: .banded, publishedInBoth: true) == .reducing,
             "a cost-style change is classified only when cost is published on both sides of it "
-                + "(mutation: classifying it unconditionally spends a reduction's floor bypass "
-                + "on an addition that is still waiting out the floor)")
+                + "(mutation: classifying it unconditionally retires work that is still valid)")
         // Absent and malformed are different answers. An absent key is an
         // upgrade and keeps every component; a present non-string is a
         // malformed write and gets what a string of only unknown tokens gets.
@@ -3977,10 +3976,8 @@ enum SelfTest {
                 components: dpAllComponents, selection: .only("codex"))?.state
                 .hasSuffix("<$10") == true,
             "a negative stripe elsewhere still leaves the selected client a finite band")
-        // Selection changes retire earlier work WITHOUT arming the floor
-        // bypass. Hide and unhide alternate, so a reduction's bypass is
-        // naturally rate-limited; A->B->C->A does not alternate, and four
-        // bypasses is a per-client breakdown pushed out in one second.
+        // A selection change replaces what is published, so anything computed
+        // for the previous selection is stale.
         expect(
             AppDelegate.selectionChange(
                 previous: .mostUsed, current: .only("claude"), hidden: []) == .retiring
@@ -3993,8 +3990,8 @@ enum SelfTest {
                     hidden: ["claude", "codex"]) == .none,
             "a selection change is `.retiring`, and switching between two clients that are both "
                 + "hidden is no change at all (mutation: classifying it `.reducing` grants an "
-                + "unbounded floor bypass; comparing raw selections republishes when nothing "
-                + "published actually moved)")
+                + "work computed for a selection that is still current; comparing raw "
+                + "selections republishes when nothing published actually moved)")
         // A hidden-set change is judged against the clients published at EITHER
         // endpoint. With one agent named, hiding an unrelated client cannot
         // move a published byte; hiding the selected one is still a reduction;
@@ -4039,7 +4036,7 @@ enum SelfTest {
                     selection: .mostUsed, hidden: [], contributors: ["claude"]) == ["claude"],
             "hiding a registered client with no usage today is no change, while hiding one that "
                 + "contributed is a reduction (mutation: expanding `.mostUsed` to the whole "
-                + "registry grants a bypass for a hide that removed nothing published)")
+                + "registry retires work for a hide that removed nothing published)")
 
         // Absent, malformed and named are three answers. One `as? String` cast
         // would send a key holding a number down the ABSENT branch and widen a
@@ -4832,9 +4829,9 @@ enum SelfTest {
                 + "sub-interval; throttling the clear leaves a stale presence public)")
         // The superseded-grant fixture is gone with the grant: nothing is armed, so nothing can be inherited or destroyed.
 
-        // A15c — the bypass is one shot: a clear carries no new information
-        // and must not re-arm the floor's clock, or the unhide behind it goes
-        // out sub-floor. Windows below are wall-clock, not a turn count.
+        // A clear carries no new information, so it is not throttled — but it
+        // must not re-arm the floor's CLOCK either, or the unhide behind it
+        // goes out inside the interval. Windows below are wall-clock.
         func dpFramesNow(_ fd: Int32) -> String {
             dpFrames(fd).filter { $0.0 == .frame }
                 .map { String(decoding: $0.1, as: UTF8.self) }.joined()
@@ -4877,8 +4874,8 @@ enum SelfTest {
                 && dpOneShotHeld && dpOneShotArrivedLater,
             "A15c: the unhide that follows a clear still waits out the floor, and does arrive "
                 + "once it expires (fixture spent \(String(format: "%.3f", dpOneShotSpent))s "
-                + "arming; mutation: granting the bypass by clearing `lastSent` leaves the clock "
-                + "cleared through the clear, and this payload goes out sub-interval)")
+                + "arming; mutation: letting the clear reset `lastSent` leaves the clock cleared "
+                + "through it, and this payload goes out inside the interval)")
 
         // A15d is gone with the grant it tested — an armed-but-unspent state cannot occur.
 
@@ -5137,7 +5134,7 @@ enum SelfTest {
                 + "interval after the user hid everything)")
 
         // Codex round 3 — user intent vs connection state, descriptor
-        // inheritance, and the duplicate that round 2's throttle bypass let in.
+        // inheritance, and the duplicate the restore exemption let in.
 
         // A producer update while the retry budget is spent is still the
         // latest intent, and the client is what a later start() must restore.
@@ -5202,7 +5199,7 @@ enum SelfTest {
         close(dpCloexecPair.1)
 
         // Publishing the same payload twice on one connection sends it once.
-        // Round 2's throttle bypass is for restores; without a per-connection
+        // The throttle exemption is for restores; without a per-connection
         // record it also let a duplicate through immediately, which resets the
         // floor's clock and delays the next real payload behind a no-op.
         let dpDupReady = dpFrameBytes(1, "{\"evt\":\"READY\"}")
@@ -5239,7 +5236,7 @@ enum SelfTest {
                 + "creates it (mutation: dropping either fcntl leaks the descriptor into helpers "
                 + "the Rust core spawns, or leaves the connect() window inheritable)")
 
-        // Codex round 5 — the bypass skipped the floor but still moved its
+        // The restore skipped the floor but still moved its
         // clock, so a restore delayed the next real payload by a full
         // interval measured from the restore instead of from the last sample.
         let dpFloorReady = dpFrameBytes(1, "{\"evt\":\"READY\"}")
@@ -5334,10 +5331,11 @@ enum SelfTest {
             "A1 control: an ordinary run builds a client, reuses the one it was given rather "
                 + "than opening a second connection, and refuses when the switch is off")
 
-        // A15b — which visibility change earns the floor bypass. Getting this
-        // backwards is not a missed optimisation: it makes an *unhide* jump the
-        // floor while a hide waits it out, the exact inversion of the point.
-        // The swap case is the one a strict-subset or size test gets wrong.
+        // A15b — which visibility change retires earlier work. Getting this
+        // backwards is not cosmetic: it would retire work an unhide leaves
+        // perfectly valid while letting a hide's stale payload through — the
+        // exact inversion. The swap case is the one a subset or size test gets
+        // wrong.
         func dpChange(_ previous: String, _ current: String) -> DiscordIPC.VisibilityChange {
             AppDelegate.visibilityChange(previousHiddenRaw: previous, hiddenRaw: current)
         }
