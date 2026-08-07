@@ -76,6 +76,48 @@ enum AgentUsagePublicationCoordinator {
     }
 }
 
+/// What a graph commit actually did. `GraphFetchOutcome.committed` used to be
+/// reported unconditionally, even when `apply()`'s empty-year branch left the
+/// filter cleared and a reload spawned without committing anything — so a
+/// caller reading `.committed` as "the slice settled" was wrong exactly then.
+enum ApplyResult: Equatable {
+    /// The payload committed; `payload`/`stats`/`acceptedPayloadYear` moved.
+    case applied
+    /// The selected year was absent from this payload; the filter cleared and
+    /// an unfiltered reload was spawned. Nothing committed here.
+    case redirectedToAllYears
+    /// The expected-year guard failed (a stale fetch for a year the model has
+    /// since moved away from). Nothing committed, nothing spawned.
+    case rejected
+}
+
+/// Which trigger owns a background graph fetch, for the header's freshness
+/// indicator. `.manual` deliberately renders through the EXISTING
+/// `refreshButton` spinner instead of a second one — see
+/// `PopoverView.header`/`refreshButton`.
+enum RefreshKind: Equatable {
+    case initial, poll, yearSwitch, manual
+}
+
+/// A graph fetch currently in flight, keyed on the same `graphFetchToken`
+/// ownership rule `commit`/`graphFetchFailed` already follow: only the fetch
+/// that owns the token it was created with may clear it, so an overtaken
+/// fetch's completion can never clear a NEWER request's indicator.
+struct BackgroundRefresh: Equatable {
+    let token: Int
+    let kind: RefreshKind
+}
+
+/// Retained once a restore (memory or disk) leaves the dashboard showing data
+/// that has not yet been confirmed current by a live fetch — restored numbers
+/// with nothing on screen saying so are just stale numbers. Cleared only by
+/// the first ACCEPTED commit (`ApplyResult.applied`); a redirect or a
+/// rejection settles nothing, so the age stays displayed.
+struct RestoredSnapshot: Equatable {
+    let savedAt: Date
+    var failed: Bool
+}
+
 /// Snapshot of the model's essential state, captured on each successful
 /// load so a fresh DashboardModel can start in `.ready` state instead of
 /// flashing "Loading usage…" every time the popover reopens.
@@ -88,6 +130,12 @@ enum AgentUsagePublicationCoordinator {
 private struct DashboardSnapshot {
     let payload: UsagePayload
     let stats: UsageStats
+    /// When `apply()` committed this `payload` — NOT when this struct itself
+    /// was built, so `publishModel()`/`refreshSnapshotLiveData()` republishing
+    /// the cache for an unrelated reason (a model landing, a trace poll) never
+    /// makes the graph look freshly captured. Feeds the header's restored-age
+    /// indicator on a same-process reopen.
+    let payloadCapturedAt: Date
     let modelReport: ModelReport?
     /// The payload generation the cached `modelReport` was fetched for. It can
     /// legitimately lag `payload.meta.generatedAt`: a poll may commit a newer
@@ -143,6 +191,19 @@ private struct DashboardSnapshot {
     /// popover's model, whose teardown/rebuild is what the cache speeds up).
     private let cachesSnapshot: Bool
     private let source: any UsageDataSource
+    /// The exact build this process ships as, or nil for anything that is not
+    /// the shipping bundle (including every `swift run` invocation — demo,
+    /// smoke, selftest, icon-gallery among them). A disk snapshot is read or
+    /// written only when this is non-nil.
+    private let buildIdentity: BuildIdentity?
+    /// Resolved from the injected `snapshotDirectory` autoclosure ONLY when
+    /// `cachesSnapshot && buildIdentity != nil` — never merely evaluated by
+    /// default. `SnapshotStore.defaultDirectory()` is itself real
+    /// `FileManager` work, and the isolation contract this app relies on
+    /// (never touch the production location outside the shipping bundle) is
+    /// that it is never even RESOLVED off that identity, not only never
+    /// written to.
+    private let resolvedSnapshotDirectory: URL?
     enum Phase {
         case loading
         case ready
@@ -169,17 +230,32 @@ private struct DashboardSnapshot {
             ?? UserDefaults.standard.string(forKey: yearKey)
     }
 
+    private static let snapshotDecoder = JSONDecoder()
+
     /// `cachesSnapshot` = true only for the popover's model (PopoverView), the
     /// one whose per-open teardown/rebuild the cache exists to speed up; the
-    /// settings window passes false so it never writes the shared snapshot.
+    /// settings window passes false so it never writes the shared snapshot,
+    /// and never reads the disk one either.
+    ///
+    /// `buildIdentity`/`snapshotDirectory` are injectable so a hermetic test
+    /// can drive the disk path without ever touching the production location
+    /// — production always takes the defaults. `snapshotDirectory` is an
+    /// `@autoclosure` specifically so it is not evaluated unless
+    /// `cachesSnapshot && buildIdentity != nil`; see `resolvedSnapshotDirectory`.
     init(
         cachesSnapshot: Bool = false,
         source: any UsageDataSource = UsageDataSources.current,
-        initialYear: String? = DashboardModel.resolveYear()
+        initialYear: String? = DashboardModel.resolveYear(),
+        buildIdentity: BuildIdentity? = BuildIdentity.shipping(),
+        snapshotDirectory: @autoclosure () -> URL? = SnapshotStore.defaultDirectory()
     ) {
         self.cachesSnapshot = cachesSnapshot
         self.source = source
         self.year = initialYear
+        self.buildIdentity = buildIdentity
+        self.resolvedSnapshotDirectory =
+            (cachesSnapshot && buildIdentity != nil) ? snapshotDirectory() : nil
+
         // Guard snapshot restore on year-consistency: if the user changed the
         // year filter after the snapshot was written (e.g. setYear() persisted
         // the new year but reload() failed before apply() ran), the cached
@@ -199,15 +275,40 @@ private struct DashboardSnapshot {
             // the model's recorded generation rather than the payload's: when
             // it lags, the lens SHOULD re-request instead of treating a stale
             // report as current.
+            var modelCurrent = false
             if snap.modelReport != nil {
                 modelYear = Self.identityYear(initialYear)
                 modelPayloadGeneratedAt = snap.modelGeneratedAt
+                modelCurrent = snap.modelGeneratedAt == snap.payload.meta.generatedAt
             }
             agentUsage = snap.agentUsage.map {
                 AgentUsagePublicationCoordinator.resolve($0)
             }
             trace = snap.trace
             phase = .ready
+            restoredSnapshot = RestoredSnapshot(savedAt: snap.payloadCapturedAt, failed: false)
+            // Installed ONLY when the restored model report is absent or lags
+            // its payload — a restore whose model is already current for the
+            // committed generation never has anything for the gate to guard
+            // (`ensureModelReport` returns at its own identity check).
+            if !modelCurrent { restoreGatePending = true }
+        } else if cachesSnapshot, let identity = buildIdentity,
+                  let directory = resolvedSnapshotDirectory,
+                  let bytes = SnapshotStore.readBytes(in: directory),
+                  let envelope = try? Self.snapshotDecoder.decode(SnapshotEnvelope.self, from: bytes),
+                  SnapshotStore.validate(envelope, expectedYear: initialYear, identity: identity)
+        {
+            // The model report is never persisted (see SnapshotEnvelope's doc
+            // comment), so a disk restore ALWAYS leaves modelReport/modelYear/
+            // modelPayloadGeneratedAt nil and the gate is always installed.
+            payload = envelope.payload
+            stats = UsageStats(
+                payload: envelope.payload, selectedClients: Set(envelope.payload.summary.clients))
+            knownYears = envelope.knownYears
+            acceptedPayloadYear = Self.identityYear(initialYear)
+            phase = .ready
+            restoredSnapshot = RestoredSnapshot(savedAt: envelope.savedAt, failed: false)
+            restoreGatePending = true
         } else {
             phase = .loading
         }
@@ -225,6 +326,16 @@ private struct DashboardSnapshot {
     private(set) var stats: UsageStats?
     private(set) var modelReport: ModelReport?
     private(set) var colors = ModelColorMap(report: nil)
+    /// The graph fetch currently running, for the header's freshness
+    /// indicator. Distinct from `graphLoadTask`: this is presentation state
+    /// (token + trigger kind) rather than the task itself, and is cleared by
+    /// ownership the same way `commit`/`graphFetchFailed` are — see
+    /// `gatedGraph`.
+    private(set) var backgroundRefresh: BackgroundRefresh?
+    /// Set whenever `init` restored a payload (memory or disk) that has not
+    /// yet been confirmed current by a live fetch. Cleared only by the first
+    /// accepted commit — see `RestoredSnapshot`'s doc comment.
+    private(set) var restoredSnapshot: RestoredSnapshot?
     private(set) var hourly: HourlyReport?
     /// True while a model-report request is in flight. Model-dependent cards
     /// must distinguish this from a completed request that genuinely found
@@ -299,9 +410,48 @@ private struct DashboardSnapshot {
     /// Returning the payload made those two cases indistinguishable; naming
     /// them is what removes the question.
     private enum GraphFetchOutcome {
-        case committed(UsagePayload)
+        case committed(ApplyResult)
         case superseded
     }
+
+    /// Installed by `init` only when it restored a payload whose model report
+    /// is absent or not current for it. Awaited by `ensureModelReport` before
+    /// it reads ANY committed state — without that, a model-task-first
+    /// ordering finds the restored payload already "committed" (year matches,
+    /// non-nil) and a nil `graphLoadTask` (because `load()` has not even
+    /// called `gatedGraph` yet), and would scan against a payload nobody has
+    /// confirmed live. Fulfilled from INSIDE the gated task in `gatedGraph`,
+    /// on every exit — success, failure, and superseded alike — so task
+    /// cancellation on the caller's side can never strand it, and so
+    /// `reload()`/`pollGraph()` fulfil it too if either runs before `load()`.
+    @ObservationIgnored private var restoreGatePending = false
+    @ObservationIgnored private var restoreGateContinuations: [CheckedContinuation<Void, Never>] = []
+
+    private func waitForRestoreGate() async {
+        guard restoreGatePending else { return }
+        await withCheckedContinuation { continuation in
+            // Re-checked here (not just by the guard above) because both
+            // hops are MainActor-only: this is what makes "no window where
+            // fulfillment and the wait cross" structural rather than assumed.
+            if restoreGatePending {
+                restoreGateContinuations.append(continuation)
+            } else {
+                continuation.resume()
+            }
+        }
+    }
+
+    private func fulfillRestoreGate() {
+        guard restoreGatePending else { return }
+        restoreGatePending = false
+        let waiting = restoreGateContinuations
+        restoreGateContinuations = []
+        waiting.forEach { $0.resume() }
+    }
+
+    /// Monotonic capture sequence for the disk writer, taken on the MAIN
+    /// actor before handing off to the detached encode — see `submitDiskCapture`.
+    private static var nextCaptureSequence = 0
 
     /// Runs a graph fetch under that gate and commits it INSIDE the gated task,
     /// so the gate opens on the commit rather than on the fetch.
@@ -328,11 +478,17 @@ private struct DashboardSnapshot {
     /// the year itself, and a commit that lands after a popover close only
     /// leaves a fresher reopen snapshot behind.
     private func gatedGraph(
+        kind: RefreshKind,
         fetch: @escaping () async throws -> UsagePayload,
-        commit: @escaping (UsagePayload) -> Void
+        commit: @escaping (UsagePayload) -> ApplyResult
     ) async throws -> GraphFetchOutcome {
         graphFetchToken += 1
         let token = graphFetchToken
+        // Ownership-cleared, exactly like `graphFetchFailed` below: an
+        // overtaken fetch's completion must not clear a NEWER request's
+        // indicator, so every clear site compares the token it was given
+        // against the CURRENT `backgroundRefresh`, not against its own copy.
+        backgroundRefresh = BackgroundRefresh(token: token, kind: kind)
         let task = Task { () throws -> GraphFetchOutcome in
             do {
                 let payload = try await fetch()
@@ -345,22 +501,38 @@ private struct DashboardSnapshot {
                 // to its payload and clear the newer fetch's failure state.
                 // (The rollback itself predates the split; guarding only the
                 // error path was this file's own asymmetry.)
-                guard self.graphFetchToken == token else { return .superseded }
-                commit(payload)
-                return .committed(payload)
+                guard self.graphFetchToken == token else {
+                    self.clearBackgroundRefresh(owner: token)
+                    self.fulfillRestoreGate()
+                    return .superseded
+                }
+                let result = commit(payload)
+                self.clearBackgroundRefresh(owner: token)
+                self.fulfillRestoreGate()
+                return .committed(result)
             } catch {
                 // Inside the task for the same reason `commit` is: a waiter
                 // that resumes the instant the gate opens must not read this
                 // before the failure is recorded. Only the newest fetch may
                 // record it — an overtaken one describes a slice that is no
                 // longer displayed, exactly as above.
-                if self.graphFetchToken == token { self.graphFetchFailed = true }
+                if self.graphFetchToken == token {
+                    self.graphFetchFailed = true
+                    self.restoredSnapshot?.failed = true
+                }
+                self.clearBackgroundRefresh(owner: token)
+                self.fulfillRestoreGate()
                 throw error
             }
         }
         graphLoadTask = task
         defer { if graphLoadTask == task { graphLoadTask = nil } }
         return try await task.value
+    }
+
+    private func clearBackgroundRefresh(owner token: Int) {
+        guard backgroundRefresh?.token == token else { return }
+        backgroundRefresh = nil
     }
     /// Identity of the last payload/hourly report that actually committed.
     /// These are separate from `year`: a newer request may complete in the
@@ -427,7 +599,7 @@ private struct DashboardSnapshot {
     func load() async {
         do {
             let year = self.year
-            _ = try await gatedGraph { [source] in
+            _ = try await gatedGraph(kind: .initial) { [source] in
                 try await source.graph(year: year, priority: .userInitiated)
             } commit: { payload in
                 // The year may have changed while we were off-actor (the user
@@ -435,8 +607,8 @@ private struct DashboardSnapshot {
                 // slice so apply() never tags the new year — and the static
                 // snapshot — with the old year's payload. Mirrors
                 // reload()/pollGraph().
-                guard self.year == year else { return }
-                self.apply(payload: payload, expectedYear: year)
+                guard self.year == year else { return .rejected }
+                return self.apply(payload: payload, expectedYear: year)
             }
         } catch {
             // Keep showing stale data over an error screen when a previous
@@ -455,7 +627,7 @@ private struct DashboardSnapshot {
         guard !refreshing else { return }
         refreshing = true
         defer { refreshing = false }
-        await reload(force: true)
+        await reload(force: true, kind: .manual)
     }
 
     /// Switch the year filter and re-fetch every lens for the new slice.
@@ -469,7 +641,7 @@ private struct DashboardSnapshot {
         UserDefaults.standard.set(newYear, forKey: Self.yearKey)
         refreshing = true
         defer { refreshing = false }
-        await reload(force: false)
+        await reload(force: false, kind: .yearSwitch)
     }
 
     /// Auto-clear a year filter scoped to a year that only hidden clients used.
@@ -557,19 +729,19 @@ private struct DashboardSnapshot {
         }
     }
 
-    private func reload(force: Bool) async {
+    private func reload(force: Bool, kind: RefreshKind) async {
         let year = self.year
         // Graph-first here too: the model is refreshed after the graph commits,
         // and only when a lens had already loaded it (mirrors hourly/agents).
         let outcome: GraphFetchOutcome
         do {
-            outcome = try await gatedGraph { [source] in
+            outcome = try await gatedGraph(kind: kind) { [source] in
                 force
                     ? try await source.refreshGraph(year: year, priority: .userInitiated)
                     : try await source.graph(year: year, priority: .userInitiated)
             } commit: { payload in
-                guard self.year == year else { return }
-                self.apply(payload: payload, expectedYear: year)
+                guard self.year == year else { return .rejected }
+                return self.apply(payload: payload, expectedYear: year)
             }
         } catch {
             // A model that has never reached `.ready` must still settle. apply()
@@ -634,8 +806,13 @@ private struct DashboardSnapshot {
     /// report is owned separately (`ensureModelData`/`publishModel`) so a graph
     /// commit never has to wait for it, and a still-loading model never blanks
     /// the cards that already have last-good data.
-    private func apply(payload: UsagePayload, expectedYear: String? = nil) {
-        guard expectedYear == nil || self.year == expectedYear else { return }
+    ///
+    /// Returns what actually happened — see `ApplyResult`. Only `.applied`
+    /// clears `restoredSnapshot`: a redirect or a rejection settles nothing,
+    /// so restored data stays flagged as not-yet-confirmed.
+    @discardableResult
+    private func apply(payload: UsagePayload, expectedYear: String? = nil) -> ApplyResult {
+        guard expectedYear == nil || self.year == expectedYear else { return .rejected }
         // A year-filtered payload reports only the selected year (empty if that
         // year has no data). Validate the filter against THIS fresh payload —
         // not the knownYears union, which never drops a year once seen — so a
@@ -648,8 +825,8 @@ private struct DashboardSnapshot {
             acceptedPayloadYear = nil
             self.year = nil
             UserDefaults.standard.removeObject(forKey: Self.yearKey)
-            Task { [weak self] in await self?.reload(force: false) }
-            return
+            Task { [weak self] in await self?.reload(force: false, kind: .yearSwitch) }
+            return .redirectedToAllYears
         }
         // A model report fetched for a different year describes a slice this
         // payload no longer shows, so drop it rather than render it beside the
@@ -663,8 +840,18 @@ private struct DashboardSnapshot {
         stats = UsageStats(payload: payload, selectedClients: Set(payload.summary.clients))
         knownYears = Set(knownYears + payload.years.map(\.year)).sorted(by: >)
         phase = .ready
+        payloadCapturedAt = Date()
+        restoredSnapshot = nil
         cacheSnapshot()
+        submitDiskCapture()
+        return .applied
     }
+
+    /// When `apply()` last committed a payload — the timestamp `cacheSnapshot()`
+    /// stamps into `DashboardSnapshot.payloadCapturedAt`. Deliberately NOT
+    /// touched by `publishModel()`/`refreshSnapshotLiveData()`, which republish
+    /// the cache for reasons unrelated to the graph moving.
+    @ObservationIgnored private var payloadCapturedAt = Date()
 
     /// Capture the full restore cache from the current state. Called ONLY from
     /// apply(), where the year-scoped payload/stats and `year` are set together
@@ -674,10 +861,36 @@ private struct DashboardSnapshot {
     private func cacheSnapshot() {
         guard cachesSnapshot, let payload, let stats else { return }
         Self.lastSnapshot = DashboardSnapshot(
-            payload: payload, stats: stats, modelReport: modelReport,
+            payload: payload, stats: stats, payloadCapturedAt: payloadCapturedAt,
+            modelReport: modelReport,
             modelGeneratedAt: modelPayloadGeneratedAt,
             colors: colors, knownYears: knownYears, year: year,
             agentUsage: agentUsage, trace: trace)
+    }
+
+    /// Submit the DISK capture. Deliberately separate from `cacheSnapshot()`
+    /// (the in-memory reopen cache, which both `apply()` and `publishModel()`
+    /// write): only a graph commit reaches this, so a model landing on its own
+    /// never triggers a disk write, and Settings' model (`cachesSnapshot ==
+    /// false`) never resolves a directory to write to at all.
+    private func submitDiskCapture() {
+        guard cachesSnapshot, let payload, let identity = buildIdentity,
+              let directory = resolvedSnapshotDirectory
+        else { return }
+        Self.nextCaptureSequence += 1
+        let sequence = Self.nextCaptureSequence
+        let envelope = SnapshotEnvelope(
+            snapshotSchemaVersion: SnapshotEnvelope.schemaVersion,
+            bundleIdentifier: identity.bundleIdentifier,
+            shortVersion: identity.shortVersion,
+            buildNumber: identity.buildNumber,
+            savedAt: Date(),
+            selectedYear: year,
+            payload: payload,
+            knownYears: knownYears)
+        Task.detached(priority: .utility) {
+            await SnapshotWriter.shared.submit(sequence: sequence, envelope: envelope, directory: directory)
+        }
     }
 
     /// Refresh only the live, year-independent fields (agentUsage/trace) of the
@@ -692,7 +905,8 @@ private struct DashboardSnapshot {
     private func refreshSnapshotLiveData() {
         guard cachesSnapshot, let snap = Self.lastSnapshot else { return }
         Self.lastSnapshot = DashboardSnapshot(
-            payload: snap.payload, stats: snap.stats, modelReport: snap.modelReport,
+            payload: snap.payload, stats: snap.stats, payloadCapturedAt: snap.payloadCapturedAt,
+            modelReport: snap.modelReport,
             modelGeneratedAt: snap.modelGeneratedAt,
             colors: snap.colors, knownYears: snap.knownYears, year: snap.year,
             agentUsage: agentUsage, trace: trace)
@@ -714,13 +928,13 @@ private struct DashboardSnapshot {
             // Don't race an in-flight manual Refresh or year switch.
             guard !refreshing else { continue }
             let year = self.year
-            let fetched = try? await gatedGraph { [source] in
+            let fetched = try? await gatedGraph(kind: .poll) { [source] in
                 try await source.graph(year: year, priority: .utility)
             } commit: { payload in
                 // The year may have changed while we were off-actor; drop a
                 // stale slice so the chart never flickers to the wrong year.
-                guard self.year == year else { return }
-                self.apply(payload: payload, expectedYear: year)
+                guard self.year == year else { return .rejected }
+                return self.apply(payload: payload, expectedYear: year)
             }
             if Task.isCancelled { break }
             // Same rule as reload: a superseded poll settled nothing, so its
@@ -905,6 +1119,19 @@ private struct DashboardSnapshot {
         // reporting a deferred read as an answered one. Only when nothing is
         // displayable: a last-good report stays visible unflagged.
         if modelReport == nil { modelLoading = true }
+        // LP3 restore gate. A restored snapshot (memory or disk) without a
+        // model report current for it makes `modelSliceIsCommitted` below
+        // true from the FIRST body evaluation — payload present, year
+        // matching — while `graphLoadTask` is still nil, because `load()`
+        // may not even have called `gatedGraph` yet. Without this wait, a
+        // model-task-first ordering would fall straight through the guard
+        // below and the `while` loop after it (nothing "in flight" to wait
+        // on) and scan against a payload nobody has confirmed live. Awaiting
+        // it here is a no-op unless `init` installed it — see
+        // `restoreGatePending`'s doc comment — and it resolves as soon as
+        // ANY graph fetch settles, whether that is `load()`, `reload()`, or
+        // `pollGraph()`.
+        await waitForRestoreGate()
         // Settle the slice BEFORE waiting on anything. `setYear` moves `year`
         // synchronously while the payload only catches up when reload commits,
         // and PopoverView's task id contains both — so this can be entered with
@@ -1038,6 +1265,14 @@ private struct DashboardSnapshot {
     /// would start the model scan alongside the graph again — the exact
     /// contention this split removes. PopoverView keys this on the committed
     /// payload generation instead.
+    ///
+    /// PRECONDITION, not merely convention: `load()` must have been called on
+    /// this model at least once before this is. Every production caller
+    /// satisfies it (`PopoverView` always runs both `.task { load() }` and the
+    /// model-data task), but nothing here enforces it — a future caller that
+    /// skips `load()` on a model whose restore installed the gate above will
+    /// hang forever awaiting a fetch nobody ever starts. This is a liveness
+    /// trap, not a safe API to call on its own.
     func ensureModelData(for view: AppView) async {
         switch view {
         case .overview, .models, .stats:
@@ -1054,6 +1289,10 @@ private struct DashboardSnapshot {
     /// load; without this hook the drill-down would flatten every model of a
     /// provider onto the same rank-0 shade. Idempotent, so repeated expands
     /// cost nothing once the report has landed.
+    ///
+    /// PRECONDITION, not merely convention — same as `ensureModelData`: this
+    /// reaches the same gate, so calling it on a restored model that never had
+    /// `load()` called first is a future-caller liveness trap, not a safe API.
     func ensureModelColors() async {
         await ensureModelReport(priority: .userInitiated)
     }

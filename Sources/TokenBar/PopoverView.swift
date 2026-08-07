@@ -296,12 +296,47 @@ struct PopoverView: View {
             Text("TokenBar")
                 .font(.headline)
             Spacer()
+            restoreIndicator
             liveRateBadge
             yearMenu
             refreshButton
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+    }
+
+    private static let restoredAgeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter
+    }()
+
+    /// LP3's freshness indicator for data restored on this open (memory or
+    /// disk). `refreshButton` already renders its own spinner while
+    /// `model.refreshing` — the manual/year-switch authority — so this is
+    /// deliberately NOT a second spinner for that kind: only `.initial` and
+    /// `.poll` show the small progress dot here. Once the fetch settles, a
+    /// still-restored (never-confirmed-live) snapshot shows its age instead;
+    /// a failed fetch surfaces the same age rather than an error, since the
+    /// restored data is still what's on screen.
+    @ViewBuilder private var restoreIndicator: some View {
+        if let refresh = model.backgroundRefresh,
+           refresh.kind == .initial || refresh.kind == .poll
+        {
+            ProgressView()
+                .controlSize(.small)
+                .frame(width: 12, height: 12)
+                .accessibilityLabel("Updating usage data")
+        } else if let restored = model.restoredSnapshot {
+            // A fixed accessibility label rather than the relative-time text
+            // itself: the text advances on every ~10s trace poll re-render,
+            // and VoiceOver re-announcing it that often would be noise, not
+            // a signal.
+            Text(Self.restoredAgeFormatter.localizedString(for: restored.savedAt, relativeTo: Date()))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Updating usage data")
+        }
     }
 
     /// Year filter for every lens — the Tauri HeaderBar's year select. "All"
