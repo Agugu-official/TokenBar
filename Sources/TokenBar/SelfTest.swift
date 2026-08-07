@@ -846,14 +846,37 @@ enum SelfTest {
                 sourceClient: "claude", provider: "openai",
                 subscriptionClients: ["claude", "codex"]) == .assigned("codex"),
             "gateway-routed openai usage suggests the codex subscription")
+        // opencode is a router with no plan of its own, so with nothing declared
+        // about what it is signed into, nothing can be said. This used to answer
+        // `.excluded` — an assertion that the tokens were bought — which the
+        // 2026-08 survey showed there was never evidence for.
         expect(
             UsageAttributionSettings.suggestionTarget(
                 sourceClient: "opencode", provider: "anthropic",
-                subscriptionClients: ["claude", "codex"]) == .excluded,
-            "anthropic reached from another client is suggested as API spend, not the subscription")
+                subscriptionClients: ["claude", "codex"]) == nil,
+            "an undeclared router produces no suggestion")
+        // Declare what it is signed into and the answer follows from that, not
+        // from any policy about who may reach anthropic from where: the user
+        // authed to Copilot here deliberately.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "opencode", provider: "anthropic",
+                subscriptionClients: ["claude", "copilot"],
+                routedSubscriptions: ["opencode": ["copilot"]]) == .assigned("copilot"),
+            "a declared router spends the subscription it is signed into")
+        // Two of its subscriptions cover the provider, so which one paid is not
+        // decidable from here.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "opencode", provider: "anthropic",
+                subscriptionClients: ["claude", "copilot"],
+                routedSubscriptions: ["opencode": ["claude", "copilot"]]) == nil,
+            "a router signed into two covering subscriptions produces no suggestion")
         // copilot accepts openai too, so with both subscribed nothing here can
         // tell which one paid. Suggesting either would be a coin flip presented
         // as an inference.
+        // claude does not sell an openai plan, so this falls to the cross-agent
+        // path where codex and copilot both cover it — undecidable from here.
         expect(
             UsageAttributionSettings.suggestionTarget(
                 sourceClient: "claude", provider: "openai",
@@ -877,6 +900,14 @@ enum SelfTest {
                 sourceClient: "claude", provider: "xai",
                 subscriptionClients: ["claude", "grok"]) == .assigned("grok"),
             "xai reached from another client is spending the grok subscription")
+        // Cursor bundles a jointly-trained Grok, so an xai row it logged is its
+        // own plan — the survey's clearest example of a reseller relationship
+        // that the old provider-keyed model could not express.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "cursor", provider: "xai",
+                subscriptionClients: ["grok"]) == .assigned("cursor"),
+            "cursor's bundled grok is cursor's own spend")
         // The two policies contradict each other, so no provider may appear in
         // both — otherwise which one wins depends on the order of the branches.
         expect(
@@ -932,29 +963,28 @@ enum SelfTest {
         // capitalized label. `xai` was not — a Grok subscription reached only
         // through opencode could not be named — and only a check derived from
         // the map itself fails when the next provider is added.
-        // The label the Rust producer emits for each provider. `subscription_label`
-        // renames four outright and capitalizes the rest, so this cannot be
-        // derived by capitalizing — `openai` becomes `Codex`, not `Openai`.
-        let opencodeLabels = [
-            "openai": "Codex", "anthropic": "Claude", "google": "Gemini", "xai": "Xai",
-        ]
-        let labelledProviders = Set(
-            UsageAttributionSettings.subscriptionProviderMap.values.flatMap { $0 })
-        expect(
-            labelledProviders == Set(opencodeLabels.keys),
-            "every provider a subscription serves has a known opencode label (missing: \(labelledProviders.subtracting(opencodeLabels.keys).sorted()))")
-        // Reachable means more than "resolves": the client it names must be one
-        // that actually serves that provider.
-        let unreachableProviders = opencodeLabels.filter { provider, label in
-            guard let owner = UsageAttributionSettings.subscriptionClient(forLabel: label),
-                  ClientRegistry.allIds.contains(owner)
-            else { return true }
-            return UsageAttributionSettings.subscriptionProviderMap[owner]?
-                .contains(provider) != true
+        // opencode emits a label only for a vendor the user actually authed to,
+        // so the set it can produce is the vendors that sell first-party access
+        // — not every vendor some subscription carries. `microsoft`, `amazon`,
+        // `open-weights` and `own` are sold only inside someone else's bundle
+        // and can never appear as an oauth entry. The assertion is therefore
+        // that every first-party vendor resolves, and that resolution names
+        // that vendor's own client rather than a reseller that also carries it.
+        let firstPartyVendors = UsageAttributionSettings.providerOwnClient
+        let unresolvableVendors = firstPartyVendors.filter { vendor, expected in
+            let label = vendor.prefix(1).uppercased() + vendor.dropFirst()
+            return UsageAttributionSettings.subscriptionClient(forLabel: label) != expected
         }
         expect(
-            unreachableProviders.isEmpty,
-            "every subscription provider is reachable from its opencode label (unreachable: \(unreachableProviders.keys.sorted()))")
+            unresolvableVendors.isEmpty,
+            "every first-party vendor resolves from its opencode label to its own client (broken: \(unresolvableVendors.keys.sorted()))")
+        // The four the producer renames rather than capitalizes.
+        expect(
+            ClientRegistry.subscriptionLabelAliases.allSatisfy { label, id in
+                UsageAttributionSettings.subscriptionClient(forLabel: label) == id
+                    && ClientRegistry.allIds.contains(id)
+            },
+            "every renamed opencode label resolves to a registered client")
         expect(
             UsageAttributionSettings.subscriptionClient(forLabel: "Xai") == "grok",
             "an opencode xai subscription names the grok client")
@@ -966,37 +996,80 @@ enum SelfTest {
                 && ClientRegistry.allIds.contains("kiro"),
             "an opencode label naming no subscription is not a target")
 
-        // The restriction is on the provider's *own* subscription, not on the
-        // provider. Copilot resells Anthropic models under its own subscription,
-        // so opencode reaching anthropic through Copilot is Copilot's usage —
-        // calling it API spend removes the only target those rows can have.
+        // These three previously encoded the reseller rule as a property of the
+        // *provider*: anthropic reached from anywhere else was assigned to
+        // whichever non-Claude subscription covered it. The survey showed the
+        // premise is wrong — an opencode row is paid by whatever opencode is
+        // signed into, and that is declared, not inferred from who else carries
+        // anthropic. Undeclared, the honest answer is nothing.
         expect(
             UsageAttributionSettings.suggestionTarget(
                 sourceClient: "opencode", provider: "anthropic",
-                subscriptionClients: ["copilot"]) == .assigned("copilot"),
-            "an anthropic row reachable only through copilot targets copilot")
-        // Anthropic's own subscription stays unassignable from elsewhere.
+                subscriptionClients: ["copilot"]) == nil,
+            "an undeclared router is not assigned to whoever happens to cover the provider")
         expect(
             UsageAttributionSettings.suggestionTarget(
                 sourceClient: "opencode", provider: "anthropic",
-                subscriptionClients: ["claude"]) == .excluded,
-            "anthropic's own subscription is still not a cross-agent target")
-        // Both subscribed: the compliant explanation is the reseller, and it is
-        // the only eligible one, so it is what gets proposed.
+                subscriptionClients: ["copilot"],
+                routedSubscriptions: ["opencode": ["copilot"]]) == .assigned("copilot"),
+            "the same row is assigned once the routing is declared")
+        // Anthropic's own subscription is still never a cross-agent target: a
+        // client that sells no anthropic plan and routes nowhere gets excluded.
         expect(
             UsageAttributionSettings.suggestionTarget(
-                sourceClient: "opencode", provider: "anthropic",
-                subscriptionClients: ["claude", "copilot"]) == .assigned("copilot"),
-            "the reseller is the eligible target when the bound owner is not")
+                sourceClient: "zed", provider: "xai",
+                subscriptionClients: ["grok"]) == .assigned("grok"),
+            "a surveyed client that does not sell the provider still uses the cross-agent path")
         // Every provider a subscription serves must name the client whose own
         // subscription it is, or the eligibility filter above silently keeps a
         // bound owner assignable.
-        let unownedProviders = Set(
-            UsageAttributionSettings.subscriptionProviderMap.values.flatMap { $0 }
-        ).filter { UsageAttributionSettings.providerOwnClient[$0] == nil }
+        // Only a bound provider needs an own client — that entry names who the
+        // restriction protects. Requiring one for permitted providers would be
+        // inventing a fact; requiring one for bound providers is what stops the
+        // eligibility filter from silently leaving a bound owner assignable.
+        let unownedBound = UsageAttributionSettings.subscriptionBoundProviders
+            .filter { UsageAttributionSettings.providerOwnClient[$0] == nil }
         expect(
-            unownedProviders.isEmpty,
-            "every subscription provider names its own client (missing: \(unownedProviders.sorted()))")
+            unownedBound.isEmpty,
+            "every bound provider names the client it protects (missing: \(unownedBound.sorted()))")
+        let ownClientsAreRegistered = UsageAttributionSettings.providerOwnClient.values
+            .allSatisfy { ClientRegistry.allIds.contains($0) }
+        expect(ownClientsAreRegistered, "every protected client is registered")
+
+        // The table is hand-maintained product knowledge, so every client in it
+        // must be a client this app knows — a typo would otherwise sit there
+        // covering nothing.
+        let unknownSubscriptionClients = UsageAttributionSettings.subscriptionProviderMap.keys
+            .filter { !ClientRegistry.allIds.contains($0) }
+        expect(
+            unknownSubscriptionClients.isEmpty,
+            "every subscription client is registered (unknown: \(unknownSubscriptionClients.sorted()))")
+
+        // The case the whole survey was run for. Cursor sells its own plan
+        // covering Anthropic models, and TokenBar has no Cursor quota gauge — so
+        // a rule that asks `subscriptionClients` cannot see it, and the row gets
+        // proposed against whatever else happens to cover anthropic.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "cursor", provider: "anthropic",
+                subscriptionClients: ["claude", "copilot"]) == .assigned("cursor"),
+            "a client's own subscription wins even without a quota snapshot")
+        // And the same row must not be offered to a subscription that merely
+        // also covers anthropic.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "cursor", provider: "anthropic",
+                subscriptionClients: ["copilot"]) != .assigned("copilot"),
+            "a foreign subscription is never proposed for a client that has its own")
+        // A source the table says nothing about yields nothing. `crush` is
+        // registered but no plan has been established for it, and that is not
+        // the same claim as "its plan does not cover anthropic".
+        expect(
+            UsageAttributionSettings.subscriptionProviderMap["crush"] == nil
+                && UsageAttributionSettings.suggestionTarget(
+                    sourceClient: "crush", provider: "anthropic",
+                    subscriptionClients: ["claude", "copilot"]) == nil,
+            "an unsurveyed source produces no suggestion rather than a guess")
 
         // "No subscriptions" and "not asked yet" both render an empty target
         // list, so without the lifecycle token the signature is unchanged when a
@@ -1046,13 +1119,19 @@ enum SelfTest {
                 sourceClient: "antigravity-cli", provider: "google",
                 subscriptionClients: ["antigravity"]) == .assigned("antigravity"),
             "antigravity-cli usage suggests the antigravity subscription it spends")
-        // The fold is only for deciding ownership; a client that genuinely does
-        // not own the provider still gets the bound-provider answer.
+        // The fold decides ownership only. A router with nothing declared says
+        // nothing, and a surveyed client that genuinely sells no google plan
+        // still gets the bound-provider answer.
         expect(
             UsageAttributionSettings.suggestionTarget(
                 sourceClient: "opencode", provider: "google",
+                subscriptionClients: ["antigravity"]) == nil,
+            "an undeclared router reaching google produces no suggestion")
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "kimi", provider: "google",
                 subscriptionClients: ["antigravity"]) == .excluded,
-            "another client reaching google is still API spend")
+            "a surveyed client that sells no google plan is API spend")
         let missingSourceSuggestions = UsageAttributionSettings.suggestionRecords(
             entries: [
                 attributionEntry(client: "copilot", provider: "openai", model: "gpt-5.6-sol"),
@@ -1060,15 +1139,16 @@ enum SelfTest {
             ],
             confirmed: [],
             subscriptionClients: codexOnlySubscriptions)
-        // Whether the source client appears in the quota payload is irrelevant:
-        // the user has no Copilot subscription here, so the question is only
-        // which subscription covers each provider. openai is covered by codex;
-        // anthropic is covered by nothing they subscribe to.
+        // Copilot sells both, so both rows are its own spend regardless of what
+        // the quota payload lists. Before the survey this table claimed Copilot
+        // covered only openai and anthropic, and the anthropic row came back as
+        // API spend — the same shape of error as the Cursor row that started
+        // this: a subscription the user holds, unrecognised.
         expect(
             missingSourceSuggestions.map(\.state)
-                == [UsageAttribution.State.assigned("codex"), .excluded]
+                == [UsageAttribution.State.assigned("copilot"), .assigned("copilot")]
                 && missingSourceSuggestions.map(\.provider) == ["openai", "anthropic"],
-            "openai routes to the one subscription covering it; anthropic defaults to API spend")
+            "a client that sells both providers keeps both rows as its own spend")
 
         let suggestionRows = UsageAttributionSettings.rows(
             entries: [

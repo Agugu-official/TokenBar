@@ -4,7 +4,7 @@ id: kb-architecture
 kind: canonical
 scope: repository
 read_when: changing Rust parsing, the C ABI, Swift models, reports, cache, or filters
-last_verified: 2026-07-29
+last_verified: 2026-08-07
 sources: [".gitmodules", "Package.swift", "Makefile", "Sources/CTB/include/ctb.h", "crates/tb_core_ffi", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_duration.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_storage_windows.rs", "Sources/TokenBarCore", "Sources/TokenBar", "docs/knowledge/plans/provider-quota-pace.md", "vendor/README.md", "public tokscale-core commit b31e394", "public TokenBar PR #114", "public TokenBar-Windows PR #12", "public TokenBar-Windows PR #20"]
 ---
 
@@ -175,6 +175,48 @@ Pricing metadata is refreshable rather than frozen for the process lifetime; the
 | 帳號變更 | `agent_usage` wire 不帶 account scope，Swift 端偵測不到帳號更換，因此不宣稱對應會隨帳號失效 |
 
 > **政策來源：** 上述 provider 分組是可稽核的產品知識，不是從本機用量或 quota payload 推論而得。新增 provider 時必須選邊，self-test 對此 fail closed。
+
+### 各訂閱涵蓋的模型廠商
+
+`subscriptionProviderMap` 記錄「每個訂閱的方案實際付錢買了哪些廠商的模型」。**這是會過期的外部事實**，各家陣容持續變動——2026 上半年 Copilot 改 AI Credits、Antigravity 2.0 重build、Cursor 併入聯訓的 Grok，都改變過這張表的正確內容。
+
+> **歸屬建議明顯不對時，先懷疑這張表，再懷疑讀它的判定邏輯。** 這條寫在這裡是有代價換來的：一次 Cursor 的 Anthropic 用量被建議計入 Copilot 訂閱，連續五輪審查都在修判定邏輯，而錯的自始至終是表——它當時只涵蓋 5 個 client，且是照「TokenBar 有沒有該 client 的 quota API」建的，不是照「誰在賣訂閱」建的。
+
+兩條決定什麼能進表的規則，兩條都曾被弄錯：
+
+| 規則 | 理由 |
+|---|---|
+| **BYO-key 不計入** | 產品「支援」某廠商但要你自帶 API key 時，付錢的是你對廠商，不是訂閱。Cursor 的 BYOK 路徑、Warp 的自帶 key 模式都據此排除 |
+| **他人代管的開放權重不算原廠訂閱** | Antigravity 提供 `gpt-oss-120b`，那是 Apache-2.0 權重跑在 Google 的算力上，錢進 Google。記為 `open-weights`，**絕不是** `openai` |
+
+`open-weights`（產品自行代管的開放模型）與 `own`（產品自訓模型，如 Cursor Composer）是一等公民的 provider 值。少了它們，這些用量只能塞進 `excluded`，而那個文案是「不是訂閱」——對訂閱涵蓋的用量是錯的。
+
+查證日期 **2026-08-07**（僅列 TokenBar 註冊表內的 client；調查涵蓋的產品比這多）：
+
+| client | 產品 | 涵蓋廠商 | 信心 | 來源 |
+|---|---|---|---|---|
+| `amp` | Amp | `openai`, `anthropic`, `zhipu`, `open-weights` | medium | [來源](https://ampcode.com/pricing) |
+| `antigravity` | Google Antigravity | `google`, `anthropic`, `open-weights` | high | [來源](https://antigravity.google/pricing) |
+| `claude` | Claude Code | `anthropic` | high | [來源](https://claude.com/pricing) |
+| `cline` | Cline | `zhipu`, `moonshot`, `deepseek`, `minimax`, `alibaba`, `open-weights` | high | [來源](https://cline.bot/) |
+| `codex` | Codex (ChatGPT) | `openai` | high | [來源](https://chatgpt.com/codex/pricing/) |
+| `copilot` | GitHub Copilot | `openai`, `anthropic`, `google`, `xai`, `microsoft`, `moonshot` | high | [來源](https://docs.github.com/en/copilot/reference/ai-models/supported-models) |
+| `cursor` | Cursor | `anthropic`, `openai`, `google`, `xai`, `own`, `moonshot`, `zhipu` | high | [來源](https://cursor.com/docs/models-and-pricing) |
+| `droid` | Factory Droid | `anthropic`, `openai`, `google`, `moonshot`, `zhipu`, `open-weights` | high | [來源](https://factory.ai/pricing) |
+| `grok` | Grok (SuperGrok / X Premium+) | `xai` | high | [來源](https://x.ai/news/grok-build-cli) |
+| `junie` | JetBrains Junie | `openai`, `anthropic`, `google`, `xai`, `amazon` | high | [來源](https://www.jetbrains.com/help/ai-assistant/supported-llms.html) |
+| `kilo`／`kilocode` | Kilo Code | `anthropic`, `openai`, `google`, `xai`, `deepseek`, `moonshot`, `minimax`, `zhipu`, `alibaba`, `open-weights` | medium | [來源](https://kilo.ai/) |
+| `kimi` | Kimi for Coding | `moonshot` | high | [來源](https://www.moonshot.ai/) |
+| `kiro` | Kiro (AWS) | `anthropic`, `open-weights`, `alibaba`, `deepseek`, `minimax` | high | [來源](https://kiro.dev/pricing/) |
+| `micode` | MiniMax coding plan | `minimax` | high | [來源](https://platform.minimax.io/docs/guides/pricing-token-plan) |
+| `qwen` | Qwen Code | `alibaba`, `zhipu`, `moonshot`, `minimax` | high | [來源](https://www.alibabacloud.com/help/en/model-studio/coding-plan) |
+| `trae` | Trae (ByteDance) | `openai`, `anthropic`, `minimax` | medium | [來源](https://www.trae.ai/pricing) |
+| `warp` | Warp | `openai`, `anthropic`, `google`, `xai`, `open-weights`, `zhipu`, `moonshot`, `minimax`, `alibaba`, `deepseek` | high | [來源](https://docs.warp.dev/agents/inference/model-choice/) |
+| `zed` | Zed | `anthropic`, `openai`, `google` | high | [來源](https://zed.dev/docs/account/zed-hosted-models.html) |
+
+**不在表裡的 client 代表尚未調查，不代表它不賣訂閱。** 這兩者的差別是承重的：`suggestionTarget` 對表裡沒有的來源回傳 nil（不建議），而非 `excluded`（斷言那是 API 支出）。缺席是無知，不是證據。
+
+**Router 不進表。** OpenRouter、LiteLLM、opencode、Roo Code、Goose 用的是你自己的 key 或別人的訂閱，自己不賣方案。opencode 是唯一有例外處理的：它的 `auth.json` oauth 條目經 `opencodeSubscriptions` 上報，`routedSubscriptions` 據此判定它實際簽入哪個訂閱——那是宣告的事實，不是推論。其餘 router 沒有等價訊號，因此不建議。
 
 ## Swift presentation layer
 

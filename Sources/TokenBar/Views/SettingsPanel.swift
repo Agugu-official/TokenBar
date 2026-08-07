@@ -754,7 +754,8 @@ struct SettingsPanel: View {
         let proposed = UsageAttributionSettings.suggestionRecords(
             entries: report.entries,
             confirmed: confirmed.records,
-            subscriptionClients: targetClients)
+            subscriptionClients: targetClients,
+            routedSubscriptions: UsageAttributionSettings.routedSubscriptions(from: agentUsage))
         let table = UsageAttribution.suggestions(defaults: defaults)
         let result = UsageAttribution.suggestionsRaw(
             replacing: defaults.object(forKey: UsageAttribution.suggestionsKey), with: proposed)

@@ -85,7 +85,20 @@ public enum UsageAttributionSettings {
     /// agents (Pi, OpenCode) and its own ACP protocol for them, and that usage
     /// draws on the same shared weekly pool as grok.com — so a row of theirs
     /// logged elsewhere really did consume the subscription.
-    public static let crossAgentSubscriptionProviders: Set<String> = ["openai", "xai"]
+    public static let crossAgentSubscriptionProviders: Set<String> = [
+        "openai", "xai",
+        // Vendors whose coding plans are sold to be reached from other agents —
+        // that is the product. Reselling them is likewise routine.
+        "deepseek", "moonshot", "minimax", "zhipu", "alibaba",
+        // Not a vendor relationship at all. `open-weights` is a model the
+        // product hosts itself and `own` is a model it trained; either way the
+        // subscription that served it is the one that paid, and no third party's
+        // terms are involved.
+        "open-weights", "own",
+        // Sold only inside a bundle (Copilot's MAI, Junie's Amazon models), so a
+        // row of theirs is that bundle's spend by construction.
+        "microsoft", "amazon",
+    ]
 
     /// Providers whose subscription may only be used by its own client. A row
     /// of theirs logged by a different client is API spend under any compliant
@@ -98,19 +111,81 @@ public enum UsageAttributionSettings {
     /// forbid. A different subscription that resells the same models — Copilot
     /// serving Anthropic — is that subscription's own matter and is not covered
     /// by the restriction, so it stays assignable.
+    /// The registered client that *is* a vendor's own product, where one exists.
+    ///
+    /// Two callers, two reasons. The bound-provider rule uses it to name the
+    /// subscription whose terms forbid being driven from elsewhere. Opencode
+    /// label resolution uses it because an `auth.json` oauth entry for a vendor
+    /// means the user authed to that vendor directly — so the subscription is
+    /// the vendor's own, never a reseller that also happens to carry it.
+    ///
+    /// A vendor with no first-party client here (`microsoft`, `amazon`,
+    /// `open-weights`, `own`) is sold only inside someone else's bundle.
     public static let providerOwnClient: [String: String] = [
         "anthropic": "claude",
         "openai": "codex",
         "google": "antigravity",
         "xai": "grok",
+        "moonshot": "kimi",
+        "minimax": "micode",
+        "alibaba": "qwen",
     ]
 
+    /// Which model vendors each subscription's own plan pays for.
+    ///
+    /// **This is a perishable external fact, not something derivable from the
+    /// code.** Vendors are added and dropped from these plans continuously. The
+    /// verification date, per-product notes and sources live in
+    /// `docs/knowledge/architecture.md` under Usage attribution — when a
+    /// suggestion looks obviously wrong, suspect this table before suspecting
+    /// the logic that reads it. Last verified 2026-08-07.
+    ///
+    /// Two rules decide what belongs here, and both were got wrong before:
+    ///
+    /// - **BYO-key does not count.** A product that merely *supports* a vendor
+    ///   when you supply your own API key did not pay for those tokens; you paid
+    ///   the vendor. Cursor's BYOK path and Warp's own-key mode are excluded on
+    ///   this basis.
+    /// - **A vendor's open weights hosted by someone else are not that vendor's
+    ///   subscription.** Antigravity serves `gpt-oss-120b`, but it is Apache-2.0
+    ///   weights running on Google's capacity — the money goes to Google. It is
+    ///   `open-weights`, never `openai`.
+    ///
+    /// Only clients in `ClientRegistry` appear here; the survey covered more
+    /// products than TokenBar recognises.
     public static let subscriptionProviderMap: [String: Set<String>] = [
+        // Single-vendor plans: the vendor's own product.
         "claude": ["anthropic"],
         "codex": ["openai"],
-        "copilot": ["openai", "anthropic"],
         "grok": ["xai"],
-        "antigravity": ["google"],
+        "kimi": ["moonshot"],
+        "micode": ["minimax"],
+
+        // Multi-vendor plans. A row of theirs is the subscription's spend, not
+        // the underlying vendor's.
+        "copilot": ["openai", "anthropic", "google", "xai", "microsoft", "moonshot"],
+        "antigravity": ["google", "anthropic", "open-weights"],
+        "cursor": ["anthropic", "openai", "google", "xai", "own", "moonshot", "zhipu"],
+        "zed": ["anthropic", "openai", "google"],
+        "junie": ["openai", "anthropic", "google", "xai", "amazon"],
+        "trae": ["openai", "anthropic", "minimax"],
+        "amp": ["openai", "anthropic", "zhipu", "open-weights"],
+        "droid": ["anthropic", "openai", "google", "moonshot", "zhipu", "open-weights"],
+        "kiro": ["anthropic", "open-weights", "alibaba", "deepseek", "minimax"],
+        "warp": [
+            "openai", "anthropic", "google", "xai", "open-weights",
+            "zhipu", "moonshot", "minimax", "alibaba", "deepseek",
+        ],
+        "kilo": [
+            "anthropic", "openai", "google", "xai", "deepseek",
+            "moonshot", "minimax", "zhipu", "alibaba", "open-weights",
+        ],
+        "kilocode": [
+            "anthropic", "openai", "google", "xai", "deepseek",
+            "moonshot", "minimax", "zhipu", "alibaba", "open-weights",
+        ],
+        "cline": ["zhipu", "moonshot", "deepseek", "minimax", "alibaba", "open-weights"],
+        "qwen": ["alibaba", "zhipu", "moonshot", "minimax"],
     ]
 
     /// `agentUsage` is the capability source for assignment targets. A transient
@@ -152,18 +227,19 @@ public enum UsageAttributionSettings {
     /// opencode could not be named as a target.
     public static func subscriptionClient(forLabel label: String) -> String? {
         if let alias = ClientRegistry.subscriptionLabelAliases[label] { return alias }
-        let provider = label.lowercased()
-        let owners = subscriptionProviderMap
-            .filter { $0.value.contains(provider) }
-            .keys
-            .sorted()
-        // A label with no owner names no subscription, whatever else it may
-        // name. `Kiro` lowercases to a registered client, so returning it would
-        // put "Counts toward Kiro" in the picker for a client that owns no
-        // subscription provider and that the policy below can never resolve.
-        // Ambiguity yields nothing for the same reason: a guess is not an answer.
-        guard owners.count == 1 else { return nil }
-        return owners[0]
+        // The remaining labels are capitalized provider keys, and an oauth entry
+        // for a provider means the user authed to that provider directly — so
+        // the subscription is that vendor's own client, not whichever reseller
+        // also carries it. Resolving by "the unique subscription covering this
+        // provider" stopped working once the survey showed most providers are
+        // carried by several: `Xai` would become ambiguous between Grok, Cursor,
+        // Copilot, Warp and others, when the answer is plainly Grok.
+        //
+        // A label naming no first-party client names no subscription. `Kiro`
+        // lowercases to a registered client, so returning it would put
+        // "Counts toward Kiro" in the picker for something the policy can never
+        // resolve.
+        return providerOwnClient[label.lowercased()]
     }
 
     /// What the attribution page shows. A nil report is two states: the request
@@ -247,8 +323,30 @@ public enum UsageAttributionSettings {
     /// API key, whose right answer is `excluded`, and no field in the data tells
     /// the two apart. This turns N clicks into one confirmation; it never
     /// decides.
+    /// Clients that route through subscriptions they do not own, keyed to the
+    /// subscription clients they are authed against.
+    ///
+    /// opencode is the only one TokenBar can know this for, because its
+    /// `auth.json` oauth entries are reported as `opencodeSubscriptions`. That
+    /// declaration is what separates it from every other multi-provider source:
+    /// a Cursor row is Cursor's own plan, but an opencode row was paid for by
+    /// whichever subscription opencode is signed into. Without this the router's
+    /// rows get no suggestion at all, and on real data opencode is the single
+    /// most provider-diverse source there is.
+    public typealias RoutedSubscriptions = [String: [String]]
+
+    public static func routedSubscriptions(
+        from payload: AgentUsagePayload?
+    ) -> RoutedSubscriptions {
+        let authed = (payload?.opencodeSubscriptions ?? [])
+            .compactMap(subscriptionClient(forLabel:))
+            .filter { ClientRegistry.allIds.contains($0) }
+        return authed.isEmpty ? [:] : ["opencode": authed]
+    }
+
     public static func suggestionTarget(
-        sourceClient: String, provider: String, subscriptionClients: [String]
+        sourceClient: String, provider: String, subscriptionClients: [String],
+        routedSubscriptions: RoutedSubscriptions = [:]
     ) -> UsageAttribution.State? {
         let owners = subscriptionClients.filter {
             subscriptionProviderMap[$0]?.contains(provider) == true
@@ -262,7 +360,36 @@ public enum UsageAttributionSettings {
         // find no owner and fall through to the subscription-bound branch —
         // declaring the CLI's own subscription usage to be API spend.
         let sourceOwner = ClientRegistry.quotaOwner(sourceClient)
-        if owners.contains(sourceOwner) { return .assigned(sourceOwner) }
+
+        // Own subscription wins, and asking the table directly rather than
+        // `owners` is the point: `owners` is filtered by `subscriptionClients`,
+        // which lists only clients TokenBar has a quota snapshot for. Attribution
+        // answers who paid, not who has a gauge — Cursor's own plan covers the
+        // Anthropic models it serves whether or not TokenBar can draw its meter.
+        // Requiring a snapshot here is what made a Cursor row fall through and
+        // get proposed against someone else's subscription entirely.
+        if subscriptionProviderMap[sourceOwner]?.contains(provider) == true {
+            return .assigned(sourceOwner)
+        }
+
+        // A declared router spends the subscription it is signed into, so that
+        // is the answer before any policy about the provider applies — the
+        // question of who may reach a vendor from elsewhere does not arise when
+        // the user authed to it here on purpose.
+        if let routed = routedSubscriptions[sourceOwner] {
+            let covering = routed.filter {
+                subscriptionProviderMap[$0]?.contains(provider) == true
+            }
+            guard covering.count == 1 else { return nil }
+            return .assigned(covering[0])
+        }
+
+        // A source the table says nothing about is not evidence of anything.
+        // Absence here means "nobody has established what this product's plan
+        // covers", which is a different claim from "this product's plan does not
+        // cover it" — and only the second one justifies calling the usage API
+        // spend. Refusing to suggest leaves the row unassigned for the user.
+        guard subscriptionProviderMap[sourceOwner] != nil else { return nil }
 
         // Which of the covering subscriptions could legitimately have been
         // reached from somewhere else. For a bound provider that is every owner
@@ -294,14 +421,16 @@ public enum UsageAttributionSettings {
     public static func suggestionRecords(
         entries: [ModelReportEntry],
         confirmed: [UsageAttribution.Record],
-        subscriptionClients: [String]
+        subscriptionClients: [String],
+        routedSubscriptions: RoutedSubscriptions = [:]
     ) -> [UsageAttribution.Record] {
         rows(entries: entries, confirmed: confirmed, suggestions: []).compactMap { row in
             guard case .unassigned = row.state,
                   let proposed = suggestionTarget(
                     sourceClient: row.client,
                     provider: row.provider,
-                    subscriptionClients: subscriptionClients)
+                    subscriptionClients: subscriptionClients,
+                    routedSubscriptions: routedSubscriptions)
             else { return nil }
             return UsageAttribution.Record(
                 client: row.client, provider: row.provider, state: proposed)
