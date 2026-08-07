@@ -230,6 +230,7 @@
 "Could not save this classification: existing attribution data is invalid or foreign." = "無法儲存這項分類：現有的歸屬資料無效或來自其他格式。";
 "Could not save this classification: the attribution entry limit was reached." = "無法儲存這項分類：已達歸屬項目上限。";
 "Could not save this classification: the new value is too large or unsupported." = "無法儲存這項分類：新值太大或不受支援。";
+"Claude accounts" = "Claude 帳號";
 
 /* ===== 設定：選項 ===== */
 "Launch at login" = "登入時開啟";
@@ -297,6 +298,10 @@
 "Every hour" = "每小時";
 "Every %lld min" = "每 %lld 分鐘";
 
+"Add config dir…" = "加入設定資料夾…";
+"Add" = "加入";
+"Not found on disk right now — kept in the list in case it's an unmounted drive or a typo you'll fix." = "目前在磁碟上找不到 —— 仍保留在清單中，以免是尚未掛載的磁碟或待修正的筆誤。";
+
 /* ===== 設定：說明文字 ===== */
 "Spins faster as the live token rate climbs (idle 2 fps, 1M tokens/min tops out at 40 fps)." = "即時 token 速率越高轉得越快（閒置 2 fps，每分鐘 100 萬 tokens 時達到上限 40 fps）。";
 "Gauge icons drain as the selected quota window empties. \"Color on warning only\" stays monochrome until under 25% left (amber) and 10% (red), like the battery icon." = "儀表圖示會隨著所選額度時間窗耗盡而下降。「僅警示時上色」在剩餘 25%（琥珀色）與 10%（紅色）之前維持單色，行為與電池圖示一致。";
@@ -314,6 +319,9 @@
 "Or drag the handle at the bottom edge of the popover. Width is fixed; \"Auto\" fits about 60% of your screen height." = "也可以拖曳彈出視窗底部邊緣的把手。寬度固定；「自動」約為螢幕高度的 60%。";
 "How often the tray re-reads your logs. The dashboard refreshes when the popover opens; live tokens/min updates every few seconds regardless." = "選單列重新讀取記錄檔的頻率。儀表板會在開啟彈出視窗時更新；即時的每分鐘 tokens 則不受此設定影響，每隔幾秒就會更新。";
 "TokenBar began as a fork of tokcat by handlecusion. Parsing & pricing come from tokscale by Junho Yeo; the menu-bar patterns reference CodexBar by Peter Steinberger; the running cat traces back to RunCat by Takuto Nakamura. MIT licensed." = "TokenBar 最初是 handlecusion 的 tokcat 分支。解析與計價來自 Junho Yeo 的 tokscale；選單列的做法參考 Peter Steinberger 的 CodexBar；跑動的貓則源自 Takuto Nakamura 的 RunCat。採用 MIT 授權。";
+"For a second Claude account, run it with CLAUDE_CONFIG_DIR pointed at an isolated folder, then add that folder here. Its usage is merged into the totals above everywhere in TokenBar — there is no separate per-account view." = "第二個 Claude 帳號請以 CLAUDE_CONFIG_DIR 指向隔離資料夾來執行，再把該資料夾加到這裡。它的用量會合併進上方的總計 —— TokenBar 各處都不會分開顯示個別帳號。";
+"%lld of %lld path(s) can't be read right now — this is retried automatically on the next scan." = "%2$lld 個路徑中有 %1$lld 個目前無法讀取 —— 下次掃描時會自動重試。";
+"%lld path(s) can't be used as a scan folder and were not added." = "有 %lld 個路徑無法作為掃描資料夾，未加入清單。";
 
 /* ===== 步調（pace）=====
    片段各自查表後以 " · " 串接，分隔符與語言無關，因此逐片段翻譯是安全的。

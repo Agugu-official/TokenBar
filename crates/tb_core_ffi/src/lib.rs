@@ -24,6 +24,7 @@ mod agent_quota_history;
 mod agent_storage_windows;
 mod agent_usage;
 mod agents_report;
+mod extra_scan_paths;
 mod filter_parity_probe;
 mod hourly_report;
 mod model_report;
@@ -90,6 +91,10 @@ impl LocalSourceContext {
             use_env_roots: true,
             year,
             clients,
+            scanner_settings: tokscale_core::scanner::ScannerSettings {
+                extra_scan_paths: extra_scan_paths::snapshot(),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -107,6 +112,10 @@ impl LocalSourceContext {
             use_env_roots: true,
             year,
             clients,
+            scanner_settings: tokscale_core::scanner::ScannerSettings {
+                extra_scan_paths: extra_scan_paths::snapshot(),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -825,6 +834,43 @@ pub unsafe extern "C" fn tb_quota_curve(
         });
         envelope(result)
     })
+}
+
+/// Replace the process-wide extra-scan-paths registry (see the
+/// `extra_scan_paths` module doc). `json` is an object of
+/// `{"<public-client-id>": ["<absolute-dir-path>", ...]}`, e.g.
+/// `{"claude":["/Users/x/.claude-work/projects","/Users/x/.claude-work/transcripts"]}`.
+/// Full-replace: passing `{}` (or every client's list empty) clears the
+/// registry. Every subsequent report/parse call picks up the new roots
+/// immediately — no restart required. `data` on success is
+/// `{"registeredCount":N,"unreadable":[{"client","path","reason"}],"rejected":[{"client","path","reason"}]}`.
+/// A path whose client id is supported is always registered, even when it
+/// can't be read right now (unmounted volume, not-yet-created config dir) —
+/// such a path is listed in `unreadable` and is retried automatically by the
+/// next scan, with no need to call this setter again. A path is only ever
+/// left out of the registry (`rejected`) when its client id is not one this
+/// consumer wires extra-root support for. Malformed JSON returns
+/// `{"ok":false,...}` and leaves the registry untouched.
+///
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_set_extra_scan_paths(json: *const c_char) -> *mut c_char {
+    guarded("tb_set_extra_scan_paths", || {
+        envelope(unsafe { set_extra_scan_paths_from_c(json) })
+    })
+}
+
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated UTF-8 string.
+unsafe fn set_extra_scan_paths_from_c(json: *const c_char) -> Result<serde_json::Value, String> {
+    if json.is_null() {
+        return Err("extra scan paths payload must not be NULL".to_string());
+    }
+    let raw = unsafe { CStr::from_ptr(json) }
+        .to_str()
+        .map_err(|_| "extra scan paths payload is not valid UTF-8".to_string())?;
+    extra_scan_paths::set_from_json(raw)
 }
 
 /// Release a string returned by any tb_* entry point.
