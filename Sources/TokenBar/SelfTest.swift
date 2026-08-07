@@ -7248,6 +7248,47 @@ enum SelfTest {
                 + "never even RESOLVED, not merely unwritten (mutation: hoisting the "
                 + "`snapshotDirectory()` call ahead of the `buildIdentity != nil` check)")
 
+        // The block above assumed in prose that every non-user mode yields a nil
+        // identity. It did not: `shipping()` looked at the bundle identifier
+        // alone, and `scripts/bundle.sh` stamps the production one by default,
+        // so running `--selftest` on a release bundle — an ordinary way to check
+        // one — left fixture-backed models resolving the real directory. The
+        // assumption is a predicate now, and these assert it.
+        expect(
+            BuildIdentity.nonUserRuntimeFlags.sorted()
+                == ["--demo", "--icon-gallery", "--selftest", "--smoke"],
+            "LP3 isolation: the non-user runtime set is exactly the four modes the spy "
+                + "above depends on")
+        // Supply the production bundle triple explicitly. Under `swift run`
+        // there is no bundle, so overriding only `arguments` would leave every
+        // call nil for the bundle reason and the flag check untested — that
+        // mutation survived before this was written.
+        func lp3ShippingIdentity(_ args: [String]) -> BuildIdentity? {
+            BuildIdentity.shipping(
+                arguments: args,
+                bundleIdentifier: "com.nyanako.tokenbar",
+                shortVersion: "1.2.3", buildNumber: "456")
+        }
+        expect(
+            lp3ShippingIdentity(["/Applications/TokenBar.app"]) != nil,
+            "LP3 isolation control: the production bundle triple with no non-user flag DOES "
+                + "yield an identity — without this every assertion below would pass on a "
+                + "function that always returns nil")
+        for flag in BuildIdentity.nonUserRuntimeFlags {
+            expect(
+                lp3ShippingIdentity(["/Applications/TokenBar.app", flag]) == nil,
+                "LP3 isolation: \(flag) yields no shipping identity even on a production "
+                    + "bundle, so no production snapshot path exists for a fixture model")
+        }
+        expect(
+            lp3ShippingIdentity(["/Applications/TokenBar.app", "--demo", "--selftest"]) == nil,
+            "LP3 isolation: combined non-user flags still yield no shipping identity")
+        expect(
+            !BuildIdentity.isNonUserRuntime(["/Applications/TokenBar.app"]),
+            "LP3 isolation control: an ordinary launch is NOT classified as a non-user "
+                + "runtime — without this the assertions above would pass on a predicate "
+                + "that always returns true")
+
         let lp3SpyOn = LP3DirectorySpy(directory: lp3TempDir("spy-on"))
         _ = awaitMainActorValue { () -> Bool in
             _ = DashboardModel(

@@ -252,12 +252,45 @@ struct BuildIdentity: Equatable, Sendable {
     /// The shipping identity. Returns nil for anything that is not the official
     /// bundle — including `swift run`, which has no bundle identifier — so a
     /// development or test binary can never read or write the production file.
-    static func shipping() -> BuildIdentity? {
-        guard let bundle = Bundle.main.bundleIdentifier,
+    /// Runtime modes that enter the app but are not a user session.
+    ///
+    /// The identifier alone is not enough. `scripts/bundle.sh` stamps the
+    /// production identifier by default, and running `--selftest` or `--smoke`
+    /// on a release bundle is an ordinary way to verify one — at which point
+    /// every fixture-backed `DashboardModel(cachesSnapshot: true)` in the suite
+    /// would resolve the real snapshot directory and could overwrite a user's
+    /// dashboard with fabricated usage. `SELFTEST_BUNDLE_ID` defaults to a
+    /// distinct identifier, but it is a `?=` override, so it cannot be the only
+    /// thing standing between fixtures and the production file.
+    ///
+    /// This is the same set the isolation spy asserts against; before, the test
+    /// enumerated these modes while the production guard did not know them.
+    static let nonUserRuntimeFlags = ["--selftest", "--smoke", "--demo", "--icon-gallery"]
+
+    /// Whether these launch arguments describe something other than a user
+    /// session. Split out so it is directly assertable — the identifier half
+    /// cannot be exercised under `swift run`, which has no bundle at all.
+    static func isNonUserRuntime(_ arguments: [String]) -> Bool {
+        arguments.contains { nonUserRuntimeFlags.contains($0) }
+    }
+
+    /// Every input is injectable, and deliberately so. Under `swift run` there
+    /// is no bundle at all, so a test that only overrides `arguments` proves
+    /// nothing: the result is nil for the bundle reason whatever the flags say.
+    /// Removing the runtime check below survived exactly that mutation once.
+    static func shipping(
+        arguments: [String] = CommandLine.arguments,
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        shortVersion: String? = Bundle.main
+            .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+        buildNumber: String? = Bundle.main
+            .object(forInfoDictionaryKey: "CFBundleVersion") as? String
+    ) -> BuildIdentity? {
+        guard !isNonUserRuntime(arguments) else { return nil }
+        guard let bundle = bundleIdentifier,
               bundle == "com.nyanako.tokenbar",
-              let short = Bundle.main
-                  .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
-              let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+              let short = shortVersion,
+              let build = buildNumber
         else { return nil }
         return BuildIdentity(bundleIdentifier: bundle, shortVersion: short, buildNumber: build)
     }
