@@ -407,7 +407,7 @@ struct PopoverView: View {
             }
         }
         .buttonStyle(.plain)
-        .disabled(model.refreshing || backgroundRefreshRunning)
+        .disabled(refreshDisabled)
         .help(refreshHelp)
         // The SAME condition that drives the spinner and the disabled state.
         // Keying the label on `backgroundRefreshRunning` alone announced
@@ -417,6 +417,12 @@ struct PopoverView: View {
         .accessibilityLabel(
             model.refreshing || backgroundRefreshRunning
                 ? "Updating usage data".localized : "Refresh usage data".localized)
+    }
+
+    /// One source for the button's disabled state and the ⌘R shortcut, so the
+    /// keyboard path cannot outlive a restriction the visible control shows.
+    private var refreshDisabled: Bool {
+        model.refreshing || backgroundRefreshRunning
     }
 
     /// A graph fetch that the user did not start. `refreshing` already owns the
@@ -699,6 +705,19 @@ struct PopoverView: View {
         case "q":
             NSApp.terminate(nil)
         case "r":
+            // The same condition the button uses. Gating only the button left
+            // the shortcut able to launch a forced scan alongside a running
+            // background one: the ownership token stops the older result from
+            // committing, but it does not cancel the FFI work, so two full
+            // scans contend on the bounded pool while the control says it is
+            // disabled and updating.
+            //
+            // Gated here rather than inside `DashboardModel.refresh()` on
+            // purpose. Overlapping fetches are a capability the model must keep
+            // — several regressions drive `load()` and `refresh()` concurrently
+            // to prove the supersession rules — so the restriction belongs to
+            // the user-facing control, not to the API.
+            guard !refreshDisabled else { return true }
             Task { await model.refresh() }
         case "g":
             // Round 6, FIX 1: cycle order lives on `ChartView` (bars →
