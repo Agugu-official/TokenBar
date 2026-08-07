@@ -222,6 +222,9 @@
 "Not a subscription" = "不是訂閱";
 "Counts toward %@" = "計入 %@";
 "Suggested: counts toward %@" = "建議：計入 %@";
+"Suggested: not a subscription" = "建議：不是訂閱";
+"Usage could not be loaded, so there is nothing to classify yet." = "無法載入用量，因此目前沒有可分類的內容。";
+"Usage breakdown is unavailable right now." = "目前無法顯示用量拆分。";
 "Unspecified provider" = "未指定供應商";
 "Classification for %@" = "%@ 的分類";
 "Could not save this classification: existing attribution data is invalid or foreign." = "無法儲存這項分類：現有的歸屬資料無效或來自其他格式。";

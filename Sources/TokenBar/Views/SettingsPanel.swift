@@ -46,6 +46,12 @@ struct SettingsPanel: View {
     /// caller derives this from request lifecycle, not payload presence — a failed
     /// fetch leaves the payload nil forever.
     var isLoading = false
+    /// True while the model-report request is in flight. Separate from
+    /// `isLoading`, which tracks the graph and quota requests: the report has
+    /// its own lifecycle since it came off the critical path, and folding it
+    /// into the same flag would call the page unavailable while it is still
+    /// being fetched.
+    var reportLoading = false
 
     @AppStorage(TrayMode.storageKey) private var trayModeRaw = TrayMode.todayTokens.rawValue
     @AppStorage(TrayAnimator.animateKey) private var animateTray = true
@@ -227,7 +233,8 @@ struct SettingsPanel: View {
         return UsageAttributionSettings.signature(
             entries: modelReport.entries,
             subscriptionClients: attributionTargetClients,
-            targetsKnown: agentUsage != nil)
+            targetsKnown: agentUsage != nil,
+            routedSubscriptions: UsageAttributionSettings.routedSubscriptions(from: agentUsage))
     }
 
     @ViewBuilder
@@ -627,7 +634,8 @@ struct SettingsPanel: View {
             }
 
             switch UsageAttributionSettings.pageState(
-                hasReport: modelReport != nil, rowCount: rows.count, isLoading: isLoading)
+                hasReport: modelReport != nil, rowCount: rows.count,
+                isLoading: isLoading || reportLoading)
             {
             case .loading:
                 LoadingLine(title: "Loading usage…")
@@ -653,13 +661,21 @@ struct SettingsPanel: View {
     private func attributionRow(
         _ row: UsageAttributionSettings.Row, targetClients: [String]
     ) -> some View {
-        let assignedTarget: String? = {
-            guard case let .assigned(target) = row.state else { return nil }
-            return target
-        }()
+        // Every target this row can legitimately hold has to be selectable, and
+        // `targetClients` only lists clients with a quota snapshot. Two kinds of
+        // target fall outside it: one already confirmed, and one being suggested
+        // for a plan TokenBar draws no meter for — a Cursor row is exactly that.
+        // Offering the suggestion while the picker cannot select it leaves
+        // "Accept all" as the only way to take it, and then undoing everything
+        // else it accepted.
+        let outOfBandTargets: [String] = [row.state, row.suggestedState]
+            .compactMap { state in
+                guard case let .assigned(target)? = state else { return nil }
+                return target
+            }
         var pickerTargets = targetClients
-        if let assignedTarget, !pickerTargets.contains(assignedTarget) {
-            pickerTargets.append(assignedTarget)
+        for target in outOfBandTargets where !pickerTargets.contains(target) {
+            pickerTargets.append(target)
         }
 
         return VStack(alignment: .leading, spacing: 6) {

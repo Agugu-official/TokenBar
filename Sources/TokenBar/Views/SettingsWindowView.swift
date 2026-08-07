@@ -126,7 +126,8 @@ struct SettingsWindowView: View {
                         agentUsage: model.agentUsage,
                         modelReport: model.modelReport,
                         presentClients: model.stats?.presentClients ?? [],
-                        isLoading: isInitialLoad)
+                        isLoading: isInitialLoad,
+                        reportLoading: model.modelLoading)
                         .padding(14)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(OverlayScrollerEnforcer())
@@ -159,6 +160,17 @@ struct SettingsWindowView: View {
         .frame(width: Self.contentSize.width, height: Self.contentSize.height)
         .background(PopoverBackdrop().ignoresSafeArea())
         .task { await model.load() }
+        // The attribution page is built from the model report, and `load()` is
+        // graph-only since the report came off the critical path. Without this
+        // Settings never asks for one: opened cold — `--settings`, or before the
+        // popover has ever been shown — the page waits for a request nobody
+        // makes, and once `isLoading` clears it reads as permanently
+        // unavailable. Keyed like PopoverView's, on the committed slice rather
+        // than the payload generation, so an all-years and a current-year view
+        // dated the same day still re-fire.
+        .task(id: model.committedSliceKey) {
+            await model.ensureModelData(for: .stats)
+        }
         .task { await model.pollAgentUsage() }
         .task(id: quotaReconciliationID) {
             guard let payload = model.agentUsage else { return }

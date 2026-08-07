@@ -988,12 +988,41 @@ enum SelfTest {
         expect(
             UsageAttributionSettings.subscriptionClient(forLabel: "Xai") == "grok",
             "an opencode xai subscription names the grok client")
-        // `Kiro` lowercases to a registered client that owns no subscription
-        // provider, so returning it would put an unresolvable target in the
-        // picker. A label that names no subscription must name nothing.
+        // opencode's provider keys carry the plan: `minimax-coding-plan` becomes
+        // the label `Minimax-coding-plan`, which no vendor lookup matches. These
+        // vendors sell per-plan keys, so the qualifier is trimmed rather than
+        // each plan enumerated.
         expect(
-            UsageAttributionSettings.subscriptionClient(forLabel: "Kiro") == nil
-                && ClientRegistry.allIds.contains("kiro"),
+            UsageAttributionSettings.subscriptionClient(forLabel: "Minimax-coding-plan") == "micode"
+                && UsageAttributionSettings.subscriptionClient(forLabel: "Kimi-for-coding") == "kimi",
+            "a plan-qualified opencode label resolves to its vendor's client")
+        // Trimming must not turn an unknown vendor into a known one.
+        expect(
+            UsageAttributionSettings.subscriptionClient(forLabel: "Crush-plan") == nil,
+            "trimming a qualifier does not invent a subscription")
+
+        // Routing is a second input to every suggestion, and it can change while
+        // the resolved target list does not: a Codex snapshot contributes
+        // `codex` whether or not opencode also holds an OpenAI oauth entry.
+        let routingEntries = [attributionEntry(
+            client: "opencode", provider: "openai", model: "gpt-5.6-sol", total: 1, cost: 0.1)]
+        expect(
+            UsageAttributionSettings.signature(
+                entries: routingEntries, subscriptionClients: ["codex"],
+                routedSubscriptions: [:])
+                != UsageAttributionSettings.signature(
+                    entries: routingEntries, subscriptionClients: ["codex"],
+                    routedSubscriptions: ["opencode": ["codex"]]),
+            "routing state changes the refresh signature even when targets do not")
+        // A label that lowercases to a registered client which sells no plan
+        // must still name nothing — returning it would put an unresolvable
+        // target in the picker. `Kiro` no longer serves as the example: the
+        // corrected table says Kiro does sell one, so the case moved to a client
+        // that genuinely does not.
+        expect(
+            UsageAttributionSettings.subscriptionClient(forLabel: "Crush") == nil
+                && ClientRegistry.allIds.contains("crush")
+                && UsageAttributionSettings.subscriptionProviderMap["crush"] == nil,
             "an opencode label naming no subscription is not a target")
 
         // These three previously encoded the reseller rule as a property of the

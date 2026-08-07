@@ -227,6 +227,16 @@ public enum UsageAttributionSettings {
     /// opencode could not be named as a target.
     public static func subscriptionClient(forLabel label: String) -> String? {
         if let alias = ClientRegistry.subscriptionLabelAliases[label] { return alias }
+        // opencode's provider keys carry the plan, not just the vendor:
+        // `minimax-coding-plan` becomes the label `Minimax-coding-plan`, and
+        // `kimi-for-coding` and the `zai` coding plan are the same shape. The
+        // vendor is the leading segment, so the qualifier is trimmed before the
+        // lookup rather than each plan being enumerated — these vendors sell
+        // per-plan keys and the list would never stay complete.
+        let vendor = label.lowercased()
+            .split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+            .first
+            .map(String.init) ?? label.lowercased()
         // The remaining labels are capitalized provider keys, and an oauth entry
         // for a provider means the user authed to that provider directly — so
         // the subscription is that vendor's own client, not whichever reseller
@@ -239,7 +249,14 @@ public enum UsageAttributionSettings {
         // lowercases to a registered client, so returning it would put
         // "Counts toward Kiro" in the picker for something the policy can never
         // resolve.
-        return providerOwnClient[label.lowercased()]
+        if let own = providerOwnClient[vendor] { return own }
+        // The key can name the product rather than the model vendor: Moonshot
+        // sells `kimi-for-coding`, and `kimi` is the registered client while
+        // `moonshot` is the vendor `providerOwnClient` is keyed by. Accept the
+        // segment as a client only when that client actually sells a plan —
+        // otherwise a registered id that owns no subscription (`crush`) would
+        // become a target the policy can never resolve.
+        return subscriptionProviderMap[vendor] != nil ? vendor : nil
     }
 
     /// What the attribution page shows. A nil report is two states: the request
@@ -483,7 +500,8 @@ public enum UsageAttributionSettings {
     /// payload that arrives with zero candidates produces an unchanged signature
     /// and the reconciliation that should clear stale proposals never runs.
     public static func signature(
-        entries: [ModelReportEntry], subscriptionClients: [String], targetsKnown: Bool = true
+        entries: [ModelReportEntry], subscriptionClients: [String], targetsKnown: Bool = true,
+        routedSubscriptions: RoutedSubscriptions = [:]
     ) -> String {
         let entrySignature = entries.map {
             [
@@ -491,8 +509,16 @@ public enum UsageAttributionSettings {
                 String($0.cost.bitPattern),
             ].joined(separator: "\u{1f}")
         }.joined(separator: "\u{1e}")
+        // Routing is a second, independent input to every suggestion: opencode
+        // gaining or losing an oauth entry changes the answer while the resolved
+        // target list can stay identical, because a Codex snapshot already
+        // contributes `codex` either way.
+        let routing = routedSubscriptions.keys.sorted()
+            .map { "\($0)>\(routedSubscriptions[$0]!.sorted().joined(separator: "+"))" }
+            .joined(separator: ";")
         return entrySignature + "|" + (targetsKnown ? "known" : "pending")
             + "|" + subscriptionClients.joined(separator: ",")
+            + "|" + routing
     }
 
     private static func sourceKey(client: String, provider: String) -> String {
