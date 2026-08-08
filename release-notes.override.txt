@@ -1,2 +1,2 @@
 Fixes:
-- The Discord agent picker now lists the agents you have used, rather than every agent TokenBar recognises. It offered a row for agents you have never run and for ones you had hidden, and naming one of those left the presence empty without saying why. The agent your setting already names stays listed even if you hide it, so the picker keeps showing what the setting points at.
+- The Discord agent picker no longer lists every agent TokenBar recognises. Once your usage has loaded it offers the agents you actually use. Before, it also offered a row for agents you had never run and for ones you had hidden, and naming one of those left the presence empty without saying why.
