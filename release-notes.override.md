@@ -13,7 +13,7 @@
 
 ## Fixes
 
-- **Turns are no longer lost when a transcript is rewritten in place.** When Claude Code rewrites a transcript — during compaction, for instance — the turns removed from the file used to disappear from history along with it. From this version on they are kept. This does not bring back history already lost: the compacted file no longer holds those turns, and the cache rebuild described below starts from what is on disk today. Existing totals will not change; the loss simply stops here. [#195](https://github.com/Nanako0129/TokenBar/pull/195)
+- **Turns are no longer lost when a transcript is rewritten in place.** When Claude Code rewrites a transcript — during compaction, for instance — the turns removed from the file used to disappear from history along with it. From this version on they are kept. This does not bring back history already lost: the compacted file no longer holds those turns, and the cache rebuild described below starts from what is on disk today. If a transcript was compacted after this version's predecessor last scanned it, that rebuild will notice — those turns were already gone from the file, and the total drops to match. The loss stops here; it is not reversed here. [#195](https://github.com/Nanako0129/TokenBar/pull/195)
 - **Inactive segments of the view switch are clickable again.** The hit area only covered the active segment, so changing views needed a pixel-accurate click. [#182](https://github.com/Nanako0129/TokenBar/pull/182) — thanks @yeha98555
 - Codex shows its monochrome mark instead of the ChatGPT green. [#140](https://github.com/Nanako0129/TokenBar/pull/140)
 
