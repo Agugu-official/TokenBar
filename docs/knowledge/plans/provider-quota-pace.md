@@ -123,8 +123,12 @@ Security review 與 2026-07-17 live prompt 後的修訂已把 Mac protocol 鎖�
 > 接受的後果：在沒有 authoritative ID 的 provider 上，同一台機器的兩個帳號共用一條 pace series。影響 Claude 全部路線、Grok、Copilot、Antigravity remote，以及 `ChatGPT-Account-Id` 缺席時的 Codex。
 >
 > 一併接受的模型代價：series 存的是 `usedPercent` 對 phase，同一個人在不同規模的方案上斜率不同，合併會讓曲線失真。判斷是「失真的模型遠勝於永遠學不起來的模型」。**刻意不把 plan tier 放進 `windowKey`**，那會重新引入碎片化。
+>
+> **一次性的歷史歸零，也是接受的代價。** 換 key 就是換 series，所以帶著這個改動出貨的那一版，上述每個 provider 的既有歷史都會被拋下、卡片回到 `learningHistory`，短 window 要重新累積 6 個 bucket、長 window 要 3 個完整 cycle。曾經評估過一次性 re-key 或合併舊 series 來避開這件事，實作並驗證後**被否決**：合併會把來源的 `active_reset_at` 交給目標，而 `apply_observed_duration` 在未學到 duration 的分支上遇到不同的 reset 就把它設成 `None`，救回來的 cycle 隨即失去 `retain_series` 的 active-group 豁免而整批被刪——實測同一份 store 同一次 poll，合併 3→0、不合併 3→3。付一次歸零的代價，比背一套會刪掉自己要救的資料的機制便宜。發版說明必須提到這一次重來。
+>
+> 被拋下的 series 不需要清理：`retain_store` 會掃過**每一條** series（不只正在寫入的那些），樣本逐一老化出 horizon 後整條被丟棄。
 
-下方 `:581`／`:591`／§Account scope resolver 開頭「不得自行換成 token hash、path／slot-only identity」等規則，約束的是 **`accountScope`**，不是 history identity；history identity 走的就是上表 priority 2 的 provider-only 常數，那是記錄在案的決策而非默默放寬。
+下列三條規則約束的是 **`accountScope`**，不是 history identity——history identity 走的就是上表 priority 2 的 provider-only 常數，那是記錄在案的決策而非默默放寬：§風險表的「不得降級 default key」列、§停止條件的「不得以 label、token hash、30-day constant或 silent Linear 來『完成』matrix」，以及 §Account scope resolver 開頭的「不得自行換成 token hash、path／slot-only identity」。（以內容引用而非行號：本節的插入曾讓既有的行號引用整體位移。）
 
 Antigravity local IDE 的 email 來自 authenticated `GetUserStatus`，可走 authoritative route。Remote OAuth quota 使用 Google credential，但目前 email 來自另一份 `google_accounts.active` state，兩者未綁定；remote 必須走 credential lineage，且該 local email不得再用來標示或 scope remote quota。Local／remote history 只有在未來同一 authenticated response證明相同 provider ID，或有明確 trusted binding 時才能 merge；目前安全地分開學習。
 
