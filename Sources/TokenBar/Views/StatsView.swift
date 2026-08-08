@@ -10,13 +10,23 @@ struct StatsView: View {
     let clientIds: [String]
     let stats: UsageStats
     let modelReport: ModelReport?
+    /// The year `modelReport` was fetched for, in identity form.
+    var modelYear: String?
     let colors: ModelColorMap
     /// Dashboard year filter (nil = all time), forwarded to the chart card.
     var year: String?
+    /// The client tab this slice belongs to, or nil on Overview. Passed
+    /// explicitly rather than inferred from `clientIds.count == 1`, because
+    /// Overview legitimately displays exactly one client when the others are
+    /// hidden or absent.
+    var singleClient: String?
+    /// Forwarded to the attribution card so a terminal nil report reads as
+    /// unavailable rather than as a request still in flight.
+    var reportLoading = false
 
     private var favorite: ModelReportEntry? {
         let allow = Set(clientIds)
-        return (modelReport?.entries ?? [])
+        return (modelReport?.modelLevelEntries ?? [])
             .filter { allow.contains($0.client) }
             .max { $0.cost < $1.cost }
     }
@@ -27,6 +37,9 @@ struct StatsView: View {
                 payload: payload, clientIds: clientIds, stats: stats, colors: colors,
                 year: year)
             summaryCard
+            UsageAttributionBreakdownCard(
+                report: modelReport, reportYear: modelYear, clientIds: clientIds,
+                singleClient: singleClient, reportLoading: reportLoading)
         }
     }
 

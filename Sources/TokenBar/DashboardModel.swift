@@ -371,7 +371,12 @@ private struct DashboardSnapshot {
     /// year keeps a previous year's report off a newly-filtered dashboard; the
     /// payload generation is what makes the request idempotent per graph commit,
     /// so a model-dependent lens re-requests only when the graph actually moves.
-    @ObservationIgnored private var modelYear: String?
+    /// Readable because the attribution breakdown states the range its figures
+    /// cover, and that has to be the range the report was fetched for rather
+    /// than the currently selected year — a failed reload can move the selection
+    /// while this report stands, and labelling stale rows with the new year is
+    /// exactly the misreading the feature exists to prevent.
+    @ObservationIgnored private(set) var modelYear: String?
     @ObservationIgnored private var modelPayloadGeneratedAt: String?
     @ObservationIgnored private var modelRequestToken = 0
     /// The slice a model scan is currently running for, used to coalesce

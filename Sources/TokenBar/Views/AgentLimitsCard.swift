@@ -115,13 +115,6 @@ struct AgentLimitsCard: View {
         "grok": ["Weekly"],
     ]
 
-    /// Maps opencode subscription labels (from the backend) to the agent
-    /// client ids whose quota cards represent them.
-    private static let subLabelToId: [String: String] = [
-        "Codex": "codex", "Claude": "claude", "Copilot": "copilot",
-        "Gemini": "antigravity",
-    ]
-
     /// Every client id that can show a row in the multi-agent Agent-limits
     /// card. Thin wrapper over `ClientRegistry.knownLimitsClients` (the one
     /// implementation) that supplies this card's placeholder-row keys, so the
@@ -165,7 +158,11 @@ struct AgentLimitsCard: View {
         let snapshots = self.snapshots
         if opencodeView {
             return opencodeSubs
-                .map { Self.subLabelToId[$0] ?? $0.lowercased() }
+                // The subscription-owner resolution, not the raw label mapper:
+                // `Xai` maps to `xai` there, while the quota snapshot is keyed
+                // `grok`, so the filter below would drop the very card opencode
+                // is authed against.
+                .compactMap(UsageAttributionSettings.subscriptionClient(forLabel:))
                 .filter { snapshots[$0] != nil }
         }
         func known(_ id: String) -> Bool {

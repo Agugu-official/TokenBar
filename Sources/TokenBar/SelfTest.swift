@@ -258,14 +258,93 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
     func tokensPerMin() async throws -> Double { DemoData.tokensPerMin }
 }
 
+/// Wait for a condition another task has to establish.
+///
+/// Bounded by a deadline rather than by an iteration count. A fixed number of
+/// yields measures scheduler turns, not elapsed time, so how long it actually
+/// waits depends on how much other work shares the cooperative pool — which
+/// made the tests that use it fail intermittently as unrelated cases were added
+/// ahead of them. The failure was always a false negative: the condition would
+/// have held, the wait just gave up first.
+///
+/// The deadline is generous because the cost of raising it is only paid when a
+/// test is genuinely about to fail, while the cost of setting it too low is a
+/// flake that looks like a product defect.
 private func waitUntil(
+    timeout: Duration = .seconds(5),
     _ predicate: @escaping @Sendable () async -> Bool
 ) async -> Bool {
-    for _ in 0..<1_000 {
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
         if await predicate() { return true }
         await Task.yield()
     }
-    return false
+    return await predicate()
+}
+
+private enum DashboardModelTestError: Error {
+    case graphUnavailable
+}
+
+private struct DashboardModelTestSource: UsageDataSource {
+    let failingGraphYear: String
+    let allowsQuotaCachePersistence = false
+
+    func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        _ = priority
+        if year == failingGraphYear { throw DashboardModelTestError.graphUnavailable }
+        return DemoData.payload(for: year)
+    }
+
+    func refreshGraph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        try await graph(year: year, priority: priority)
+    }
+
+    func modelReport(year: String?, priority: TaskPriority) async throws -> ModelReport {
+        _ = priority
+        let marker = year ?? "all"
+        let tokens = year == "2024" ? 24 : year == "2023" ? 23 : 1
+        let json = """
+        {"entries":[{"client":"claude","model":"loaded-MARKER","provider":"test",
+         "input":TOKENS,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+         "total":TOKENS,"messageCount":1,"cost":1.0,"msPer1kTokens":null}],
+         "totalInput":TOKENS,"totalOutput":0,"totalCacheRead":0,"totalCacheWrite":0,
+         "totalMessages":1,"totalCost":1.0}
+        """
+        .replacingOccurrences(of: "MARKER", with: marker)
+        .replacingOccurrences(of: "TOKENS", with: String(tokens))
+        return try JSONDecoder().decode(ModelReport.self, from: Data(json.utf8))
+    }
+
+    func hourlyReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> HourlyReport {
+        _ = priority
+        return DemoData.hourlyReport(for: year, clients: clients)
+    }
+
+    func agentsReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> AgentsReport {
+        _ = priority
+        return DemoData.agentsReport(for: year, clients: clients)
+    }
+
+    func agentUsage() async throws -> AgentUsagePayload { DemoData.agentUsage }
+
+    func usageTrace(windowSecs: Int64) async throws -> [TraceBucket] {
+        DemoData.trace(windowSecs: windowSecs)
+    }
+
+    func tokensPerMin() async throws -> Double { DemoData.tokensPerMin }
+}
+
+private struct DashboardModelTestObservation: Sendable {
+    let selectedYear: String?
+    let loadedYear: String?
+    let loadedModel: String?
+    let loadedTokens: Int64?
+    let cardRangeLabel: String
 }
 
 enum SelfTest {
@@ -420,6 +499,971 @@ enum SelfTest {
         expect(ModelColors.shadeFromBase("#da7756", rank: 0) == "#da7756", "shade rank 0 is base")
         // rank 1 factor 0.11: 59→81 (0x51), 130→144 (0x90), 246→247 (0xf7)
         expect(ModelColors.shadeFromBase("#3b82f6", rank: 1) == "#5190f7", "shade rank 1 lerp")
+
+        let providerSplitReportJSON = """
+        {"entries":[
+          {"client":"claude","model":"shared-model","provider":"openai",
+           "input":100,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+           "total":100,"messageCount":1,"cost":6.0,"msPer1kTokens":2.0},
+          {"client":"claude","model":"shared-model","provider":"nvidia",
+           "input":200,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+           "total":200,"messageCount":1,"cost":5.0,"msPer1kTokens":3.0},
+          {"client":"claude","model":"runner-up","provider":"openai",
+           "input":150,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+           "total":150,"messageCount":1,"cost":9.0,"msPer1kTokens":1.0}
+        ],"totalInput":450,"totalOutput":0,"totalCacheRead":0,"totalCacheWrite":0,
+        "totalMessages":3,"totalCost":20.0}
+        """
+        let providerSplitReport = try! JSONDecoder().decode(
+            ModelReport.self, from: Data(providerSplitReportJSON.utf8))
+        let modelLevelEntries = providerSplitReport.modelLevelEntries
+        let favoriteModel = modelLevelEntries.max { $0.cost < $1.cost }
+        expect(
+            favoriteModel?.model == "shared-model" && favoriteModel?.cost == 11.0,
+            "provider-split favorite uses combined model cost")
+        let modelCardRows = modelLevelEntries.filter { $0.client == "claude" }
+        expect(
+            modelCardRows.count == 2 && modelCardRows.filter { $0.model == "shared-model" }.count == 1,
+            "provider-split model count treats one model as one row")
+        expect(
+            modelLevelEntries.first { $0.model == "shared-model" }?.provider == "nvidia, openai",
+            "provider-split model fold preserves merged providers")
+        expect(
+            modelLevelEntries.first { $0.model == "shared-model" }?.msPer1kTokens == nil,
+            "provider-split model fold omits unrecomputable throughput")
+
+        // Usage attribution: declarations are explicit, provider-level by
+        // default, and model overrides are more specific. Suggestions never
+        // participate in effective-state resolution.
+        func attributionEntry(
+            client: String, provider: String, model: String,
+            total: Int64 = 1, cost: Double = 0.0
+        ) -> ModelReportEntry {
+            let json = """
+            {"client":"\(client)","model":"\(model)","provider":"\(provider)",
+             "input":1,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+             "total":\(total),"messageCount":1,"cost":\(cost),"msPer1kTokens":null}
+            """
+            return try! JSONDecoder().decode(
+                ModelReportEntry.self, from: Data(json.utf8))
+        }
+        let claudeOpenAIEntry = attributionEntry(
+            client: "claude", provider: "openai", model: "gpt-5.6-sol")
+        expect(
+            UsageAttribution.resolve(
+                client: "claude", provider: "openai", model: "gpt-5.6-sol", records: [])
+                == .unassigned,
+            "empty attribution table resolves unassigned")
+
+        let providerDeclaration = UsageAttribution.Record(
+            client: "claude", provider: "openai", state: .excluded)
+        let modelDeclaration = UsageAttribution.Record(
+            client: "claude", provider: "openai", model: "gpt-5.6-sol",
+            state: .assigned("codex"))
+        expect(
+            UsageAttribution.resolve(claudeOpenAIEntry, records: [providerDeclaration, modelDeclaration])
+                == .assigned("codex"),
+            "model attribution override wins over provider declaration")
+
+        let crossAssignment = UsageAttribution.Record(
+            client: "claude", provider: "openai", state: .assigned("codex"))
+        let crossAssignmentRaw = UsageAttribution.confirmedRaw(
+            updating: nil, record: crossAssignment)
+        expect(
+            crossAssignmentRaw
+                == "[{\"client\":\"claude\",\"model\":null,\"provider\":\"openai\",\"state\":\"assigned\",\"target\":\"codex\"}]"
+                && UsageAttribution.parseRaw(crossAssignmentRaw).records.first?.state
+                    == .assigned("codex"),
+            "cross-client attribution round-trips its target")
+
+        let emptyProviderDeclaration = UsageAttribution.Record(
+            client: "opencode", provider: "", state: .assigned("codex"))
+        let namedProviderDeclaration = UsageAttribution.Record(
+            client: "opencode", provider: "nvidia", state: .excluded)
+        let emptyProviderEntry = attributionEntry(
+            client: "opencode", provider: "", model: "deepseek-v4-pro")
+        let namedProviderEntry = attributionEntry(
+            client: "opencode", provider: "nvidia", model: "deepseek-v4-pro")
+        func applyConfirmed(_ records: [UsageAttribution.Record]) -> String? {
+            records.reduce(String?.none) { raw, record in
+                UsageAttribution.confirmedRaw(updating: raw, record: record)
+            }
+        }
+        let emptyProviderRaw = applyConfirmed([namedProviderDeclaration, emptyProviderDeclaration])
+        expect(
+            UsageAttribution.resolve(emptyProviderEntry, records: [namedProviderDeclaration, emptyProviderDeclaration])
+                == .assigned("codex")
+                && UsageAttribution.resolve(namedProviderEntry, records: [namedProviderDeclaration, emptyProviderDeclaration])
+                    == .excluded
+                && emptyProviderRaw
+                    == "[{\"client\":\"opencode\",\"model\":null,\"provider\":\"\",\"state\":\"assigned\",\"target\":\"codex\"},{\"client\":\"opencode\",\"model\":null,\"provider\":\"nvidia\",\"state\":\"excluded\"}]",
+            "empty provider is a distinct usable source key")
+
+        let providerRows = UsageAttributionSettings.rows(
+            entries: [
+                attributionEntry(
+                    client: "claude", provider: "openai", model: "shared-model",
+                    total: 100, cost: 6.0),
+                attributionEntry(
+                    client: "claude", provider: "nvidia", model: "shared-model",
+                    total: 200, cost: 5.0),
+                attributionEntry(
+                    client: "claude", provider: "openai", model: "other-model",
+                    total: 50, cost: 1.0),
+            ],
+            confirmed: [],
+            suggestions: [])
+        expect(
+                providerRows.count == 2
+                && providerRows.map(\.provider) == ["openai", "nvidia"]
+                && providerRows.map(\.tokens) == [150, 200]
+                && providerRows.map(\.cost) == [7.0, 5.0],
+            "attribution rows retain two providers for one model")
+
+        // Stats attribution consumes raw provider rows. Keep bucket totals
+        // lossless so a mixed model cannot hide a source classification.
+        let breakdownEntries = [
+            attributionEntry(
+                client: "claude", provider: "anthropic", model: "claude-model",
+                total: 100, cost: 1.0),
+            attributionEntry(
+                client: "claude", provider: "openai", model: "gpt-model",
+                total: 200, cost: 2.0),
+            attributionEntry(
+                client: "claude", provider: "nvidia", model: "deepseek-model",
+                total: 300, cost: 3.0),
+        ]
+        let breakdownRecords = [
+            UsageAttribution.Record(
+                client: "claude", provider: "anthropic", state: .assigned("claude")),
+            UsageAttribution.Record(
+                client: "claude", provider: "openai", state: .excluded),
+        ]
+        let oneEachBreakdown = UsageAttributionBreakdown.rows(
+            entries: breakdownEntries, clientIds: ["claude"], confirmed: breakdownRecords)
+        expect(
+            oneEachBreakdown.map(\.state) == [
+                UsageAttribution.State.assigned("claude"), .excluded, .unassigned,
+            ]
+                && oneEachBreakdown.map(\.tokens) == [100, 200, 300]
+                && oneEachBreakdown.map(\.cost) == [1.0, 2.0, 3.0],
+            "attribution breakdown reports assigned, excluded, and unassigned buckets")
+
+        // Unpriced/local usage still carries tokens. Keep every bucket's
+        // non-zero guard load-bearing so zero-cost rows cannot vanish.
+        let zeroCostBreakdown = UsageAttributionBreakdown.rows(
+            entries: [
+                attributionEntry(
+                    client: "claude", provider: "anthropic", model: "zero-assigned",
+                    total: 11, cost: 0.0),
+                attributionEntry(
+                    client: "claude", provider: "openai", model: "zero-excluded",
+                    total: 22, cost: 0.0),
+                attributionEntry(
+                    client: "claude", provider: "local", model: "zero-unassigned",
+                    total: 33, cost: 0.0),
+            ],
+            clientIds: ["claude"],
+            confirmed: [
+                UsageAttribution.Record(
+                    client: "claude", provider: "anthropic", state: .assigned("claude")),
+                UsageAttribution.Record(
+                    client: "claude", provider: "openai", state: .excluded),
+            ])
+        expect(
+            zeroCostBreakdown.map(\.state) == [
+                UsageAttribution.State.assigned("claude"), .excluded, .unassigned,
+            ]
+                && zeroCostBreakdown.map(\.tokens) == [11, 22, 33]
+                && zeroCostBreakdown.map(\.cost) == [0.0, 0.0, 0.0],
+            "zero-cost tokens remain visible in every attribution bucket")
+
+        let mergedBreakdown = UsageAttributionBreakdown.rows(
+            entries: [
+                attributionEntry(
+                    client: "claude", provider: "openai", model: "one",
+                    total: 10, cost: 1.0),
+                attributionEntry(
+                    client: "claude", provider: "anthropic", model: "two",
+                    total: 20, cost: 2.0),
+                attributionEntry(
+                    client: "claude", provider: "nvidia", model: "three",
+                    total: 30, cost: 3.0),
+            ],
+            clientIds: ["claude"],
+            confirmed: [
+                UsageAttribution.Record(
+                    client: "claude", provider: "openai", state: .assigned("codex")),
+                UsageAttribution.Record(
+                    client: "claude", provider: "anthropic", state: .assigned("codex")),
+                UsageAttribution.Record(
+                    client: "claude", provider: "nvidia", state: .assigned("claude")),
+            ])
+        expect(
+            mergedBreakdown.map(\.state) == [
+                UsageAttribution.State.assigned("claude"), .assigned("codex"),
+            ]
+                && mergedBreakdown.map(\.tokens) == [30, 30]
+                && mergedBreakdown.map(\.cost) == [3.0, 3.0],
+            "attribution breakdown merges same targets and keeps targets separate")
+
+        expect(
+            oneEachBreakdown.reduce(Int64.zero) { $0 + $1.tokens } == 600
+                && oneEachBreakdown.reduce(0.0) { $0 + $1.cost } == 6.0,
+            "attribution breakdown preserves pinned unfiltered totals")
+
+        let overrideBreakdown = UsageAttributionBreakdown.rows(
+            entries: [claudeOpenAIEntry],
+            clientIds: ["claude"],
+            confirmed: [providerDeclaration, modelDeclaration])
+        expect(
+            overrideBreakdown.count == 1
+                && overrideBreakdown[0].state == .assigned("codex")
+                && overrideBreakdown[0].tokens == 1
+                && overrideBreakdown[0].cost == 0.0,
+            "attribution breakdown delegates model override resolution")
+
+        let suggestionOnlyRecords = UsageAttributionSettings.suggestionRecords(
+            entries: [
+                attributionEntry(
+                    client: "claude", provider: "anthropic", model: "claude-model",
+                    total: 40, cost: 4.0),
+            ],
+            confirmed: [],
+            subscriptionClients: ["claude"])
+        let suggestionOnlyBreakdown = UsageAttributionBreakdown.rows(
+            entries: [
+                attributionEntry(
+                    client: "claude", provider: "anthropic", model: "claude-model",
+                    total: 40, cost: 4.0),
+            ],
+            clientIds: ["claude"],
+            confirmed: [])
+        expect(
+            suggestionOnlyRecords.count == 1
+                && suggestionOnlyBreakdown.count == 1
+                && suggestionOnlyBreakdown[0].state == .unassigned
+                && suggestionOnlyBreakdown[0].tokens == 40
+                && suggestionOnlyBreakdown[0].cost == 4.0,
+            "suggestion-only attribution remains unassigned")
+
+        let emptyBreakdown = UsageAttributionBreakdown.rows(
+            entries: [
+                attributionEntry(
+                    client: "claude", provider: "openai", model: "one",
+                    total: 10, cost: 1.0),
+                attributionEntry(
+                    client: "claude", provider: "nvidia", model: "two",
+                    total: 20, cost: 2.0),
+            ],
+            clientIds: ["claude"],
+            confirmed: [])
+        expect(
+            emptyBreakdown.count == 1
+                && emptyBreakdown[0].state == .unassigned
+                && emptyBreakdown[0].tokens == 30
+                && emptyBreakdown[0].cost == 3.0,
+            "empty attribution table puts all usage in unassigned")
+
+        let selectedOnlyBreakdown = UsageAttributionBreakdown.rows(
+            entries: [
+                attributionEntry(
+                    client: "claude", provider: "openai", model: "selected-assigned",
+                    total: 10, cost: 1.0),
+                attributionEntry(
+                    client: "claude", provider: "anthropic", model: "selected-excluded",
+                    total: 20, cost: 2.0),
+                attributionEntry(
+                    client: "claude", provider: "nvidia", model: "selected-unassigned",
+                    total: 30, cost: 3.0),
+                attributionEntry(
+                    client: "codex", provider: "openai", model: "hidden-assigned",
+                    total: 100, cost: 10.0),
+                attributionEntry(
+                    client: "codex", provider: "anthropic", model: "hidden-excluded",
+                    total: 200, cost: 20.0),
+                attributionEntry(
+                    client: "codex", provider: "nvidia", model: "hidden-unassigned",
+                    total: 300, cost: 30.0),
+            ],
+            clientIds: ["claude"],
+            confirmed: [
+                UsageAttribution.Record(
+                    client: "claude", provider: "openai", state: .assigned("codex")),
+                UsageAttribution.Record(
+                    client: "claude", provider: "anthropic", state: .excluded),
+                UsageAttribution.Record(
+                    client: "codex", provider: "openai", state: .assigned("codex")),
+                UsageAttribution.Record(
+                    client: "codex", provider: "anthropic", state: .excluded),
+            ])
+        expect(
+            selectedOnlyBreakdown.map(\.state) == [
+                UsageAttribution.State.assigned("codex"), .excluded, .unassigned,
+            ]
+                && selectedOnlyBreakdown.map(\.tokens) == [10, 20, 30]
+                && selectedOnlyBreakdown.map(\.cost) == [1.0, 2.0, 3.0],
+            "attribution breakdown filters every bucket by selected clients")
+
+        let emptyProviderRow = UsageAttributionSettings.rows(
+            entries: [attributionEntry(
+                client: "opencode", provider: "", model: "shared-model", total: 7, cost: 1.5)],
+            confirmed: [],
+            suggestions: []).first
+        expect(
+            emptyProviderRow?.provider.isEmpty == true
+                && emptyProviderRow?.providerLabel == "Unspecified provider",
+            "empty provider row has a readable label")
+
+        let attributionTargets = UsageAttributionSettings.subscriptionClients(
+            from: DemoData.agentUsage)
+        let claudeProviderRow = providerRows.first { $0.client == "claude" }
+        expect(
+            claudeProviderRow?.client == "claude" && attributionTargets.contains("codex"),
+            "claude source rows can target a different subscription client")
+
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "copilot", provider: "openai",
+                subscriptionClients: attributionTargets) == .assigned("copilot"),
+            "copilot openai usage suggests copilot")
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "copilot", provider: "anthropic",
+                subscriptionClients: attributionTargets) == .assigned("copilot"),
+            "copilot anthropic usage suggests copilot")
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "claude", provider: "anthropic",
+                subscriptionClients: attributionTargets) == .assigned("claude"),
+            "claude anthropic usage suggests claude")
+        // The case the whole feature exists for: a gateway routes Claude Code to
+        // an OpenAI model, so the row says claude/openai while the subscription
+        // consumed is Codex. Asking source-first would leave exactly these rows
+        // unsuggested, which is most of the usage on a gateway user's machine.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "claude", provider: "openai",
+                subscriptionClients: ["claude", "codex"]) == .assigned("codex"),
+            "gateway-routed openai usage suggests the codex subscription")
+        // opencode is a router with no plan of its own, so with nothing declared
+        // about what it is signed into, nothing can be said. This used to answer
+        // `.excluded` — an assertion that the tokens were bought — which the
+        // 2026-08 survey showed there was never evidence for.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "opencode", provider: "anthropic",
+                subscriptionClients: ["claude", "codex"]) == nil,
+            "an undeclared router produces no suggestion")
+        // Declare what it is signed into and the answer follows from that, not
+        // from any policy about who may reach anthropic from where: the user
+        // authed to Copilot here deliberately.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "opencode", provider: "anthropic",
+                subscriptionClients: ["claude", "copilot"],
+                routedSubscriptions: ["opencode": ["copilot"]]) == .assigned("copilot"),
+            "a declared router spends the subscription it is signed into")
+        // Two of its subscriptions cover the provider, so which one paid is not
+        // decidable from here.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "opencode", provider: "anthropic",
+                subscriptionClients: ["claude", "copilot"],
+                routedSubscriptions: ["opencode": ["claude", "copilot"]]) == nil,
+            "a router signed into two covering subscriptions produces no suggestion")
+        // copilot accepts openai too, so with both subscribed nothing here can
+        // tell which one paid. Suggesting either would be a coin flip presented
+        // as an inference.
+        // claude does not sell an openai plan, so this falls to the cross-agent
+        // path where codex and copilot both cover it — undecidable from here.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "claude", provider: "openai",
+                subscriptionClients: ["claude", "codex", "copilot"]) == nil,
+            "two subscriptions covering one provider produce no suggestion")
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "claude", provider: "openai",
+                subscriptionClients: ["claude"]) == nil,
+            "no subscription covering the provider produces no suggestion")
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "copilot", provider: "openai",
+                subscriptionClients: ["codex", "copilot"]) == .assigned("copilot"),
+            "an owning source client wins over another subscription that also covers it")
+        // xAI signs third-party agents in with the subscription itself, and
+        // that usage draws on the same weekly pool, so it really is the
+        // subscription being spent.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "claude", provider: "xai",
+                subscriptionClients: ["claude", "grok"]) == .assigned("grok"),
+            "xai reached from another client is spending the grok subscription")
+        // Cursor bundles a jointly-trained Grok, so an xai row it logged is its
+        // own plan — the survey's clearest example of a reseller relationship
+        // that the old provider-keyed model could not express.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "cursor", provider: "xai",
+                subscriptionClients: ["grok"]) == .assigned("cursor"),
+            "cursor's bundled grok is cursor's own spend")
+        // The two policies contradict each other, so no provider may appear in
+        // both — otherwise which one wins depends on the order of the branches.
+        expect(
+            UsageAttributionSettings.crossAgentSubscriptionProviders
+                .isDisjoint(with: UsageAttributionSettings.subscriptionBoundProviders),
+            "a provider cannot be both safe and unsafe to assign across agents")
+        // Every provider a subscription can serve needs a decided policy. This
+        // is what stops a new entry in the map from silently inheriting the
+        // permissive branch: adding one without choosing a side fails here.
+        let policedProviders = UsageAttributionSettings.crossAgentSubscriptionProviders
+            .union(UsageAttributionSettings.subscriptionBoundProviders)
+        let servedProviders = Set(
+            UsageAttributionSettings.subscriptionProviderMap.values.flatMap { $0 })
+        expect(
+            servedProviders.isSubset(of: policedProviders),
+            "every provider a subscription serves has a checked cross-agent policy")
+
+        let codexOnlyPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data(#"{"generatedAt":"now","agents":[{"clientId":"codex","source":"fixture","updatedAt":"now","identity":{"plan":"Plus"},"windows":[]}]}"#.utf8))
+        let codexOnlySubscriptions = UsageAttributionSettings.subscriptionClients(
+            from: codexOnlyPayload)
+        let terminalAndLastGoodPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data(#"{"generatedAt":"now","agents":[{"clientId":"codex","source":"fixture","updatedAt":"now","windows":[],"error":"not configured"},{"clientId":"claude","source":"fixture","updatedAt":"now","windows":[],"error":"not configured"},{"clientId":"copilot","source":"fixture","updatedAt":"now","identity":{"plan":"Pro"},"windows":[],"error":"temporarily unavailable"}]}"#.utf8))
+        expect(
+            UsageAttributionSettings.subscriptionClients(from: terminalAndLastGoodPayload)
+                == ["copilot"],
+            "terminal empty provider cards are not subscription candidates, but last-good cards remain")
+
+        // A subscription reached only through opencode has no snapshot of its
+        // own — just the empty placeholder the filter above removes — so without
+        // folding the labels back in, exactly the rows that consume it cannot
+        // name it. This is the case the placeholder filter regressed.
+        let opencodeOnlyPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data(#"{"generatedAt":"now","agents":[{"clientId":"codex","source":"fixture","updatedAt":"now","windows":[],"error":"not configured"}],"opencodeSubscriptions":["Codex","Gemini"]}"#.utf8))
+        expect(
+            UsageAttributionSettings.subscriptionClients(from: opencodeOnlyPayload)
+                == ["codex", "antigravity"],
+            "an opencode-only subscription is still an assignment target")
+        // Both statements naming the same client must not produce it twice.
+        let opencodeDuplicatePayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data(#"{"generatedAt":"now","agents":[{"clientId":"codex","source":"fixture","updatedAt":"now","identity":{"plan":"Plus"},"windows":[]}],"opencodeSubscriptions":["Codex"]}"#.utf8))
+        expect(
+            UsageAttributionSettings.subscriptionClients(from: opencodeDuplicatePayload) == ["codex"],
+            "a subscription reported by both sources appears once")
+
+        // The structural guard, not another hand-kept row. Rust's
+        // `subscription_label` renames four providers and capitalizes the rest,
+        // so every provider a subscription serves must be reachable from its
+        // capitalized label. `xai` was not — a Grok subscription reached only
+        // through opencode could not be named — and only a check derived from
+        // the map itself fails when the next provider is added.
+        // opencode emits a label only for a vendor the user actually authed to,
+        // so the set it can produce is the vendors that sell first-party access
+        // — not every vendor some subscription carries. `microsoft`, `amazon`,
+        // `open-weights` and `own` are sold only inside someone else's bundle
+        // and can never appear as an oauth entry. The assertion is therefore
+        // that every first-party vendor resolves, and that resolution names
+        // that vendor's own client rather than a reseller that also carries it.
+        let firstPartyVendors = UsageAttributionSettings.providerOwnClient
+        let unresolvableVendors = firstPartyVendors.filter { vendor, expected in
+            let label = vendor.prefix(1).uppercased() + vendor.dropFirst()
+            return UsageAttributionSettings.subscriptionClient(forLabel: label) != expected
+        }
+        expect(
+            unresolvableVendors.isEmpty,
+            "every first-party vendor resolves from its opencode label to its own client (broken: \(unresolvableVendors.keys.sorted()))")
+        // The four the producer renames rather than capitalizes.
+        expect(
+            ClientRegistry.subscriptionLabelAliases.allSatisfy { label, id in
+                UsageAttributionSettings.subscriptionClient(forLabel: label) == id
+                    && ClientRegistry.allIds.contains(id)
+            },
+            "every renamed opencode label resolves to a registered client")
+        expect(
+            UsageAttributionSettings.subscriptionClient(forLabel: "Xai") == "grok",
+            "an opencode xai subscription names the grok client")
+        // opencode's provider keys carry the plan: `minimax-coding-plan` becomes
+        // the label `Minimax-coding-plan`, which no vendor lookup matches. These
+        // vendors sell per-plan keys, so the qualifier is trimmed rather than
+        // each plan enumerated.
+        expect(
+            UsageAttributionSettings.subscriptionClient(forLabel: "Minimax-coding-plan") == "micode"
+                && UsageAttributionSettings.subscriptionClient(forLabel: "Kimi-for-coding") == "kimi",
+            "a plan-qualified opencode label resolves to its vendor's client")
+        // Trimming must not turn an unknown vendor into a known one.
+        expect(
+            UsageAttributionSettings.subscriptionClient(forLabel: "Crush-plan") == nil,
+            "trimming a qualifier does not invent a subscription")
+
+        // Routing is a second input to every suggestion, and it can change while
+        // the resolved target list does not: a Codex snapshot contributes
+        // `codex` whether or not opencode also holds an OpenAI oauth entry.
+        let routingEntries = [attributionEntry(
+            client: "opencode", provider: "openai", model: "gpt-5.6-sol", total: 1, cost: 0.1)]
+        expect(
+            UsageAttributionSettings.signature(
+                entries: routingEntries, subscriptionClients: ["codex"],
+                routedSubscriptions: [:])
+                != UsageAttributionSettings.signature(
+                    entries: routingEntries, subscriptionClients: ["codex"],
+                    routedSubscriptions: ["opencode": ["codex"]]),
+            "routing state changes the refresh signature even when targets do not")
+        // A label that lowercases to a registered client which sells no plan
+        // must still name nothing — returning it would put an unresolvable
+        // target in the picker. `Kiro` no longer serves as the example: the
+        // corrected table says Kiro does sell one, so the case moved to a client
+        // that genuinely does not.
+        expect(
+            UsageAttributionSettings.subscriptionClient(forLabel: "Crush") == nil
+                && ClientRegistry.allIds.contains("crush")
+                && UsageAttributionSettings.subscriptionProviderMap["crush"] == nil,
+            "an opencode label naming no subscription is not a target")
+
+        // These three previously encoded the reseller rule as a property of the
+        // *provider*: anthropic reached from anywhere else was assigned to
+        // whichever non-Claude subscription covered it. The survey showed the
+        // premise is wrong — an opencode row is paid by whatever opencode is
+        // signed into, and that is declared, not inferred from who else carries
+        // anthropic. Undeclared, the honest answer is nothing.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "opencode", provider: "anthropic",
+                subscriptionClients: ["copilot"]) == nil,
+            "an undeclared router is not assigned to whoever happens to cover the provider")
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "opencode", provider: "anthropic",
+                subscriptionClients: ["copilot"],
+                routedSubscriptions: ["opencode": ["copilot"]]) == .assigned("copilot"),
+            "the same row is assigned once the routing is declared")
+        // Anthropic's own subscription is still never a cross-agent target: a
+        // client that sells no anthropic plan and routes nowhere gets excluded.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "zed", provider: "xai",
+                subscriptionClients: ["grok"]) == .assigned("grok"),
+            "a surveyed client that does not sell the provider still uses the cross-agent path")
+        // Every provider a subscription serves must name the client whose own
+        // subscription it is, or the eligibility filter above silently keeps a
+        // bound owner assignable.
+        // Only a bound provider needs an own client — that entry names who the
+        // restriction protects. Requiring one for permitted providers would be
+        // inventing a fact; requiring one for bound providers is what stops the
+        // eligibility filter from silently leaving a bound owner assignable.
+        let unownedBound = UsageAttributionSettings.subscriptionBoundProviders
+            .filter { UsageAttributionSettings.providerOwnClient[$0] == nil }
+        expect(
+            unownedBound.isEmpty,
+            "every bound provider names the client it protects (missing: \(unownedBound.sorted()))")
+        let ownClientsAreRegistered = UsageAttributionSettings.providerOwnClient.values
+            .allSatisfy { ClientRegistry.allIds.contains($0) }
+        expect(ownClientsAreRegistered, "every protected client is registered")
+
+        // The table is hand-maintained product knowledge, so every client in it
+        // must be a client this app knows — a typo would otherwise sit there
+        // covering nothing.
+        let unknownSubscriptionClients = UsageAttributionSettings.subscriptionProviderMap.keys
+            .filter { !ClientRegistry.allIds.contains($0) }
+        expect(
+            unknownSubscriptionClients.isEmpty,
+            "every subscription client is registered (unknown: \(unknownSubscriptionClients.sorted()))")
+
+        // The case the whole survey was run for. Cursor sells its own plan
+        // covering Anthropic models, and TokenBar has no Cursor quota gauge — so
+        // a rule that asks `subscriptionClients` cannot see it, and the row gets
+        // proposed against whatever else happens to cover anthropic.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "cursor", provider: "anthropic",
+                subscriptionClients: ["claude", "copilot"]) == .assigned("cursor"),
+            "a client's own subscription wins even without a quota snapshot")
+        // And the same row must not be offered to a subscription that merely
+        // also covers anthropic.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "cursor", provider: "anthropic",
+                subscriptionClients: ["copilot"]) != .assigned("copilot"),
+            "a foreign subscription is never proposed for a client that has its own")
+        // A source the table says nothing about yields nothing. `crush` is
+        // registered but no plan has been established for it, and that is not
+        // the same claim as "its plan does not cover anthropic".
+        expect(
+            UsageAttributionSettings.subscriptionProviderMap["crush"] == nil
+                && UsageAttributionSettings.suggestionTarget(
+                    sourceClient: "crush", provider: "anthropic",
+                    subscriptionClients: ["claude", "copilot"]) == nil,
+            "an unsurveyed source produces no suggestion rather than a guess")
+
+        // "No subscriptions" and "not asked yet" both render an empty target
+        // list, so without the lifecycle token the signature is unchanged when a
+        // payload arrives carrying zero candidates — the refresh never reruns
+        // and stale proposals stop being suppressed without being reconciled.
+        let signatureEntries = [attributionEntry(
+            client: "claude", provider: "openai", model: "gpt-5.6-sol", total: 1, cost: 0.1)]
+        expect(
+            UsageAttributionSettings.signature(
+                entries: signatureEntries, subscriptionClients: [], targetsKnown: false)
+                != UsageAttributionSettings.signature(
+                    entries: signatureEntries, subscriptionClients: [], targetsKnown: true),
+            "an empty target list is distinguishable from an unknown one")
+
+        // A stored proposal names a target, and until the quota payload says
+        // which subscriptions exist there is nothing to check it against.
+        let staleSuggestionRows = UsageAttributionSettings.rows(
+            entries: [attributionEntry(
+                client: "claude", provider: "openai", model: "gpt-5.6-sol", total: 5, cost: 0.5)],
+            confirmed: [],
+            suggestions: [])
+        expect(
+            staleSuggestionRows.count == 1 && staleSuggestionRows[0].suggestedState == nil
+                && UsageAttributionSettings.acceptanceRecords(rows: staleSuggestionRows).isEmpty,
+            "suppressed suggestions offer nothing to accept")
+
+        expect(
+            [
+                UsageAttributionSettings.pageState(hasReport: false, rowCount: 0, isLoading: true),
+                UsageAttributionSettings.pageState(hasReport: false, rowCount: 0, isLoading: false),
+                UsageAttributionSettings.pageState(hasReport: true, rowCount: 0, isLoading: false),
+                UsageAttributionSettings.pageState(hasReport: true, rowCount: 2, isLoading: false),
+            ] == [.loading, .unavailable, .empty, .rows],
+            "the attribution page separates a failed report from one with no rows")
+        expect(
+            UsageAttributionSettings.Copy.all.contains(UsageAttributionSettings.Copy.unavailable)
+                && UsageAttributionSettings.Copy.unavailable
+                    != UsageAttributionSettings.Copy.noRows,
+            "the attribution page has distinct copy for an unavailable report")
+
+        // `antigravity-cli` is its own client but spends the `antigravity`
+        // subscription, exactly as the quota views already fold it. Comparing
+        // the raw id finds no owner and falls through to the subscription-bound
+        // branch, which would call the CLI's own subscription usage API spend.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "antigravity-cli", provider: "google",
+                subscriptionClients: ["antigravity"]) == .assigned("antigravity"),
+            "antigravity-cli usage suggests the antigravity subscription it spends")
+        // The fold decides ownership only. A router with nothing declared says
+        // nothing, and a surveyed client that genuinely sells no google plan
+        // still gets the bound-provider answer.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "opencode", provider: "google",
+                subscriptionClients: ["antigravity"]) == nil,
+            "an undeclared router reaching google produces no suggestion")
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "kimi", provider: "google",
+                subscriptionClients: ["antigravity"]) == .excluded,
+            "a surveyed client that sells no google plan is API spend")
+        let missingSourceSuggestions = UsageAttributionSettings.suggestionRecords(
+            entries: [
+                attributionEntry(client: "copilot", provider: "openai", model: "gpt-5.6-sol"),
+                attributionEntry(client: "copilot", provider: "anthropic", model: "claude-sonnet-4-6"),
+            ],
+            confirmed: [],
+            subscriptionClients: codexOnlySubscriptions)
+        // Copilot sells both, so both rows are its own spend regardless of what
+        // the quota payload lists. Before the survey this table claimed Copilot
+        // covered only openai and anthropic, and the anthropic row came back as
+        // API spend — the same shape of error as the Cursor row that started
+        // this: a subscription the user holds, unrecognised.
+        expect(
+            missingSourceSuggestions.map(\.state)
+                == [UsageAttribution.State.assigned("copilot"), .assigned("copilot")]
+                && missingSourceSuggestions.map(\.provider) == ["openai", "anthropic"],
+            "a client that sells both providers keeps both rows as its own spend")
+
+        let suggestionRows = UsageAttributionSettings.rows(
+            entries: [
+                attributionEntry(
+                    client: "copilot", provider: "openai", model: "gpt-5.6-sol",
+                    total: 10, cost: 1.0),
+                attributionEntry(
+                    client: "claude", provider: "openai", model: "gpt-5.6-sol",
+                    total: 20, cost: 2.0),
+            ],
+            confirmed: [],
+            suggestions: UsageAttributionSettings.suggestionRecords(
+                entries: [
+                    attributionEntry(client: "copilot", provider: "openai", model: "gpt-5.6-sol"),
+                    attributionEntry(client: "claude", provider: "openai", model: "gpt-5.6-sol"),
+                ],
+                confirmed: [],
+                subscriptionClients: attributionTargets))
+        let acceptedAttributionRecords = UsageAttributionSettings.acceptanceRecords(
+            rows: suggestionRows)
+        let acceptedAttributionRaw = UsageAttribution.confirmedRaw(
+            updating: nil, records: acceptedAttributionRecords)
+        let acceptedAttributionTable = UsageAttribution.parseRaw(acceptedAttributionRaw)
+        expect(
+            acceptedAttributionRecords.count == 1
+                && UsageAttribution.resolve(
+                    client: "copilot", provider: "openai", model: nil,
+                    records: acceptedAttributionTable.records) == .assigned("copilot")
+                && UsageAttribution.resolve(
+                    client: "claude", provider: "openai", model: nil,
+                    records: acceptedAttributionTable.records) == .unassigned,
+            "accept all assigns only suggested rows")
+
+        let staleSuggestion = UsageAttribution.Record(
+            client: "claude", provider: "stale-provider", state: .excluded)
+        let currentSuggestion = UsageAttribution.Record(
+            client: "claude", provider: "openai", state: .assigned("codex"))
+        let staleSuggestionRaw = UsageAttribution.suggestionsRaw(
+            updating: nil, records: [staleSuggestion, currentSuggestion])
+        let reconciledSuggestionRaw = UsageAttribution.suggestionsRaw(
+            replacing: staleSuggestionRaw, with: [currentSuggestion])
+        expect(
+            UsageAttribution.parseRaw(reconciledSuggestionRaw).records == [currentSuggestion],
+            "suggestion reconciliation drops sources absent from the current report")
+
+        let nearLimitRecords = (0..<(UsageAttribution.maxEntries - 1)).map {
+            UsageAttribution.Record(
+                client: "opencode", provider: "provider-\($0)", state: .excluded)
+        }
+        let nearLimitRaw = UsageAttribution.confirmedRaw(
+            updating: nil, records: nearLimitRecords)
+        let overflowingBatch = [
+            UsageAttribution.Record(client: "claude", provider: "new-a", state: .excluded),
+            UsageAttribution.Record(client: "claude", provider: "new-b", state: .excluded),
+        ]
+        let rejectedBatchRaw = UsageAttribution.confirmedRaw(
+            updating: nearLimitRaw, records: overflowingBatch)
+        expect(
+            UsageAttribution.parseRaw(nearLimitRaw).records.count
+                == UsageAttribution.maxEntries - 1
+                && rejectedBatchRaw == nil
+                && UsageAttributionSettings.writeFailure(
+                    table: UsageAttribution.parseRaw(nearLimitRaw),
+                    records: overflowingBatch,
+                    result: rejectedBatchRaw) == .entryLimit,
+            "accept-all batch validates the complete result before any write")
+
+        let refusedAttributionWrite = UsageAttributionSettings.writeFailure(
+            table: UsageAttribution.parseRaw("not-json"),
+            record: crossAssignment,
+            result: nil)
+        expect(
+            refusedAttributionWrite != nil
+                && refusedAttributionWrite?.message.contains("Could not save") == true,
+            "refused attribution writes are reported as failures")
+        expect(
+            (UsageAttributionSettings.Copy.all + UsageAttributionBreakdown.Copy.all).allSatisfy {
+                let copy = $0.lowercased()
+                return !copy.contains("consumed") && !copy.contains("deducted")
+            },
+            "attribution screen copy does not claim consumption or deduction")
+
+        let savedCardRaw = UserDefaults.standard.object(forKey: UsageAttribution.confirmedKey)
+        let cardRaw = UsageAttribution.confirmedRaw(updating: nil, record: crossAssignment)
+        UserDefaults.standard.set(cardRaw, forKey: UsageAttribution.confirmedKey)
+        let cardState = awaitMainActorValue { () -> UsageAttribution.State? in
+            let card = UsageAttributionBreakdownCard(
+                report: nil, clientIds: [], singleClient: nil)
+            return UsageAttribution.resolve(
+                client: "claude", provider: "openai", model: nil, records: card.confirmed)
+        }
+        // Reading the right value is not the defect. A computed read of
+        // UserDefaults returns the same records; what it does not create is a
+        // dependency SwiftUI can invalidate on, so a mounted card kept showing
+        // the previous split after Settings wrote. Only a stored @AppStorage
+        // creates it, so assert the storage itself is present.
+        let cardObservesStore = awaitMainActorValue { () -> Bool in
+            let card = UsageAttributionBreakdownCard(
+                report: nil, clientIds: [], singleClient: nil)
+            return Mirror(reflecting: card).children.contains {
+                String(describing: type(of: $0.value)).hasPrefix("AppStorage<")
+            }
+        }
+        if let savedCardRaw {
+            UserDefaults.standard.set(savedCardRaw, forKey: UsageAttribution.confirmedKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: UsageAttribution.confirmedKey)
+        }
+        expect(
+            cardState == .some(.assigned("codex")) && cardObservesStore == true,
+            "attribution card derives confirmed records from an observed stored value")
+
+        // A nil report is two different states. `load()` fetches the report with
+        // `try?` and still reaches `.ready` on the graph alone, so treating nil
+        // as in-flight leaves the card spinning forever once the report keeps
+        // failing. The flag is what separates them, and the copy differs from
+        // `noUsage`, which is an answer about a report that did arrive.
+        expect(
+            UsageAttributionBreakdown.Copy.all.contains(
+                UsageAttributionBreakdown.Copy.unavailable)
+                && UsageAttributionBreakdown.Copy.unavailable
+                    != UsageAttributionBreakdown.Copy.noUsage,
+            "the breakdown card has distinct copy for an unavailable report")
+        // Assert the branch the body actually takes, not just that the flag can
+        // be set — a card that stored the flag and ignored it would satisfy the
+        // weaker check while still spinning forever.
+        let cardStates = awaitMainActorValue { () -> [UsageAttributionBreakdownCard.ContentState] in
+            [
+                UsageAttributionBreakdownCard.contentState(
+                    rowCount: nil, reportLoading: true),
+                UsageAttributionBreakdownCard.contentState(
+                    rowCount: nil, reportLoading: false),
+                UsageAttributionBreakdownCard.contentState(
+                    rowCount: 0, reportLoading: false),
+                UsageAttributionBreakdownCard.contentState(
+                    rowCount: 3, reportLoading: false),
+            ]
+        }
+        expect(
+            cardStates ?? [] == [.loading, .unavailable, .empty, .rows],
+            "the breakdown card separates an in-flight report from a finished one with none")
+
+        let canonicalRecords = [
+            UsageAttribution.Record(
+                client: "opencode", provider: "nvidia", model: "deepseek-v4-pro",
+                state: .assigned("codex")),
+            UsageAttribution.Record(
+                client: "claude", provider: "openai", state: .assigned("codex")),
+            UsageAttribution.Record(
+                client: "opencode", provider: "nvidia", state: .excluded),
+        ]
+        let canonicalExpected = "[{\"client\":\"claude\",\"model\":null,\"provider\":\"openai\",\"state\":\"assigned\",\"target\":\"codex\"},{\"client\":\"opencode\",\"model\":null,\"provider\":\"nvidia\",\"state\":\"excluded\"},{\"client\":\"opencode\",\"model\":\"deepseek-v4-pro\",\"provider\":\"nvidia\",\"state\":\"assigned\",\"target\":\"codex\"}]"
+        let canonicalForward = applyConfirmed(canonicalRecords)
+        let canonicalReverse = applyConfirmed(Array(canonicalRecords.reversed()))
+        let excludedEntry = attributionEntry(
+            client: "opencode", provider: "nvidia", model: "other-model")
+        let unassignedEntry = attributionEntry(
+            client: "gemini", provider: "openai", model: "other-model")
+        let canonicalTable = UsageAttribution.parseRaw(canonicalForward)
+        expect(
+            canonicalForward == canonicalExpected && canonicalReverse == canonicalExpected
+                && UsageAttribution.resolve(claudeOpenAIEntry, records: canonicalTable.records)
+                    == .assigned("codex")
+                && UsageAttribution.resolve(excludedEntry, records: canonicalTable.records)
+                    == .excluded
+                && UsageAttribution.resolve(unassignedEntry, records: canonicalTable.records)
+                    == .unassigned,
+            "attribution serialization is canonical and preserves all states")
+        expect(
+            UsageAttribution.confirmedRaw(
+                updating: nil,
+                record: UsageAttribution.Record(
+                    client: "claude", provider: "openai", state: .unassigned)
+            ) == "[]",
+            "unassigned attribution update removes its declaration")
+
+        let attributionDefaultsName = "TokenBar.SelfTest.UsageAttribution.\(UUID().uuidString)"
+        if let attributionDefaults = UserDefaults(suiteName: attributionDefaultsName) {
+            defer { attributionDefaults.removePersistentDomain(forName: attributionDefaultsName) }
+            let suggestion = UsageAttribution.Record(
+                client: "claude", provider: "openai", state: .assigned("codex"))
+            let suggestionRaw = UsageAttribution.suggestionsRaw(updating: nil, record: suggestion)
+            attributionDefaults.set(suggestionRaw, forKey: UsageAttribution.suggestionsKey)
+            expect(
+                UsageAttribution.suggestions(defaults: attributionDefaults).records.count == 1
+                    && UsageAttribution.effectiveState(
+                        for: claudeOpenAIEntry, defaults: attributionDefaults) == .unassigned,
+                "suggestion alone does not affect effective attribution")
+        } else {
+            expect(false, "isolated attribution defaults suite is available")
+        }
+
+        let malformedAttributionRaw = "not-json"
+        // An unregistered *target* is what cannot be persisted: it names a quota
+        // bucket the app cannot render. The source is whatever the report
+        // observed, and the report emits ids outside the registry
+        // (`cc-mirror/*`), so constraining it would render those rows and then
+        // refuse every classification made on them.
+        let invalidAttributionRecordRaw = "[{\"client\":\"claude\",\"model\":null,\"provider\":\"openai\",\"state\":\"assigned\",\"target\":\"not-registered\"}]"
+        let dynamicSourceRecord = UsageAttribution.Record(
+            client: "cc-mirror/sonnet", provider: "anthropic", state: .excluded)
+        let dynamicSourceRaw = UsageAttribution.confirmedRaw(
+            updating: nil, record: dynamicSourceRecord)
+        expect(
+            UsageAttribution.parseRaw(dynamicSourceRaw).records == [dynamicSourceRecord]
+                && !ClientRegistry.allIds.contains("cc-mirror/sonnet"),
+            "a dynamic report client can carry a declaration")
+        expect(
+            UsageAttribution.parseRaw(malformedAttributionRaw).records.isEmpty
+                && !UsageAttribution.parseRaw(malformedAttributionRaw).isWritable
+                && UsageAttribution.confirmedRaw(
+                    updating: malformedAttributionRaw, record: crossAssignment) == nil
+                && UsageAttribution.suggestionsRaw(
+                    replacing: malformedAttributionRaw, with: [crossAssignment]) == nil,
+            "malformed attribution raw fails closed and refuses writes")
+        expect(
+            UsageAttribution.parseRaw(invalidAttributionRecordRaw).records.isEmpty
+                && !UsageAttribution.parseRaw(invalidAttributionRecordRaw).isWritable
+                && UsageAttribution.confirmedRaw(
+                    updating: invalidAttributionRecordRaw, record: crossAssignment) == nil,
+            "invalid attribution records are rejected at parse time")
+
+        let malformedDefaultsName = "TokenBar.SelfTest.UsageAttribution.Malformed.\(UUID().uuidString)"
+        if let malformedDefaults = UserDefaults(suiteName: malformedDefaultsName) {
+            defer { malformedDefaults.removePersistentDomain(forName: malformedDefaultsName) }
+            malformedDefaults.set("not-json", forKey: UsageAttribution.confirmedKey)
+            let read = UsageAttribution.confirmed(defaults: malformedDefaults)
+            var records = read.records
+            records.append(crossAssignment)
+            let attemptedRaw = UsageAttribution.confirmedRaw(
+                updating: malformedDefaults.object(forKey: UsageAttribution.confirmedKey),
+                record: records.last!)
+            if let attemptedRaw {
+                malformedDefaults.set(attemptedRaw, forKey: UsageAttribution.confirmedKey)
+            }
+            expect(
+                records.count == 1 && !read.isWritable && attemptedRaw == nil
+                    && (malformedDefaults.object(forKey: UsageAttribution.confirmedKey) as? String)
+                        == "not-json",
+                "public attribution read-modify-write preserves rejected raw bytes")
+        } else {
+            expect(false, "isolated malformed attribution defaults suite is available")
+        }
+
+        let wrongTypeDefaultsName = "TokenBar.SelfTest.UsageAttribution.WrongType.\(UUID().uuidString)"
+        if let wrongTypeDefaults = UserDefaults(suiteName: wrongTypeDefaultsName) {
+            defer { wrongTypeDefaults.removePersistentDomain(forName: wrongTypeDefaultsName) }
+            wrongTypeDefaults.set(["foreign"], forKey: UsageAttribution.confirmedKey)
+            let read = UsageAttribution.confirmed(defaults: wrongTypeDefaults)
+            var records = read.records
+            records.append(crossAssignment)
+            let attemptedRaw = UsageAttribution.confirmedRaw(
+                updating: wrongTypeDefaults.object(forKey: UsageAttribution.confirmedKey),
+                record: records.last!)
+            if let attemptedRaw {
+                wrongTypeDefaults.set(attemptedRaw, forKey: UsageAttribution.confirmedKey)
+            }
+            expect(
+                records.count == 1 && !read.isWritable && attemptedRaw == nil
+                    && (wrongTypeDefaults.object(forKey: UsageAttribution.confirmedKey)
+                        as? [String]) == ["foreign"],
+                "wrong-typed attribution defaults value is non-writable")
+        } else {
+            expect(false, "isolated wrong-type attribution defaults suite is available")
+        }
+
+        let absentDefaultsName = "TokenBar.SelfTest.UsageAttribution.Absent.\(UUID().uuidString)"
+        if let absentDefaults = UserDefaults(suiteName: absentDefaultsName) {
+            defer { absentDefaults.removePersistentDomain(forName: absentDefaultsName) }
+            let read = UsageAttribution.confirmed(defaults: absentDefaults)
+            let firstWriteRaw = UsageAttribution.confirmedRaw(
+                updating: absentDefaults.object(forKey: UsageAttribution.confirmedKey),
+                record: crossAssignment)
+            if let firstWriteRaw {
+                absentDefaults.set(firstWriteRaw, forKey: UsageAttribution.confirmedKey)
+            }
+            expect(
+                read.records.isEmpty && read.isWritable
+                    && firstWriteRaw
+                        == "[{\"client\":\"claude\",\"model\":null,\"provider\":\"openai\",\"state\":\"assigned\",\"target\":\"codex\"}]"
+                    && absentDefaults.string(forKey: UsageAttribution.confirmedKey)
+                        == firstWriteRaw,
+                "absent attribution defaults value remains writable")
+        } else {
+            expect(false, "fresh attribution defaults suite is available")
+        }
 
         // ModelColorMap: cost ranking drives shades; unseen models fall back.
         let map = ModelColorMap(entries: [
@@ -1348,6 +2392,91 @@ enum SelfTest {
         expect(
             settingsModelUsesAllTime,
             "Settings can pin its client universe to the all-time graph")
+
+        // The invariant is that the card never labels rows with a range they do
+        // not cover. `invalidateModel()` drops the report the moment the slice
+        // changes — deliberately, so a late in-flight scan cannot publish the
+        // previous year's models — so on a failed switch there are no rows left
+        // to mislabel and the subtitle falls back to the unscoped form. The two
+        // successful switches are where the pairing is actually exercised.
+        let dashboardYearKey = "tokenbar.dashboard.year"
+        let savedDashboardYear = UserDefaults.standard.object(forKey: dashboardYearKey)
+        let reportRangeSequence: [DashboardModelTestObservation] = awaitMainActorValue {
+            let source = DashboardModelTestSource(failingGraphYear: "2022")
+            let model = DashboardModel(source: source, initialYear: "2024")
+            await model.load()
+            // PR #187 took the model report off the critical path: `load()`
+            // fetches the graph alone and a model-dependent lens asks for the
+            // report when it appears. The Stats lens is where this card lives,
+            // so that is the call that has to drive this sequence now.
+            await model.ensureModelData(for: .stats)
+            let initial = DashboardModelTestObservation(
+                selectedYear: model.year,
+                loadedYear: model.modelYear,
+                loadedModel: model.modelReport?.entries.first?.model,
+                loadedTokens: model.modelReport?.entries.first?.total,
+                cardRangeLabel: UsageAttributionBreakdownCard.rangeLabel(
+                    reportYear: model.modelYear))
+            await model.setYear("2023")
+            await model.ensureModelData(for: .stats)
+            let successfulSwitch = DashboardModelTestObservation(
+                selectedYear: model.year,
+                loadedYear: model.modelYear,
+                loadedModel: model.modelReport?.entries.first?.model,
+                loadedTokens: model.modelReport?.entries.first?.total,
+                cardRangeLabel: UsageAttributionBreakdownCard.rangeLabel(
+                    reportYear: model.modelYear))
+            await model.setYear("2022")
+            await model.ensureModelData(for: .stats)
+            let failedSwitch = DashboardModelTestObservation(
+                selectedYear: model.year,
+                loadedYear: model.modelYear,
+                loadedModel: model.modelReport?.entries.first?.model,
+                loadedTokens: model.modelReport?.entries.first?.total,
+                cardRangeLabel: UsageAttributionBreakdownCard.rangeLabel(
+                    reportYear: model.modelYear))
+            return [initial, successfulSwitch, failedSwitch]
+        } ?? []
+        if let savedDashboardYear {
+            UserDefaults.standard.set(savedDashboardYear, forKey: dashboardYearKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: dashboardYearKey)
+        }
+        expect(
+            reportRangeSequence.count == 3
+                && reportRangeSequence.map(\.selectedYear) == ["2024", "2023", "2022"]
+                && reportRangeSequence.map(\.loadedYear) == ["2024", "2023", nil]
+                && reportRangeSequence.map(\.loadedModel)
+                    == ["loaded-2024", "loaded-2023", nil]
+                && reportRangeSequence.map(\.loadedTokens) == [24, 23, nil]
+                // Never "2022": the label always states the range the rows come
+                // from, and with no rows it states no range at all.
+                && reportRangeSequence.map(\.cardRangeLabel)
+                    == ["2024", "2023", "All years"],
+            "attribution card labels rows only with the range they come from |"
+                + " selected=\(reportRangeSequence.map(\.selectedYear))"
+                + " loaded=\(reportRangeSequence.map(\.loadedYear))"
+                + " model=\(reportRangeSequence.map(\.loadedModel))"
+                + " label=\(reportRangeSequence.map(\.cardRangeLabel))")
+
+        // The card's figures change with BOTH the year and the client tab, so
+        // naming only the year let a client subtotal read as an account-wide
+        // breakdown. Overview passes nil rather than relying on a one-element
+        // clientIds, which Overview can legitimately produce.
+        expect(
+            UsageAttributionBreakdownCard.subtitle(
+                reportYear: "2026", singleClient: nil) == "2026"
+                && UsageAttributionBreakdownCard.subtitle(
+                    reportYear: "2026", singleClient: "claude")
+                    == "2026 · \(ClientRegistry.shortName("claude"))"
+                && UsageAttributionBreakdownCard.subtitle(
+                    reportYear: nil, singleClient: "claude")
+                    == "All years · \(ClientRegistry.shortName("claude"))"
+                // Empty is the identity form's all-time marker, so it must read
+                // the same as never having been scoped.
+                && UsageAttributionBreakdownCard.subtitle(
+                    reportYear: "", singleClient: nil) == "All years",
+            "attribution card subtitle names the client scope, not only the year")
 
         // Browsing a client inside the MAIN popover must not decide what that
         // client's own item opens on.
@@ -2434,7 +3563,7 @@ enum SelfTest {
             "a message-only Daily row retains its model drill-down")
 
         let dashboardYearDefaultsKey = "tokenbar.dashboard.year"
-        let savedDashboardYear = UserDefaults.standard.object(forKey: dashboardYearDefaultsKey)
+        let savedAttributionDashboardYear = UserDefaults.standard.object(forKey: dashboardYearDefaultsKey)
         let turnTransitionChecks = awaitMainActorValue { () async -> [String: Bool] in
             let yearA = "2037"
             let yearB = "2038"
@@ -3214,8 +4343,8 @@ enum SelfTest {
                 "emptyDidNotFetch": emptyDidNotFetch,
             ]
         }
-        if let savedDashboardYear {
-            UserDefaults.standard.set(savedDashboardYear, forKey: dashboardYearDefaultsKey)
+        if let savedAttributionDashboardYear {
+            UserDefaults.standard.set(savedAttributionDashboardYear, forKey: dashboardYearDefaultsKey)
         } else {
             UserDefaults.standard.removeObject(forKey: dashboardYearDefaultsKey)
         }
