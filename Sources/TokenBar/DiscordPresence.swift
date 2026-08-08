@@ -216,6 +216,38 @@ enum DiscordPresence {
 
     static let defaultComponentsRaw = rawComponents(Set(Component.allCases))
 
+    /// The agents the picker may offer, in the user's own tab order.
+    ///
+    /// Derived from the two conditions `payload` already enforces, rather than
+    /// from the registry: a row is only publishable when the id is registered
+    /// (an unregistered one returns nil at the `.only` guard) and not hidden
+    /// (`trayTotals` filters it out of the totals). Offering anything else is a
+    /// row that reads as a choice and silently publishes nothing — the failure
+    /// the whole feature is built to avoid, arriving through the picker.
+    static func selectableClients(
+        present: [String], hiddenRaw: String, orderRaw: String, selection: ClientSelection
+    ) -> [String] {
+        let registered = Set(ClientRegistry.allIds)
+        let eligible = ClientRegistry
+            .displayClients(present: present, hiddenRaw: hiddenRaw, orderRaw: orderRaw)
+            .filter(registered.contains)
+        // `present` is empty until the first scan lands, and Settings can be
+        // opened before then. An empty picker would read as "your agents are
+        // gone"; the registry list is what shipped before this filter existed.
+        var out = eligible.isEmpty
+            ? ClientRegistry.orderedClients(
+                ClientRegistry.allIds.filter {
+                    !ClientRegistry.parseIdSet(hiddenRaw).contains($0)
+                }, orderRaw: orderRaw)
+            : eligible
+        // A stored selection that stopped qualifying — the user hid it, or that
+        // agent has no usage this year — stays listed. Dropping it would tick
+        // nothing while the preference still names it, showing the user a state
+        // the app is not in.
+        if case .only(let id) = selection, !out.contains(id) { out.append(id) }
+        return out
+    }
+
     /// One reader for both switches, so their strictness cannot drift apart.
     ///
     /// `as? Bool` alone is not enough: `NSNumber` bridges, so an integer 1 or a

@@ -872,6 +872,12 @@ struct SettingsPanel: View {
             // work — so it is treated as switching the feature off for as long
             // as it stays empty.
             hint("Untick everything and nothing is published at all.")
+            // Read here, not inside the options expression: `selection()` goes
+            // to UserDefaults and registers no SwiftUI dependency, so the list
+            // would keep a de-listed selection visible after the user picked
+            // another row. Touching the @AppStorage raw is what re-renders.
+            let selectionRaw = discordSelectionRaw
+            let discordSelection = DiscordPresence.selection()
             radioGroup(
                 selection: Binding(
                     get: {
@@ -880,8 +886,8 @@ struct SettingsPanel: View {
                         // substitutes its empty default for a key holding a
                         // non-string, which would tick "most used" while the
                         // runtime published nothing at all.
-                        _ = discordSelectionRaw
-                        switch DiscordPresence.selection() {
+                        _ = selectionRaw
+                        switch discordSelection {
                         case .mostUsed: return ""
                         case .only(let id): return id
                         case .malformed: return DiscordPresence.malformedSelectionLabel
@@ -889,7 +895,12 @@ struct SettingsPanel: View {
                     },
                     set: { discordSelectionRaw = $0 }),
                 options: [("", "Whichever client you used most")]
-                    + ClientRegistry.allIds.map { ($0, ClientRegistry.style($0).displayName) })
+                    + DiscordPresence.selectableClients(
+                        present: presentClients,
+                        hiddenRaw: tabsHiddenRaw,
+                        orderRaw: tabsOrderRaw,
+                        selection: discordSelection
+                    ).map { ($0, ClientRegistry.style($0).displayName) })
             // Nothing is ticked when the stored value is malformed, which is
             // honest: the runtime publishes nothing, and no option describes
             // that. Picking any row writes a well-formed value and recovers.

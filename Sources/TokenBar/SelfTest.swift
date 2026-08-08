@@ -7424,6 +7424,29 @@ enum SelfTest {
         } else {
             expect(false, "the isolated selection suite could not be created")
         }
+        // The picker's universe is derived from what `payload` will publish, not
+        // from the registry. Every row it offers that the payload path rejects
+        // is a choice the user makes and nothing happens — the same silent
+        // nothing the zero-usage and empty-component guards exist to prevent,
+        // arriving through Settings instead of through the wire.
+        let dpPickVisible = DiscordPresence.selectableClients(
+            present: ["claude", "codex", "cc-mirror/foo"], hiddenRaw: "codex", orderRaw: "",
+            selection: .mostUsed)
+        let dpPickUnloaded = DiscordPresence.selectableClients(
+            present: [], hiddenRaw: "claude", orderRaw: "", selection: .mostUsed)
+        let dpPickStale = DiscordPresence.selectableClients(
+            present: ["claude"], hiddenRaw: "codex", orderRaw: "", selection: .only("codex"))
+        expect(
+            dpPickVisible == ["claude"]
+                && dpPickUnloaded.count > 1 && !dpPickUnloaded.contains("claude")
+                && dpPickStale.contains("codex") && dpPickStale.contains("claude"),
+            "the agent picker offers only registered, unhidden clients with usage, falls back to "
+                + "the registry before the first scan lands, and keeps a stored selection listed "
+                + "after it stops qualifying (mutation: dropping the registry filter offers "
+                + "`cc-mirror/foo`, which `payload` rejects; dropping the hidden filter offers a "
+                + "client `trayTotals` subtracts; dropping the fallback empties the picker while "
+                + "the dashboard is still loading; dropping the stale append ticks nothing while "
+                + "the preference still names that agent)")
         // Combining is the union of the retire. Losing one would let a payload
         // built against a state that no longer holds reach the socket.
         expect(
