@@ -7436,17 +7436,25 @@ enum SelfTest {
             present: [], hiddenRaw: "claude", orderRaw: "", selection: .mostUsed)
         let dpPickStale = DiscordPresence.selectableClients(
             present: ["claude"], hiddenRaw: "codex", orderRaw: "", selection: .only("codex"))
+        // Every other fixture passes an empty order, which leaves "in the user's
+        // saved tab order" unfalsifiable — the picker could ignore `orderRaw`
+        // entirely and still pass them.
+        let dpPickOrdered = DiscordPresence.selectableClients(
+            present: ["claude", "codex"], hiddenRaw: "", orderRaw: "codex,claude",
+            selection: .mostUsed)
         expect(
             dpPickVisible == ["claude"]
                 && dpPickUnloaded.count > 1 && !dpPickUnloaded.contains("claude")
-                && dpPickStale.contains("codex") && dpPickStale.contains("claude"),
+                && dpPickStale.contains("codex") && dpPickStale.contains("claude")
+                && dpPickOrdered == ["codex", "claude"],
             "the agent picker offers only registered, unhidden clients with usage, falls back to "
                 + "the registry before the first scan lands, and keeps a stored selection listed "
                 + "after it stops qualifying (mutation: dropping the registry filter offers "
                 + "`cc-mirror/foo`, which `payload` rejects; dropping the hidden filter offers a "
                 + "client `trayTotals` subtracts; dropping the fallback empties the picker while "
                 + "the dashboard is still loading; dropping the stale append ticks nothing while "
-                + "the preference still names that agent)")
+                + "the preference still names that agent; ignoring `orderRaw` lists the agents in "
+                + "registry order instead of the one the user dragged)")
         // Combining is the union of the retire. Losing one would let a payload
         // built against a state that no longer holds reach the socket.
         expect(
