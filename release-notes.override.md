@@ -6,7 +6,7 @@
 
 ## Changes
 
-- Quota figures are deliberately not written to disk, since they carry account identity. After a restart those rows read "Checking…" until the first live answer arrives, rather than claiming there is no data — "no data" is a claim that we asked and there was none. [#192](https://github.com/Nanako0129/TokenBar/pull/192)
+- The restored dashboard deliberately leaves out the quota payload, which carries account identity. After a restart those rows read "Checking…" until the first live answer arrives, rather than claiming there is no data — "no data" is a claim that we asked and there was none. [#192](https://github.com/Nanako0129/TokenBar/pull/192)
 - The refresh button doubles as the freshness indicator, so a restored dashboard is distinguishable from a live one at a glance. [#192](https://github.com/Nanako0129/TokenBar/pull/192)
 - Hovering a heatmap cell rings it, matching the bar chart. [#141](https://github.com/Nanako0129/TokenBar/pull/141)
 
