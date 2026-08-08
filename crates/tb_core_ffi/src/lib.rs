@@ -371,15 +371,21 @@ fn history_error_message(error: agent_quota_history::HistoryError) -> String {
     error.to_string()
 }
 
-fn quota_curve_result_with_reader<R, H>(
+/// `before_serialize` runs while the binding guard is held. Without a hook
+/// inside that window the guard's scope is invisible to a test: the property
+/// worth asserting is that a publication attempting to land during
+/// serialization blocks, and only something running in there can observe it.
+fn quota_curve_result_with_reader<R, H, S>(
     client_id: &str,
     window_key: &str,
     generation: u64,
     before_history: H,
+    before_serialize: S,
     read_history: R,
 ) -> Result<serde_json::Value, String>
 where
     H: FnOnce(),
+    S: FnOnce(),
     R: FnOnce(
         &agent_quota_history::SeriesKey,
     ) -> Result<
@@ -418,9 +424,30 @@ where
     // Re-resolving afterwards is what keeps the fail-closed generation contract
     // honest: without it an account switch mid-read returns the previous
     // account's curve stamped with a generation that has already expired.
-    if lookup()? != key {
+    //
+    // The re-resolution and the value it authorises happen under one guard.
+    // Checking and then releasing leaves a window in which a publication lands
+    // between the two, and the resulting payload would be built on a key that
+    // no longer resolves — harm bounded, since the samples still answer the
+    // generation the caller asked for, but the property is impossible to state
+    // and impossible to test. Holding the read guard across construction costs
+    // nothing worth measuring: serialization is CPU-only, this is a read lock
+    // so concurrent readers are unaffected, and only a publication waits.
+    let state = QUOTA_CURVE_BINDINGS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if state.generation != 0 && state.generation != generation {
         return Err("quota curve generation is expired".to_string());
     }
+    if state
+        .series
+        .get(&(client_id.to_string(), window_key.to_string()))
+        != Some(&key)
+    {
+        return Err("quota curve generation is expired".to_string());
+    }
+
+    before_serialize();
 
     let Some(series) = series else {
         return Ok(serde_json::Value::Null);
@@ -447,6 +474,7 @@ fn quota_curve_result(
             window_key,
             generation,
             || {},
+            || {},
             move |key| {
                 agent_quota_history::read_series_at_path(key, &path, chrono::Utc::now().timestamp())
             },
@@ -457,6 +485,7 @@ fn quota_curve_result(
         client_id,
         window_key,
         generation,
+        || {},
         || {},
         |key| agent_quota_history::read_series(key, chrono::Utc::now().timestamp()),
     )
@@ -945,6 +974,7 @@ mod tests {
             window_key,
             generation,
             || {},
+            || {},
             |key| agent_quota_history::read_series_at_path(key, path, now),
         )
     }
@@ -1238,6 +1268,7 @@ mod tests {
                     paused_tx.send(()).expect("pause reader");
                     release_rx.recv().expect("release reader");
                 },
+                || {},
                 |key| agent_quota_history::read_series_at_path(key, &reader_path, now),
             )
         });
@@ -1260,6 +1291,70 @@ mod tests {
             "quota curve generation is expired"
         );
         fs::remove_dir_all(directory).expect("remove lock-order fixture");
+    }
+
+    /// The mirror of `quota_curve_reader_drops_binding_lock_before_history_io`.
+    /// That one proves the guard is released for the file system; this one
+    /// proves it is held for serialization, so a publication cannot land between
+    /// the revalidation and the value it authorises. Both are needed: releasing
+    /// everywhere costs the check its meaning, holding everywhere blocks
+    /// publication on disk I/O.
+    #[test]
+    fn quota_curve_holds_the_binding_through_serialization() {
+        let _test_guard = quota_curve_test_guard();
+        reset_quota_curve_bindings();
+        let (directory, path) = quota_curve_temp_path("serialize-guard");
+        let now = 9_500_000;
+        let key = quota_curve_key("account-a");
+        record_quota_curve_sample(&path, key.clone(), now + 96, 10.0, now, 96);
+        replace_quota_curve_bindings(1, vec![key]);
+
+        let (inside_tx, inside_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (committed_tx, committed_rx) = mpsc::channel();
+        let reader_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            quota_curve_result_with_reader(
+                "codex",
+                "weekly.v1",
+                1,
+                || {},
+                || {
+                    inside_tx.send(()).expect("reached the guarded window");
+                    release_rx.recv().expect("hold the guarded window");
+                },
+                |key| agent_quota_history::read_series_at_path(key, &reader_path, now),
+            )
+        });
+        inside_rx.recv().expect("reader entered the guarded window");
+
+        let writer = std::thread::spawn(move || {
+            replace_quota_curve_bindings(2, vec![quota_curve_key("account-b")]);
+            committed_tx.send(()).expect("commit binding tuple");
+        });
+        // The publication must NOT complete while the reader holds the guard.
+        // A wait long enough to be meaningful, short enough not to stall the
+        // suite; the definitive half is the successful receive after release.
+        assert!(
+            committed_rx
+                .recv_timeout(Duration::from_millis(300))
+                .is_err(),
+            "a publication must wait for the guarded window to close"
+        );
+        release_tx.send(()).expect("release the guarded window");
+        committed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("publication proceeds once the guard drops");
+        writer.join().expect("binding writer join");
+
+        // And the value it authorised is still account A's, not a half-built
+        // payload from a tuple that moved underneath it.
+        let value = reader
+            .join()
+            .expect("history reader join")
+            .expect("guarded read result");
+        assert_eq!(value["points"][0]["usedPercent"], 10.0);
+        fs::remove_dir_all(directory).expect("remove serialize-guard fixture");
     }
 
     /// A publication that keeps the generation but moves the account is the case
@@ -1288,6 +1383,7 @@ mod tests {
                     paused_tx.send(()).expect("pause reader");
                     release_rx.recv().expect("release reader");
                 },
+                || {},
                 |key| agent_quota_history::read_series_at_path(key, &reader_path, now),
             )
         });

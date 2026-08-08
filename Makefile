@@ -78,6 +78,12 @@ selftest: build
 SELFTEST_BUNDLE_ID ?= com.nyanako.tokenbar.selftest
 selftest-bundled: rust
 	@$(call relink_if_stale,release)
+# scripts/bundle.sh runs a plain `swift build -c release`, which keeps an
+# imported CTB module built against the previous header. Without this the
+# bundled ABI-seam gate can pass on an incremental checkout against
+# declarations the library no longer has — the exact failure the debug target
+# already guards.
+	@$(call rebuild_if_header_stale,release)
 	BUNDLE_ID=$(SELFTEST_BUNDLE_ID) OUT_DIR=dist/selftest scripts/bundle.sh
 	dist/selftest/TokenBar.app/Contents/MacOS/TokenBar --selftest -AppleLanguages "(en)"
 

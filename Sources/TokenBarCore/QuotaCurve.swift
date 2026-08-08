@@ -111,6 +111,15 @@ public struct QuotaCurve: Decodable, Sendable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         points = try container.decode([QuotaCurvePoint].self, forKey: .points)
         coverage = try container.decode(QuotaCurveCoverage.self, forKey: .coverage)
+        // Same distinction the envelope's `data` key needed: Rust always emits
+        // this field (`Option<i64>` with no `skip_serializing_if`), so an absent
+        // key is ABI drift while an explicit null is the real answer for a
+        // series with no active cycle. `decodeIfPresent` alone maps both to nil,
+        // which would let drift render as "no active cycle" — and a current
+        // incomplete group would then be drawn as inactive.
+        guard container.contains(.activeResetAt) else {
+            throw Self.corrupted(decoder, "the curve is missing the activeResetAt key")
+        }
         activeResetAt = try container.decodeIfPresent(Int64.self, forKey: .activeResetAt)
         generation = try container.decode(UInt64.self, forKey: .generation)
 

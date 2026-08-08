@@ -424,11 +424,13 @@ public enum TBCore {
         }
 
         func curve(
-            points: [String], oldest: Int64 = 1_000, newest: Int64 = 1_000, count: Int = 1
+            points: [String], oldest: Int64 = 1_000, newest: Int64 = 1_000, count: Int = 1,
+            activeResetAt: String? = "1500"
         ) -> Data {
-            Data((#"{"points":[\#(points.joined(separator: ","))],"#
+            let active = activeResetAt.map { #""activeResetAt":\#($0),"# } ?? ""
+            return Data((#"{"points":[\#(points.joined(separator: ","))],"#
                 + #""coverage":{"oldestSampledAt":\#(oldest),"newestSampledAt":\#(newest),"#
-                + #""sampleCount":\#(count)},"activeResetAt":1500,"generation":7}"#).utf8)
+                + #""sampleCount":\#(count)},"# + active + #""generation":7}"#).utf8)
         }
 
         func rejects(_ label: String, _ data: Data) {
@@ -440,6 +442,15 @@ public enum TBCore {
             } catch {
                 check(label, false)
             }
+        }
+
+        do {
+            let nullActive = try JSONDecoder().decode(
+                QuotaCurve.self,
+                from: curve(points: [point()], activeResetAt: "null"))
+            check("an explicit null activeResetAt is accepted", nullActive.activeResetAt == nil)
+        } catch {
+            check("an explicit null activeResetAt is accepted", false)
         }
 
         do {
@@ -510,6 +521,13 @@ public enum TBCore {
         rejects(
             "a repeated sample is rejected",
             curve(points: [point(), point()], count: 2))
+        // Rust always emits the key, so its absence is drift while an explicit
+        // null is the real answer for a series with no active cycle. Both cases
+        // are asserted, because rejecting the null too would refuse every valid
+        // curve for an inactive series.
+        rejects(
+            "a curve missing the activeResetAt key is rejected",
+            curve(points: [point()], activeResetAt: nil))
 
         // The fixture's generation is 7, which is also what the payload claims,
         // so these two cases differ only in what the caller asked for.
