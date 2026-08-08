@@ -87,8 +87,15 @@ enum Smoke {
             try TBCore.filterParityProbe().smokeSummary
         }
 
+        // The generation the run's own publication bound its series under. The
+        // quota-curve check below needs it: with a publication behind it, any
+        // other value is rejected at the generation check and never reaches the
+        // binding lookup that check exists to exercise.
+        var publishedGeneration: UInt64?
+
         summarize("agentUsage") {
             let usage = try TBCore.agentUsage()
+            publishedGeneration = usage.publicationGeneration
             let cards = usage.agents.map { snapshot in
                 if let error = snapshot.error {
                     return "\(snapshot.clientId)=error(\(error))"
@@ -100,10 +107,49 @@ enum Smoke {
                 + (subs.isEmpty ? "" : " | opencode subs: \(subs.joined(separator: ", "))")
         }
 
+        // tb_quota_curve has no unconditional success path to smoke: it serves a
+        // curve only for a series this process bound and that already has stored
+        // history, neither of which a CI machine has. What the gate can still
+        // prove is that the symbol links, the header signature matches, and the
+        // binding table this run just published rejects a series it does not
+        // contain.
+        //
+        // It must use that published generation. Passing anything else makes
+        // Rust fail the generation check first, so the binding lookup — the only
+        // part of the new boundary this check can reach — never runs, and a
+        // broken lookup would still look green. For the same reason the expected
+        // error is compared exactly: accepting any bridge error cannot tell the
+        // two failures apart.
+        summarize("quotaCurve") {
+            guard let generation = publishedGeneration else {
+                throw SmokeExpectationFailure(
+                    "agentUsage published no generation, so no binding table exists to probe")
+            }
+            do {
+                let curve = try TBCore.quotaCurve(
+                    clientId: "__smoke__", windowKey: "__smoke__", generation: generation)
+                throw SmokeExpectationFailure(
+                    "unbound series returned \(curve == nil ? "null" : "a curve") instead of failing closed")
+            } catch let TBCoreError.bridge(message) {
+                guard message == "quota curve binding is unavailable" else {
+                    throw SmokeExpectationFailure(
+                        "unbound series failed with \"\(message)\" instead of an unavailable binding")
+                }
+                return "generation \(generation) rejects an unbound series — \(message)"
+            }
+        }
+
         if failures > 0 {
             print("\(failures) entry point(s) failed")
             return 1
         }
         return 0
     }
+}
+
+/// A smoke check that reached an outcome the contract forbids. Distinct from a
+/// thrown FFI error so the printed line cannot be mistaken for one.
+private struct SmokeExpectationFailure: Error, CustomStringConvertible {
+    let description: String
+    init(_ description: String) { self.description = description }
 }

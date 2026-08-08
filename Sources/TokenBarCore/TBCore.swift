@@ -33,6 +33,24 @@ struct TBEnvelope<T: Decodable>: Decodable {
     let ok: Bool
     let data: T?
     let err: String?
+    /// Whether `data` was present at all, which `data: T?` alone cannot report:
+    /// synthesized Optional decoding maps both an absent key and an explicit
+    /// null to nil. Only `decodeOptionalEnvelope` needs the distinction — every
+    /// other entry point rejects a nil payload outright — but the envelope is
+    /// where the fact lives.
+    let hasDataKey: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case ok, data, err
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.ok = try container.decode(Bool.self, forKey: .ok)
+        self.data = try container.decodeIfPresent(T.self, forKey: .data)
+        self.err = try container.decodeIfPresent(String.self, forKey: .err)
+        self.hasDataKey = container.contains(.data)
+    }
 }
 
 /// Thin Swift facade over the tb_core_ffi staticlib. All calls are blocking;
@@ -67,6 +85,38 @@ public enum TBCore {
     }
 
     /// Decode an enveloped payload, surfacing `{"ok":false}` as a thrown error.
+    /// Like `unwrap`, but a successful envelope may legitimately carry `null`.
+    /// `tb_quota_curve` uses that for "this series is bound but has no history
+    /// yet", which is an answer rather than a failure. Kept as its own path so
+    /// every other entry point still treats a missing payload on `ok:true` as a
+    /// decode failure.
+    static func unwrapOptional<T: Decodable>(_ raw: UnsafeMutablePointer<CChar>?) throws -> T? {
+        guard let data = takeBytes(raw) else {
+            ffiLog.error("FFI returned NULL for \(String(describing: T.self), privacy: .public)")
+            throw TBCoreError.nullPointer
+        }
+        return try decodeOptionalEnvelope(data)
+    }
+
+    package static func decodeOptionalEnvelope<T: Decodable>(_ data: Data) throws -> T? {
+        let envelope = try JSONDecoder().decode(TBEnvelope<T>.self, from: data)
+        guard envelope.ok else {
+            throw TBCoreError.bridge(envelope.err ?? "unknown")
+        }
+        // `data: T?` cannot tell an explicit null from an absent key — synthesized
+        // Optional decoding accepts both — so the key's presence is checked
+        // separately. Rust always emits it (`envelope()` builds
+        // `{"ok":true,"data":<value>}` and `Value::Null` serializes as `"data":null`),
+        // which makes a missing key ABI drift rather than "no history". Without
+        // this, that drift would read as an empty curve and disappear.
+        guard envelope.hasDataKey else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: [],
+                debugDescription: "successful FFI envelope is missing the data key"))
+        }
+        return envelope.data
+    }
+
     static func unwrap<T: Decodable>(_ raw: UnsafeMutablePointer<CChar>?) throws -> T {
         guard let data = takeBytes(raw) else {
             ffiLog.error("FFI returned NULL for \(String(describing: T.self), privacy: .public)")
@@ -167,6 +217,34 @@ public enum TBCore {
     /// report calls with one opaque local-source token sequence.
     public static func filterParityProbe() throws -> FilterParityProbe {
         try unwrap(tb_filter_parity_probe())
+    }
+
+    /// Read-only quota curve snapshot for one bound series. `generation` must be
+    /// the publication generation the series identity was bound under; a stale
+    /// one, or a series this process never verified, fails closed rather than
+    /// serving a curve.
+    ///
+    /// Returns nil when the series exists but has no stored history yet.
+    public static func quotaCurve(
+        clientId: String, windowKey: String, generation: UInt64
+    ) throws -> QuotaCurve? {
+        let curve: QuotaCurve? = try clientId.withCString { client in
+            try windowKey.withCString { window in
+                try unwrapOptional(tb_quota_curve(client, window, generation))
+            }
+        }
+        try requireAnswering(curve, request: generation)
+        return curve
+    }
+
+    /// Rust stamps the payload with the generation the call passed in, so this
+    /// is the one field the caller can check against something it already knows.
+    /// A mismatch means the response did not answer this request, which no
+    /// amount of structural validation inside the payload could reveal.
+    package static func requireAnswering(_ curve: QuotaCurve?, request: UInt64) throws {
+        guard let curve, curve.generation != request else { return }
+        throw TBCoreError.bridge(
+            "quota curve generation \(curve.generation) does not answer request \(request)")
     }
 
     /// Live trace buckets over the trailing `windowSecs`.
@@ -283,6 +361,203 @@ public enum TBCore {
             check("malformed body throws", false)
         } catch {
             check("malformed body throws", true)
+        }
+
+        // The optional path exists so `tb_quota_curve` can answer "bound, but no
+        // history yet". Only an explicit null is that answer.
+        do {
+            let value: TokensPerMin? = try decodeOptionalEnvelope(
+                Data(#"{"ok":true,"data":null}"#.utf8))
+            check("optional ok:true with null data is absent history", value == nil)
+        } catch {
+            check("optional ok:true with null data is absent history", false)
+        }
+
+        do {
+            let value: TokensPerMin? = try decodeOptionalEnvelope(
+                Data(#"{"ok":true,"data":{"tokensPerMin":7.5}}"#.utf8))
+            check("optional ok:true returns data", value?.tokensPerMin == 7.5)
+        } catch {
+            check("optional ok:true returns data", false)
+        }
+
+        // An omitted key is ABI drift, not an answer. Synthesized Optional
+        // decoding maps it to nil exactly like an explicit null, so without the
+        // presence check this would read as an empty curve.
+        do {
+            let _: TokensPerMin? = try decodeOptionalEnvelope(Data(#"{"ok":true}"#.utf8))
+            check("optional ok:true without the data key is decode failure", false)
+        } catch is DecodingError {
+            check("optional ok:true without the data key is decode failure", true)
+        } catch {
+            check("optional ok:true without the data key is decode failure", false)
+        }
+
+        do {
+            let _: TokensPerMin? = try decodeOptionalEnvelope(
+                Data(#"{"ok":false,"err":"boom"}"#.utf8))
+            check("optional ok:false throws bridge(boom)", false)
+        } catch let TBCoreError.bridge(msg) {
+            check("optional ok:false throws bridge(boom)", msg == "boom")
+        } catch {
+            check("optional ok:false throws bridge(boom)", false)
+        }
+
+        return out
+    }
+
+    /// Hermetic decode checks for the `tb_quota_curve` payload. Every rejection
+    /// here corresponds to something the Rust producer cannot emit, so accepting
+    /// it would mean rendering an ABI drift as a plausible curve.
+    public static func quotaCurveContractChecks() -> [(String, Bool)] {
+        var out: [(String, Bool)] = []
+        func check(_ label: String, _ passed: Bool) { out.append((label, passed)) }
+
+        func point(
+            sampledAt: Int64 = 1_000, usedPercent: String = "10.0", resetAt: Int64 = 1_500,
+            durationSeconds: Int64 = 1_000, durationSource: String = "contract",
+            origin: String = "liveV3"
+        ) -> String {
+            #"{"sampledAt":\#(sampledAt),"usedPercent":\#(usedPercent),"resetAt":\#(resetAt),"#
+                + #""durationSeconds":\#(durationSeconds),"durationSource":"\#(durationSource)","#
+                + #""origin":"\#(origin)"}"#
+        }
+
+        func curve(
+            points: [String], oldest: Int64 = 1_000, newest: Int64 = 1_000, count: Int = 1,
+            activeResetAt: String? = "1500"
+        ) -> Data {
+            let active = activeResetAt.map { #""activeResetAt":\#($0),"# } ?? ""
+            return Data((#"{"points":[\#(points.joined(separator: ","))],"#
+                + #""coverage":{"oldestSampledAt":\#(oldest),"newestSampledAt":\#(newest),"#
+                + #""sampleCount":\#(count)},"# + active + #""generation":7}"#).utf8)
+        }
+
+        func rejects(_ label: String, _ data: Data) {
+            do {
+                _ = try JSONDecoder().decode(QuotaCurve.self, from: data)
+                check(label, false)
+            } catch is DecodingError {
+                check(label, true)
+            } catch {
+                check(label, false)
+            }
+        }
+
+        do {
+            let nullActive = try JSONDecoder().decode(
+                QuotaCurve.self,
+                from: curve(points: [point()], activeResetAt: "null"))
+            check("an explicit null activeResetAt is accepted", nullActive.activeResetAt == nil)
+        } catch {
+            check("an explicit null activeResetAt is accepted", false)
+        }
+
+        do {
+            let decoded = try JSONDecoder().decode(
+                QuotaCurve.self,
+                from: curve(
+                    points: [point(), point(sampledAt: 1_200, usedPercent: "99.5")],
+                    newest: 1_200, count: 2))
+            check(
+                "a well-formed curve decodes",
+                decoded.points.count == 2 && decoded.generation == 7
+                    && decoded.points[0].durationSource == .contract
+                    && decoded.points[0].origin == .liveV3
+                    && decoded.points[1].usedPercent == 99.5)
+        } catch {
+            check("a well-formed curve decodes", false)
+        }
+
+        rejects(
+            "an unknown durationSource is rejected",
+            curve(points: [point(durationSource: "guessed")]))
+        rejects("an unknown origin is rejected", curve(points: [point(origin: "liveV4")]))
+        rejects("an empty curve is rejected", curve(points: [], count: 0))
+        rejects(
+            "a sampleCount disagreeing with points is rejected",
+            curve(points: [point()], count: 2))
+        rejects(
+            "coverage that does not match its points is rejected",
+            curve(points: [point()], oldest: 900))
+        rejects(
+            "points out of sampledAt order are rejected",
+            curve(
+                points: [point(sampledAt: 1_200), point()],
+                oldest: 1_200, newest: 1_000, count: 2))
+        // `sampledAt == resetAt` keeps the zero-length cycle self-consistent, so
+        // the containment guard passes and only the duration guard can reject
+        // this. With any other `sampledAt` the containment check fires first and
+        // this case proves nothing about the guard it names.
+        rejects(
+            "a non-positive durationSeconds is rejected",
+            curve(
+                points: [point(sampledAt: 1_500, durationSeconds: 0)],
+                oldest: 1_500, newest: 1_500))
+        // Mirrors `valid_duration`'s full `1...MAX_DURATION_SECONDS` bound. The
+        // upper end needs its own case: a duration above the cap still satisfies
+        // the positive check and, with a consistent `resetAt`, the containment
+        // check too, so nothing else would reject it.
+        rejects(
+            "a durationSeconds above the storable cap is rejected",
+            curve(
+                points: [point(
+                    sampledAt: 1_000, resetAt: 1_500,
+                    durationSeconds: QuotaCurve.validDurationSeconds.upperBound + 1)]))
+        rejects(
+            "a usedPercent outside (0, 100] is rejected",
+            curve(points: [point(usedPercent: "0.0")]))
+        // Rejected by JSON number parsing rather than by the `isFinite` guard,
+        // which no JSON input can reach. Kept because it pins that a payload
+        // cannot smuggle an unrepresentable number past this boundary.
+        rejects(
+            "a usedPercent outside Double range is rejected",
+            curve(points: [point(usedPercent: "1e400")]))
+        rejects(
+            "a sampledAt outside its own cycle is rejected",
+            curve(points: [point(sampledAt: 400)], oldest: 400, newest: 400))
+        // Two identical samples pass the count, coverage and ordering checks, so
+        // only the repeat check can reject this.
+        rejects(
+            "a repeated sample is rejected",
+            curve(points: [point(), point()], count: 2))
+        // Rust always emits the key, so its absence is drift while an explicit
+        // null is the real answer for a series with no active cycle. Both cases
+        // are asserted, because rejecting the null too would refuse every valid
+        // curve for an inactive series.
+        rejects(
+            "a curve missing the activeResetAt key is rejected",
+            curve(points: [point()], activeResetAt: nil))
+
+        // The fixture's generation is 7, which is also what the payload claims,
+        // so these two cases differ only in what the caller asked for.
+        if let decoded = try? JSONDecoder().decode(
+            QuotaCurve.self, from: curve(points: [point()]))
+        {
+            do {
+                try requireAnswering(decoded, request: 7)
+                check("a curve answering its request is accepted", true)
+            } catch {
+                check("a curve answering its request is accepted", false)
+            }
+            do {
+                try requireAnswering(decoded, request: 8)
+                check("a curve answering another request is rejected", false)
+            } catch is TBCoreError {
+                check("a curve answering another request is rejected", true)
+            } catch {
+                check("a curve answering another request is rejected", false)
+            }
+        } else {
+            check("a curve answering its request is accepted", false)
+            check("a curve answering another request is rejected", false)
+        }
+
+        do {
+            try requireAnswering(nil, request: 8)
+            check("absent history is not a generation mismatch", true)
+        } catch {
+            check("absent history is not a generation mismatch", false)
         }
 
         return out

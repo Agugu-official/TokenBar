@@ -59,6 +59,44 @@ pub struct AgentUsagePayload {
     opencode_subscriptions: Vec<String>,
 }
 
+impl AgentUsagePayload {
+    /// Series identities this publication actually verified, for the quota
+    /// curve binding table.
+    ///
+    /// A trusted `account_scope` alone is not enough. A provider that failed
+    /// keeps serving its last-good windows alongside `error` (see the wire
+    /// contract in `Sources/CTB/include/ctb.h`), and a degraded transport is
+    /// reported through `transport_diagnostic` — in both cases the windows here
+    /// may predate this publication, so binding them would let the curve claim
+    /// an identity this run never confirmed. This mirrors the same three
+    /// conditions the last-good cache uses to decide a snapshot is trustworthy
+    /// (`cacheable` in `resolve_provider_outcome`).
+    pub(crate) fn quota_curve_series(&self) -> Vec<SeriesKey> {
+        self.agents
+            .iter()
+            .filter(|snapshot| snapshot.error.is_none() && snapshot.transport_diagnostic.is_none())
+            .filter_map(|snapshot| {
+                snapshot
+                    .account_scope
+                    .as_ref()
+                    .ok()
+                    .map(|scope| (snapshot, scope.as_str().to_string()))
+            })
+            .flat_map(|(snapshot, account_scope)| {
+                snapshot.windows.iter().filter_map(move |window| {
+                    window.window_key.as_ref().map(|window_key| {
+                        SeriesKey::new(
+                            snapshot.client_id.clone(),
+                            account_scope.clone(),
+                            window_key.clone(),
+                        )
+                    })
+                })
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentUsageSnapshot {
@@ -4979,6 +5017,101 @@ mod tests {
             error: None,
             transport_diagnostic: None,
         }
+    }
+
+    #[test]
+    fn quota_curve_series_only_binds_trusted_scopes() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let scope = TestRefreshScope::new("quota-curve", "trusted-scope");
+        let trusted = scope
+            .resolve_current("fixture", "account-a", b"marker-a")
+            .unwrap();
+        let payload = AgentUsagePayload {
+            generated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+            publication_generation: 1,
+            agents: vec![
+                cache_test_snapshot("codex", Ok(trusted.clone()), now),
+                cache_test_snapshot("claude", Err(AccountScopeError::NoTrustedEvidence), now),
+                // Trusted scope, but the provider failed and these windows are
+                // its last-good replay — the identity was not confirmed by this
+                // run, so it must not become a binding.
+                {
+                    let mut stale = cache_test_snapshot("copilot", Ok(trusted.clone()), now);
+                    stale.error = Some("Copilot is unavailable.".to_string());
+                    stale
+                },
+                // Trusted scope, degraded transport — same reasoning.
+                {
+                    let mut degraded = cache_test_snapshot("grok", Ok(trusted.clone()), now);
+                    degraded.transport_diagnostic =
+                        Some(SafeTransportDiagnostic::server_error(503));
+                    degraded
+                },
+            ],
+            opencode_subscriptions: Vec::new(),
+        };
+
+        assert_eq!(
+            payload.quota_curve_series(),
+            vec![SeriesKey::new("codex", trusted.as_str(), "main.session.v1")]
+        );
+        scope.cleanup();
+    }
+
+    /// Claude's model-scoped weekly limits reach the binding table like any
+    /// other identified window, so a curve can be requested for them.
+    ///
+    /// The keys asserted here are produced by the real mapper from a provider
+    /// payload rather than written into the fixture by hand: the binding table
+    /// is keyed by the literal `(client_id, window_key)` tuple, so a mapper-side
+    /// identity change would otherwise unbind the curve silently and surface
+    /// only as "quota curve binding is unavailable" at the Swift call site.
+    ///
+    /// The `Sonnet` entry covers the frozen flat-successor lane
+    /// (`CLAUDE_SCOPED_FLAT_SUCCESSORS`) and `Fable` the dynamic
+    /// `weekly_scoped.{slug}.v1` lane; those are the two shapes a scoped window
+    /// key can take, and they bind on the same terms.
+    #[test]
+    fn quota_curve_series_binds_claude_scoped_weekly_windows() {
+        let raw = r#"{
+            "five_hour": {"utilization": 20, "resets_at": "2026-08-04T12:00:00Z"},
+            "seven_day": {"utilization": 30, "resets_at": "2026-08-10T00:00:00Z"},
+            "limits": [
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 40,
+                 "resets_at": "2026-08-10T00:00:00Z",
+                 "scope": {"model": {"display_name": "Sonnet"}}},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 50,
+                 "resets_at": "2026-08-10T00:00:00Z",
+                 "scope": {"model": {"id": "claude/fable.5", "display_name": "Fable"}}}
+            ]
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let windows = claude_windows(&usage, now);
+        let scope = TestRefreshScope::new("quota-curve", "scoped-weekly");
+        let trusted = scope
+            .resolve_current("fixture", "account-a", b"marker-a")
+            .unwrap();
+        let payload = AgentUsagePayload {
+            generated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+            publication_generation: 1,
+            agents: vec![AgentUsageSnapshot {
+                windows,
+                ..cache_test_snapshot("claude", Ok(trusted.clone()), now)
+            }],
+            opencode_subscriptions: Vec::new(),
+        };
+
+        assert_eq!(
+            payload.quota_curve_series(),
+            vec![
+                SeriesKey::new("claude", trusted.as_str(), "session.v1"),
+                SeriesKey::new("claude", trusted.as_str(), "weekly.v1"),
+                SeriesKey::new("claude", trusted.as_str(), "sonnet.weekly.v1"),
+                SeriesKey::new("claude", trusted.as_str(), "weekly_scoped.fable.v1"),
+            ]
+        );
+        scope.cleanup();
     }
 
     fn claude_test_login_credentials() -> ClaudeCredentials {
