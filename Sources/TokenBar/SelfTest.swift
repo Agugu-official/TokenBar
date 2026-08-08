@@ -7433,7 +7433,18 @@ enum SelfTest {
             present: ["claude", "codex", "cc-mirror/foo"], hiddenRaw: "codex", orderRaw: "",
             selection: .mostUsed)
         let dpPickUnloaded = DiscordPresence.selectableClients(
-            present: [], hiddenRaw: "claude", orderRaw: "", selection: .mostUsed)
+            present: nil, hiddenRaw: "claude", orderRaw: "", selection: .mostUsed)
+        // A scan that finished and found nothing is a real answer, not a
+        // not-loaded one: the honest picker offers only "whichever you used
+        // most". Collapsing it into the unloaded branch hands a user with no
+        // usage the whole registry back.
+        let dpPickNoUsage = DiscordPresence.selectableClients(
+            present: [], hiddenRaw: "", orderRaw: "", selection: .mostUsed)
+        // An id the registry no longer knows is one `payload` rejects outright,
+        // so listing it would tick a row that can never publish.
+        let dpPickUnknown = DiscordPresence.selectableClients(
+            present: ["claude"], hiddenRaw: "", orderRaw: "",
+            selection: .only("not-a-registered-client"))
         let dpPickStale = DiscordPresence.selectableClients(
             present: ["claude"], hiddenRaw: "codex", orderRaw: "", selection: .only("codex"))
         // Every other fixture passes an empty order, which leaves "in the user's
@@ -7445,16 +7456,20 @@ enum SelfTest {
         expect(
             dpPickVisible == ["claude"]
                 && dpPickUnloaded.count > 1 && !dpPickUnloaded.contains("claude")
+                && dpPickNoUsage.isEmpty
                 && dpPickStale.contains("codex") && dpPickStale.contains("claude")
+                && dpPickUnknown == ["claude"]
                 && dpPickOrdered == ["codex", "claude"],
             "the agent picker offers only registered, unhidden clients with usage, falls back to "
                 + "the registry before the first scan lands, and keeps a stored selection listed "
                 + "after it stops qualifying (mutation: dropping the registry filter offers "
                 + "`cc-mirror/foo`, which `payload` rejects; dropping the hidden filter offers a "
                 + "client `trayTotals` subtracts; dropping the fallback empties the picker while "
-                + "the dashboard is still loading; dropping the stale append ticks nothing while "
-                + "the preference still names that agent; ignoring `orderRaw` lists the agents in "
-                + "registry order instead of the one the user dragged)")
+                + "the dashboard is still loading; treating a finished empty scan as unloaded "
+                + "hands the whole registry to a user with no usage; dropping the stale append "
+                + "ticks nothing while the preference still names that agent; appending an "
+                + "unregistered stale id ticks a row `payload` rejects; ignoring `orderRaw` lists "
+                + "the agents in registry order instead of the one the user dragged)")
         // Combining is the union of the retire. Losing one would let a payload
         // built against a state that no longer holds reach the socket.
         expect(
