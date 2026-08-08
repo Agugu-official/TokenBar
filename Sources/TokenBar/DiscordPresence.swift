@@ -216,6 +216,52 @@ enum DiscordPresence {
 
     static let defaultComponentsRaw = rawComponents(Set(Component.allCases))
 
+    /// The agents the picker may offer, in the user's own tab order.
+    ///
+    /// Derived from the two conditions `payload` already enforces, rather than
+    /// from the registry: a row is only publishable when the id is registered
+    /// (an unregistered one returns nil at the `.only` guard) and not hidden
+    /// (`trayTotals` filters it out of the totals). Offering anything else is a
+    /// row that reads as a choice and silently publishes nothing — the failure
+    /// the whole feature is built to avoid, arriving through the picker.
+    /// `present` is nil until an accepted payload lands, and DISTINCT from an
+    /// empty one: Settings can be opened before the first scan, where an empty
+    /// picker would read as "your agents are gone". A loaded-but-empty scan is
+    /// a real answer — no usage at all, or every used client hidden — and the
+    /// honest picker there offers only "whichever client you used most".
+    /// Collapsing the two would repopulate the list with the whole registry for
+    /// a user who has no usage, which is the defect this exists to remove.
+    ///
+    /// nil also covers a graph fetch that keeps failing, since that never
+    /// assigns a payload. The registry list is the right answer there too: with
+    /// no data at all, nothing is knowable about which agents are in use, and
+    /// this is what the picker showed before the filter existed.
+    static func selectableClients(
+        present: [String]?, hiddenRaw: String, orderRaw: String, selection: ClientSelection
+    ) -> [String] {
+        let registered = Set(ClientRegistry.allIds)
+        guard let present else {
+            return ClientRegistry.orderedClients(
+                ClientRegistry.allIds.filter {
+                    !ClientRegistry.parseIdSet(hiddenRaw).contains($0)
+                }, orderRaw: orderRaw)
+        }
+        var out = ClientRegistry
+            .displayClients(present: present, hiddenRaw: hiddenRaw, orderRaw: orderRaw)
+            .filter(registered.contains)
+        // A stored selection that stopped qualifying — the user hid it, or that
+        // agent has no usage — stays listed. Dropping it would tick nothing
+        // while the preference still names it, showing a state the app is not
+        // in. Only while it stays REGISTERED: an id the registry no longer
+        // knows is one `payload` rejects outright, so listing it would tick a
+        // row that can never publish. Nothing ticked is the honest answer
+        // there, and the same one `.malformed` already gets.
+        if case .only(let id) = selection, registered.contains(id), !out.contains(id) {
+            out.append(id)
+        }
+        return out
+    }
+
     /// One reader for both switches, so their strictness cannot drift apart.
     ///
     /// `as? Bool` alone is not enough: `NSNumber` bridges, so an integer 1 or a

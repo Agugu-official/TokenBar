@@ -38,7 +38,10 @@ struct SettingsPanel: View {
     var modelReport: ModelReport?
 
     /// Present clients (used for the client tabs reorder/hide UI).
-    var presentClients: [String] = []
+    /// nil until an accepted payload lands, which is DIFFERENT from a scan
+    /// that found nothing. Only the Discord picker distinguishes them; the
+    /// other readers below want "whatever is present right now" and flatten it.
+    var presentClients: [String]?
 
     /// True while either initial request is still in flight. An empty client list
     /// is otherwise indistinguishable from "still loading", and the first seconds
@@ -161,16 +164,16 @@ struct SettingsPanel: View {
         // Client tabs), instead of re-deriving `knownClientIds` per section.
         // `orderRaw:` overloads keep both lists reactive to a drag/reorder.
         let knownIds = AgentLimitsCard.knownClientIds(
-            agentUsage: agentUsage, present: presentClients)
+            agentUsage: agentUsage, present: presentClients ?? [])
         // Agent-limits management universe: only clients that can actually
         // render a quota card (placeholder rows or a live snapshot).
         let limitOrdered = ClientRegistry.orderedClients(knownIds, orderRaw: tabsOrderRaw)
         // Client-tabs universe: every client that can be a top tab (present)
         // OR a quota card (knownIds — e.g. quota-only Antigravity), so both
         // orderings are managed from one list. Mirrors displayClients' source.
-        let presentSet = Set(presentClients)
+        let presentSet = Set(presentClients ?? [])
         let tabsUniverse = ClientRegistry.orderedClients(
-            Self.orderedUnion(presentClients, knownIds), orderRaw: tabsOrderRaw)
+            Self.orderedUnion(presentClients ?? [], knownIds), orderRaw: tabsOrderRaw)
 
         VStack(alignment: .leading, spacing: 14) {
             switch page {
@@ -272,7 +275,7 @@ struct SettingsPanel: View {
     @ViewBuilder
     private func individualItemsSection() -> some View {
         let rows = ClientTray.settingsRows(
-            presentClients: presentClients,
+            presentClients: presentClients ?? [],
             payload: agentUsage,
             enabled: ClientTray.parseEnabledRaw(individualEnabledRaw),
             selections: ClientTray.parseSelectionsRaw(individualSelectionsRaw),
@@ -872,6 +875,12 @@ struct SettingsPanel: View {
             // work — so it is treated as switching the feature off for as long
             // as it stays empty.
             hint("Untick everything and nothing is published at all.")
+            // Read here, not inside the options expression: `selection()` goes
+            // to UserDefaults and registers no SwiftUI dependency, so the list
+            // would keep a de-listed selection visible after the user picked
+            // another row. Touching the @AppStorage raw is what re-renders.
+            let selectionRaw = discordSelectionRaw
+            let discordSelection = DiscordPresence.selection()
             radioGroup(
                 selection: Binding(
                     get: {
@@ -880,8 +889,8 @@ struct SettingsPanel: View {
                         // substitutes its empty default for a key holding a
                         // non-string, which would tick "most used" while the
                         // runtime published nothing at all.
-                        _ = discordSelectionRaw
-                        switch DiscordPresence.selection() {
+                        _ = selectionRaw
+                        switch discordSelection {
                         case .mostUsed: return ""
                         case .only(let id): return id
                         case .malformed: return DiscordPresence.malformedSelectionLabel
@@ -889,7 +898,12 @@ struct SettingsPanel: View {
                     },
                     set: { discordSelectionRaw = $0 }),
                 options: [("", "Whichever client you used most")]
-                    + ClientRegistry.allIds.map { ($0, ClientRegistry.style($0).displayName) })
+                    + DiscordPresence.selectableClients(
+                        present: presentClients,
+                        hiddenRaw: tabsHiddenRaw,
+                        orderRaw: tabsOrderRaw,
+                        selection: discordSelection
+                    ).map { ($0, ClientRegistry.style($0).displayName) })
             // Nothing is ticked when the stored value is malformed, which is
             // honest: the runtime publishes nothing, and no option describes
             // that. Picking any row writes a well-formed value and recovers.
