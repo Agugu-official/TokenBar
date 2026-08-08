@@ -47,7 +47,7 @@ If you use an automated coding client, it must also follow [`AGENTS.md`](AGENTS.
 | Sparkle, appcast, Homebrew, Pages, or release notes | [`release.md`](docs/knowledge/release.md) and [`workflow.md`](docs/knowledge/workflow.md) |
 | Landing site structure, deployment, or product claims | [`landing/AGENTS.md`](landing/AGENTS.md) and [`release.md`](docs/knowledge/release.md) |
 
-Durable architecture, verification, workflow, and release facts belong in `docs/knowledge/`. The engine's exact upstream baseline and local patch records belong in its immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/5546bd59095af9f267dcb399287637b0f34a3e1c/UPSTREAM.md); TokenBar's source and pin belong in `vendor/README.md`.
+Durable architecture, verification, workflow, and release facts belong in `docs/knowledge/`. The engine's exact upstream baseline and local patch records belong in its immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/5b5f500d3a8abe66ab5fa44b18f4fc1aaee53947/UPSTREAM.md); TokenBar's source and pin belong in `vendor/README.md`.
 
 ## Development environment
 
