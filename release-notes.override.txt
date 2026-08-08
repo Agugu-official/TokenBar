@@ -1,5 +1,6 @@
 New:
-- TokenBar can publish what you are working on to Discord. It is off by default, and you choose whether it shows the agent, a cost band, both or neither, and which agent by name.
+- TokenBar can publish what you are working on to Discord. It is off by default. You choose which of today's tokens, the agent and the cost band it shows, and which agent by name; all three are shown unless you change them.
+- A Usage attribution page in Settings lets you declare which subscription a client's local usage belongs to. Running another provider's model through an agent is common, and the usage was previously drawn against that agent's own quota. Stats now breaks the total into assigned, excluded and undeclared.
 
 Improved:
 - Opening the popover no longer waits for two extra scans. The chart runs on its own and appears as soon as it is ready.
