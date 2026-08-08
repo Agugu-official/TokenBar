@@ -151,7 +151,7 @@ Amdahl 上限：86.2% 理想減半、13.8% 序列，兩個 worker 的理論上�
 | NEW-a | `921412b` | `6031430621329286087` |
 | NEW-b | `921412b` | `6031430621329286087` |
 
-`OLD-a == OLD-b` 證明 oracle 穩定；`NEW-a == NEW-b` 證明被測實作穩定（被測的是平行化，所以這一半才是新增的風險）；兩者都成立之後 `NEW == OLD` 才代表輸出保持。
+`OLD-a == OLD-b` 證明 oracle 穩定，成立之後 `NEW == OLD` 才代表輸出保持。`NEW-a == NEW-b` 是 sanity check——**兩個樣本不是排程穩定性的證明**，那由引擎的確定性 fixture 承擔（見 [`../measurement.md`](../measurement.md)）。
 
 oracle 本身經過敏感度驗證——四個變異全部偵測到、一個負對照不動，細節見 [`../measurement.md`](../measurement.md)。
 
