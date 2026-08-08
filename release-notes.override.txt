@@ -1,16 +1,2 @@
-New:
-- TokenBar can publish what you are working on to Discord. It is off by default. You choose which of today's tokens, the agent and the cost band it shows, and which agent by name; all three are shown unless you change them.
-- A Usage attribution page in Settings lets you declare which subscription a client's local usage belongs to. Running another provider's model through an agent is common, and the usage was previously drawn against that agent's own quota. Stats now breaks the total into assigned, excluded and undeclared.
-
-Improved:
-- Opening the popover no longer waits for two extra scans. The chart runs on its own and appears as soon as it is ready.
-- Scanning is faster: on an 8 GB history, a cold scan dropped about 31 percent and a warm scan about 37 percent. Peak memory is about 15 percent higher, which is the trade for the parallel parsing.
-- Restarting shows your last dashboard immediately and refreshes behind it, instead of showing nothing for several seconds.
-- Turns that an in-place transcript rewrite used to drop are now kept. This does not restore history already lost. A total can still fall on the first launch if a transcript was compacted since the last scan, because the rebuild reads the file as it stands now.
-
 Fixes:
-- Inactive segments of the view switch are clickable again.
-- Codex shows its monochrome mark instead of the ChatGPT green.
-- Hovering a heatmap cell rings it, the way the bar chart already did.
-
-Note: the first launch after this update rescans every client once, because the engine's cache format changed. Later launches are back to normal.
+- The Discord agent picker no longer lists every agent TokenBar recognises. It used to offer a row for each one, including agents you had never run and agents you had hidden, and naming one of those left the presence empty without saying why.
