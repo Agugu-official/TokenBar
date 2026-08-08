@@ -12,7 +12,7 @@
 
 ## Fixes
 
-- **Turns dropped by an in-place transcript rewrite are recovered.** When a transcript was rewritten in place — during compaction, for instance — the turns removed from the file used to disappear from history as well. Claude totals may therefore be higher after this update. That is the fix, not inflation. [#195](https://github.com/Nanako0129/TokenBar/pull/195)
+- **Turns are no longer lost when a transcript is rewritten in place.** When Claude Code rewrites a transcript — during compaction, for instance — the turns removed from the file used to disappear from history along with it. From this version on they are kept. This does not bring back history already lost: the compacted file no longer holds those turns, and the cache rebuild described below starts from what is on disk today. Existing totals will not change; the loss simply stops here. [#195](https://github.com/Nanako0129/TokenBar/pull/195)
 - **Inactive segments of the view switch are clickable again.** The hit area only covered the active segment, so changing views needed a pixel-accurate click. [#182](https://github.com/Nanako0129/TokenBar/pull/182) — thanks @yeha98555
 - Codex shows its monochrome mark instead of the ChatGPT green. [#140](https://github.com/Nanako0129/TokenBar/pull/140)
 
@@ -20,4 +20,4 @@
 
 The engine's cache format changed, so **the first launch after this update rescans every client once** and will be slower than usual. Later launches are back to normal.
 
-That rescan was sequenced deliberately rather than deferred: the same release recovers turns that an in-place transcript rewrite had dropped, and bumping the cache format afterwards would have discarded the only surviving copy of them.
+The rescan was sequenced deliberately rather than deferred. The same release starts keeping turns that an in-place rewrite would otherwise drop, and once that is running the cache holds the only copy of them — unlike everything else in it, they cannot be recovered by re-reading the files. Bumping the format afterwards would have thrown them away, so the bump had to land first.

@@ -5,7 +5,7 @@ Improved:
 - Opening the popover no longer waits for two extra scans. The chart runs on its own and appears as soon as it is ready.
 - Scanning is faster: on an 8 GB history, a cold scan dropped about 31 percent and a warm scan about 37 percent. Peak memory is about 15 percent higher, which is the trade for the parallel parsing.
 - Restarting shows your last dashboard immediately and refreshes behind it, instead of showing nothing for several seconds.
-- Turns that an in-place transcript rewrite used to drop are recovered, so Claude history totals may be higher than before. That is the fix, not inflation.
+- Turns that an in-place transcript rewrite used to drop are now kept. This does not restore history already lost, and existing totals do not change; from this version on the loss stops.
 
 Fixes:
 - Inactive segments of the view switch are clickable again.
