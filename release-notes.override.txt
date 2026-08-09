@@ -1,8 +1,8 @@
 Note:
-- Pace history restarts once with this update. Quota cards return to "Learning history" and rebuild over the next few days. This is the cost of the identity fix below and it happens only once.
+- Pace history restarts once with this update. A card returns to "Learning history" and rebuilds unless its provider gives TokenBar a stable account identifier, which today means Codex with an account ID on its credential, and the Antigravity IDE. This is the cost of the identity fix below and it happens only once.
 
 Fixes:
-- Pace history no longer restarts every time another app refreshes a shared login. Claude, Grok, Copilot and Antigravity kept losing their learned usage curve whenever the Claude CLI or a sibling tool rotated the credential they share, so Historical pace could never accumulate.
+- Pace history no longer restarts every time another app refreshes a shared login. Providers without a stable account identifier kept losing their learned usage curve whenever the Claude CLI or a sibling tool rotated the credential they share, so Historical pace could never accumulate.
 - A pace marker in deficit is now highlighted whether it came from the historical curve or the linear estimate. Previously only a historical result was coloured, so the warning appeared and disappeared as the fit requalified while the deficit itself never moved.
 - A clock disagreement no longer discards the whole quota history. A single forward jump of the system clock, from a time sync or a sleep and wake, could leave one window with a timestamp ahead of the next read, which quarantined every provider's history at once. It is now repaired in place, and only genuinely unverifiable data is dropped.
 

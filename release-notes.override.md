@@ -1,6 +1,14 @@
 ## Before you update
 
-**Pace history restarts once.** Quota cards for Claude, Grok, Copilot and Antigravity will show "Learning history · Linear estimate" again and rebuild their curve over the next few days — a short window in hours, a little longer for a weekly one. Nothing is broken; this is the one-time cost of the identity fix below, and it does not repeat. Codex is unaffected.
+**Pace history restarts once.** Affected quota cards show "Learning history · Linear estimate" again and rebuild their curve — a short window within hours, a weekly one over a few days. Nothing is broken; this is the one-time cost of the identity fix below, and it does not repeat.
+
+Which cards depends on whether the provider gives TokenBar a stable account identifier, not on the provider's name:
+
+| Keeps its history | Starts over |
+|---|---|
+| Codex, when its stored credential carries an account ID | Claude, on every login route |
+| The Antigravity IDE | Grok, Copilot, and Antigravity's remote login |
+| | Codex, if its credential has no account ID |
 
 ## Fixes
 
