@@ -143,7 +143,7 @@ const en = {
       },
       {
         q: 'Which AI coding tools does it track?',
-        a: '25+ agents from their local logs — Claude Code, Codex CLI, Cursor, OpenCode, Gemini CLI, Copilot CLI, Amp, Droid, Hermes, Goose, Kilo/KiloCode, Roo Code, Qwen, Kimi, Crush, Zed, Kiro, Trae, Warp and more. Parsing is handled by the vendored tokscale-core, so coverage tracks tokscale.',
+        a: '25+ agents from their local logs — Claude Code, Codex, Cursor, OpenCode, Gemini CLI, Copilot, Amp, Droid, Hermes, Goose, Kilo/KiloCode, Roo Code, Qwen, Kimi, Crush, Zed, Kiro, Trae, Warp and more. Parsing is handled by the vendored tokscale-core, so coverage tracks tokscale.',
       },
       {
         q: 'Does it cost anything?',
@@ -353,7 +353,7 @@ const zhTw: typeof en = {
       },
       {
         q: '追蹤哪些 AI 編碼工具？',
-        a: '25+ 個 agent，直接讀本機紀錄——Claude Code、Codex CLI、Cursor、OpenCode、Gemini CLI、Copilot CLI、Amp、Droid、Hermes、Goose、Kilo/KiloCode、Roo Code、Qwen、Kimi、Crush、Zed、Kiro、Trae、Warp 等。解析交給 vendored tokscale-core，涵蓋範圍跟著 tokscale 走。',
+        a: '25+ 個 agent，直接讀本機紀錄——Claude Code、Codex、Cursor、OpenCode、Gemini CLI、Copilot、Amp、Droid、Hermes、Goose、Kilo/KiloCode、Roo Code、Qwen、Kimi、Crush、Zed、Kiro、Trae、Warp 等。解析交給 vendored tokscale-core，涵蓋範圍跟著 tokscale 走。',
       },
       {
         q: '要錢嗎？',

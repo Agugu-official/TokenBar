@@ -3165,6 +3165,21 @@ enum SelfTest {
         expect(ClientRegistry.style("kimi").displayName == "Kimi", "Kimi registry covers CLI and Code")
         expect(ClientRegistry.style("junie").displayName == "Junie", "Junie registry metadata")
         expect(ClientRegistry.style("opencodereview").displayName == "OpenCodeReview", "OpenCodeReview registry metadata")
+        // Sources that are not surface-scoped carry no form-factor suffix:
+        // ~/.codex/sessions is majority Codex Desktop, ~/.copilot merges CLI
+        // OTel with the desktop app's data.db, and the cursor source is an
+        // account-level billing export. Naming any of them "... CLI"/"... IDE"
+        // claims a scope the data does not have.
+        for (id, name) in [("codex", "Codex"), ("copilot", "Copilot"), ("cursor", "Cursor")] {
+            expect(ClientRegistry.style(id).displayName == name,
+                "\(id) carries no form-factor suffix — its source spans CLI, IDE and desktop")
+            expect(ClientRegistry.shortName(id) == name,
+                "\(id) legend label is unchanged by dropping the suffix")
+        }
+        // The " IDE" arm of shortName was dropped with "Cursor IDE"; it stays
+        // dropped only while no registered name ends in it.
+        expect(ClientRegistry.allIds.allSatisfy { !ClientRegistry.style($0).displayName.hasSuffix(" IDE") },
+            "no registered display name ends in \" IDE\" (shortName no longer strips it)")
         // AgentLimitsCard keeps its own generic "-cli" fold for quota-card
         // attribution: explicit aliases via the registry, then a local strip so
         // antigravity-cli shares the antigravity quota snapshot — this fold must
@@ -6982,7 +6997,7 @@ enum SelfTest {
                 && dpHidden.map { !$0.fields.values.joined().contains("1.2M") } == true,
             "published tokens are the visible-only sum, and the mixed day-level total reaches "
                 + "no field (mutation: reading the day-level totals publishes 1.2M)")
-        expect(dpHidden?.state.contains("Codex CLI") == true
+        expect(dpHidden?.state.contains("Codex") == true
             && dpHidden?.state.contains("Claude Code") == false,
             "the top client skips the hidden client (mutation: dropping the hidden filter from "
                 + "the fold publishes Claude Code)")
@@ -7181,7 +7196,7 @@ enum SelfTest {
             graph: dpFoldGraph, hidden: [], today: dpToday, costStyle: .banded, components: dpAllComponents)
         expect(dpFold?.state.hasPrefix("Claude Code") == true,
             "the top client folds stripes per client first (mutation: max over raw stripes picks "
-                + "Codex CLI's single 50 over Claude Code's 30+30)")
+                + "Codex's single 50 over Claude Code's 30+30)")
 
         // Deterministic tie-break: tokens, then higher cost, then the smallest
         // id. The six-way tie is fed in both orders because an unsorted key walk

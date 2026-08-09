@@ -17,9 +17,17 @@ public enum ClientRegistry {
         "openclaw": ("OpenClaw", "#dc2626"),
         "gemini": ("Gemini CLI", "#60a5fa"),
         "opencode": ("OpenCode", "#1f2937"),
-        "codex": ("Codex CLI", "#9ca3af"),
-        "copilot": ("Copilot CLI", "#1f2937"),
-        "cursor": ("Cursor IDE", "#0ea5e9"),
+        // No form-factor suffix on these three: their sources are not
+        // surface-scoped. `codex` reads ~/.codex/sessions, written by Codex
+        // Desktop / the IDE extension / the CLI alike (a 1733-file sample was
+        // 70% "Codex Desktop", 4% CLI). `copilot` merges the CLI/VS Code OTel
+        // export with the desktop app's ~/.copilot/data.db. `cursor` is not a
+        // session parser at all — it reads Cursor's account usage export CSV,
+        // which bills IDE, cursor-agent and cloud agents into one undifferentiated
+        // ledger.
+        "codex": ("Codex", "#9ca3af"),
+        "copilot": ("Copilot", "#1f2937"),
+        "cursor": ("Cursor", "#0ea5e9"),
         "amp": ("Amp", "#10b981"),
         "droid": ("Droid", "#22c55e"),
         "hermes": ("Hermes", "#a78bfa"),
@@ -67,7 +75,7 @@ public enum ClientRegistry {
     public static func shortName(_ id: String) -> String {
         let name = style(id).displayName
         let registeredNames = Set(entries.values.map { $0.displayName })
-        for suffix in [" CLI", " Code", " IDE"] where name.hasSuffix(suffix) {
+        for suffix in [" CLI", " Code"] where name.hasSuffix(suffix) {
             let base = String(name.dropLast(suffix.count))
             // Don't collapse onto a base that is itself another client's full
             // name — e.g. "Antigravity CLI" must stay distinct from the IDE
