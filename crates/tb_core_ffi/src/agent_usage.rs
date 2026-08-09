@@ -75,19 +75,27 @@ impl AgentUsagePayload {
         self.agents
             .iter()
             .filter(|snapshot| snapshot.error.is_none() && snapshot.transport_diagnostic.is_none())
+            // Trust is still decided by `account_scope` — it is the verified
+            // identity, and its absence is what suppresses history for an
+            // unverified snapshot. The key itself must come from
+            // `history_scope`, because that is the identity durable history is
+            // stored under; binding on the account scope would look up a series
+            // the recorder never writes and the curve would silently find
+            // nothing for every provider without an authoritative ID.
+            .filter(|snapshot| snapshot.account_scope.is_ok())
             .filter_map(|snapshot| {
                 snapshot
-                    .account_scope
+                    .history_scope
                     .as_ref()
                     .ok()
-                    .map(|scope| (snapshot, scope.as_str().to_string()))
+                    .map(|scope| (snapshot, scope.clone()))
             })
-            .flat_map(|(snapshot, account_scope)| {
+            .flat_map(|(snapshot, history_scope)| {
                 snapshot.windows.iter().filter_map(move |window| {
                     window.window_key.as_ref().map(|window_key| {
                         SeriesKey::new(
                             snapshot.client_id.clone(),
-                            account_scope.clone(),
+                            &history_scope,
                             window_key.clone(),
                         )
                     })
@@ -5116,7 +5124,11 @@ mod tests {
 
         assert_eq!(
             payload.quota_curve_series(),
-            vec![SeriesKey::new("codex", trusted.as_str(), "main.session.v1")]
+            vec![SeriesKey::new(
+                "codex",
+                &HistoryScope::for_test(trusted.as_str()),
+                "main.session.v1"
+            )]
         );
         scope.cleanup();
     }
@@ -5168,10 +5180,26 @@ mod tests {
         assert_eq!(
             payload.quota_curve_series(),
             vec![
-                SeriesKey::new("claude", trusted.as_str(), "session.v1"),
-                SeriesKey::new("claude", trusted.as_str(), "weekly.v1"),
-                SeriesKey::new("claude", trusted.as_str(), "sonnet.weekly.v1"),
-                SeriesKey::new("claude", trusted.as_str(), "weekly_scoped.fable.v1"),
+                SeriesKey::new(
+                    "claude",
+                    &HistoryScope::for_test(trusted.as_str()),
+                    "session.v1"
+                ),
+                SeriesKey::new(
+                    "claude",
+                    &HistoryScope::for_test(trusted.as_str()),
+                    "weekly.v1"
+                ),
+                SeriesKey::new(
+                    "claude",
+                    &HistoryScope::for_test(trusted.as_str()),
+                    "sonnet.weekly.v1"
+                ),
+                SeriesKey::new(
+                    "claude",
+                    &HistoryScope::for_test(trusted.as_str()),
+                    "weekly_scoped.fable.v1"
+                ),
             ]
         );
         scope.cleanup();
