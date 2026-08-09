@@ -429,6 +429,30 @@ Import 不會為 v2 raw key 自行建立 scope。它只使用成功 request 已�
 
 Migration fixtures 必須包含 empty／existing／corrupt v3、valid／corrupt v2、accepted current-ID match、email-only skip、multiple legacy accounts only-current-ID-imported、same-bucket collisions、rollback 新增 v2 sample、save interruption 與 two-process first run。每個 fixture 都逐 byte／mtime 驗證 v2 未變，並鎖定 sorted v3 JSON。V3 history 與新 metadata 不得保存 raw provider identifiers、credential material、display labels 或 UI copy；fixture 同時明示 retained v2 仍是 legacy-sensitive。
 
+## Clock disagreement is repaired, not quarantined（2026-08-09，issue #144）
+
+一個結構完整的 store 曾因為單一 series 的 `lastActivityAt` 超前讀取交易 48 秒而被整份隔離重建，585 筆樣本消失。根因不是 provider 資料也不是 stale caller——**寫入端一律是本機時鐘，但兩個寫入點都是單調的**：`update_seen` 的 `previous.max(now)` 與 `series.last_activity_at.max(now)`。因此**單次向前的時鐘偏移（NTP step、睡眠喚醒）會被永久鎖住**，時鐘回正後該值不會衰減，之後每次讀取的 ceiling 都低於它。`max()` 本身正確（防時間戳倒退），保留不動。
+
+`validate_store` 本來就是純結構檢查、`validate_store_at` 才加上唯一那條時間檢查——分離早已存在，是呼叫端把兩者塌成同一個隔離決定。現行契約：
+
+| Failure class | Disposition |
+|---|---|
+| Deserialize 或結構失敗 | 隔離、重建空 store（不變） |
+| 某 series 自己的 `sample.sampled_at` 超前 ceiling | **只**丟該 series，兄弟不受影響 |
+| Rollover 的**活動**時間戳超前 | rollover 設為 `None`，樣本全留 |
+| `lastActivityAt` 超前 ceiling | 夾取 |
+
+四條規則各自都曾寫錯過一次，錯法相同——**把本模組四種語意不同的時間量拿兩種來比**：
+
+| 規則 | 錯了會怎樣 |
+|---|---|
+| 偵測門檻一律 `upperBound`，**只有夾取目標**是 `observationNow` | 夾到 ceiling 會讓 series 高於交易主體的時鐘，`is_stale_observation` 拒絕每一筆觀測、不存檔、每次載入重複——保住歷史卻永久停止記錄，比隔離更糟 |
+| Rollover 偵測**只看活動時間戳** | `resetAt` 等是未來邊界（`validate_observed_state` 要求 `lastSeenAt < resetAt`），納入會在每次載入丟掉每個健康 rollover、duration 學習停擺。`Candidate` 沒有 `lastSeenAt`，其活動時間戳是 `firstNewSeenAt` |
+| Floor 包含存活的 rollover，不只樣本 | 落在 `(observationNow, upperBound]` 的 rollover 活動時間戳會存活，只算樣本的 floor 會夾到它底下、違反 `activity_valid`，最後讓**整筆交易**對所有 provider 失敗 |
+| 夾取以 `lastActivityAt > upperBound` 為閘 | 無閘會改低較新寫入者已提交的時間戳。多 series 時（實際回報的形狀）A 超前觸發修復、兄弟 B 落在健康帶被改低＝lost update |
+
+修復是記憶體內的，**不隔離、不改名、不寫第二個檔**，由既有的 save-if-changed 路徑持久化。它對任何今日可正常載入的 store 必為 no-op：`activity_valid` 已強制 `sampled_at <= lastActivityAt <= upperBound`，所以丟棄條件不可滿足、per-series 閘也全數跳過。**刻意不設有界門檻常數**——夾取在任何幅度下都合理，門檻只會在兩個等價修復之間做無法論證的選擇；真正需要看幅度的只有「樣本證據在未來」，那由分類處理。
+
 ## Provider adapter matrix
 
 ### Codex and Claude mappings

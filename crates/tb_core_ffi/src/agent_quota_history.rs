@@ -1540,6 +1540,84 @@ fn validate_store_at(store: &Store, now: i64) -> bool {
             .all(|series| series.last_activity_at <= now)
 }
 
+/// The activity timestamp `validate_series`'s `activity_valid` holds a
+/// rollover to, per variant. `Candidate` has no `last_seen_at`; its activity
+/// timestamp is `first_new_seen_at`. Cycle boundaries (`reset_at`,
+/// `new_reset_at`, `old_reset_at`, `cycle_started_at`) are deliberately not
+/// consulted here — see the module-level design note on `repair_store_at`.
+fn rollover_activity_at(rollover: &ObservedState) -> i64 {
+    match rollover {
+        ObservedState::Watching { last_seen_at, .. }
+        | ObservedState::Ready { last_seen_at, .. } => *last_seen_at,
+        ObservedState::Candidate {
+            first_new_seen_at, ..
+        } => *first_new_seen_at,
+    }
+}
+
+/// Repair a structurally valid store (`validate_store` already passed) whose
+/// clock disagrees with the reading transaction: some series' derived
+/// timestamps lead `upper_bound`. Structural failures never reach this
+/// function; they still quarantine at the call site.
+///
+/// Every detection threshold below is `upper_bound` — the same ceiling
+/// `validate_store_at` failed against, which is what "leads the ceiling"
+/// means. Only the clamp target is `observation_now`: `is_stale_observation`
+/// compares against `observation_now`, so clamping to `upper_bound` would
+/// leave a repaired series' clock above the transaction body's clock, reject
+/// this poll's observation as stale, and repeat identically on every future
+/// load. Rollover detection only ever looks at activity timestamps
+/// (`rollover_activity_at`), never at cycle boundaries: `reset_at` and
+/// friends are future boundaries that lead `upper_bound` in essentially
+/// every healthy rollover, and including them would drop every in-flight
+/// rollover on every load.
+///
+/// **Precondition: `observation_now <= upper_bound`.** Every current caller
+/// satisfies it — the transaction passes `observation_now.max(lock_time)` as
+/// the ceiling, and the two read paths pass the same value for both. A caller
+/// that broke it could produce a clamped `last_activity_at` above the ceiling,
+/// which the post-body `validate_store_at` would reject, failing the whole
+/// transaction for every provider rather than just one series.
+fn repair_store_at(mut store: Store, upper_bound: i64, observation_now: i64) -> Store {
+    debug_assert!(
+        observation_now <= upper_bound,
+        "repair_store_at requires observation_now <= upper_bound"
+    );
+    // A series whose own sample evidence leads the ceiling cannot be
+    // verified against any clock the reader trusts; drop it wholesale so a
+    // sibling's history is not held hostage by it.
+    store.series.retain(|series| {
+        !series
+            .samples
+            .iter()
+            .any(|sample| sample.sampled_at > upper_bound)
+    });
+
+    for series in &mut store.series {
+        if series.last_activity_at <= upper_bound {
+            continue; // gated: a series at or below the ceiling is untouched
+        }
+        if series
+            .rollover
+            .as_ref()
+            .is_some_and(|rollover| rollover_activity_at(rollover) > upper_bound)
+        {
+            series.rollover = None;
+        }
+        let floor = series
+            .samples
+            .iter()
+            .map(|sample| sample.sampled_at)
+            .max()
+            .into_iter()
+            .chain(series.rollover.as_ref().map(rollover_activity_at))
+            .max();
+        let clamped = series.last_activity_at.min(observation_now);
+        series.last_activity_at = floor.map_or(clamped, |floor| floor.max(clamped));
+    }
+    store
+}
+
 fn duration_for_resolution(resolution: DurationResolution) -> Option<i64> {
     match resolution {
         DurationResolution::Ready {
@@ -2867,8 +2945,13 @@ fn load_store_at_with_mode(
 
     let parsed = serde_json::from_slice::<Store>(&bytes)
         .ok()
-        .filter(|store| validate_store_at(store, validation_now));
+        .filter(|store| validate_store(store));
     if let Some(store) = parsed {
+        let store = if validate_store_at(&store, validation_now) {
+            store
+        } else {
+            repair_store_at(store, validation_now, quarantine_now)
+        };
         return Ok(LoadedStore {
             store,
             quarantined: false,
@@ -5904,11 +5987,23 @@ mod tests {
     }
 
     #[test]
-    fn future_last_activity_is_quarantined_before_observed_fallback() {
+    fn future_last_activity_is_repaired_not_quarantined() {
+        // This used to be the pre-repair quarantine fixture: a purely
+        // structural false-alarm — a metadata-only clock lead, no future
+        // sample, no rollover — that used to discard the sample below along
+        // with the rest of the store. The loader now repairs it in place.
         let (directory, path) = temp_path("future-activity");
         let now = 16_000_000;
         let lock_time = now + 1;
         let reset = now + DAY;
+        let existing_sample = QuotaSample {
+            reset_at: reset,
+            duration_seconds: DAY,
+            duration_source: DurationSource::Provider,
+            used_percent: 10.0,
+            sampled_at: now,
+            origin: SampleOrigin::LiveV3,
+        };
         let store = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
             series: vec![SeriesState {
@@ -5918,14 +6013,7 @@ mod tests {
                 active_reset_at: Some(reset),
                 last_activity_at: lock_time + 1,
                 rollover: None,
-                samples: vec![QuotaSample {
-                    reset_at: reset,
-                    duration_seconds: DAY,
-                    duration_source: DurationSource::Provider,
-                    used_percent: 10.0,
-                    sampled_at: now,
-                    origin: SampleOrigin::LiveV3,
-                }],
+                samples: vec![existing_sample.clone()],
             }],
         };
         let bytes = serde_json::to_vec_pretty(&store).unwrap();
@@ -5935,13 +6023,20 @@ mod tests {
             record_at_lock_time(&path, "acct", Some(reset), 10.0, now, None, None, lock_time,),
             HistoryOutcome::LearningDuration
         );
-        assert_eq!(
-            fs::read(directory.join(format!("quota-pace-history-v3.corrupt-{now}.json"))).unwrap(),
-            bytes
+        assert!(
+            !directory
+                .join(format!("quota-pace-history-v3.corrupt-{now}.json"))
+                .exists(),
+            "a purely metadata-ahead series must not quarantine the store"
         );
         let recovered = read_store(&path);
-        assert_eq!(recovered.series[0].active_reset_at, None);
-        assert!(recovered.series[0].samples.is_empty());
+        assert_eq!(recovered.series.len(), 1);
+        assert_eq!(recovered.series[0].active_reset_at, Some(reset));
+        assert_eq!(
+            recovered.series[0].samples,
+            vec![existing_sample],
+            "the pre-existing sample must survive the repair"
+        );
         assert!(matches!(
             recovered.series[0].rollover,
             Some(ObservedState::Watching {
@@ -6006,6 +6101,630 @@ mod tests {
             }) if reset_at == reset
         ));
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    // --- Clock disagreement is repaired per series, not quarantined
+    // wholesale. Contract and the four cross-baseline traps that shaped it:
+    // docs/knowledge/plans/provider-quota-pace.md, section
+    // "Clock disagreement is repaired, not quarantined".
+    // section 4 for the design this fixture set proves.
+
+    fn watching_rollover(reset_at: i64, first_seen_at: i64, last_seen_at: i64) -> ObservedState {
+        ObservedState::Watching {
+            reset_at,
+            first_seen_at,
+            last_seen_at,
+            consecutive_count: 1,
+        }
+    }
+
+    #[test]
+    fn clock_lead_incident_both_series_survive_with_every_sample_and_no_quarantine() {
+        let (directory, path) = temp_path("clock-incident");
+        let upper_bound = 20_000_000;
+        let observation_now = upper_bound;
+        let cycle_started_at = upper_bound - 3 * HOUR;
+        let duration_seconds = 5 * HOUR;
+        let reset = cycle_started_at + duration_seconds;
+
+        let session_samples = vec![
+            quota_sample(reset, duration_seconds, 0.10, 12.0, SampleOrigin::LiveV3),
+            quota_sample(reset, duration_seconds, 0.30, 30.0, SampleOrigin::LiveV3),
+            quota_sample(reset, duration_seconds, 0.55, 55.0, SampleOrigin::LiveV3),
+        ];
+        let session = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "session.v1".into(),
+            active_reset_at: Some(reset),
+            last_activity_at: session_samples.iter().map(|s| s.sampled_at).max().unwrap(),
+            rollover: None,
+            samples: session_samples.clone(),
+        };
+
+        let weekly_samples = vec![
+            quota_sample(reset, duration_seconds, 0.20, 20.0, SampleOrigin::LiveV3),
+            quota_sample(reset, duration_seconds, 0.45, 48.0, SampleOrigin::LiveV3),
+        ];
+        let lead_activity = upper_bound + 48;
+        let weekly = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "weekly.v1".into(),
+            active_reset_at: Some(reset),
+            last_activity_at: lead_activity,
+            rollover: Some(watching_rollover(reset, lead_activity - 120, lead_activity)),
+            samples: weekly_samples.clone(),
+        };
+
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![session.clone(), weekly],
+        };
+        store.series.sort_by(series_order);
+        assert!(!validate_store_at(&store, upper_bound)); // fails before the fix
+        let bytes = serde_json::to_vec_pretty(&store).unwrap();
+        fs::write(&path, &bytes).unwrap();
+
+        let loaded =
+            load_store_at_with_mode(StorageMode::Generic, &path, upper_bound, observation_now)
+                .unwrap();
+        assert!(!loaded.quarantined);
+        assert!(validate_store_at(&loaded.store, upper_bound)); // passes after the fix
+        assert!(!directory
+            .join(format!(
+                "quota-pace-history-v3.corrupt-{observation_now}.json"
+            ))
+            .exists());
+
+        let recovered_session = loaded
+            .store
+            .series
+            .iter()
+            .find(|s| s.window_key == "session.v1")
+            .unwrap();
+        assert_eq!(
+            *recovered_session, session,
+            "sibling series must be untouched, field for field"
+        );
+
+        let recovered_weekly = loaded
+            .store
+            .series
+            .iter()
+            .find(|s| s.window_key == "weekly.v1")
+            .unwrap();
+        assert_eq!(
+            recovered_weekly.samples, weekly_samples,
+            "every sample survives"
+        );
+        assert_eq!(recovered_weekly.samples.len(), 2);
+        assert!(recovered_weekly.last_activity_at <= upper_bound);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn future_sample_evidence_drops_only_that_series() {
+        let (directory, path) = temp_path("clock-future-sample");
+        let upper_bound = 21_000_000;
+        let observation_now = upper_bound;
+        let reset = upper_bound + DAY;
+
+        let healthy_samples = vec![quota_sample(
+            reset,
+            2 * DAY,
+            0.10,
+            10.0,
+            SampleOrigin::LiveV3,
+        )];
+        let healthy = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "session.v1".into(),
+            active_reset_at: Some(reset),
+            last_activity_at: healthy_samples[0].sampled_at,
+            rollover: None,
+            samples: healthy_samples.clone(),
+        };
+
+        // This sample's own sampled_at leads the ceiling, which forces
+        // last_activity_at (>= every sample) to lead it too, per
+        // activity_valid — this series is structurally valid but
+        // unverifiable, not merely metadata-ahead.
+        let tainted_sample = QuotaSample {
+            reset_at: reset,
+            duration_seconds: 2 * DAY,
+            duration_source: DurationSource::Provider,
+            used_percent: 40.0,
+            sampled_at: upper_bound + 5,
+            origin: SampleOrigin::LiveV3,
+        };
+        let tainted = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "weekly.v1".into(),
+            active_reset_at: Some(reset),
+            last_activity_at: tainted_sample.sampled_at,
+            rollover: None,
+            samples: vec![tainted_sample],
+        };
+
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![healthy.clone(), tainted],
+        };
+        store.series.sort_by(series_order);
+        assert!(!validate_store_at(&store, upper_bound));
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+
+        let loaded =
+            load_store_at_with_mode(StorageMode::Generic, &path, upper_bound, observation_now)
+                .unwrap();
+        assert!(!loaded.quarantined);
+        assert!(validate_store_at(&loaded.store, upper_bound));
+        assert_eq!(loaded.store.series.len(), 1);
+        assert_eq!(loaded.store.series[0], healthy, "sibling is untouched");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rollover_drop_per_variant_keeps_every_sample() {
+        let (directory, path) = temp_path("clock-rollover-variants");
+        let upper_bound = 22_000_000;
+        let observation_now = upper_bound;
+        let lead = upper_bound + 30;
+        let reset = upper_bound + DAY;
+
+        let sample = || quota_sample(reset, 2 * DAY, 0.10, 10.0, SampleOrigin::LiveV3);
+
+        let watching = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "watching.v1".into(),
+            active_reset_at: Some(reset),
+            last_activity_at: lead,
+            rollover: Some(watching_rollover(reset, lead - 100, lead)),
+            samples: vec![sample()],
+        };
+
+        // Ready's confirmed_at must land within ROLLOVER_GRACE_SECONDS of its
+        // own cycle_started_at (not of `lead`), so this cycle is built with
+        // its own well-separated reset rather than reusing `reset`.
+        let ready_cycle_started_at = upper_bound - DAY;
+        let ready_duration_seconds = 3 * DAY;
+        let ready_reset_at = ready_cycle_started_at + ready_duration_seconds;
+        let ready = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "ready.v1".into(),
+            active_reset_at: Some(ready_reset_at),
+            last_activity_at: lead,
+            rollover: Some(ObservedState::Ready {
+                cycle_started_at: ready_cycle_started_at,
+                reset_at: ready_reset_at,
+                duration_seconds: ready_duration_seconds,
+                confirmed_at: ready_cycle_started_at + 50,
+                last_seen_at: lead,
+            }),
+            samples: vec![sample()],
+        };
+
+        // Candidate has no last_seen_at at all; its activity timestamp for
+        // activity_valid is first_new_seen_at. Its confirmation window is
+        // ROLLOVER_GRACE_SECONDS around old_reset_at, so old_reset_at must
+        // sit close to upper_bound for first_new_seen_at (== lead, beyond
+        // upper_bound) to still fall inside that window.
+        let old_reset = upper_bound - 100;
+        let candidate = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "candidate.v1".into(),
+            active_reset_at: None,
+            last_activity_at: lead,
+            rollover: Some(ObservedState::Candidate {
+                old_reset_at: old_reset,
+                old_seen_at: old_reset - 60,
+                new_reset_at: reset,
+                first_new_seen_at: lead,
+            }),
+            samples: vec![sample()],
+        };
+
+        for series in [watching, ready, candidate] {
+            let store = Store {
+                schema_version: HISTORY_SCHEMA_VERSION,
+                series: vec![series.clone()],
+            };
+            assert!(!validate_store_at(&store, upper_bound));
+            fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+
+            let loaded =
+                load_store_at_with_mode(StorageMode::Generic, &path, upper_bound, observation_now)
+                    .unwrap();
+            assert!(!loaded.quarantined, "{}", series.window_key);
+            assert!(
+                validate_store_at(&loaded.store, upper_bound),
+                "{}",
+                series.window_key
+            );
+            assert_eq!(loaded.store.series.len(), 1, "{}", series.window_key);
+            assert!(
+                loaded.store.series[0].rollover.is_none(),
+                "{} rollover must be dropped",
+                series.window_key
+            );
+            assert_eq!(
+                loaded.store.series[0].samples, series.samples,
+                "{} keeps every sample",
+                series.window_key
+            );
+        }
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn repaired_series_resumes_recording_in_same_transaction() {
+        let (directory, path) = temp_path("clock-resume-same-txn");
+        let observation_now = 23_000_000;
+        let lock_time = observation_now + 500;
+        let upper_bound = lock_time;
+        let reset = observation_now + DAY;
+        let duration_seconds = 2 * DAY;
+
+        let existing_sample = QuotaSample {
+            reset_at: reset,
+            duration_seconds,
+            duration_source: DurationSource::Provider,
+            used_percent: 5.0,
+            // Far enough from observation_now to land in a different
+            // phase bucket, so the new poll adds a sample rather than
+            // updating this one in place.
+            sampled_at: observation_now - 50_000,
+            origin: SampleOrigin::LiveV3,
+        };
+        let series = SeriesState {
+            provider_id: "copilot".into(),
+            account_scope: "acct".into(),
+            window_key: "premium_interactions.v1".into(),
+            active_reset_at: Some(reset),
+            last_activity_at: upper_bound + 10, // leads the ceiling
+            rollover: None,
+            samples: vec![existing_sample.clone()],
+        };
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series],
+        };
+        assert!(!validate_store_at(&store, upper_bound));
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+
+        let outcome = record_at_lock_time(
+            &path,
+            "acct",
+            Some(reset),
+            10.0,
+            observation_now,
+            provider(reset, duration_seconds),
+            None,
+            lock_time,
+        );
+        assert!(
+            !matches!(outcome, HistoryOutcome::Ready { sampled: false, .. })
+                && !matches!(outcome, HistoryOutcome::Unavailable(_)),
+            "the repaired series must accept this poll's observation, got {outcome:?}"
+        );
+        assert!(!directory
+            .join(format!(
+                "quota-pace-history-v3.corrupt-{observation_now}.json"
+            ))
+            .exists());
+
+        let recovered = read_store(&path);
+        assert_eq!(recovered.series.len(), 1);
+        assert_eq!(
+            recovered.series[0].samples.len(),
+            2,
+            "recovery must not depend on any sibling series changing"
+        );
+        assert!(recovered.series[0]
+            .samples
+            .iter()
+            .any(|sample| sample.sampled_at == observation_now));
+        assert!(recovered.series[0].samples.contains(&existing_sample));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn repair_floor_binds_for_a_surviving_sample() {
+        let upper_bound = 100;
+        let observation_now = 50;
+        let sample = QuotaSample {
+            reset_at: 1_000,
+            duration_seconds: 1_000,
+            duration_source: DurationSource::Provider,
+            used_percent: 10.0,
+            sampled_at: 80, // strictly between observation_now and upper_bound
+            origin: SampleOrigin::LiveV3,
+        };
+        let series = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "session.v1".into(),
+            active_reset_at: None,
+            last_activity_at: upper_bound + 5,
+            rollover: None,
+            samples: vec![sample],
+        };
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series],
+        };
+
+        let repaired = repair_store_at(store, upper_bound, observation_now);
+        assert_eq!(
+            repaired.series[0].last_activity_at, 80,
+            "floor must not clamp below the surviving sample"
+        );
+        assert!(validate_series(&repaired.series[0]));
+        assert!(validate_store_at(&repaired, upper_bound));
+    }
+
+    #[test]
+    fn repair_floor_binds_for_a_surviving_rollover() {
+        let upper_bound = 200;
+        let observation_now = 50;
+        let rollover_activity = 150; // strictly between observation_now and upper_bound
+        let far_reset = upper_bound + 10 * DAY; // a normal rollover's reset_at sits far beyond upper_bound
+        let series = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "weekly.v1".into(),
+            active_reset_at: Some(far_reset),
+            last_activity_at: upper_bound + 5,
+            rollover: Some(watching_rollover(
+                far_reset,
+                rollover_activity - 10,
+                rollover_activity,
+            )),
+            samples: Vec::new(),
+        };
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series],
+        };
+
+        let repaired = repair_store_at(store, upper_bound, observation_now);
+        assert!(
+            repaired.series[0].rollover.is_some(),
+            "the rollover itself survives detection"
+        );
+        assert_eq!(
+            repaired.series[0].last_activity_at, rollover_activity,
+            "floor must include the surviving rollover's activity timestamp"
+        );
+        assert!(validate_series(&repaired.series[0]));
+        assert!(validate_store_at(&repaired, upper_bound));
+    }
+
+    #[test]
+    fn repair_gate_leaves_a_series_at_or_below_the_ceiling_untouched_and_unsaved() {
+        let (directory, path) = temp_path("clock-gate");
+        let observation_now = 30_000_000;
+        let lock_time = observation_now + 100;
+        let upper_bound = lock_time;
+        let reset = observation_now + DAY;
+        // observation_now < last_activity_at <= upper_bound: a healthy band,
+        // e.g. a fresh SeriesState::new() from a faster concurrent writer.
+        // No active_reset_at/rollover/samples: retain_series clears a stray
+        // active_reset_at whenever both are empty, which would look like an
+        // unrelated mutation and defeat the "no save occurs" assertion below.
+        let series = SeriesState {
+            provider_id: "copilot".into(),
+            account_scope: "acct".into(),
+            window_key: "premium_interactions.v1".into(),
+            active_reset_at: None,
+            last_activity_at: observation_now + 50,
+            rollover: None,
+            samples: Vec::new(),
+        };
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series.clone()],
+        };
+        assert!(
+            validate_store_at(&store, upper_bound),
+            "this store is already healthy"
+        );
+        let original_bytes = serde_json::to_vec_pretty(&store).unwrap();
+        fs::write(&path, &original_bytes).unwrap();
+
+        // Not a substitute for this fixture: there floor == last_activity_at,
+        // so an ungated clamp would be a no-op and this gate's absence would
+        // be invisible.
+        let outcome = record_at_lock_time(
+            &path,
+            "acct",
+            Some(reset),
+            10.0,
+            observation_now,
+            provider(reset, DAY),
+            None,
+            lock_time,
+        );
+        assert!(
+            matches!(outcome, HistoryOutcome::Ready { sampled: false, .. })
+                || matches!(outcome, HistoryOutcome::LearningDuration),
+            "an untouched series is above the body's clock and must reject as stale, got {outcome:?}"
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            original_bytes,
+            "a series at or below the ceiling must not be rewritten"
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn repair_gate_is_load_bearing_inside_repair_store_at() {
+        // The fixture above proves the end-to-end "no save" outcome, but for
+        // a *single-series* store that outcome holds even without the gate:
+        // load_store_at_with_mode only calls repair_store_at when
+        // validate_store_at already failed, which for one series means that
+        // series' own last_activity_at was the thing leading upper_bound.
+        //
+        // The gate is NOT dead code. In a multi-series store — the reported
+        // shape in #144, and any real store — series A can lead upper_bound
+        // and force the repair while sibling B sits in the healthy band
+        // (observation_now, upper_bound] left by a faster concurrent writer.
+        // Without the gate the loader lowers B's last_activity_at to
+        // observation_now, discarding a timestamp another writer committed:
+        // a lost update on the production path. Verified by driving a
+        // two-series store through load_store_at_with_mode with the gate
+        // removed. Do not delete it as unreachable.
+        //
+        // This test calls repair_store_at directly, which production never
+        // does for an already-healthy
+        // series, specifically to pin the internal gate: removing it must
+        // make this test fail even though no real load path currently can.
+        let upper_bound = 31_000_000;
+        let observation_now = upper_bound - 100;
+        let series = SeriesState {
+            provider_id: "copilot".into(),
+            account_scope: "acct".into(),
+            window_key: "premium_interactions.v1".into(),
+            active_reset_at: None,
+            last_activity_at: observation_now + 50, // within (observation_now, upper_bound]
+            rollover: None,
+            samples: Vec::new(),
+        };
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series.clone()],
+        };
+
+        let repaired = repair_store_at(store, upper_bound, observation_now);
+        assert_eq!(
+            repaired.series[0], series,
+            "a series at or below the ceiling must be returned untouched, field for field"
+        );
+    }
+
+    #[test]
+    fn healthy_store_with_far_future_reset_at_is_untouched_no_repair_no_save() {
+        let (directory, path) = temp_path("clock-healthy");
+        let upper_bound = 24_000_000;
+        let observation_now = upper_bound;
+        let far_reset = upper_bound + 30 * DAY; // days beyond upper_bound, as normal
+                                                // A cycle that started well before upper_bound, so the sample's own
+                                                // sampled_at (unlike the far-future reset_at boundary) stays behind
+                                                // the ceiling.
+        let sample = QuotaSample {
+            reset_at: far_reset,
+            duration_seconds: 60 * DAY,
+            duration_source: DurationSource::Provider,
+            used_percent: 8.0,
+            sampled_at: upper_bound - 20,
+            origin: SampleOrigin::LiveV3,
+        };
+        let series = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "weekly.v1".into(),
+            active_reset_at: Some(far_reset),
+            last_activity_at: upper_bound - 10,
+            rollover: Some(watching_rollover(
+                far_reset,
+                upper_bound - 200,
+                upper_bound - 10,
+            )),
+            samples: vec![sample],
+        };
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series.clone()],
+        };
+        assert!(validate_store_at(&store, upper_bound));
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+
+        let loaded =
+            load_store_at_with_mode(StorageMode::Generic, &path, upper_bound, observation_now)
+                .unwrap();
+        assert!(!loaded.quarantined);
+        assert_eq!(loaded.store, store, "no repair on an already-healthy store");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn structural_corruption_still_quarantines_under_the_new_loader_branch() {
+        let (directory, path) = temp_path("clock-structural");
+        let now = 25_000_000;
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION + 1, // structural: wrong schema
+            series: Vec::new(),
+        };
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+
+        let loaded = load_store_at_with_mode(StorageMode::Generic, &path, now, now).unwrap();
+        assert!(loaded.quarantined);
+        assert_eq!(loaded.store, Store::default());
+        assert!(directory
+            .join(format!("quota-pace-history-v3.corrupt-{now}.json"))
+            .exists());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn malformed_json_still_quarantines_under_the_new_loader_branch() {
+        let (directory, path) = temp_path("clock-malformed");
+        let now = 26_000_000;
+        fs::write(&path, b"{not-json-at-all").unwrap();
+
+        let loaded = load_store_at_with_mode(StorageMode::Generic, &path, now, now).unwrap();
+        assert!(loaded.quarantined);
+        assert_eq!(loaded.store, Store::default());
+        assert!(directory
+            .join(format!("quota-pace-history-v3.corrupt-{now}.json"))
+            .exists());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn repair_is_a_fixed_point() {
+        let upper_bound = 27_000_000;
+        let observation_now = upper_bound - 1_000;
+        let reset = upper_bound + DAY;
+        let lead = upper_bound + 60;
+        let series = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "weekly.v1".into(),
+            active_reset_at: Some(reset),
+            last_activity_at: lead,
+            rollover: Some(watching_rollover(reset, lead - 100, lead)),
+            samples: vec![quota_sample(
+                reset,
+                2 * DAY,
+                0.10,
+                20.0,
+                SampleOrigin::LiveV3,
+            )],
+        };
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series],
+        };
+
+        let once = repair_store_at(store.clone(), upper_bound, observation_now);
+        let twice = repair_store_at(once.clone(), upper_bound, observation_now);
+        assert_eq!(once, twice);
     }
 
     #[test]
