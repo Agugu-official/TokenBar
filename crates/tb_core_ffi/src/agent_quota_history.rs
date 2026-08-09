@@ -5988,10 +5988,10 @@ mod tests {
 
     #[test]
     fn future_last_activity_is_repaired_not_quarantined() {
-        // This used to be the pre-CLOCK-A quarantine fixture: a purely
+        // This used to be the pre-repair quarantine fixture: a purely
         // structural false-alarm — a metadata-only clock lead, no future
         // sample, no rollover — that used to discard the sample below along
-        // with the rest of the store. CLOCK-A repairs it in place instead.
+        // with the rest of the store. The loader now repairs it in place.
         let (directory, path) = temp_path("future-activity");
         let now = 16_000_000;
         let lock_time = now + 1;
@@ -6103,8 +6103,10 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    // --- CLOCK-A: clock disagreement is repaired per series, not quarantined
-    // wholesale. See docs/knowledge and /Users/nanako/.claude/plans/tokenbar-clock-disagreement.md
+    // --- Clock disagreement is repaired per series, not quarantined
+    // wholesale. Contract and the four cross-baseline traps that shaped it:
+    // docs/knowledge/plans/provider-quota-pace.md, section
+    // "Clock disagreement is repaired, not quarantined".
     // section 4 for the design this fixture set proves.
 
     fn watching_rollover(reset_at: i64, first_seen_at: i64, last_seen_at: i64) -> ObservedState {
