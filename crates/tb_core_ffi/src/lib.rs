@@ -919,8 +919,12 @@ mod tests {
         replace_quota_curve_bindings(0, Vec::new());
     }
 
-    fn quota_curve_key(account_scope: &str) -> agent_quota_history::SeriesKey {
-        agent_quota_history::SeriesKey::new("codex", account_scope, "weekly.v1")
+    fn quota_curve_key(history_scope: &str) -> agent_quota_history::SeriesKey {
+        agent_quota_history::SeriesKey::new(
+            "codex",
+            &agent_account_scope::HistoryScope::for_test(history_scope),
+            "weekly.v1",
+        )
     }
 
     fn quota_curve_temp_path(label: &str) -> (PathBuf, PathBuf) {

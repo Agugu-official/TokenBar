@@ -6,6 +6,7 @@
 
 #![allow(dead_code)]
 
+use crate::agent_account_scope::HistoryScope;
 use crate::agent_quota_duration::{
     self, observe_reset, valid_duration, DurationEvidence, DurationResolution, DurationSource,
     DurationUnavailableReason, ObservedState,
@@ -102,15 +103,31 @@ pub(crate) struct SeriesKey {
 }
 
 impl SeriesKey {
+    /// The scope argument is a `HistoryScope`, never an `AccountScope`: a key
+    /// that outlives a credential rotation cannot be derived from the credential.
+    /// The persisted field name stays `accountScope` because the store's schema
+    /// is frozen at version 3.
     pub(crate) fn new(
         provider_id: impl Into<String>,
-        account_scope: impl Into<String>,
+        history_scope: &HistoryScope,
         window_key: impl Into<String>,
     ) -> Self {
         Self {
             provider_id: provider_id.into(),
-            account_scope: account_scope.into(),
+            account_scope: history_scope.as_str().to_string(),
             window_key: window_key.into(),
+        }
+    }
+
+    /// Rebuild a key from strings already persisted in the store. This is not
+    /// choosing a scope, so it deliberately does not go through `HistoryScope`;
+    /// giving `HistoryScope` a string constructor would reopen the hole `new`
+    /// closes.
+    fn from_stored_parts(provider_id: &str, account_scope: &str, window_key: &str) -> Self {
+        Self {
+            provider_id: provider_id.to_string(),
+            account_scope: account_scope.to_string(),
+            window_key: window_key.to_string(),
         }
     }
 
@@ -167,11 +184,7 @@ impl SeriesState {
     }
 
     fn key(&self) -> SeriesKey {
-        SeriesKey::new(
-            self.provider_id.clone(),
-            self.account_scope.clone(),
-            self.window_key.clone(),
-        )
+        SeriesKey::from_stored_parts(&self.provider_id, &self.account_scope, &self.window_key)
     }
 }
 
@@ -509,11 +522,13 @@ fn read_series_at_path_with_mode(
 }
 
 /// Import only the legacy Codex records bound to the account ID used by the
-/// successful request. The caller supplies the already-resolved opaque scope;
-/// this API never turns a legacy raw key into a v3 scope.
+/// successful request. The caller supplies the already-resolved opaque history
+/// scope — the same one the live recording path keys on, so imported samples
+/// cannot land in a series the live path never touches again — and this API
+/// never turns a legacy raw key into a v3 scope.
 pub(crate) fn migrate_codex_v2(
     request_account_id: &str,
-    account_scope: &str,
+    history_scope: &HistoryScope,
     now: i64,
 ) -> Result<MigrationOutcome, HistoryError> {
     let Some(preferred) = dirs::data_dir().map(|directory| directory.join("com.nyanako.tokenbar"))
@@ -527,7 +542,7 @@ pub(crate) fn migrate_codex_v2(
     let destination = preferred.clone();
     migrate_codex_v2_at_paths_with_clock_and_mode(
         request_account_id,
-        account_scope,
+        history_scope,
         now,
         &preferred.join(LEGACY_V2_FILE_NAME),
         &destination.join(HISTORY_FILE_NAME),
@@ -538,14 +553,14 @@ pub(crate) fn migrate_codex_v2(
 
 pub(crate) fn migrate_codex_v2_at_paths(
     request_account_id: &str,
-    account_scope: &str,
+    history_scope: &HistoryScope,
     now: i64,
     v2_path: &Path,
     v3_path: &Path,
 ) -> Result<MigrationOutcome, HistoryError> {
     migrate_codex_v2_at_paths_with_clock_and_mode(
         request_account_id,
-        account_scope,
+        history_scope,
         now,
         v2_path,
         v3_path,
@@ -556,7 +571,7 @@ pub(crate) fn migrate_codex_v2_at_paths(
 
 fn migrate_codex_v2_at_paths_with_clock_and_mode(
     request_account_id: &str,
-    account_scope: &str,
+    history_scope: &HistoryScope,
     now: i64,
     v2_path: &Path,
     v3_path: &Path,
@@ -564,7 +579,7 @@ fn migrate_codex_v2_at_paths_with_clock_and_mode(
     transaction_clock: impl FnOnce() -> i64,
 ) -> Result<MigrationOutcome, HistoryError> {
     let accepted_account = request_account_id.trim();
-    if accepted_account.is_empty() || account_scope.trim().is_empty() {
+    if accepted_account.is_empty() || history_scope.as_str().trim().is_empty() {
         return Ok(MigrationOutcome {
             imported_samples: 0,
             skipped_samples: 0,
@@ -625,7 +640,7 @@ fn migrate_codex_v2_at_paths_with_clock_and_mode(
         });
     }
 
-    let key = SeriesKey::new("codex", account_scope.trim(), "main.weekly.v1");
+    let key = SeriesKey::new("codex", history_scope, "main.weekly.v1");
     if !key.is_valid() {
         return Err(HistoryError::InvalidSeriesKey);
     }
@@ -3317,6 +3332,19 @@ fn rollback_quarantine_link(path: &Path, source: &File) {
 
 #[cfg(test)]
 mod tests {
+
+    /// Mechanical bridge for fixtures that only need a distinct scope identity.
+    fn test_key(
+        provider_id: impl Into<String>,
+        history_scope: impl AsRef<str>,
+        window_key: impl Into<String>,
+    ) -> SeriesKey {
+        SeriesKey::new(
+            provider_id,
+            &HistoryScope::for_test(history_scope.as_ref()),
+            window_key,
+        )
+    }
     use super::*;
     use chrono::Utc;
     #[cfg(target_os = "windows")]
@@ -3382,7 +3410,7 @@ mod tests {
     }
 
     fn key(account: &str) -> SeriesKey {
-        SeriesKey::new("copilot", account, "premium_interactions.v1")
+        test_key("copilot", account, "premium_interactions.v1")
     }
 
     fn temp_path(label: &str) -> (PathBuf, PathBuf) {
@@ -3826,7 +3854,7 @@ mod tests {
         duration_seconds: i64,
         cycles: usize,
     ) -> SeriesState {
-        let key = SeriesKey::new(provider_id, account_scope, window_key);
+        let key = test_key(provider_id, account_scope, window_key);
         let mut samples = Vec::new();
         for offset in 1..=cycles {
             samples.extend(complete_cycle(
@@ -4623,7 +4651,7 @@ mod tests {
             assert_eq!(
                 migrate_codex_v2_at_paths_with_clock_and_mode(
                     "acct",
-                    "opaque-scope",
+                    &HistoryScope::for_test("opaque-scope"),
                     now,
                     &v2_path,
                     &v3_path,
@@ -4658,7 +4686,7 @@ mod tests {
             assert_eq!(
                 migrate_codex_v2_at_paths_with_clock_and_mode(
                     "acct",
-                    "opaque-scope",
+                    &HistoryScope::for_test("opaque-scope"),
                     now,
                     &v2_path,
                     &v3_path,
@@ -4697,7 +4725,7 @@ mod tests {
             assert_eq!(
                 migrate_codex_v2_at_paths_with_clock_and_mode(
                     "acct",
-                    "opaque-scope",
+                    &HistoryScope::for_test("opaque-scope"),
                     now,
                     &v2_path,
                     &v3_path,
@@ -4739,7 +4767,7 @@ mod tests {
             assert_eq!(
                 migrate_codex_v2_at_paths_with_clock_and_mode(
                     "acct",
-                    "opaque-scope",
+                    &HistoryScope::for_test("opaque-scope"),
                     now,
                     &v2_path,
                     &v3_path,
@@ -4775,7 +4803,7 @@ mod tests {
             assert_eq!(
                 migrate_codex_v2_at_paths_with_clock_and_mode(
                     "acct",
-                    "opaque-scope",
+                    &HistoryScope::for_test("opaque-scope"),
                     now,
                     &v2_path,
                     &v3_path,
@@ -4837,7 +4865,7 @@ mod tests {
         assert_eq!(
             migrate_codex_v2_at_paths_with_clock_and_mode(
                 "acct",
-                "opaque-scope",
+                &HistoryScope::for_test("opaque-scope"),
                 now,
                 &v2_path,
                 &v3_path,
@@ -5986,7 +6014,7 @@ mod tests {
         let duration = DAY;
         let cycle_start = 17_100_000;
         let reset_at = cycle_start + duration;
-        let key = SeriesKey::new("fixture", "stale-scope", "window.v1");
+        let key = test_key("fixture", "stale-scope", "window.v1");
         let mut newest_result = None;
         for phase in [0.10, 0.20, 0.30, 0.40, 0.50, 0.60] {
             let now = cycle_start + (phase * duration as f64) as i64;
@@ -6034,7 +6062,7 @@ mod tests {
         let duration = DAY;
         let completed_reset = 17_200_000 + duration;
         let active_reset = completed_reset + duration;
-        let key = SeriesKey::new("fixture", "stale-rollover-scope", "window.v1");
+        let key = test_key("fixture", "stale-rollover-scope", "window.v1");
         let active_phases = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60];
         let mut series = current_series(&key, active_reset, duration, &active_phases, 80.0);
         let completed = complete_cycle(completed_reset, duration, 80.0);
@@ -6498,7 +6526,7 @@ mod tests {
     #[test]
     fn invalid_series_key_never_creates_store() {
         let (directory, path) = temp_path("key");
-        let invalid = SeriesKey::new("provider", "", "window.v1");
+        let invalid = test_key("provider", "", "window.v1");
         let result = record_observation_at_path(
             invalid,
             Some(10_000 + DAY),
@@ -6570,7 +6598,7 @@ mod tests {
         let now = 8_000_000_000_i64;
         let duration = DAY;
         let current_reset = now + duration;
-        let key = SeriesKey::new("fixture", "scope", "window.v1");
+        let key = test_key("fixture", "scope", "window.v1");
         let mut series = seeded_series(
             &key.provider_id,
             &key.account_scope,
@@ -6618,7 +6646,7 @@ mod tests {
         for duration in durations {
             let now = 1_000_000_000;
             let current_reset = now + duration;
-            let key = SeriesKey::new("fixture", "opaque", "quota.v1");
+            let key = test_key("fixture", "opaque", "quota.v1");
             let expected_cycles = if duration < DAY { 6 } else { 3 };
             let mature_cycles = if duration < DAY { 36 } else { 5 };
             let mut series = seeded_series(
@@ -6757,7 +6785,7 @@ mod tests {
             });
         }
         store.series.sort_by(series_order);
-        let active = BTreeSet::from([SeriesKey::new("provider", "scope-active", "window.v1")]);
+        let active = BTreeSet::from([test_key("provider", "scope-active", "window.v1")]);
         evict_inactive_series(&mut store, &active, now).unwrap();
         assert_eq!(store.series.len(), MAX_SERIES);
         assert!(!store
@@ -6813,11 +6841,11 @@ mod tests {
     fn batch_emitted_existing_without_observation_stays_active() {
         let (directory, path) = temp_path("batch-emitted-active");
         let now = 5_250_000_000_i64;
-        let emitted = SeriesKey::new("provider", "scope-0000", "window.v1");
+        let emitted = test_key("provider", "scope-0000", "window.v1");
         let mut store = Store::default();
         for index in 0..=MAX_SERIES {
             store.series.push(batch_series(
-                SeriesKey::new("provider", format!("scope-{index:04}"), "window.v1"),
+                test_key("provider", format!("scope-{index:04}"), "window.v1"),
                 now,
                 None,
             ));
@@ -6847,14 +6875,14 @@ mod tests {
     fn batch_observation_key_protects_existing_history_without_explicit_emission() {
         let (directory, path) = temp_path("batch-observation-active");
         let now = 5_275_000_000_i64;
-        let existing = SeriesKey::new("provider", "scope-0000", "window.v1");
+        let existing = test_key("provider", "scope-0000", "window.v1");
         let mut store = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
             series: vec![batch_series(existing.clone(), now, None)],
         };
         for index in 1..=MAX_SERIES {
             store.series.push(batch_series(
-                SeriesKey::new("provider", format!("scope-{index:04}"), "window.v1"),
+                test_key("provider", format!("scope-{index:04}"), "window.v1"),
                 now,
                 None,
             ));
@@ -6904,7 +6932,7 @@ mod tests {
         let idle = now - 57 * DAY;
         for (label, candidate) in [("watching", false), ("candidate", true)] {
             let (directory, path) = temp_path(&format!("stale-rollover-{label}"));
-            let stale_key = SeriesKey::new("provider", format!("stale-{label}"), "window.v1");
+            let stale_key = test_key("provider", format!("stale-{label}"), "window.v1");
             let mut store = Store {
                 schema_version: HISTORY_SCHEMA_VERSION,
                 series: vec![rollover_only_series(
@@ -6916,7 +6944,7 @@ mod tests {
             };
             for index in 0..MAX_SERIES - 1 {
                 store.series.push(batch_series(
-                    SeriesKey::new("provider", format!("active-{index:04}"), "window.v1"),
+                    test_key("provider", format!("active-{index:04}"), "window.v1"),
                     now,
                     Some(now + DAY),
                 ));
@@ -6924,7 +6952,7 @@ mod tests {
             store.series.sort_by(series_order);
             fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
 
-            let new_key = SeriesKey::new("provider", format!("new-{label}"), "window.v1");
+            let new_key = test_key("provider", format!("new-{label}"), "window.v1");
             let results = record_observations_at_path_and_evaluate(
                 &[],
                 &[observation(new_key.clone(), now + DAY, 10.0, DAY)],
@@ -6949,7 +6977,7 @@ mod tests {
         let now = 5_300_000_000_i64;
         let future_reset = now + 90 * DAY;
         let (directory, path) = temp_path("rollover-boundary-55d");
-        let key = SeriesKey::new("provider", "boundary-55d", "window.v1");
+        let key = test_key("provider", "boundary-55d", "window.v1");
         let store = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
             series: vec![rollover_only_series(
@@ -6968,7 +6996,7 @@ mod tests {
 
         for (label, candidate) in [("watching", false), ("candidate", true)] {
             let (directory, path) = temp_path(&format!("rollover-boundary-{label}"));
-            let key = SeriesKey::new("provider", format!("boundary-{label}"), "window.v1");
+            let key = test_key("provider", format!("boundary-{label}"), "window.v1");
             let stale_store = Store {
                 schema_version: HISTORY_SCHEMA_VERSION,
                 series: vec![rollover_only_series(
@@ -6998,21 +7026,21 @@ mod tests {
     fn batch_existing_future_active_series_precedes_new_candidate() {
         let (directory, path) = temp_path("batch-existing-active");
         let now = 5_300_000_000_i64;
-        let active = SeriesKey::new("provider", "active", "window.v1");
+        let active = test_key("provider", "active", "window.v1");
         let mut store = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
             series: vec![batch_series(active.clone(), now, Some(now + DAY))],
         };
         for index in 0..MAX_SERIES - 1 {
             store.series.push(batch_series(
-                SeriesKey::new("provider", format!("inactive-{index:04}"), "window.v1"),
+                test_key("provider", format!("inactive-{index:04}"), "window.v1"),
                 now,
                 None,
             ));
         }
         store.series.sort_by(series_order);
         fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
-        let new_key = SeriesKey::new("provider", "new", "window.v1");
+        let new_key = test_key("provider", "new", "window.v1");
         let results = record_observations_at_path_and_evaluate(
             &[],
             &[observation(new_key.clone(), now + DAY, 20.0, DAY)],
@@ -7036,7 +7064,7 @@ mod tests {
     fn batch_new_candidates_admit_by_key_not_input_order() {
         let now = 5_350_000_000_i64;
         let active_keys = (0..MAX_SERIES - 2)
-            .map(|index| SeriesKey::new("provider", format!("active-{index:04}"), "window.v1"))
+            .map(|index| test_key("provider", format!("active-{index:04}"), "window.v1"))
             .collect::<Vec<_>>();
         let base = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
@@ -7046,9 +7074,9 @@ mod tests {
                 .map(|key| batch_series(key, now, Some(now + DAY)))
                 .collect(),
         };
-        let new_a = SeriesKey::new("provider", "new-a", "window.v1");
-        let new_b = SeriesKey::new("provider", "new-b", "window.v1");
-        let new_c = SeriesKey::new("provider", "new-c", "window.v1");
+        let new_a = test_key("provider", "new-a", "window.v1");
+        let new_b = test_key("provider", "new-b", "window.v1");
+        let new_c = test_key("provider", "new-c", "window.v1");
         let cases = [
             (
                 "batch-admission-reversed",
@@ -7104,11 +7132,7 @@ mod tests {
     fn batch_save_failure_preserves_pre_transaction_bytes() {
         let (directory, path) = temp_path("batch-save-failure");
         let now = 5_400_000_000_i64;
-        let existing = batch_series(
-            SeriesKey::new("provider", "existing", "window.v1"),
-            now,
-            None,
-        );
+        let existing = batch_series(test_key("provider", "existing", "window.v1"), now, None);
         let store = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
             series: vec![existing],
@@ -7117,13 +7141,13 @@ mod tests {
         let before = fs::read(&path).unwrap();
         let observations = vec![
             observation(
-                SeriesKey::new("provider", "batch-a", "window.v1"),
+                test_key("provider", "batch-a", "window.v1"),
                 now + DAY,
                 10.0,
                 DAY,
             ),
             observation(
-                SeriesKey::new("provider", "batch-b", "window.v1"),
+                test_key("provider", "batch-b", "window.v1"),
                 now + DAY,
                 20.0,
                 DAY,
@@ -7151,7 +7175,7 @@ mod tests {
         fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
         let before = fs::read(&path).unwrap();
         let item = observation(
-            SeriesKey::new("provider", "duplicate", "window.v1"),
+            test_key("provider", "duplicate", "window.v1"),
             now + DAY,
             10.0,
             DAY,
@@ -7257,8 +7281,14 @@ mod tests {
         };
         fs::write(&v3_path, serde_json::to_vec_pretty(&existing).unwrap()).unwrap();
 
-        let first =
-            migrate_codex_v2_at_paths("acct", "opaque-scope", now, &v2_path, &v3_path).unwrap();
+        let first = migrate_codex_v2_at_paths(
+            "acct",
+            &HistoryScope::for_test("opaque-scope"),
+            now,
+            &v2_path,
+            &v3_path,
+        )
+        .unwrap();
         assert_eq!(first.imported_samples, 7);
         assert_eq!(fs::read(&v2_path).unwrap(), v2_before);
         assert_eq!(
@@ -7284,8 +7314,14 @@ mod tests {
         );
 
         let bytes_after_first = fs::read(&v3_path).unwrap();
-        let second =
-            migrate_codex_v2_at_paths("acct", "opaque-scope", now, &v2_path, &v3_path).unwrap();
+        let second = migrate_codex_v2_at_paths(
+            "acct",
+            &HistoryScope::for_test("opaque-scope"),
+            now,
+            &v2_path,
+            &v3_path,
+        )
+        .unwrap();
         assert_eq!(second.imported_samples, 0);
         assert_eq!(fs::read(&v3_path).unwrap(), bytes_after_first);
 
@@ -7300,8 +7336,14 @@ mod tests {
                 "sampledAt": reset - duration + duration * 55 / 100
             }));
         fs::write(&v2_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
-        let third =
-            migrate_codex_v2_at_paths("acct", "opaque-scope", now, &v2_path, &v3_path).unwrap();
+        let third = migrate_codex_v2_at_paths(
+            "acct",
+            &HistoryScope::for_test("opaque-scope"),
+            now,
+            &v2_path,
+            &v3_path,
+        )
+        .unwrap();
         assert_eq!(third.imported_samples, 1);
         assert_ne!(fs::read(&v3_path).unwrap(), bytes_after_first);
         fs::remove_dir_all(directory).unwrap();
@@ -7345,7 +7387,14 @@ mod tests {
         };
         fs::write(&v3_path, serde_json::to_vec_pretty(&existing).unwrap()).unwrap();
         let before = fs::read(&v3_path).unwrap();
-        let outcome = migrate_codex_v2_at_paths("acct", "scope", now, &v2_path, &v3_path).unwrap();
+        let outcome = migrate_codex_v2_at_paths(
+            "acct",
+            &HistoryScope::for_test("scope"),
+            now,
+            &v2_path,
+            &v3_path,
+        )
+        .unwrap();
         assert_eq!(outcome.imported_samples, 0);
         assert_eq!(
             read_store(&v3_path).series[0].last_activity_at,
@@ -7409,7 +7458,7 @@ mod tests {
 
         let outcome = migrate_codex_v2_at_paths_with_clock_and_mode(
             "acct",
-            "scope",
+            &HistoryScope::for_test("scope"),
             stale_now,
             &v2_path,
             &v3_path,
@@ -7445,8 +7494,14 @@ mod tests {
         fs::write(&v2_path, b"not-json").unwrap();
         let v3_before = b"existing-v3-bytes";
         fs::write(&v3_path, v3_before).unwrap();
-        let outcome =
-            migrate_codex_v2_at_paths("acct", "scope", 7_000_000_000, &v2_path, &v3_path).unwrap();
+        let outcome = migrate_codex_v2_at_paths(
+            "acct",
+            &HistoryScope::for_test("scope"),
+            7_000_000_000,
+            &v2_path,
+            &v3_path,
+        )
+        .unwrap();
         assert_eq!(outcome.imported_samples, 0);
         assert_eq!(fs::read(&v2_path).unwrap(), b"not-json");
         assert_eq!(fs::read(&v3_path).unwrap(), v3_before);
@@ -7477,7 +7532,14 @@ mod tests {
         .unwrap();
         let corrupt = b"corrupt-v3-evidence";
         fs::write(&v3_path, corrupt).unwrap();
-        let outcome = migrate_codex_v2_at_paths("acct", "scope", now, &v2_path, &v3_path).unwrap();
+        let outcome = migrate_codex_v2_at_paths(
+            "acct",
+            &HistoryScope::for_test("scope"),
+            now,
+            &v2_path,
+            &v3_path,
+        )
+        .unwrap();
         assert_eq!(outcome.imported_samples, 1);
         assert_eq!(
             fs::read(directory.join(format!("quota-pace-history-v3.corrupt-{now}.json"))).unwrap(),
@@ -7659,10 +7721,24 @@ mod tests {
         let right_v2 = v2_path.clone();
         let right_v3 = v3_path.clone();
         let left = std::thread::spawn(move || {
-            migrate_codex_v2_at_paths("acct", "opaque", now, &left_v2, &left_v3).unwrap()
+            migrate_codex_v2_at_paths(
+                "acct",
+                &HistoryScope::for_test("opaque"),
+                now,
+                &left_v2,
+                &left_v3,
+            )
+            .unwrap()
         });
         let right = std::thread::spawn(move || {
-            migrate_codex_v2_at_paths("acct", "opaque", now, &right_v2, &right_v3).unwrap()
+            migrate_codex_v2_at_paths(
+                "acct",
+                &HistoryScope::for_test("opaque"),
+                now,
+                &right_v2,
+                &right_v3,
+            )
+            .unwrap()
         });
         let outcomes = [left.join().unwrap(), right.join().unwrap()];
         assert_eq!(
@@ -7784,7 +7860,7 @@ mod tests {
             normalize_reset(jittered_reset, duration)
         );
         let now = reset_at - duration / 5;
-        let key = SeriesKey::new("fixture", "exact-reset", "window.v1");
+        let key = test_key("fixture", "exact-reset", "window.v1");
         let series = seeded_series(
             &key.provider_id,
             &key.account_scope,
@@ -7837,7 +7913,7 @@ mod tests {
     fn partial_fit_rejects_span_identity_and_duration_contradictions() {
         let duration = DAY;
         let reset_at = 31_000_000_i64 + duration;
-        let key = SeriesKey::new("fixture", "partial-guards", "window.v1");
+        let key = test_key("fixture", "partial-guards", "window.v1");
         let phases = [0.10, 0.12, 0.14, 0.16, 0.18, 0.19];
         let series = current_series(&key, reset_at, duration, &phases, 80.0);
         let normalized = normalize_reset(reset_at, duration);
@@ -7889,7 +7965,7 @@ mod tests {
         let (directory, path) = temp_path("partial-fit");
         let duration = DAY;
         let reset_at = 20_000_100 + duration;
-        let key = SeriesKey::new("fixture", "partial-scope", "window.v1");
+        let key = test_key("fixture", "partial-scope", "window.v1");
         let phases = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80];
         let mut final_result = None;
         for phase in phases {
@@ -7923,7 +7999,7 @@ mod tests {
         let normalized_reset = normalize_reset(40_000_000_000_i64, duration);
         let reset_at = normalized_reset + 60;
         let now = normalized_reset;
-        let key = SeriesKey::new("fixture", "cleanup-transaction", "window.v1");
+        let key = test_key("fixture", "cleanup-transaction", "window.v1");
         let mut malformed = current_series(
             &key,
             reset_at,
@@ -8001,7 +8077,7 @@ mod tests {
         let (directory, path) = temp_path("partial-fit-leakage");
         let duration = DAY;
         let reset_at = 21_000_000 + duration;
-        let key = SeriesKey::new("fixture", "partial-leak", "window.v1");
+        let key = test_key("fixture", "partial-leak", "window.v1");
         let phases = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60];
         let mut result = None;
         for (index, phase) in phases.into_iter().enumerate() {
@@ -8060,7 +8136,7 @@ mod tests {
         let current_reset = 42_000_000_000_i64 + duration;
         let now = current_reset - duration * 4 / 10;
         let phases = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60];
-        let key = SeriesKey::new("fixture", "stale-isolation", "window.v1");
+        let key = test_key("fixture", "stale-isolation", "window.v1");
         let make_samples = |reset_at: i64, jagged: bool| {
             phases
                 .iter()
@@ -8149,7 +8225,7 @@ mod tests {
         );
         assert!(cycle_profile(normalize_reset(reset_at, duration), &mixed, now).is_none());
 
-        let key = SeriesKey::new("fixture", "mixed", "window.v1");
+        let key = test_key("fixture", "mixed", "window.v1");
         let mut series = SeriesState {
             provider_id: key.provider_id.clone(),
             account_scope: key.account_scope.clone(),
@@ -8244,7 +8320,7 @@ mod tests {
 
         let duration = DAY;
         let reset_at = 43_000_000_000_i64 + duration;
-        let key = SeriesKey::new("fixture", "partial-boundaries", "window.v1");
+        let key = test_key("fixture", "partial-boundaries", "window.v1");
         let series = current_series(&key, reset_at, duration, &phases, 80.0);
         let now = reset_at - duration + (0.80 * duration as f64) as i64;
         let normalized = normalize_reset(reset_at, duration);
@@ -8276,7 +8352,7 @@ mod tests {
         let duration = 5 * HOUR;
         let reset_at = 23_000_000 + duration;
         let now = reset_at - 60;
-        let key = SeriesKey::new("fixture", "counter-partial", "window.v1");
+        let key = test_key("fixture", "counter-partial", "window.v1");
         let samples = (0..PHASE_BUCKET_COUNT)
             .map(|bucket| {
                 let phase = (bucket as f64 + 0.25) / PHASE_BUCKET_COUNT as f64;
@@ -8364,7 +8440,7 @@ mod tests {
 
         let duration = DAY;
         let reset_at = 51_000_000_000_i64 + duration;
-        let key = SeriesKey::new("fixture", "permutation", "window.v1");
+        let key = test_key("fixture", "permutation", "window.v1");
         let mut first_series = current_series(&key, reset_at, duration, &phases, 80.0);
         let mut second_series = first_series.clone();
         second_series.samples.reverse();
@@ -8506,7 +8582,7 @@ mod tests {
         let duration = 5 * HOUR;
         let current_reset = 24_000_000_000_i64 + duration;
         let now = current_reset - 60;
-        let key = SeriesKey::new("fixture", "counter-complete", "window.v1");
+        let key = test_key("fixture", "counter-complete", "window.v1");
         let mut samples = Vec::with_capacity(129 * PHASE_BUCKET_COUNT);
         for offset in 1..=RETENTION_MAX_CYCLES {
             let reset = current_reset - offset as i64 * duration;
@@ -8576,7 +8652,7 @@ mod tests {
         let duration = 5 * HOUR;
         let current_reset = (53_000_000_000_i64 + duration + 899).div_euclid(900) * 900;
         let now = current_reset - 60;
-        let key = SeriesKey::new("fixture", "mixed-retention", "window.v1");
+        let key = test_key("fixture", "mixed-retention", "window.v1");
         let phases = (0..PHASE_BUCKET_COUNT)
             .map(|bucket| (bucket as f64 + 0.25) / PHASE_BUCKET_COUNT as f64)
             .collect::<Vec<_>>();
@@ -8689,7 +8765,7 @@ mod tests {
         let duration = 5 * HOUR;
         let current_reset = 52_000_000_000_i64 + duration;
         let now = current_reset - duration / 2;
-        let target_key = SeriesKey::new("fixture", "target", "window.v1");
+        let target_key = test_key("fixture", "target", "window.v1");
         let target = seeded_series(
             &target_key.provider_id,
             &target_key.account_scope,
@@ -8701,8 +8777,7 @@ mod tests {
         let make_unrelated = |rich: bool| {
             (0..32)
                 .map(|index| {
-                    let key =
-                        SeriesKey::new("fixture", &format!("unrelated-{index:03}"), "window.v1");
+                    let key = test_key("fixture", format!("unrelated-{index:03}"), "window.v1");
                     let samples = if rich {
                         (1..=4)
                             .flat_map(|offset| {
@@ -8805,7 +8880,7 @@ mod tests {
             for index in 0..STORE_SERIES_COUNT {
                 let account = format!("benchmark-{index:03}");
                 let window = format!("window-{index:03}.v1");
-                let key = SeriesKey::new("fixture", &account, &window);
+                let key = test_key("fixture", &account, &window);
                 let target = TARGET_INDICES.contains(&index);
                 let mut samples = Vec::new();
                 if target {
