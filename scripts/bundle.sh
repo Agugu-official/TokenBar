@@ -44,10 +44,31 @@ cp -R Sources/TokenBar/Resources/Localizations/*.lproj "$APP/Contents/Resources/
 if [ -f assets/icon.icns ]; then
   cp assets/icon.icns "$APP/Contents/Resources/icon.icns"
 fi
-# Sparkle framework (SPM binary artifact).
-SPARKLE_FRAMEWORK=".build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
-if [ -d "$SPARKLE_FRAMEWORK" ]; then
-  cp -R "$SPARKLE_FRAMEWORK" "$APP/Contents/Frameworks/"
+# Sparkle framework, compiled here rather than taken from the SPM binary
+# artifact — see scripts/build-sparkle.sh for why the official prebuilt one
+# cannot rename the installed app. Not conditional: an app assembled without an
+# updater looks fine and silently never updates again.
+SPARKLE_FRAMEWORK="$(scripts/build-sparkle.sh)"
+cp -R "$SPARKLE_FRAMEWORK" "$APP/Contents/Frameworks/"
+
+# Assert on the binary that actually ships, not on the source that produced it.
+# With the macro off the call is compiled out, so the stock artifact scores zero
+# here — this check has been run against both and does discriminate. Without it,
+# a build that quietly fell back to the official framework would reach users as
+# an app whose next major version can never rename itself, and there is no
+# second channel to correct that (the cask is auto_updates true).
+#
+# `grep -c`, not `grep -q`: under `set -o pipefail` a quiet grep closes the pipe
+# on its first match, `strings` dies of SIGPIPE, and the pipeline reports
+# failure exactly when the check passes. Counting reads all the input, and the
+# count is the thing being asserted anyway.
+NORMALIZE_REFS="$(strings -a "$APP/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate" \
+                  | grep -c SUNormalizedInstallationPath || true)"
+if [ "$NORMALIZE_REFS" -eq 0 ]; then
+  echo "error: bundled Sparkle lacks installed-name normalization." >&2
+  echo "  Built from: $SPARKLE_FRAMEWORK" >&2
+  echo "  Remove .build/sparkle-normalized and re-run to rebuild it." >&2
+  exit 1
 fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
