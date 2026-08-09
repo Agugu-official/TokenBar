@@ -45,7 +45,11 @@ public struct UsagePace: Sendable {
     /// True if the current rate lasts past the reset (won't run out).
     public let willLastToReset: Bool
 
-    /// Yellow historical deficit is valid only for a backend historical result.
+    /// Which estimator produced a deficit — the cross-language parity contract's
+    /// basis discriminator. **Not** the warning-color rule: the card tints by
+    /// `stage.isDeficit` alone, because `available` is re-decided on every
+    /// refresh by an out-of-sample fit gate and keying the color here made it
+    /// blink out while the deficit underneath never moved.
     public var isHistoricalDeficit: Bool {
         basis == .historical && stage.isDeficit
     }

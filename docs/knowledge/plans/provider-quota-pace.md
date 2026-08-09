@@ -309,7 +309,9 @@ windowKey == nil <=> unavailable(windowIdentity)
 
 Linear setting 也使用同一個 exact `durationSeconds`。Historical setting 只有在 `learningHistory` 可以暫時使用 Linear，而且 UI 必須明示；`learningDuration`、`unavailable`、`legacyMissing` 都不能 silent fallback。Settings 文案要從「weekly curve」改成「learns each quota window's usage pattern」。
 
-黃色 ahead／deficit 狀態只有在 `available` 時能宣稱是 historical comparison；`learningHistory` 的 Linear estimate 必須以不同文案標示，避免把測試用 reverse 或硬編文字誤認為真實 historical result。
+「這是 historical comparison」的宣稱只有在 `available` 時成立，而且**只由文案承擔**：`learningHistory` 的 Linear estimate 必須以不同文案標示，避免把測試用 reverse 或硬編文字誤認為真實 historical result。
+
+橘色 ahead／deficit 標記本身不承擔這個宣稱——只要 actual 越過 expected 線就上色，Historical 與 Linear 同色。理由是 `available` 由每次 refresh 重跑的 out-of-sample fit gate 決定（`evaluate_partial_projection` 有六個 `return None` 分支：bucket 數、phase span、fit quality、slope、crossing 範圍），同一張 card 會在 `available` 與 `learningHistory` 之間來回；把顏色綁在 basis 上，使用者看到的是預測「一下子就不見了」，而底層 deficit 一直存在。
 
 ## Generic historical evaluator
 
@@ -559,7 +561,7 @@ Mac-owned [`provider-quota-pace-v3.json`](../../../Fixtures/CrossCheck/provider-
 
 | Case | Required result |
 |---|---|
-| Historical available | Card 使用 Rust historical expected、ETA、will-last與risk；ahead狀態可呈現真正黃色 |
+| Historical available | Card 使用 Rust historical expected、ETA、will-last與risk；ahead狀態上橘色（與 Linear 的 deficit 同色） |
 | Learning duration | 顯示 `Learning reset duration`，不顯示 deficit、projected empty或 lasts |
 | Learning history | 明示 Linear estimate；不得看起來像已啟用 Historical |
 | Unavailable／legacy payload | 顯示 typed unavailable／update state，不 silent Linear |

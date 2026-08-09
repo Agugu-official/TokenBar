@@ -101,8 +101,16 @@ struct AgentLimitsCard: View {
             }
         }
 
-        static func isHistoricalDeficit(_ pace: UsagePace?) -> Bool {
-            pace?.isHistoricalDeficit == true
+        /// Warning color follows codexbar: the marker is tinted when actual
+        /// usage has passed the expected line, whichever estimator drew that
+        /// line. Keying it to the basis instead made the warning blink out
+        /// whenever the Historical fit failed to re-qualify — `available` is
+        /// re-decided on every refresh by an out-of-sample fit gate, so a card
+        /// oscillates between Historical and `learningHistory` while the deficit
+        /// underneath never moves. The status text still names the basis, so a
+        /// Linear estimate stays identifiable without the color flickering.
+        static func isDeficit(_ pace: UsagePace?) -> Bool {
+            pace?.stage.isDeficit == true
         }
     }
 
@@ -505,7 +513,7 @@ struct AgentLimitsCard: View {
                         let left = asUsed ? $0.expectedUsedPercent : 100 - $0.expectedUsedPercent
                         return min(100, max(0, left))
                     },
-                    paceIsDeficit: Self.PacePresentation.isHistoricalDeficit(pace))
+                    paceIsDeficit: Self.PacePresentation.isDeficit(pace))
                 paceFooter(window: window, leftLabel: leftLabel, pace: pace)
             }
         }
@@ -573,7 +581,7 @@ struct AgentLimitsCard: View {
         Text(text)
             .font(.caption2)
             .foregroundStyle(
-                Self.PacePresentation.isHistoricalDeficit(pace)
+                Self.PacePresentation.isDeficit(pace)
                     ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
     }
 
