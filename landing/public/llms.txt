@@ -8,7 +8,7 @@
 ## What it is
 - Native macOS menu-bar app for Apple Silicon, macOS 14+ (Liquid Glass needs macOS 26; earlier systems get a vibrancy fallback). MIT licensed, free, open source.
 - v1.0.0 (June 2026) replaced the original Tauri implementation; the Tauri repo is archived and `tokenbar@legacy` pins its final build (v0.4.5, macOS 11+).
-- Tracks 25+ AI coding agents from local logs: Claude Code, Codex CLI, Cursor, OpenCode, Gemini CLI, Copilot CLI, Amp, Droid, Hermes, Goose, Kilo/KiloCode, Roo Code, Qwen, Kimi, Crush, Zed, Kiro, Trae, Warp, and more.
+- Tracks 25+ AI coding agents from local logs: Claude Code, Codex, Cursor, OpenCode, Gemini CLI, Copilot, Amp, Droid, Hermes, Goose, Kilo/KiloCode, Roo Code, Qwen, Kimi, Crush, Zed, Kiro, Trae, Warp, and more.
 - Session parsing, dedup, and pricing are delegated to the vendored tokscale-core crate.
 
 ## Dashboard views
