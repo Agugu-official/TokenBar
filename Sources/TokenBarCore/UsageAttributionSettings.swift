@@ -316,7 +316,13 @@ public enum UsageAttributionSettings {
             // here rather than in the view keeps `pageState` honest — a range
             // whose only sources are empty reads as "no usage", not as a page
             // of decisions waiting to be made.
-            guard value.tokens > 0 || value.cost != 0 else { return nil }
+            //
+            // Nonzero, not positive, and deliberately the same test
+            // `UsageAttributionBreakdown.rows` applies. The two surfaces
+            // describe one set of sources: anything the Stats card is willing
+            // to report as unassigned must have a row here to classify it,
+            // including a pathological negative aggregate.
+            guard value.tokens != 0 || value.cost != 0 else { return nil }
             let state = UsageAttribution.resolve(
                 client: value.client, provider: value.provider, model: nil, records: confirmed)
             // A stored suggestion carries its own state now: `excluded` is a

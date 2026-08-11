@@ -2051,6 +2051,24 @@ enum SelfTest {
                     isLoading: false) == .empty,
             "a source observed at zero is not offered for classification")
 
+        // The Stats breakdown keeps any entry with `total != 0 || cost != 0`.
+        // Settings must not be stricter, or the card can report unassigned
+        // usage the settings page offers no row to classify. A negative
+        // aggregate is the case where a positive test and a nonzero test part.
+        let negativeSourceEntries = [
+            attributionEntry(
+                client: "cursor", provider: "anthropic", model: "corrupt-model",
+                total: -5, cost: 0.0),
+        ]
+        expect(
+            UsageAttributionSettings.rows(
+                entries: negativeSourceEntries, confirmed: [], suggestions: []
+            ).map(\.tokens) == [-5]
+                && UsageAttributionBreakdown.rows(
+                    entries: negativeSourceEntries, clientIds: ["cursor"], confirmed: []
+                ).contains { $0.tokens == -5 },
+            "settings keeps every source the breakdown card still reports")
+
         let allTimeSource = AttributedSeriesTestSource(
             graphPayload: payloadFixture([
                 contributionJSON(
