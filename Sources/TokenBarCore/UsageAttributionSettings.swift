@@ -5,14 +5,19 @@ public enum UsageAttributionSettings {
     public enum Copy {
         public static let section = "Usage attribution"
         public static let classifyHint = "Classify each observed client/provider source against the subscription it should count toward. Nothing here is inferred as a billing event."
-        /// Two facts about provider identity, deliberately in one hint. The
-        /// first is about this page: it compares whatever string the report
-        /// emitted, and never canonicalizes. The second is about what reaches
-        /// it: the engine already folds a few routes together upstream
-        /// (`canonical_provider`), and those cannot be separated here at any
-        /// later stage. Stating only the first reads as a promise that nothing
-        /// was merged, which is the opposite of what happens to Vertex.
-        public static let canonicalizationHint = "Provider IDs are compared exactly as the source emitted them, so related-looking routes may appear as separate rows and be classified independently. A few arrive already merged and cannot be separated here: Vertex AI is reported as Anthropic, and Codex as OpenAI."
+        /// Two facts about provider identity, deliberately in one hint, and
+        /// both hedged for a reason.
+        ///
+        /// The first is about this page: it compares whatever string arrived
+        /// and never canonicalizes. The second is about what arrives.
+        /// `canonical_provider` folds `vertex` into `anthropic` and
+        /// `openai_codex` into `openai`, but it is applied per parser, not
+        /// globally — of the engine's session parsers, fourteen never call it,
+        /// so an OpenClaw row really does keep `openai-codex` as its own
+        /// classifiable source. Neither half can be stated flatly: "nothing is
+        /// merged" is false for Claude Code, and "Codex is reported as OpenAI"
+        /// is false for OpenClaw. Hence "some clients".
+        public static let canonicalizationHint = "Provider IDs are compared exactly as the source emitted them, so related-looking routes may appear as separate rows and be classified independently. Some clients merge them before reporting — Vertex AI arriving as Anthropic, Codex as OpenAI — and a row that arrived merged cannot be split here."
         public static let declarationHint = "A declaration is your classification, not a billing fact."
         public static let noRows = "No provider-split usage in this range."
         /// The report request finished without one. Distinct from `noRows`,

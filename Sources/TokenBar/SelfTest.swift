@@ -2016,17 +2016,21 @@ enum SelfTest {
                 && !UsageAttributionSettings.Copy.canonicalizationHint.contains("canonicalized"),
             "attribution copy describes exact provider comparison")
 
-        // The engine folds `vertex`/`vertex_ai` into `anthropic` and
-        // `openai_codex` into `openai` before the report is built, so two
-        // billing relationships share one row and no later stage can split
-        // them. Saying only that this page compares exactly reads as a promise
-        // that nothing was merged anywhere.
+        // Parsers that call `provider_identity::n` fold `vertex` into
+        // `anthropic` and `openai_codex` into `openai` before the report is
+        // built, so two billing relationships share one row no later stage can
+        // split. Fourteen parsers never call it, so the same aliases stay
+        // separable there. Both halves must be present and the claim must be
+        // hedged: "nothing is merged" is false for Claude Code, "Codex is
+        // reported as OpenAI" is false for OpenClaw.
         expect(
             UsageAttributionSettings.Copy.canonicalizationHint.contains(
-                "Vertex AI is reported as Anthropic")
+                "Vertex AI arriving as Anthropic")
                 && UsageAttributionSettings.Copy.canonicalizationHint.contains(
-                    "Codex as OpenAI"),
-            "attribution copy discloses the routes the engine already merged")
+                    "Codex as OpenAI")
+                && UsageAttributionSettings.Copy.canonicalizationHint.contains(
+                    "Some clients merge them"),
+            "attribution copy discloses merged routes as something only some clients do")
 
         let zeroSourceRows = UsageAttributionSettings.rows(
             entries: [

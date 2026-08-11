@@ -210,7 +210,7 @@
 "Nothing is classified yet. Classify sources in Settings → Usage attribution." = "目前尚未分類任何內容。請前往「設定」→「用量歸屬」分類來源。";
 "No attributed usage in this range." = "這個區間沒有歸屬用量。";
 "Classify each observed client/provider source against the subscription it should count toward. Nothing here is inferred as a billing event." = "將每個觀察到的用戶端／供應商來源分類到它應計入的訂閱。這裡沒有任何內容是推測出的帳務事件。";
-"Provider IDs are compared exactly as the source emitted them, so related-looking routes may appear as separate rows and be classified independently. A few arrive already merged and cannot be separated here: Vertex AI is reported as Anthropic, and Codex as OpenAI." = "供應商 ID 會完全按照來源送出的內容進行比對，因此看起來相關的路由仍可能顯示為不同列，並分別分類。少數路由在送達前就已被合併，在這裡無法再拆開：Vertex AI 會回報為 Anthropic，Codex 會回報為 OpenAI。";
+"Provider IDs are compared exactly as the source emitted them, so related-looking routes may appear as separate rows and be classified independently. Some clients merge them before reporting — Vertex AI arriving as Anthropic, Codex as OpenAI — and a row that arrived merged cannot be split here." = "供應商 ID 會完全按照來源送出的內容進行比對，因此看起來相關的路由仍可能顯示為不同列，並分別分類。部分 client 會在回報前先行合併——Vertex AI 併入 Anthropic、Codex 併入 OpenAI——已合併送達的列在這裡無法再拆開。";
 "A declaration is your classification, not a billing fact." = "這項宣告是你的分類，不是帳務事實。";
 "No provider-split usage in this range." = "這個區間沒有按供應商分列的用量。";
 "Accept all suggestions (%lld)" = "接受所有建議（%lld）";

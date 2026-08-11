@@ -177,7 +177,7 @@ Pricing metadata is refreshable rather than frozen for the process lifetime; the
 | 跨 client 建議的政策 | `crossAgentSubscriptionProviders` 允許從其他 agent 使用，涵蓋三類：第一方賣跨 agent 存取的（`openai`、`xai`）、coding plan 本身就是賣給別的 agent 用的中國廠商（`deepseek`、`moonshot`、`minimax`、`zhipu`、`alibaba`）、以及根本不涉及廠商關係的（`open-weights` 產品自行代管、`own` 產品自訓、`microsoft`／`amazon` 只在別人的 bundle 裡賣）。`subscriptionBoundProviders`（`anthropic`、`google`）不允許。兩者必須互斥，且每個訂閱服務的 provider 都要落在其一——self-test 對此 fail closed |
 | Bound 的對象是訂閱而非 provider | `providerOwnClient` 指出每個 provider 自己的訂閱屬於哪個 client。bound 規則只排除該 client 作為跨 agent 目標；轉售同一 provider 的訂閱（Copilot 服務 `anthropic`）不受限 |
 | opencode 的第二個所有權來源 | `opencodeSubscriptions` 以顯示標籤報告已 oauth 的 provider。解析三段：四個改名（`Codex`／`Claude`／`Copilot`／`Gemini`）走 `subscriptionLabelAliases` 顯式反查；其餘標籤是大寫的 provider key，先去掉方案後綴（`Minimax-coding-plan` → `minimax`），再查 `providerOwnClient`——**不是** `subscriptionProviderMap`，因為多數 provider 有多個轉售商，「唯一涵蓋者」對 `Xai` 之類已無法判定，而 oauth 條目代表使用者直接簽入該廠商，答案必然是它的第一方 client。查不到時退而接受該段本身為 client，但僅限它確實賣方案（`Kimi-for-coding` → `kimi`，因為 key 命名產品而非廠商）；否則不成為目標 |
-| 已知不可分 | `canonical_provider` 使 `openai_codex`／`openai`、`vertex`／`anthropic` 在資料裡同鍵。UI 必須明載，不得假裝可分 |
+| 已知不可分 | 呼叫 `provider_identity::n` 的 parser 會使 `openai_codex`／`openai`、`vertex`／`anthropic` 在資料裡同鍵。**但正規化是 per-parser**（見上一列）：14 個 session parser 從不呼叫它，同一組別名在那些來源仍是可獨立分類的兩列。UI 必須明載這件事會發生，且必須寫成條件句——「一律合併」與「一律不合併」都是錯的 |
 | 帳號變更 | `agent_usage` wire 不帶 account scope，Swift 端偵測不到帳號更換，因此不宣稱對應會隨帳號失效 |
 
 > **政策來源：** 上述 provider 分組是可稽核的產品知識，不是從本機用量或 quota payload 推論而得。新增 provider 時必須選邊，self-test 對此 fail closed。
