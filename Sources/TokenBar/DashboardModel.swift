@@ -767,13 +767,13 @@ private struct DashboardSnapshot {
         // year — skip the stale-`year` re-fetch here, or an empty year-filtered
         // hourly/agents could land after it and blank those lenses.
         guard self.year == year, !Task.isCancelled else { return }
-        // No model refresh here on purpose. Committing the payload changes
-        // `meta.generatedAt`, which is part of PopoverView's model task id, so
-        // the visible model lens re-requests on its own. Refreshing here as
-        // well raced that task — this function bumps the request token before
-        // suspending, so the task's request always won and this one's result
-        // was always discarded, leaving two concurrent model scans fighting the
-        // same bounded pool: the exact contention this slice removes.
+        // Heal a stale model report that a lens already asked for, just as the
+        // poll does. The shared seam owns the wanted/stale checks and coalesces
+        // PopoverView's generation-keyed refire onto the same in-flight scan.
+        await retryModelIfStale(priority: .userInitiated)
+        // The retry may suspend while cancellation or a year change retires this
+        // reload; do not issue lazy work for the slice it no longer owns.
+        guard self.year == year, !Task.isCancelled else { return }
         // Re-fetch the lazy lenses that were already loaded, keeping the slice
         // they were last fetched for (an ordered array of the stored Set — the
         // FFI filter is membership-based, so order is irrelevant). Re-check the

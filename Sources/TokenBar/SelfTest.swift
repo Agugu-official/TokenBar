@@ -29,6 +29,8 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
     /// graph was still blocked, which is exactly the contention being removed.
     private var modelCalls = 0
     private var modelCallsWhileGraphPending = 0
+    private var modelPriorities: [TaskPriority] = []
+    private var hourlyCalls = 0
     private var blockedModel = false
     /// Fail the next model request once, then behave normally — the shape of a
     /// transient FFI error, which is the case that must self-heal.
@@ -198,8 +200,8 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
     }
 
     func modelReport(year: String?, priority: TaskPriority) async throws -> ModelReport {
-        _ = priority
         modelCalls += 1
+        modelPriorities.append(priority)
         if !pendingGraphs.values.allSatisfy(\.isEmpty) || !blockedGraphYears.isEmpty {
             modelCallsWhileGraphPending += 1
         }
@@ -216,6 +218,8 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
 
     func modelCallCount() -> Int { modelCalls }
     func modelCallsRacingGraph() -> Int { modelCallsWhileGraphPending }
+    func modelCallPriorities() -> [TaskPriority] { modelPriorities }
+    func hourlyCallCount() -> Int { hourlyCalls }
     func blockModel() { blockedModel = true }
     func failNextModel() { failModelOnce = true }
     func failNextGraph() { failGraphOnce = true }
@@ -245,6 +249,7 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
         year: String?, clients: [String]?, priority: TaskPriority
     ) async throws -> HourlyReport {
         _ = priority
+        hourlyCalls += 1
         let key = Self.key(year)
         if blockedHourlyYears.contains(key) {
             return await withCheckedContinuation {
@@ -4944,17 +4949,24 @@ enum SelfTest {
             await staleGenModel.load()
             await staleGenModel.ensureModelData(for: .overview)
             let staleGenSeeded = staleGenModel.modelReport != nil
+            let staleGenGenerationBefore = staleGenModel.payload?.meta.generatedAt
+            let staleGenCallsBeforeRefresh = await staleGenSource.modelCallCount()
             await staleGenSource.failNextModel()
             await staleGenModel.refresh()
-            await staleGenModel.ensureModelData(for: .overview)
-            // Control: the failure has to leave a report standing, or the old
-            // `modelReport == nil` gate would have retried anyway and this
-            // assertion would pass on the very state it exists to exclude.
+            let staleGenCallsAfterRefresh = await staleGenSource.modelCallCount()
+            let staleGenGenerationAdvanced =
+                staleGenModel.payload?.meta.generatedAt != staleGenGenerationBefore
+            let staleGenRefreshRetried =
+                staleGenCallsAfterRefresh == staleGenCallsBeforeRefresh + 1
+            // Control: the failed refresh retry has to leave a report standing,
+            // or a `modelReport == nil` gate would still pass this fixture.
             let staleGenKeptLastGood = staleGenModel.modelReport != nil
-            let staleGenCallsBefore = await staleGenSource.modelCallCount()
             await staleGenModel.retryMissingModelForTest()
-            let staleGenCallsAfter = await staleGenSource.modelCallCount()
-            let staleGenRetried = staleGenCallsAfter > staleGenCallsBefore
+            let staleGenCallsAfterRetry = await staleGenSource.modelCallCount()
+            let staleGenRetried = staleGenCallsAfterRetry == staleGenCallsAfterRefresh + 1
+            await staleGenModel.retryMissingModelForTest()
+            let staleGenCurrent =
+                await staleGenSource.modelCallCount() == staleGenCallsAfterRetry
 
             // A reopen that commits a new generation scans the model exactly
             // once, for the committed slice.
@@ -5189,20 +5201,50 @@ enum SelfTest {
                 allYearsGeneration != nil && allYearsGeneration == thisYearGeneration
             let keyChangedDespiteCollision = allYearsKey != thisYearKey
 
-            // Codex P2 — a transient model failure must self-heal. Before the
-            // graph/model split the 60s poll re-fetched the report
-            // unconditionally, so a failed attempt recovered on its own;
-            // deferring the fetch removed that path and left the cards claiming
-            // "no model usage" until the user intervened.
+            // #199 — a manual refresh must heal a model request that failed
+            // transiently, without waiting for the next 60-second poll.
             let healSource = ControlledTurnUsageDataSource()
+            await healSource.advanceGraphGenerationPerCall()
             let healModel = DashboardModel(source: healSource, initialYear: yearA)
             await healModel.load()
+            let healGenerationBefore = healModel.payload?.meta.generatedAt
             await healSource.failNextModel()
             await healModel.ensureModelData(for: .overview)
-            let failedLeftEmpty = await healModel.modelReport == nil
-            // The poll is what used to heal this; drive its retry directly.
+            let healCallsAfterFailure = await healSource.modelCallCount()
+            let failedLeftEmpty =
+                healModel.modelReport == nil && healCallsAfterFailure == 1
+            await healModel.refresh()
+            let healCallsAfterRefresh = await healSource.modelCallCount()
+            let healPriorities = await healSource.modelCallPriorities()
+            let healGenerationAdvanced =
+                healModel.payload?.meta.generatedAt != healGenerationBefore
+            let healRefreshRetriedOnce = healCallsAfterRefresh == healCallsAfterFailure + 1
+            let healRefreshPriority =
+                healPriorities.count == healCallsAfterRefresh
+                    && healPriorities.last == .userInitiated
+            let healedAfterRefresh = healModel.modelReport != nil
+            // A second retry must be an idempotent no-op, proving the refresh
+            // published for the committed generation rather than merely any report.
             await healModel.retryMissingModelForTest()
-            let healedAfterRetry = await healModel.modelReport != nil
+            let healCurrentAfterRefresh =
+                await healSource.modelCallCount() == healCallsAfterRefresh
+
+            // A reload may call the shared seam unconditionally; modelWanted is
+            // what keeps a graph-only dashboard from paying for a model scan.
+            let neverWantedSource = ControlledTurnUsageDataSource()
+            await neverWantedSource.advanceGraphGenerationPerCall()
+            let neverWantedModel = DashboardModel(source: neverWantedSource, initialYear: yearA)
+            await neverWantedModel.load()
+            let neverWantedGenerationBefore = neverWantedModel.payload?.meta.generatedAt
+            let neverWantedCallsBefore = await neverWantedSource.modelCallCount()
+            await neverWantedModel.refresh()
+            let neverWantedGenerationAdvanced =
+                neverWantedModel.payload?.meta.generatedAt != neverWantedGenerationBefore
+            let neverWantedCallsAfter = await neverWantedSource.modelCallCount()
+            let neverWantedSkippedModel =
+                neverWantedCallsBefore == 0
+                    && neverWantedCallsAfter == 0
+                    && neverWantedModel.modelReport == nil
 
             // Codex P1 — switching lens mid-scan must still publish. SwiftUI
             // cancels the lens-keyed task on the switch, so if the cancelled
@@ -5397,14 +5439,8 @@ enum SelfTest {
             let lensesSkipModel = await dailySource.modelCallCount() == 0
 
             // F1 regression — a graph refresh must not fan out into two
-            // concurrent model scans. The defect only appears under the real
-            // interleaving: the background refresh bumps the request token and
-            // THEN suspends, which yields the MainActor and lets PopoverView's
-            // generation-keyed task re-fire and issue a second scan. A purely
-            // sequential drive cannot reproduce it — the first request would
-            // simply publish and the second would find matching identity — so
-            // this blocks the model source and re-fires the lens while a
-            // request is genuinely in flight.
+            // concurrent model scans. The reload retry parks first, then the
+            // generation-keyed view task re-fires and must adopt that same scan.
             let refreshSource = ControlledTurnUsageDataSource()
             await refreshSource.advanceGraphGenerationPerCall()
             let refreshModel = DashboardModel(source: refreshSource, initialYear: nil)
@@ -5413,22 +5449,51 @@ enum SelfTest {
             let beforeRefresh = await refreshSource.modelCallCount()
             await refreshSource.blockModel()
             let refreshTask = Task { await refreshModel.refresh() }
-            // Give any background model request a chance to be issued and park.
-            let sawInFlight = await waitUntil { await refreshSource.pendingModelCount() > 0 }
-            // The lens task re-fires here, exactly as the payload-generation key
-            // makes it once apply() commits the refreshed graph.
-            let refireTask = Task { await refreshModel.ensureModelData(for: .overview) }
-            _ = await waitUntil { await refreshSource.pendingModelCount() > 0 }
+            let sawInFlight = await waitUntil {
+                await refreshSource.pendingModelCount() == 1
+            }
+            let refireArrivals = MainActorArrivalGate(target: 1)
+            let refireTask = Task { @MainActor in
+                refireArrivals.arrive()
+                await refreshModel.ensureModelData(for: .overview)
+            }
+            await refireArrivals.waitForTarget()
+            let pendingAfterRefire = await refreshSource.pendingModelCount()
             await refreshSource.releaseModel()
             await refreshTask.value
             await refireTask.value
             let afterRefresh = await refreshSource.modelCallCount()
-            // EXACTLY one scan per graph commit. `<=` alone was one-sided: it
-            // stayed green when the identity gate was mutated to never refetch,
-            // which is the opposite failure and the one deleting the background
-            // refresh could plausibly have caused.
-            let oneScanPerCommit = (afterRefresh - beforeRefresh) == 1
-            _ = sawInFlight
+            // EXACTLY one scan per graph commit. The parked/refire controls make
+            // this distinguish coalescing from both zero work and a second scan.
+            let oneScanPerCommit =
+                sawInFlight
+                    && pendingAfterRefire == 1
+                    && (afterRefresh - beforeRefresh) == 1
+                    && refreshModel.modelReport != nil
+
+            // The retry above is a new suspension point. If its parent refresh is
+            // cancelled while the unstructured scan finishes, it must not continue
+            // into the already-loaded lazy lenses afterwards.
+            let cancelSource = ControlledTurnUsageDataSource()
+            await cancelSource.advanceGraphGenerationPerCall()
+            let cancelModel = DashboardModel(source: cancelSource, initialYear: yearA)
+            let cancelClients = ["claude"]
+            await cancelModel.load()
+            await cancelModel.ensureModelData(for: .overview)
+            await cancelModel.ensureData(for: .hourly, clients: cancelClients)
+            let cancelHourlySeeded =
+                await cancelModel.hourlyReport(for: cancelClients) != nil
+            let cancelHourlyCallsBefore = await cancelSource.hourlyCallCount()
+            await cancelSource.blockModel()
+            let cancelRefresh = Task { await cancelModel.refresh() }
+            let cancelRetryParked = await waitUntil {
+                await cancelSource.pendingModelCount() == 1
+            }
+            cancelRefresh.cancel()
+            await cancelSource.releaseModel()
+            await cancelRefresh.value
+            let cancelSkippedLazy =
+                await cancelSource.hourlyCallCount() == cancelHourlyCallsBefore
 
             // Re-entry during an in-flight scan must join it, not start a
             // second. Both triggers are ordinary interaction: expanding another
@@ -5472,31 +5537,38 @@ enum SelfTest {
                 cachesSnapshot: true, source: lagSource, initialYear: nil)
             await lagSeed.load()
             await lagSeed.ensureModelData(for: .overview)
+            let lagSeedGeneration = lagSeed.payload?.meta.generatedAt
             let lagSeedCalls = await lagSource.modelCallCount()
-            // Move the graph on without touching the model, exactly as a poll
-            // does while the user sits on a lens that shows no models.
+            // Move the graph on, but fail the refresh's own retry so the snapshot
+            // really carries payload B beside last-good model A.
+            await lagSource.failNextModel()
             await lagSeed.refresh()
+            let lagSeedCallsAfterRefresh = await lagSource.modelCallCount()
+            let lagSeedAdvanced = lagSeed.payload?.meta.generatedAt != lagSeedGeneration
+            let lagSeedRetryFailed =
+                lagSeedCallsAfterRefresh == lagSeedCalls + 1
+                    && lagSeed.modelReport != nil
             let lagRestored = DashboardModel(
                 cachesSnapshot: true, source: lagSource, initialYear: nil)
-            // Control: the restore really is a lag (payload present, model
-            // absent/stale for it), so LP3's restore gate is installed and
-            // `ensureModelData` below cannot return without going through it.
-            let lagRestoredNeedsGate = lagRestored.payload != nil
+            // Control: the restore really carries the lagging last-good report;
+            // its recorded generation, not its presence, is what makes the first
+            // model lens refetch it.
+            let lagRestoredNeedsGate =
+                lagRestored.payload != nil && lagRestored.modelReport != nil
             // LP3 precondition: `ensureModelData`/`ensureModelColors` require
             // `load()` to have been called first, or the restore gate a lag
             // installs hangs forever. `pauseGraphAdvance()` holds this load to
-            // the SAME generation the snapshot already carries — the fixture
-            // advances on every call by default, and letting this one move
-            // the generation would make the refetch below ambiguous: caused
-            // by the model lag under test, or merely by the payload moving.
+            // the SAME generation the snapshot already carries.
             await lagSource.pauseGraphAdvance()
             let lagGenerationBeforeLoad = lagRestored.payload?.meta.generatedAt
             await lagRestored.load()
             await lagSource.resumeGraphAdvance()
             let lagLoadHeldGeneration =
                 lagRestored.payload?.meta.generatedAt == lagGenerationBeforeLoad
+            let lagCallsBeforeEnsure = await lagSource.modelCallCount()
             await lagRestored.ensureModelData(for: .overview)
-            let lagRefetched = await lagSource.modelCallCount() > lagSeedCalls
+            let lagRefetched =
+                await lagSource.modelCallCount() == lagCallsBeforeEnsure + 1
 
             // A genuinely newer slice must supersede, not be swallowed by the
             // coalescing guard. Without this a guard of the shape
@@ -5512,21 +5584,34 @@ enum SelfTest {
             await supersedeModel.load()
             await supersedeSource.blockModel()
             let staleScan = Task { await supersedeModel.ensureModelData(for: .overview) }
-            _ = await waitUntil { await supersedeSource.pendingModelCount() > 0 }
-            // Move the graph on, then request again: a different generation, so
-            // this must start its own scan rather than join the parked one.
-            await supersedeModel.refresh()
-            let newerScan = Task { await supersedeModel.ensureModelData(for: .overview) }
-            let bothInFlight = await waitUntil { await supersedeSource.pendingModelCount() >= 2 }
+            _ = await waitUntil { await supersedeSource.pendingModelCount() == 1 }
+            // The refresh itself starts the newer generation's retry and waits on
+            // it. A view-task refire must adopt that successor, not start a third.
+            let supersedeRefresh = Task { await supersedeModel.refresh() }
+            let bothInFlight = await waitUntil {
+                await supersedeSource.pendingModelCount() == 2
+            }
+            let supersedeRefireArrivals = MainActorArrivalGate(target: 1)
+            let newerScan = Task { @MainActor in
+                supersedeRefireArrivals.arrive()
+                await supersedeModel.ensureModelData(for: .overview)
+            }
+            await supersedeRefireArrivals.waitForTarget()
+            let pendingAfterSupersedeRefire =
+                await supersedeSource.pendingModelCount()
             // Retire only the superseded scan. Its completion must not clear
-            // the loading flag, which still belongs to the scan replacing it —
-            // otherwise the cards fall to the empty copy while work continues.
+            // the loading flag, which still belongs to the scan replacing it.
             await supersedeSource.releaseOneModel()
             await staleScan.value
             let loadingHeldBySuccessor = supersedeModel.modelLoading
             await supersedeSource.releaseModel()
+            await supersedeRefresh.value
             await newerScan.value
-            let newerSliceSupersedes = bothInFlight
+            let supersedeCalls = await supersedeSource.modelCallCount()
+            let newerSliceSupersedes =
+                bothInFlight
+                    && pendingAfterSupersedeRefire == 2
+                    && supersedeCalls == 2
 
             // ABA — the in-flight slot must be released by the scan that owns
             // it, not by any scan carrying an equal identity value. A year
@@ -5637,8 +5722,11 @@ enum SelfTest {
                 "refreshGateDeferred": refreshGateDeferred,
                 "refreshGateModelArrived": refreshGateModelArrived,
                 "staleGenSeeded": staleGenSeeded,
+                "staleGenGenerationAdvanced": staleGenGenerationAdvanced,
+                "staleGenRefreshRetried": staleGenRefreshRetried,
                 "staleGenKeptLastGood": staleGenKeptLastGood,
                 "staleGenRetried": staleGenRetried,
+                "staleGenCurrent": staleGenCurrent,
                 "commitGenRestoredStale": commitGenRestoredStale,
                 "commitGenAdvanced": commitGenAdvanced,
                 "commitGenScannedOnce": commitGenScannedOnce,
@@ -5661,15 +5749,26 @@ enum SelfTest {
                 "lazyHeldBack": lazyHeldBack,
                 "keyHeldUntilCommit": keyHeldUntilCommit,
                 "keyChangedDespiteCollision": keyChangedDespiteCollision,
-                "healedAfterRetry": healedAfterRetry,
+                "healGenerationAdvanced": healGenerationAdvanced,
+                "healRefreshRetriedOnce": healRefreshRetriedOnce,
+                "healRefreshPriority": healRefreshPriority,
+                "healedAfterRefresh": healedAfterRefresh,
+                "healCurrentAfterRefresh": healCurrentAfterRefresh,
+                "neverWantedGenerationAdvanced": neverWantedGenerationAdvanced,
+                "neverWantedSkippedModel": neverWantedSkippedModel,
                 "phantomIssuedNoScan": phantomIssuedNoScan,
                 "phantomReadsAsLoading": phantomReadsAsLoading,
                 "modelDroppedOnYearSwitch": modelDroppedOnYearSwitch,
                 "oneScanPerCommit": oneScanPerCommit,
+                "cancelHourlySeeded": cancelHourlySeeded,
+                "cancelRetryParked": cancelRetryParked,
+                "cancelSkippedLazy": cancelSkippedLazy,
                 "flatBeforeExpand": flatBeforeExpand,
                 "gradedAfterExpand": gradedAfterExpand,
                 "reentryCoalesced": reentryCoalesced,
                 "coalescedStillPublished": coalescedStillPublished,
+                "lagSeedAdvanced": lagSeedAdvanced,
+                "lagSeedRetryFailed": lagSeedRetryFailed,
                 "lagRestoredNeedsGate": lagRestoredNeedsGate,
                 "lagLoadHeldGeneration": lagLoadHeldGeneration,
                 "lagRefetched": lagRefetched,
@@ -5748,15 +5847,16 @@ enum SelfTest {
                 + "instead of scanning beside it, and still receives its report")
         expect(
             turnTransitionChecks?["staleGenSeeded"] == true
+                && turnTransitionChecks?["staleGenGenerationAdvanced"] == true
+                && turnTransitionChecks?["staleGenRefreshRetried"] == true
                 && turnTransitionChecks?["staleGenKeptLastGood"] == true,
-            "the stale-model fixture really leaves a last-good report standing — without "
-                + "this the retry assertion below would pass on an absent report, which the "
-                + "old condition retried anyway")
+            "the stale-model fixture advances the graph, attempts the refresh retry, and "
+                + "keeps its last-good report when that attempt fails")
         expect(
-            turnTransitionChecks?["staleGenRetried"] == true,
-            "the poll retries a model report that lags the committed generation, not only "
-                + "one that is missing — a failure behind a last-good report used to freeze "
-                + "the cards on the previous generation beside an advancing chart")
+            turnTransitionChecks?["staleGenRetried"] == true
+                && turnTransitionChecks?["staleGenCurrent"] == true,
+            "the shared retry heals a last-good report that lags the committed generation "
+                + "and becomes idempotent once the current report lands")
         expect(
             turnTransitionChecks?["commitGenRestoredStale"] == true
                 && turnTransitionChecks?["commitGenAdvanced"] == true,
@@ -5838,8 +5938,23 @@ enum SelfTest {
                 + "intent is what left it unchanged when the payload finally committed")
         expect(
             turnTransitionChecks?["failedLeftEmpty"] == true
-                && turnTransitionChecks?["healedAfterRetry"] == true,
-            "a transient model failure is retried rather than left showing an empty result")
+                && turnTransitionChecks?["healGenerationAdvanced"] == true,
+            "the manual-heal fixture starts from a real transient model failure and commits "
+                + "a newer graph generation on Refresh")
+        expect(
+            turnTransitionChecks?["healRefreshRetriedOnce"] == true,
+            "manual Refresh retries a wanted stale model exactly once before it returns")
+        expect(
+            turnTransitionChecks?["healRefreshPriority"] == true,
+            "manual Refresh issues its model retry at userInitiated priority")
+        expect(
+            turnTransitionChecks?["healedAfterRefresh"] == true
+                && turnTransitionChecks?["healCurrentAfterRefresh"] == true,
+            "manual Refresh returns with the model report healed for the committed generation")
+        expect(
+            turnTransitionChecks?["neverWantedGenerationAdvanced"] == true
+                && turnTransitionChecks?["neverWantedSkippedModel"] == true,
+            "manual Refresh advances the graph without scanning models a lens never requested")
         expect(
             turnTransitionChecks?["survivesLensSwitch"] == true,
             "a lens switch during a model scan still publishes — the cancelled task must "
@@ -5887,15 +6002,26 @@ enum SelfTest {
             "a graph refresh issues exactly one model scan — never two racing ones, "
                 + "and never zero (a moved generation must refetch)")
         expect(
+            turnTransitionChecks?["cancelHourlySeeded"] == true
+                && turnTransitionChecks?["cancelRetryParked"] == true
+                && turnTransitionChecks?["cancelSkippedLazy"] == true,
+            "a refresh cancelled while its model retry is parked does not continue into "
+                + "already-loaded lazy lenses after that retry settles")
+        expect(
             turnTransitionChecks?["reentryCoalesced"] == true
                 && turnTransitionChecks?["coalescedStillPublished"] == true,
             "re-entry during an in-flight model scan joins it instead of starting a second")
         expect(
+            turnTransitionChecks?["lagSeedAdvanced"] == true,
+            "the lag fixture advances the payload generation before it reopens")
+        expect(
+            turnTransitionChecks?["lagSeedRetryFailed"] == true,
+            "the lag fixture issues exactly one failed model retry and keeps last-good data")
+        expect(
             turnTransitionChecks?["lagRestoredNeedsGate"] == true
                 && turnTransitionChecks?["lagLoadHeldGeneration"] == true,
-            "the lag fixture really restores a payload and the restored model's load() "
-                + "holds the SAME generation the snapshot carries — without both the "
-                + "refetch below could not discriminate a lagging model from a moved payload")
+            "the lag fixture restores the same payload generation without treating its stale "
+                + "model report as current")
         expect(
             turnTransitionChecks?["lagRefetched"] == true,
             "a restored snapshot whose model lags its payload refetches instead of "
