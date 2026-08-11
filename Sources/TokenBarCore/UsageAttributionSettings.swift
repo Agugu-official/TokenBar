@@ -301,6 +301,15 @@ public enum UsageAttributionSettings {
         var aggregate: [String: (client: String, provider: String, tokens: Int64, cost: Double)] = [:]
         var order: [String] = []
         for entry in entries {
+            // Per entry and before folding, which is where
+            // `UsageAttributionBreakdown.rows` applies the same test. Applying
+            // it to the aggregate instead would agree on every ordinary input
+            // and part on one that cancels: two rows of +5 and -5 sum to an
+            // empty source here while the card, having resolved each row first,
+            // can still place them in different buckets and report both. Same
+            // test at the same stage is one invariant; same test at two stages
+            // is an invariant plus a standing obligation to remember it.
+            guard entry.total != 0 || entry.cost != 0 else { continue }
             let key = sourceKey(client: entry.client, provider: entry.provider)
             if let current = aggregate[key] {
                 aggregate[key] = (
@@ -316,18 +325,6 @@ public enum UsageAttributionSettings {
 
         return order.compactMap { key in
             guard let value = aggregate[key] else { return nil }
-            // A source observed at zero has nothing to classify: no tokens were
-            // spent, so no subscription could have covered them. Dropping it
-            // here rather than in the view keeps `pageState` honest — a range
-            // whose only sources are empty reads as "no usage", not as a page
-            // of decisions waiting to be made.
-            //
-            // Nonzero, not positive, and deliberately the same test
-            // `UsageAttributionBreakdown.rows` applies. The two surfaces
-            // describe one set of sources: anything the Stats card is willing
-            // to report as unassigned must have a row here to classify it,
-            // including a pathological negative aggregate.
-            guard value.tokens != 0 || value.cost != 0 else { return nil }
             let state = UsageAttribution.resolve(
                 client: value.client, provider: value.provider, model: nil, records: confirmed)
             // A stored suggestion carries its own state now: `excluded` is a

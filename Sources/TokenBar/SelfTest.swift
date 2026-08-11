@@ -2073,6 +2073,32 @@ enum SelfTest {
                 ).contains { $0.tokens == -5 },
             "settings keeps every source the breakdown card still reports")
 
+        // The same test has to run at the same stage as the card's, not merely
+        // read the same. Two rows that cancel are individually nonzero, so the
+        // card keeps both and — resolving each before folding — can place them
+        // in different buckets and report them. A settings filter applied to
+        // the sum would see one empty source and offer nothing to classify.
+        let cancellingEntries = [
+            attributionEntry(
+                client: "cursor", provider: "anthropic", model: "credited-model",
+                total: 5, cost: 0.0),
+            attributionEntry(
+                client: "cursor", provider: "anthropic", model: "reversed-model",
+                total: -5, cost: 0.0),
+        ]
+        expect(
+            UsageAttributionSettings.rows(
+                entries: cancellingEntries, confirmed: [], suggestions: []
+            ).map { ($0.provider, $0.tokens) }.map { "\($0.0)=\($0.1)" } == ["anthropic=0"]
+                && UsageAttributionBreakdown.rows(
+                    entries: cancellingEntries,
+                    clientIds: ["cursor"],
+                    confirmed: [UsageAttribution.Record(
+                        client: "cursor", provider: "anthropic", model: "credited-model",
+                        state: .assigned("claude"))]
+                ).count == 2,
+            "a source whose rows cancel is still offered for classification")
+
         let allTimeSource = AttributedSeriesTestSource(
             graphPayload: payloadFixture([
                 contributionJSON(
