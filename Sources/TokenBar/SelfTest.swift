@@ -282,6 +282,36 @@ private func waitUntil(
     return await predicate()
 }
 
+/// Proves every re-entry task has started on the MainActor before a fixture
+/// observes the state those tasks should have reached. Resuming the waiter does
+/// not preempt the current actor job, so the last entrant continues until its
+/// next suspension before the waiter can inspect the shared model request.
+@MainActor
+private final class MainActorArrivalGate {
+    private let target: Int
+    private var arrivals = 0
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    init(target: Int) {
+        precondition(target > 0)
+        self.target = target
+    }
+
+    func arrive() {
+        precondition(arrivals < target, "arrival gate received too many entrants")
+        arrivals += 1
+        guard arrivals == target, let waiter else { return }
+        self.waiter = nil
+        waiter.resume()
+    }
+
+    func waitForTarget() async {
+        if arrivals == target { return }
+        precondition(waiter == nil, "arrival gate supports one waiter")
+        await withCheckedContinuation { waiter = $0 }
+    }
+}
+
 private enum DashboardModelTestError: Error {
     case graphUnavailable
 }
@@ -5295,10 +5325,21 @@ enum SelfTest {
             await reentryModel.load()
             await reentrySource.blockModel()
             let firstEntry = Task { await reentryModel.ensureModelColors() }
-            _ = await waitUntil { await reentrySource.pendingModelCount() > 0 }
-            let secondEntry = Task { await reentryModel.ensureModelColors() }
-            let thirdEntry = Task { await reentryModel.ensureModelData(for: .models) }
-            let coalescedWhileInFlight = await reentrySource.pendingModelCount() == 1
+            let firstEntryParked = await waitUntil {
+                await reentrySource.pendingModelCount() > 0
+            }
+            let reentryArrivals = MainActorArrivalGate(target: 2)
+            let secondEntry = Task { @MainActor in
+                reentryArrivals.arrive()
+                await reentryModel.ensureModelColors()
+            }
+            let thirdEntry = Task { @MainActor in
+                reentryArrivals.arrive()
+                await reentryModel.ensureModelData(for: .models)
+            }
+            await reentryArrivals.waitForTarget()
+            let pendingAfterReentry = await reentrySource.pendingModelCount()
+            let coalescedWhileInFlight = firstEntryParked && pendingAfterReentry == 1
             await reentrySource.releaseModel()
             await firstEntry.value
             await secondEntry.value
