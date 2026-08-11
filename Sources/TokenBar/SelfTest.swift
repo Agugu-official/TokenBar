@@ -2016,6 +2016,89 @@ enum SelfTest {
                 && !UsageAttributionSettings.Copy.canonicalizationHint.contains("canonicalized"),
             "attribution copy describes exact provider comparison")
 
+        // Parsers that call `provider_identity::n` fold `vertex` into
+        // `anthropic` and `openai_codex` into `openai` before the report is
+        // built, so two billing relationships share one row no later stage can
+        // split. Fourteen parsers never call it, so the same aliases stay
+        // separable there. Both halves must be present and the claim must be
+        // hedged: "nothing is merged" is false for Claude Code, "Codex is
+        // reported as OpenAI" is false for OpenClaw.
+        expect(
+            UsageAttributionSettings.Copy.canonicalizationHint.contains(
+                "Vertex AI arriving as Anthropic")
+                && UsageAttributionSettings.Copy.canonicalizationHint.contains(
+                    "Codex as OpenAI")
+                && UsageAttributionSettings.Copy.canonicalizationHint.contains(
+                    "Some clients merge them"),
+            "attribution copy discloses merged routes as something only some clients do")
+
+        let zeroSourceRows = UsageAttributionSettings.rows(
+            entries: [
+                attributionEntry(
+                    client: "cursor", provider: "anthropic", model: "idle-model",
+                    total: 0, cost: 0.0),
+                attributionEntry(
+                    client: "claude", provider: "anthropic", model: "used-model",
+                    total: 41, cost: 0.5),
+            ],
+            confirmed: [],
+            suggestions: [])
+        expect(
+            zeroSourceRows.map(\.client) == ["claude"]
+                && UsageAttributionSettings.pageState(
+                    hasReport: true,
+                    rowCount: UsageAttributionSettings.rows(
+                        entries: [attributionEntry(
+                            client: "cursor", provider: "anthropic", model: "idle-model",
+                            total: 0, cost: 0.0)],
+                        confirmed: [], suggestions: []).count,
+                    isLoading: false) == .empty,
+            "a source observed at zero is not offered for classification")
+
+        // The Stats breakdown keeps any entry with `total != 0 || cost != 0`.
+        // Settings must not be stricter, or the card can report unassigned
+        // usage the settings page offers no row to classify. A negative
+        // aggregate is the case where a positive test and a nonzero test part.
+        let negativeSourceEntries = [
+            attributionEntry(
+                client: "cursor", provider: "anthropic", model: "corrupt-model",
+                total: -5, cost: 0.0),
+        ]
+        expect(
+            UsageAttributionSettings.rows(
+                entries: negativeSourceEntries, confirmed: [], suggestions: []
+            ).map(\.tokens) == [-5]
+                && UsageAttributionBreakdown.rows(
+                    entries: negativeSourceEntries, clientIds: ["cursor"], confirmed: []
+                ).contains { $0.tokens == -5 },
+            "settings keeps every source the breakdown card still reports")
+
+        // The same test has to run at the same stage as the card's, not merely
+        // read the same. Two rows that cancel are individually nonzero, so the
+        // card keeps both and — resolving each before folding — can place them
+        // in different buckets and report them. A settings filter applied to
+        // the sum would see one empty source and offer nothing to classify.
+        let cancellingEntries = [
+            attributionEntry(
+                client: "cursor", provider: "anthropic", model: "credited-model",
+                total: 5, cost: 0.0),
+            attributionEntry(
+                client: "cursor", provider: "anthropic", model: "reversed-model",
+                total: -5, cost: 0.0),
+        ]
+        expect(
+            UsageAttributionSettings.rows(
+                entries: cancellingEntries, confirmed: [], suggestions: []
+            ).map { ($0.provider, $0.tokens) }.map { "\($0.0)=\($0.1)" } == ["anthropic=0"]
+                && UsageAttributionBreakdown.rows(
+                    entries: cancellingEntries,
+                    clientIds: ["cursor"],
+                    confirmed: [UsageAttribution.Record(
+                        client: "cursor", provider: "anthropic", model: "credited-model",
+                        state: .assigned("claude"))]
+                ).count == 2,
+            "a source whose rows cancel is still offered for classification")
+
         let allTimeSource = AttributedSeriesTestSource(
             graphPayload: payloadFixture([
                 contributionJSON(

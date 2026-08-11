@@ -5,7 +5,19 @@ public enum UsageAttributionSettings {
     public enum Copy {
         public static let section = "Usage attribution"
         public static let classifyHint = "Classify each observed client/provider source against the subscription it should count toward. Nothing here is inferred as a billing event."
-        public static let canonicalizationHint = "Provider IDs are compared exactly as the source emitted them, so related-looking routes may appear as separate rows and be classified independently."
+        /// Two facts about provider identity, deliberately in one hint, and
+        /// both hedged for a reason.
+        ///
+        /// The first is about this page: it compares whatever string arrived
+        /// and never canonicalizes. The second is about what arrives.
+        /// `canonical_provider` folds `vertex` into `anthropic` and
+        /// `openai_codex` into `openai`, but it is applied per parser, not
+        /// globally — of the engine's session parsers, fourteen never call it,
+        /// so an OpenClaw row really does keep `openai-codex` as its own
+        /// classifiable source. Neither half can be stated flatly: "nothing is
+        /// merged" is false for Claude Code, and "Codex is reported as OpenAI"
+        /// is false for OpenClaw. Hence "some clients".
+        public static let canonicalizationHint = "Provider IDs are compared exactly as the source emitted them, so related-looking routes may appear as separate rows and be classified independently. Some clients merge them before reporting — Vertex AI arriving as Anthropic, Codex as OpenAI — and a row that arrived merged cannot be split here."
         public static let declarationHint = "A declaration is your classification, not a billing fact."
         public static let noRows = "No provider-split usage in this range."
         /// The report request finished without one. Distinct from `noRows`,
@@ -289,6 +301,15 @@ public enum UsageAttributionSettings {
         var aggregate: [String: (client: String, provider: String, tokens: Int64, cost: Double)] = [:]
         var order: [String] = []
         for entry in entries {
+            // Per entry and before folding, which is where
+            // `UsageAttributionBreakdown.rows` applies the same test. Applying
+            // it to the aggregate instead would agree on every ordinary input
+            // and part on one that cancels: two rows of +5 and -5 sum to an
+            // empty source here while the card, having resolved each row first,
+            // can still place them in different buckets and report both. Same
+            // test at the same stage is one invariant; same test at two stages
+            // is an invariant plus a standing obligation to remember it.
+            guard entry.total != 0 || entry.cost != 0 else { continue }
             let key = sourceKey(client: entry.client, provider: entry.provider)
             if let current = aggregate[key] {
                 aggregate[key] = (
