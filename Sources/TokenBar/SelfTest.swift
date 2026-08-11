@@ -2016,6 +2016,41 @@ enum SelfTest {
                 && !UsageAttributionSettings.Copy.canonicalizationHint.contains("canonicalized"),
             "attribution copy describes exact provider comparison")
 
+        // The engine folds `vertex`/`vertex_ai` into `anthropic` and
+        // `openai_codex` into `openai` before the report is built, so two
+        // billing relationships share one row and no later stage can split
+        // them. Saying only that this page compares exactly reads as a promise
+        // that nothing was merged anywhere.
+        expect(
+            UsageAttributionSettings.Copy.canonicalizationHint.contains(
+                "Vertex AI is reported as Anthropic")
+                && UsageAttributionSettings.Copy.canonicalizationHint.contains(
+                    "Codex as OpenAI"),
+            "attribution copy discloses the routes the engine already merged")
+
+        let zeroSourceRows = UsageAttributionSettings.rows(
+            entries: [
+                attributionEntry(
+                    client: "cursor", provider: "anthropic", model: "idle-model",
+                    total: 0, cost: 0.0),
+                attributionEntry(
+                    client: "claude", provider: "anthropic", model: "used-model",
+                    total: 41, cost: 0.5),
+            ],
+            confirmed: [],
+            suggestions: [])
+        expect(
+            zeroSourceRows.map(\.client) == ["claude"]
+                && UsageAttributionSettings.pageState(
+                    hasReport: true,
+                    rowCount: UsageAttributionSettings.rows(
+                        entries: [attributionEntry(
+                            client: "cursor", provider: "anthropic", model: "idle-model",
+                            total: 0, cost: 0.0)],
+                        confirmed: [], suggestions: []).count,
+                    isLoading: false) == .empty,
+            "a source observed at zero is not offered for classification")
+
         let allTimeSource = AttributedSeriesTestSource(
             graphPayload: payloadFixture([
                 contributionJSON(

@@ -5,7 +5,14 @@ public enum UsageAttributionSettings {
     public enum Copy {
         public static let section = "Usage attribution"
         public static let classifyHint = "Classify each observed client/provider source against the subscription it should count toward. Nothing here is inferred as a billing event."
-        public static let canonicalizationHint = "Provider IDs are compared exactly as the source emitted them, so related-looking routes may appear as separate rows and be classified independently."
+        /// Two facts about provider identity, deliberately in one hint. The
+        /// first is about this page: it compares whatever string the report
+        /// emitted, and never canonicalizes. The second is about what reaches
+        /// it: the engine already folds a few routes together upstream
+        /// (`canonical_provider`), and those cannot be separated here at any
+        /// later stage. Stating only the first reads as a promise that nothing
+        /// was merged, which is the opposite of what happens to Vertex.
+        public static let canonicalizationHint = "Provider IDs are compared exactly as the source emitted them, so related-looking routes may appear as separate rows and be classified independently. A few arrive already merged and cannot be separated here: Vertex AI is reported as Anthropic, and Codex as OpenAI."
         public static let declarationHint = "A declaration is your classification, not a billing fact."
         public static let noRows = "No provider-split usage in this range."
         /// The report request finished without one. Distinct from `noRows`,
@@ -304,6 +311,12 @@ public enum UsageAttributionSettings {
 
         return order.compactMap { key in
             guard let value = aggregate[key] else { return nil }
+            // A source observed at zero has nothing to classify: no tokens were
+            // spent, so no subscription could have covered them. Dropping it
+            // here rather than in the view keeps `pageState` honest — a range
+            // whose only sources are empty reads as "no usage", not as a page
+            // of decisions waiting to be made.
+            guard value.tokens > 0 || value.cost != 0 else { return nil }
             let state = UsageAttribution.resolve(
                 client: value.client, provider: value.provider, model: nil, records: confirmed)
             // A stored suggestion carries its own state now: `excluded` is a
