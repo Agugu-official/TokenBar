@@ -53,6 +53,9 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
     private var advancePaused = false
     private var pendingGraphs: [String: [CheckedContinuation<UsagePayload, Error>]] = [:]
     private var pendingHourly: [String: [PendingHourly]] = [:]
+    private var blockedTrace = false
+    private var forcedTraceOnce: [TraceBucket]?
+    private var pendingTrace: [CheckedContinuation<[TraceBucket], Never>] = []
 
     init(hourlyResponses: [Set<String>: HourlyReport] = [:]) {
         self.hourlyResponses = hourlyResponses
@@ -62,6 +65,8 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
 
     func blockGraph(year: String?) { blockedGraphYears.insert(Self.key(year)) }
     func blockHourly(year: String?) { blockedHourlyYears.insert(Self.key(year)) }
+    func blockTrace() { blockedTrace = true }
+    func forceNextTrace(_ trace: [TraceBucket]) { forcedTraceOnce = trace }
 
     func hasPendingGraph(year: String?) -> Bool {
         !(pendingGraphs[Self.key(year)] ?? []).isEmpty
@@ -70,6 +75,8 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
     func hasPendingHourly(year: String?) -> Bool {
         !(pendingHourly[Self.key(year)] ?? []).isEmpty
     }
+
+    func hasPendingTrace() -> Bool { !pendingTrace.isEmpty }
 
     func releaseGraph(year: String?) {
         let key = Self.key(year)
@@ -128,6 +135,13 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
                 ?? DemoData.hourlyReport(for: year, clients: $0.clients)
             $0.continuation.resume(returning: report)
         }
+    }
+
+    func releaseTrace(_ trace: [TraceBucket]) {
+        blockedTrace = false
+        let waiting = pendingTrace
+        pendingTrace = []
+        waiting.forEach { $0.resume(returning: trace) }
     }
 
     /// Returned verbatim for the NEXT `graph()` call regardless of the year
@@ -252,7 +266,14 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
     func agentUsage() async throws -> AgentUsagePayload { DemoData.agentUsage }
 
     func usageTrace(windowSecs: Int64) async throws -> [TraceBucket] {
-        DemoData.trace(windowSecs: windowSecs)
+        if let forcedTraceOnce {
+            self.forcedTraceOnce = nil
+            return forcedTraceOnce
+        }
+        if blockedTrace {
+            return await withCheckedContinuation { pendingTrace.append($0) }
+        }
+        return DemoData.trace(windowSecs: windowSecs)
     }
 
     func tokensPerMin() async throws -> Double { DemoData.tokensPerMin }
@@ -5201,6 +5222,98 @@ enum SelfTest {
             await modelsTask.value
             let survivesLensSwitch = await handoffModel.modelReport != nil
 
+            // #190 — the newest popover model owns the process-static reopen
+            // snapshot. A retired model may still finish its unstructured model
+            // scan and a live-data poll, but neither completion may overwrite the
+            // payload or trace a newly opened model already committed.
+            func snapshotPayload(version: String, year: String) -> UsagePayload {
+                let encoded = try! JSONEncoder().encode(DemoData.payload(for: year))
+                var object = try! JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+                var meta = object["meta"] as! [String: Any]
+                meta["version"] = version
+                object["meta"] = meta
+                let tagged = try! JSONSerialization.data(withJSONObject: object)
+                return try! JSONDecoder().decode(UsagePayload.self, from: tagged)
+            }
+            func snapshotTrace(client: String, tokens: Int64) -> [TraceBucket] {
+                [TraceBucket(
+                    client: client, agent: "snapshot-fixture", model: "snapshot-fixture",
+                    tokens: tokens, messages: 1, tokensPerMin: Double(tokens))]
+            }
+
+            let snapshotYear = "2050"
+            let retiredPayload = snapshotPayload(version: "snapshot-retired", year: snapshotYear)
+            let currentPayload = snapshotPayload(version: "snapshot-current", year: snapshotYear)
+            let retiredTrace = snapshotTrace(client: "snapshot-retired", tokens: 1)
+            let currentTrace = snapshotTrace(client: "snapshot-current", tokens: 2)
+            let snapshotMarkersDiffer =
+                retiredPayload.meta.version != currentPayload.meta.version
+            let snapshotGenerationsCollide =
+                retiredPayload.meta.generatedAt == currentPayload.meta.generatedAt
+
+            let retiredSnapshotSource = ControlledTurnUsageDataSource()
+            await retiredSnapshotSource.forceNextGraphPayload(retiredPayload)
+            let retiredSnapshotModel = DashboardModel(
+                cachesSnapshot: true, source: retiredSnapshotSource, initialYear: snapshotYear)
+            await retiredSnapshotModel.load()
+            let retiredSnapshotSeeded =
+                retiredSnapshotModel.payload?.meta.version == retiredPayload.meta.version
+            await retiredSnapshotSource.blockModel()
+            await retiredSnapshotSource.blockTrace()
+            let retiredModelTask = Task {
+                await retiredSnapshotModel.ensureModelData(for: .overview)
+            }
+            let retiredTraceTask = Task { await retiredSnapshotModel.pollTrace() }
+            let retiredModelParked = await waitUntil {
+                await retiredSnapshotSource.pendingModelCount() == 1
+            }
+            let retiredTraceParked = await waitUntil {
+                await retiredSnapshotSource.hasPendingTrace()
+            }
+
+            let currentSnapshotSource = ControlledTurnUsageDataSource()
+            await currentSnapshotSource.forceNextGraphPayload(currentPayload)
+            await currentSnapshotSource.forceNextTrace(currentTrace)
+            let currentSnapshotModel = DashboardModel(
+                cachesSnapshot: true, source: currentSnapshotSource, initialYear: snapshotYear)
+            let currentRestoredRetired =
+                currentSnapshotModel.payload?.meta.version == retiredPayload.meta.version
+            await currentSnapshotModel.load()
+            let currentTraceTask = Task { await currentSnapshotModel.pollTrace() }
+            let currentTracePublished = await waitUntil {
+                await MainActor.run {
+                    currentSnapshotModel.trace.first?.client == "snapshot-current"
+                }
+            }
+            currentTraceTask.cancel()
+            await currentTraceTask.value
+            let currentSnapshotCommitted =
+                currentSnapshotModel.payload?.meta.version == currentPayload.meta.version
+                && currentTracePublished
+                && currentSnapshotModel.modelReport == nil
+
+            await retiredSnapshotSource.releaseModel()
+            await retiredModelTask.value
+            await retiredSnapshotSource.releaseTrace(retiredTrace)
+            let retiredTracePublished = await waitUntil {
+                await MainActor.run {
+                    retiredSnapshotModel.trace.first?.client == "snapshot-retired"
+                }
+            }
+            retiredTraceTask.cancel()
+            await retiredTraceTask.value
+            let retiredSnapshotWritersSettled =
+                retiredSnapshotModel.modelReport != nil && retiredTracePublished
+
+            let snapshotReopen = DashboardModel(
+                cachesSnapshot: true, source: ControlledTurnUsageDataSource(),
+                initialYear: snapshotYear)
+            let snapshotReopenKeptCurrentPayload =
+                snapshotReopen.payload?.meta.version == currentPayload.meta.version
+            let snapshotReopenKeptCurrentTrace =
+                snapshotReopen.trace.first?.client == "snapshot-current"
+            let snapshotReopenRejectedRetiredModel = snapshotReopen.modelReport == nil
+
             // A year switch must drop the previous year's model report. Two
             // sites enforce it — `setYear` calls `invalidateModel()`, and
             // `apply()` discards a report whose `modelYear` disagrees with the
@@ -5503,6 +5616,16 @@ enum SelfTest {
                 "lensesSkipModel": lensesSkipModel,
                 "modelHeldForA": modelHeldForA,
                 "survivesLensSwitch": survivesLensSwitch,
+                "snapshotMarkersDiffer": snapshotMarkersDiffer,
+                "snapshotGenerationsCollide": snapshotGenerationsCollide,
+                "retiredSnapshotSeeded": retiredSnapshotSeeded,
+                "retiredSnapshotWritersParked": retiredModelParked && retiredTraceParked,
+                "currentSnapshotRestoredRetired": currentRestoredRetired,
+                "currentSnapshotCommitted": currentSnapshotCommitted,
+                "retiredSnapshotWritersSettled": retiredSnapshotWritersSettled,
+                "snapshotReopenKeptCurrentPayload": snapshotReopenKeptCurrentPayload,
+                "snapshotReopenKeptCurrentTrace": snapshotReopenKeptCurrentTrace,
+                "snapshotReopenRejectedRetiredModel": snapshotReopenRejectedRetiredModel,
                 "failedLeftEmpty": failedLeftEmpty,
                 "generationsCollide": generationsCollide,
                 "seededWithoutModel": seededWithoutModel,
@@ -5721,6 +5844,33 @@ enum SelfTest {
             turnTransitionChecks?["survivesLensSwitch"] == true,
             "a lens switch during a model scan still publishes — the cancelled task must "
                 + "not take the only publication path with it")
+        expect(
+            turnTransitionChecks?["snapshotMarkersDiffer"] == true
+                && turnTransitionChecks?["snapshotGenerationsCollide"] == true
+                && turnTransitionChecks?["retiredSnapshotSeeded"] == true,
+            "the reopen-owner fixture starts from distinguishable payloads with the same "
+                + "generatedAt, so timestamp ordering cannot satisfy it")
+        expect(
+            turnTransitionChecks?["retiredSnapshotWritersParked"] == true
+                && turnTransitionChecks?["currentSnapshotRestoredRetired"] == true
+                && turnTransitionChecks?["currentSnapshotCommitted"] == true,
+            "a retired model and trace writer are both parked before a newly opened model "
+                + "restores the old snapshot and commits its replacement")
+        expect(
+            turnTransitionChecks?["retiredSnapshotWritersSettled"] == true,
+            "both retired writers really finish after the replacement snapshot commits — "
+                + "the fixture does not pass by cancelling or abandoning them")
+        expect(
+            turnTransitionChecks?["snapshotReopenKeptCurrentPayload"] == true,
+            "late model publication from a retired dashboard cannot roll back the newest "
+                + "reopen snapshot's payload")
+        expect(
+            turnTransitionChecks?["snapshotReopenRejectedRetiredModel"] == true,
+            "a retired dashboard's late model report cannot enter the newest reopen snapshot")
+        expect(
+            turnTransitionChecks?["snapshotReopenKeptCurrentTrace"] == true,
+            "late live-data publication from a retired dashboard cannot replace the newest "
+                + "reopen snapshot's trace")
         expect(
             turnTransitionChecks?["phantomIssuedNoScan"] == true,
             "no model scan is issued for a phantom slice — a new year paired with the "
