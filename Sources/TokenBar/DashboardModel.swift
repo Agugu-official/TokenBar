@@ -171,24 +171,19 @@ private struct DashboardSnapshot {
     /// Survives the model's deallocation so the next PopoverView starts with
     /// cached data instead of `.loading`. A deliberate process-lifetime cache
     /// (one COW-shared value snapshot, never invalidated). Every model may
-    /// *read* it on init, but only the popover's model *writes* it (gated by
-    /// `cachesSnapshot`): SettingsWindowView's independent DashboardModel runs
-    /// the same poll loops on a year frozen at its own init, so letting it
-    /// write here would clobber the snapshot with the settings model's stale
-    /// year and re-introduce the reopen flash. TODO: the cleaner end-state is
-    /// StatusItemController owning one long-lived DashboardModel injected via
-    /// `.environment`, with the poll loops started/stopped explicitly on
-    /// popover open/close — that deletes this static, DashboardSnapshot, and
-    /// the year guard while preserving the Phase B CPU win.
+    /// *read* it on init, but only the most recently initialized popover model
+    /// may write it: an older instance can outlive its view while an FFI scan
+    /// finishes, and must not roll back the next popover's fresher snapshot.
     private static var lastSnapshot: DashboardSnapshot?
+    private static var lastSnapshotOwner: ObjectIdentifier?
     /// Reopen cache for the expensive hourly fold. Multiple slices coexist so
     /// Daily/Monthly's Codex+Claude report cannot evict Hourly's all-client one.
     // ponytail: FIFO at eight slices bounds memory; use LRU only if churn shows misses.
     private static let hourlyCacheLimit = 8
     private static var hourlyCache: [HourlyCacheKey: HourlyReport] = [:]
     private static var hourlyCacheOrder: [HourlyCacheKey] = []
-    /// Whether this model owns the shared `lastSnapshot` (true only for the
-    /// popover's model, whose teardown/rebuild is what the cache speeds up).
+    /// Whether this model participates in the shared `lastSnapshot` cache.
+    /// The newest participating instance becomes its sole writer.
     private let cachesSnapshot: Bool
     private let source: any UsageDataSource
     /// The exact build this process ships as, or nil for anything that is not
@@ -311,6 +306,9 @@ private struct DashboardSnapshot {
             restoreGatePending = true
         } else {
             phase = .loading
+        }
+        if cachesSnapshot {
+            Self.lastSnapshotOwner = ObjectIdentifier(self)
         }
     }
 
@@ -858,19 +856,27 @@ private struct DashboardSnapshot {
     /// the cache for reasons unrelated to the graph moving.
     @ObservationIgnored private var payloadCapturedAt = Date()
 
-    /// Capture the full restore cache from the current state. Called ONLY from
-    /// apply(), where the year-scoped payload/stats and `year` are set together
-    /// and `year` has been validated against the payload — so the snapshot's
-    /// `year` always matches the slice its `payload` holds. No-op unless this
-    /// model owns the cache and a base payload has loaded.
+    private var ownsLastSnapshot: Bool {
+        cachesSnapshot && Self.lastSnapshotOwner == ObjectIdentifier(self)
+    }
+
+    private func replaceLastSnapshot(_ snapshot: DashboardSnapshot) {
+        guard ownsLastSnapshot else { return }
+        Self.lastSnapshot = snapshot
+    }
+
+    /// Capture the full restore cache from the current state. `apply()` first
+    /// commits the validated payload/year pair; `publishModel()` may then add a
+    /// report for that same slice. No-op unless this is the newest popover model
+    /// and a base payload has loaded.
     private func cacheSnapshot() {
         guard cachesSnapshot, let payload, let stats else { return }
-        Self.lastSnapshot = DashboardSnapshot(
+        replaceLastSnapshot(DashboardSnapshot(
             payload: payload, stats: stats, payloadCapturedAt: payloadCapturedAt,
             modelReport: modelReport,
             modelGeneratedAt: modelPayloadGeneratedAt,
             colors: colors, knownYears: knownYears, year: year,
-            agentUsage: agentUsage, trace: trace)
+            agentUsage: agentUsage, trace: trace))
     }
 
     /// Submit the DISK capture. Deliberately separate from `cacheSnapshot()`
@@ -909,12 +915,12 @@ private struct DashboardSnapshot {
     /// No-op until apply() has written a base snapshot.
     private func refreshSnapshotLiveData() {
         guard cachesSnapshot, let snap = Self.lastSnapshot else { return }
-        Self.lastSnapshot = DashboardSnapshot(
+        replaceLastSnapshot(DashboardSnapshot(
             payload: snap.payload, stats: snap.stats, payloadCapturedAt: snap.payloadCapturedAt,
             modelReport: snap.modelReport,
             modelGeneratedAt: snap.modelGeneratedAt,
             colors: snap.colors, knownYears: snap.knownYears, year: snap.year,
-            agentUsage: agentUsage, trace: trace)
+            agentUsage: agentUsage, trace: trace))
     }
 
     /// Periodically re-derive every loaded lens so the popover advances while
