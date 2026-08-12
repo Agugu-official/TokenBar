@@ -3134,9 +3134,10 @@ mod tests {
         let current = current_process_user_sid().expect("ERROR-PRIVACY: current SID");
         let sid_text = sid_string(&current).expect("ERROR-PRIVACY: SID text");
         let username = std::env::var("USERNAME").expect("ERROR-PRIVACY: username");
+        let secret = "raw-secret-sentinel";
         let path_error =
             ensure_secure_storage_directory(&path).expect_err("ERROR-PRIVACY: wrong type rejected");
-        assert_generic_error(&path_error, &[&path_text, &sid_text, &username]);
+        assert_generic_error(&path_error, &[&path_text, &sid_text, &username, secret]);
         let system = well_known_sid(WinLocalSystemSid).expect("ERROR-PRIVACY: system SID");
         let foreign = well_known_sid(WinWorldSid).expect("ERROR-PRIVACY: foreign SID");
         let foreign = if current.as_bytes() != system.as_bytes() {
@@ -3146,7 +3147,7 @@ mod tests {
         };
         let owner_error = inspect_owner(foreign.as_bytes(), current.as_bytes())
             .expect_err("ERROR-PRIVACY: owner rejected");
-        assert_generic_error(&owner_error, &[&path_text, &sid_text, &username]);
+        assert_generic_error(&owner_error, &[&path_text, &sid_text, &username, secret]);
         drop(file);
     }
     #[test]
