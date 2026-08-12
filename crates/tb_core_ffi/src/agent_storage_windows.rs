@@ -1418,89 +1418,27 @@ mod tests {
     use super::*;
     use std::fs::{self, File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
-    use std::mem;
     use std::os::windows::fs::{symlink_file, OpenOptionsExt};
     use std::os::windows::io::AsRawHandle;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
-
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
     use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows_sys::Win32::Security::{WinAuthenticatedUserSid, WinWorldSid, INHERITED_ACE};
     use windows_sys::Win32::Storage::FileSystem::{DELETE, READ_CONTROL, WRITE_DAC};
-
     const ACCESS_DENIED_ACE_TYPE_VALUE: u8 = 1;
+    const OBJECT_INHERIT_ACE_VALUE: u8 = 1;
+    macro_rules! check {
+        ($condition:expr, $label:expr) => {
+            ::std::assert!($condition, $label);
+        };
+    }
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
-
-    struct TempArtifact {
-        file: Option<File>,
-        path: PathBuf,
-    }
-
-    impl TempArtifact {
-        fn create() -> io::Result<Self> {
-            for _ in 0..32 {
-                let timestamp = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos();
-                let sequence = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-                let path = std::env::temp_dir().join(format!(
-                    "tokenbar-storage-{}-{timestamp}-{sequence}.tmp",
-                    std::process::id()
-                ));
-                let result = open_windows_path(
-                    &path,
-                    GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC,
-                    CREATE_NEW,
-                    FILE_ATTRIBUTE_NORMAL,
-                );
-                match result {
-                    Ok(file) => {
-                        return Ok(Self {
-                            file: Some(file),
-                            path,
-                        });
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => return Err(error),
-                }
-            }
-            Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "unable to create temporary storage artifact",
-            ))
-        }
-
-        fn handle(&self) -> HANDLE {
-            self.file
-                .as_ref()
-                .expect("temporary file is open")
-                .as_raw_handle() as HANDLE
-        }
-
-        fn cleanup(mut self) -> io::Result<()> {
-            self.file.take();
-            let path = mem::take(&mut self.path);
-            fs::remove_file(path)
-        }
-    }
-
-    impl Drop for TempArtifact {
-        fn drop(&mut self) {
-            self.file.take();
-            if !self.path.as_os_str().is_empty() {
-                let _ = fs::remove_file(&self.path);
-            }
-        }
-    }
-
     struct TempRoot {
         path: PathBuf,
     }
-
     impl TempRoot {
         fn create() -> io::Result<Self> {
             for _ in 0..32 {
@@ -1524,17 +1462,10 @@ mod tests {
                 "unable to create temporary storage root",
             ))
         }
-
         fn join(&self, name: &str) -> PathBuf {
             self.path.join(name)
         }
-
-        fn cleanup(mut self) -> io::Result<()> {
-            let path = mem::take(&mut self.path);
-            fs::remove_dir_all(path)
-        }
     }
-
     impl Drop for TempRoot {
         fn drop(&mut self) {
             if !self.path.as_os_str().is_empty() {
@@ -1542,7 +1473,23 @@ mod tests {
             }
         }
     }
-
+    struct SecureWorkspace {
+        directory: File,
+        path: PathBuf,
+        root: TempRoot,
+    }
+    impl SecureWorkspace {
+        fn create() -> io::Result<Self> {
+            let root = TempRoot::create()?;
+            let path = root.join("storage");
+            let directory = ensure_secure_storage_directory(&path)?;
+            Ok(Self {
+                directory,
+                path,
+                root,
+            })
+        }
+    }
     fn create_test_file(path: &Path, contents: &[u8]) -> io::Result<File> {
         let mut file = open_windows_path(
             path,
@@ -1554,7 +1501,6 @@ mod tests {
         file.sync_all()?;
         Ok(file)
     }
-
     fn create_permissive_test_file(path: &Path, contents: &[u8]) -> io::Result<File> {
         let file = create_test_file(path, contents)?;
         let everyone = well_known_sid(WinWorldSid)?;
@@ -1562,7 +1508,6 @@ mod tests {
         set_protected_handle_dacl(file.as_raw_handle() as HANDLE, acl.as_ptr())?;
         Ok(file)
     }
-
     fn create_permissive_test_directory(path: &Path) -> io::Result<File> {
         drop(ensure_secure_storage_directory(path)?);
         let directory = open_windows_path(
@@ -1576,13 +1521,9 @@ mod tests {
         set_protected_handle_dacl(directory.as_raw_handle() as HANDLE, acl.as_ptr())?;
         Ok(directory)
     }
-
     fn create_junction(link: &Path, target: &Path) -> io::Result<()> {
         let output = Command::new("cmd")
-            .arg("/D")
-            .arg("/C")
-            .arg("mklink")
-            .arg("/J")
+            .args(["/D", "/C", "mklink", "/J"])
             .arg(link)
             .arg(target)
             .output()?;
@@ -1592,21 +1533,18 @@ mod tests {
             Err(io::Error::other("unable to create test junction"))
         }
     }
-
     fn read_open_file(file: &mut File) -> io::Result<Vec<u8>> {
         file.seek(SeekFrom::Start(0))?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         Ok(bytes)
     }
-
     fn regular_file_identity(file: &File) -> io::Result<StorageIdentity> {
         storage_identity(
             file.as_raw_handle() as HANDLE,
             StorageObjectKind::RegularFile,
         )
     }
-
     fn create_secure_test_file(
         path: &Path,
         contents: &[u8],
@@ -1617,12 +1555,81 @@ mod tests {
         let identity = regular_file_identity(&file)?;
         Ok((file, identity))
     }
+    #[derive(Clone)]
+    struct FileSnapshot {
+        bytes: Vec<u8>,
+        identity: StorageIdentity,
+        acl: AclSnapshot,
+        kind: StorageObjectKind,
+    }
+    fn snapshot_object(file: &File, kind: StorageObjectKind) -> io::Result<FileSnapshot> {
+        let identity = storage_identity(file.as_raw_handle() as HANDLE, kind)?;
+        let acl = read_acl_snapshot(file.as_raw_handle() as HANDLE)?;
+        let bytes = if kind.is_directory() {
+            Vec::new()
+        } else {
+            let mut copy = file.try_clone()?;
+            read_open_file(&mut copy)?
+        };
+        Ok(FileSnapshot {
+            bytes,
+            identity,
+            acl,
+            kind,
+        })
+    }
+    fn snapshot_secure_path(path: &Path, kind: StorageObjectKind) -> io::Result<FileSnapshot> {
+        let file = open_secure_storage_object(
+            path,
+            if kind.is_directory() {
+                GENERIC_WRITE | FILE_READ_ATTRIBUTES | STORAGE_SECURITY_ACCESS
+            } else {
+                GENERIC_READ | STORAGE_SECURITY_ACCESS
+            },
+            OPEN_EXISTING,
+            kind,
+        )?;
+        snapshot_object(&file, kind)
+    }
+    fn assert_snapshot(path: &Path, expected: &FileSnapshot, label: &str) {
+        let actual =
+            snapshot_secure_path(path, expected.kind).expect("secure snapshot remains readable");
+        check!(
+            actual.bytes == expected.bytes
+                && actual.identity == expected.identity
+                && actual.acl == expected.acl,
+            "{label}: bytes, identity, or DACL changed"
+        );
+    }
+    fn assert_handle_snapshot(file: &File, expected: &FileSnapshot, label: &str) {
+        let actual =
+            snapshot_object(file, expected.kind).expect("retained handle remains readable");
+        check!(
+            actual.bytes == expected.bytes
+                && actual.identity == expected.identity
+                && actual.acl == expected.acl,
+            "{label}: bytes, identity, or DACL changed"
+        );
+    }
+    fn file_snapshot_fixture(
+        path: &Path,
+        contents: &[u8],
+        permissive: bool,
+    ) -> io::Result<(File, FileSnapshot)> {
+        let file = if permissive {
+            create_permissive_test_file(path, contents)?
+        } else {
+            create_secure_test_file(path, contents)?.0
+        };
+        let snapshot = snapshot_object(&file, StorageObjectKind::RegularFile)?;
+        Ok((file, snapshot))
+    }
 
-    fn read_secure_test_file(path: &Path) -> io::Result<(Vec<u8>, StorageIdentity)> {
-        let mut file = open_existing_secure_file(path, false)?;
-        let identity = regular_file_identity(&file)?;
-        let bytes = read_open_file(&mut file)?;
-        Ok((bytes, identity))
+    fn assert_absent(path: &Path, label: &str) {
+        match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            _ => panic!("{label}: pathname remains installed"),
+        }
     }
 
     fn sid_string(sid: &Sid) -> io::Result<String> {
@@ -1634,7 +1641,6 @@ mod tests {
         if allocation.0.is_null() {
             return Err(security_operation_failed());
         }
-
         let mut len = 0usize;
         while len < 256 && unsafe { *wide.add(len) } != 0 {
             len += 1;
@@ -1645,594 +1651,510 @@ mod tests {
         String::from_utf16(unsafe { slice::from_raw_parts(wide, len) })
             .map_err(|_| security_operation_failed())
     }
-
     fn assert_generic_error(error: &io::Error, sensitive_values: &[&str]) {
         let message = error.to_string().to_lowercase();
         for value in sensitive_values {
             if !value.is_empty() {
-                assert!(
+                check!(
                     !message.contains(&value.to_lowercase()),
-                    "security error does not disclose sensitive context"
+                    "security error discloses sensitive context"
                 );
             }
         }
     }
-
-    #[test]
-    fn cng_random_returns_requested_distinct_bytes() {
-        let first = cng_random_bytes(32).expect("first CNG request succeeds");
-        let second = cng_random_bytes(32).expect("second CNG request succeeds");
-        assert!(first.len() == 32, "first CNG result has requested length");
-        assert!(second.len() == 32, "second CNG result has requested length");
-        assert!(first != second, "independent CNG requests differ");
-    }
-
-    #[test]
-    fn cng_failure_returns_no_partially_filled_bytes() {
-        let result = random_bytes_with(32, |buffer, buffer_len| {
-            unsafe {
-                ptr::write_bytes(buffer, 0xA5, buffer_len as usize);
-            }
-            -1
-        });
-        assert!(result.is_err(), "failed CNG request returns only an error");
-    }
-
-    #[test]
-    fn creation_dacl_round_trips_exact_principals_and_permissions() {
-        let artifact = TempArtifact::create().expect("create secure temporary file");
-        verify_storage_handle(artifact.handle()).expect("creation security verifies");
-
-        let current_user = current_process_user_sid().expect("read current process SID");
-        let local_system = well_known_sid(WinLocalSystemSid).expect("create LocalSystem SID");
-        let snapshot = read_acl_snapshot(artifact.handle()).expect("read temporary file DACL");
-        inspect_acl(&snapshot, current_user.as_bytes(), local_system.as_bytes())
-            .expect("DACL satisfies exact contract");
-        let expected_count = if current_user.as_bytes() == local_system.as_bytes() {
-            1
-        } else {
-            2
-        };
-        assert!(snapshot.dacl_present, "DACL is present");
-        assert!(!snapshot.dacl_null, "DACL is non-null");
-        assert!(snapshot.protected, "DACL is protected");
-        assert!(
-            snapshot.aces.len() == expected_count,
-            "DACL has exactly the expected principals"
-        );
-        assert!(
-            snapshot
-                .aces
-                .iter()
-                .all(|ace| ace.flags & INHERITED_ACE as u8 == 0),
-            "DACL has no inherited ACE"
-        );
-
-        artifact.cleanup().expect("remove temporary file");
-    }
-
-    #[test]
-    fn broad_aces_fail_closed_without_in_place_repair() {
-        let artifact = TempArtifact::create().expect("create temporary file");
-
-        for kind in [WinWorldSid, WinAuthenticatedUserSid] {
-            let broad_sid = well_known_sid(kind).expect("create broad well-known SID");
-            let broad_acl =
-                build_full_control_acl(&[&broad_sid]).expect("build permissive temporary ACL");
-            set_protected_handle_dacl(artifact.handle(), broad_acl.as_ptr())
-                .expect("apply permissive temporary ACL");
-            let before = read_acl_snapshot(artifact.handle()).expect("snapshot broad DACL");
-
-            assert!(
-                verify_storage_handle(artifact.handle()).is_err(),
-                "broad ACE is rejected"
-            );
-            assert!(
-                read_acl_snapshot(artifact.handle()).expect("read rejected DACL") == before,
-                "verification never repairs the broad DACL in place"
-            );
-        }
-
-        artifact.cleanup().expect("remove temporary file");
-    }
-
-    #[test]
-    fn owner_mismatch_fails_closed() {
-        let current_user = current_process_user_sid().expect("read current process SID");
-        let local_system = well_known_sid(WinLocalSystemSid).expect("create LocalSystem SID");
-        let everyone = well_known_sid(WinWorldSid).expect("create Everyone SID");
-        let foreign_owner = if current_user.as_bytes() != local_system.as_bytes() {
-            &local_system
-        } else {
-            &everyone
-        };
-
-        inspect_owner(foreign_owner.as_bytes(), current_user.as_bytes())
-            .expect_err("foreign owner is rejected");
-        inspect_owner(current_user.as_bytes(), current_user.as_bytes())
-            .expect("current process owner is accepted");
-    }
-
-    #[test]
-    fn pure_acl_inspection_rejects_missing_null_extra_deny_and_incomplete_entries() {
-        let current_user = current_process_user_sid().expect("read current process SID");
-        let local_system = well_known_sid(WinLocalSystemSid).expect("create LocalSystem SID");
-        let everyone = well_known_sid(WinWorldSid).expect("create Everyone SID");
-        let mut aces = vec![AceSnapshot {
+    fn ace(sid: &[u8]) -> AceSnapshot {
+        AceSnapshot {
             ace_type: ACCESS_ALLOWED_ACE_TYPE_VALUE,
             flags: NO_INHERITANCE as u8,
             mask: FILE_ALL_ACCESS,
-            sid: current_user.as_bytes().to_vec(),
-        }];
-        if current_user.as_bytes() != local_system.as_bytes() {
-            aces.push(AceSnapshot {
-                ace_type: ACCESS_ALLOWED_ACE_TYPE_VALUE,
-                flags: NO_INHERITANCE as u8,
-                mask: FILE_ALL_ACCESS,
-                sid: local_system.as_bytes().to_vec(),
-            });
+            sid: sid.to_vec(),
         }
-        let valid = AclSnapshot {
+    }
+    fn canonical_acl(current_user: &Sid, local_system: &Sid) -> AclSnapshot {
+        let mut aces = vec![ace(current_user.as_bytes())];
+        if current_user.as_bytes() != local_system.as_bytes() {
+            aces.push(ace(local_system.as_bytes()));
+        }
+        AclSnapshot {
             dacl_present: true,
             dacl_null: false,
             protected: true,
             aces,
-        };
-        assert!(
+        }
+    }
+    fn reject_acl_mutations(current_user: &Sid, local_system: &Sid, foreign: &Sid) {
+        let valid = canonical_acl(current_user, local_system);
+        check!(
             inspect_acl(&valid, current_user.as_bytes(), local_system.as_bytes()).is_ok(),
-            "baseline ACL is accepted"
+            "ACL/BASE: canonical descriptor is accepted"
         );
-
-        let mut missing = valid.clone();
-        missing.dacl_present = false;
-        assert!(
-            inspect_acl(&missing, current_user.as_bytes(), local_system.as_bytes()).is_err(),
-            "missing DACL is rejected"
+        for case in [
+            "missing-dacl",
+            "null-dacl",
+            "unprotected-dacl",
+            "wrong-owner",
+            "missing-user",
+            "missing-system",
+            "foreign-non-broad-allow",
+            "broad-allow",
+            "deny",
+            "inherited",
+            "wrong-flags",
+            "wrong-mask",
+            "duplicate-user",
+            "duplicate-system",
+            "incomplete-ace",
+            "unsupported-ace",
+        ] {
+            let mut candidate = valid.clone();
+            match case {
+                "missing-dacl" => candidate.dacl_present = false,
+                "null-dacl" => candidate.dacl_null = true,
+                "unprotected-dacl" => candidate.protected = false,
+                "wrong-owner" => {
+                    check!(
+                        inspect_owner(foreign.as_bytes(), current_user.as_bytes()).is_err(),
+                        "ACL/{case}: foreign owner rejected"
+                    );
+                    continue;
+                }
+                "missing-user" => {
+                    if current_user.as_bytes() == local_system.as_bytes() {
+                        candidate.aces.clear();
+                    } else {
+                        candidate
+                            .aces
+                            .retain(|entry| entry.sid != current_user.as_bytes());
+                    }
+                }
+                "missing-system" => {
+                    candidate
+                        .aces
+                        .retain(|entry| entry.sid != local_system.as_bytes());
+                }
+                "foreign-non-broad-allow" => candidate.aces.push(AceSnapshot {
+                    mask: FILE_READ_DATA,
+                    ..ace(foreign.as_bytes())
+                }),
+                "broad-allow" => candidate.aces.push(ace(foreign.as_bytes())),
+                "deny" => candidate.aces.push(AceSnapshot {
+                    ace_type: ACCESS_DENIED_ACE_TYPE_VALUE,
+                    ..ace(current_user.as_bytes())
+                }),
+                "inherited" => candidate.aces[0].flags = INHERITED_ACE as u8,
+                "wrong-flags" => candidate.aces[0].flags = OBJECT_INHERIT_ACE_VALUE,
+                "wrong-mask" => candidate.aces[0].mask &= !1,
+                "duplicate-user" => candidate.aces.push(ace(current_user.as_bytes())),
+                "duplicate-system" => candidate.aces.push(ace(local_system.as_bytes())),
+                "incomplete-ace" => candidate.aces[0].sid.clear(),
+                "unsupported-ace" => candidate.aces[0].ace_type = 0xff,
+                _ => unreachable!(),
+            }
+            check!(
+                inspect_acl(&candidate, current_user.as_bytes(), local_system.as_bytes()).is_err(),
+                "ACL-MUTATION-MATRIX/{case}: mutation is rejected"
+            );
+        }
+    }
+    fn replace_success_case(destination_present: bool, label: &str) -> io::Result<()> {
+        let workspace = SecureWorkspace::create()?;
+        let storage_path = &workspace.path;
+        let directory = &workspace.directory;
+        let staged_path = storage_path.join("staged.tmp");
+        let destination_path = storage_path.join("history.json");
+        let (staged, staged_identity) = create_secure_test_file(&staged_path, b"new bytes")?;
+        let staged_snapshot = snapshot_object(&staged, StorageObjectKind::RegularFile)?;
+        drop(staged);
+        if destination_present {
+            let (destination, _) = create_secure_test_file(&destination_path, b"old bytes")?;
+            drop(destination);
+        }
+        replace_secure_file(&directory, &storage_path, &staged_path, &destination_path)?;
+        let installed = snapshot_secure_path(&destination_path, StorageObjectKind::RegularFile)?;
+        check!(
+            installed.bytes == b"new bytes"
+                && installed.identity == staged_identity
+                && installed.acl == staged_snapshot.acl,
+            "{label}: staged bytes, identity, or DACL changed"
         );
-
-        let mut null_dacl = valid.clone();
-        null_dacl.dacl_null = true;
-        assert!(
-            inspect_acl(&null_dacl, current_user.as_bytes(), local_system.as_bytes()).is_err(),
-            "null DACL is rejected"
+        assert_absent(&staged_path, label);
+    }
+    fn replace_precommit_failure_case() -> io::Result<()> {
+        let root = TempRoot::create()?;
+        let storage_path = root.join("storage");
+        let directory = ensure_secure_storage_directory(&storage_path)?;
+        let staged_path = storage_path.join("staged.tmp");
+        let destination_path = storage_path.join("history.json");
+        let (staged, _) = create_secure_test_file(&staged_path, b"staged bytes")?;
+        let staged_snapshot = snapshot_object(&staged, StorageObjectKind::RegularFile)?;
+        let (destination, _) = create_secure_test_file(&destination_path, b"last-good bytes")?;
+        let destination_snapshot = snapshot_object(&destination, StorageObjectKind::RegularFile)?;
+        drop(destination);
+        drop(staged);
+        let mut called = false;
+        let error = replace_secure_file_with(
+            &directory,
+            &storage_path,
+            &staged_path,
+            &destination_path,
+            |_, _| {
+                called = true;
+                Err(io::Error::other("injected replace failure"))
+            },
+        )
+        .expect_err("REPLACE-PRECOMMIT: injected failure returns error");
+        check!(called, "REPLACE-PRECOMMIT: seam reached");
+        assert_path_snapshots([
+            (&staged_path, &staged_snapshot, "REPLACE-PRECOMMIT/staged"),
+            (
+                &destination_path,
+                &destination_snapshot,
+                "REPLACE-PRECOMMIT/destination",
+            ),
+        ]);
+    }
+    fn assert_path_snapshots<const N: usize>(cases: [(&Path, &FileSnapshot, &str); N]) {
+        for (path, snapshot, label) in cases {
+            assert_snapshot(path, snapshot, label);
+        }
+    }
+    fn reject_replace_reparse(
+        directory: &File,
+        storage_path: &Path,
+        target: &Path,
+        target_snapshot: &FileSnapshot,
+        link: &Path,
+        regular: &Path,
+        regular_snapshot: &FileSnapshot,
+        staged: &Path,
+        destination: &Path,
+        label: &str,
+    ) {
+        symlink_file(target, link).expect("REPLACE-FINAL-REPARSE: link");
+        replace_secure_file(directory, storage_path, staged, destination)
+            .expect_err("REPLACE-FINAL-REPARSE: link accepted");
+        check!(
+            fs::symlink_metadata(link)
+                .expect("REPLACE-FINAL-REPARSE: link remains")
+                .file_type()
+                .is_symlink(),
+            label
         );
-
-        let mut unprotected = valid.clone();
-        unprotected.protected = false;
-        assert!(
-            inspect_acl(
-                &unprotected,
-                current_user.as_bytes(),
-                local_system.as_bytes()
-            )
-            .is_err(),
-            "unprotected DACL is rejected"
-        );
-
-        let mut inherited = valid.clone();
-        inherited.aces[0].flags = INHERITED_ACE as u8;
-        assert!(
-            inspect_acl(&inherited, current_user.as_bytes(), local_system.as_bytes()).is_err(),
-            "inherited ACE is rejected"
-        );
-
-        let mut extra = valid.clone();
-        extra.aces.push(AceSnapshot {
-            ace_type: ACCESS_ALLOWED_ACE_TYPE_VALUE,
-            flags: NO_INHERITANCE as u8,
-            mask: FILE_ALL_ACCESS,
-            sid: everyone.as_bytes().to_vec(),
+        assert_snapshot(target, target_snapshot, "REPLACE-FINAL-REPARSE/target");
+        assert_snapshot(regular, regular_snapshot, "REPLACE-FINAL-REPARSE/regular");
+        fs::remove_file(link).expect("REPLACE-FINAL-REPARSE: remove link");
+    }
+    #[test]
+    fn cng_success_exact_length_and_injected_failure_return_no_partial() {
+        let first = cng_random_bytes(32).expect("CNG success returns bytes");
+        let second = cng_random_bytes(32).expect("CNG second success returns bytes");
+        check!(first.len() == 32, "CNG-EXACT-LENGTH: first length");
+        check!(second.len() == 32, "CNG-EXACT-LENGTH: second length");
+        let result = random_bytes_with(32, |buffer, buffer_len| {
+            unsafe { ptr::write_bytes(buffer, 0xA5, buffer_len as usize) };
+            -1
         });
-        assert!(
-            inspect_acl(&extra, current_user.as_bytes(), local_system.as_bytes()).is_err(),
-            "extra broad allow ACE is rejected"
-        );
-
-        let mut denied = valid.clone();
-        denied.aces.push(AceSnapshot {
-            ace_type: ACCESS_DENIED_ACE_TYPE_VALUE,
-            flags: NO_INHERITANCE as u8,
-            mask: FILE_ALL_ACCESS,
-            sid: everyone.as_bytes().to_vec(),
-        });
-        assert!(
-            inspect_acl(&denied, current_user.as_bytes(), local_system.as_bytes()).is_err(),
-            "extra broad deny ACE is rejected"
-        );
-
-        let mut incomplete = valid;
-        incomplete.aces[0].mask = FILE_ALL_ACCESS & !1;
-        assert!(
-            inspect_acl(
-                &incomplete,
-                current_user.as_bytes(),
-                local_system.as_bytes()
-            )
-            .is_err(),
-            "incomplete access mask is rejected"
+        check!(
+            result.is_err(),
+            "CNG-INJECTED-FAILURE: failure has no result"
         );
     }
-
     #[test]
-    fn secure_root_resolver_preserves_legacy_preferred_and_uses_exact_fallback() {
-        let root = TempRoot::create().expect("create temporary root");
+    fn acl_descriptor_and_handle_mutations_fail_closed() {
+        let current = current_process_user_sid().expect("ACL: current SID");
+        let system = well_known_sid(WinLocalSystemSid).expect("ACL: system SID");
+        let foreign_sid = well_known_sid(WinWorldSid).expect("ACL: foreign SID");
+        let foreign = if current.as_bytes() != system.as_bytes() {
+            &system
+        } else {
+            &foreign_sid
+        };
+        let root = TempRoot::create().expect("ACL-ROUNDTRIP: root");
+        let path = root.join("artifact.tmp");
+        let artifact = create_test_file(&path, b"").expect("ACL-ROUNDTRIP: create artifact");
+        verify_storage_handle(artifact.as_raw_handle() as HANDLE)
+            .expect("ACL-ROUNDTRIP: creation verifies");
+        let snapshot = read_acl_snapshot(artifact.as_raw_handle() as HANDLE)
+            .expect("ACL-ROUNDTRIP: read DACL");
+        inspect_acl(&snapshot, current.as_bytes(), system.as_bytes())
+            .expect("ACL-ROUNDTRIP: exact DACL");
+        let expected_count = usize::from(current.as_bytes() != system.as_bytes()) + 1;
+        check!(snapshot.dacl_present, "ACL-ROUNDTRIP: DACL present");
+        check!(!snapshot.dacl_null, "ACL-ROUNDTRIP: DACL non-null");
+        check!(snapshot.protected, "ACL-ROUNDTRIP: DACL protected");
+        check!(
+            snapshot.aces.len() == expected_count,
+            "ACL-ROUNDTRIP: ACE count"
+        );
+        check!(
+            snapshot
+                .aces
+                .iter()
+                .all(|entry| entry.flags & INHERITED_ACE as u8 == 0),
+            "ACL-ROUNDTRIP: no inherited ACE"
+        );
+        for kind in [WinWorldSid, WinAuthenticatedUserSid] {
+            let broad = well_known_sid(kind).expect("ACL-BROAD-ALLOW: broad SID");
+            let acl = build_full_control_acl(&[&broad]).expect("ACL-BROAD-ALLOW: build DACL");
+            set_protected_handle_dacl(artifact.as_raw_handle() as HANDLE, acl.as_ptr())
+                .expect("ACL-BROAD-ALLOW: apply DACL");
+            let before = snapshot_object(&artifact, StorageObjectKind::RegularFile)
+                .expect("ACL-BROAD-ALLOW: before snapshot");
+            check!(
+                verify_storage_handle(artifact.as_raw_handle() as HANDLE).is_err(),
+                "ACL-BROAD-ALLOW: broad ACE rejected"
+            );
+            assert_handle_snapshot(&artifact, &before, "ACL-BROAD-ALLOW");
+        }
+        check!(
+            inspect_owner(foreign.as_bytes(), current.as_bytes()).is_err(),
+            "ACL-WRONG-OWNER: foreign owner rejected"
+        );
+        check!(
+            inspect_owner(current.as_bytes(), current.as_bytes()).is_ok(),
+            "ACL-WRONG-OWNER: current owner accepted"
+        );
+        reject_acl_mutations(&current, &system, foreign);
+    }
+    #[test]
+    fn secure_root_resolver_preserves_preferred_fallback_sticky_and_collision_cases() {
+        let root = TempRoot::create().expect("RESOLVER: root");
         let preferred = root.join("com.nyanako.tokenbar");
         let fallback = root.join("com.nyanako.tokenbar.secure");
-        fs::create_dir(&preferred).expect("create inherited legacy directory");
+        fs::create_dir(&preferred).expect("RESOLVER-FALLBACK: preferred");
         let preferred_handle = open_windows_path(
             &preferred,
             FILE_READ_ATTRIBUTES | READ_CONTROL,
             OPEN_EXISTING,
             StorageObjectKind::Directory.open_flags(),
         )
-        .expect("open inherited legacy directory");
-        assert!(
-            verify_storage_handle(preferred_handle.as_raw_handle() as HANDLE).is_err(),
-            "legacy directory does not satisfy the exact DACL contract"
-        );
+        .expect("RESOLVER-FALLBACK: open preferred");
         let preferred_identity = storage_identity(
             preferred_handle.as_raw_handle() as HANDLE,
             StorageObjectKind::Directory,
         )
-        .expect("snapshot legacy directory identity");
+        .expect("RESOLVER-FALLBACK: preferred identity");
         let preferred_acl = read_acl_snapshot(preferred_handle.as_raw_handle() as HANDLE)
-            .expect("snapshot legacy directory DACL");
-
+            .expect("RESOLVER-FALLBACK: preferred DACL");
+        check!(
+            verify_storage_handle(preferred_handle.as_raw_handle() as HANDLE).is_err(),
+            "RESOLVER-FALLBACK: legacy preferred rejected"
+        );
         let v1_path = preferred.join("codex-weekly-history.json");
-        let v1_bytes = b"legacy-v1-sentinel";
-        fs::write(&v1_path, v1_bytes).expect("write legacy v1 sentinel");
-        let v1_handle = open_windows_path(
+        fs::write(&v1_path, b"legacy-v1-sentinel").expect("RESOLVER-FALLBACK: v1 bytes");
+        let v1 = open_windows_path(
             &v1_path,
             GENERIC_READ | FILE_READ_ATTRIBUTES,
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
         )
-        .expect("open legacy v1 sentinel");
-        let v1_identity = regular_file_identity(&v1_handle).expect("snapshot v1 identity");
+        .expect("RESOLVER-FALLBACK: open v1");
+        let v1_snapshot = snapshot_object(&v1, StorageObjectKind::RegularFile)
+            .expect("RESOLVER-FALLBACK: v1 snapshot");
         let v1_mtime = fs::metadata(&v1_path)
-            .expect("read v1 metadata")
+            .expect("RESOLVER-FALLBACK: v1 metadata")
             .modified()
-            .expect("read v1 mtime");
-
-        assert_eq!(
-            resolve_secure_storage_directory(&preferred).expect("resolve secure sibling"),
-            fallback
+            .expect("RESOLVER-FALLBACK: v1 mtime");
+        check!(
+            resolve_secure_storage_directory(&preferred).expect("RESOLVER-FALLBACK: resolve")
+                == fallback,
+            "RESOLVER-FALLBACK: fallback selected"
         );
-        let fallback_handle = ensure_secure_storage_directory(&fallback)
-            .expect("fallback remains an exact secure directory");
+        let fallback_handle =
+            ensure_secure_storage_directory(&fallback).expect("RESOLVER-FALLBACK: exact fallback");
         verify_storage_handle(fallback_handle.as_raw_handle() as HANDLE)
-            .expect("fallback DACL is exact");
-
+            .expect("RESOLVER-FALLBACK: fallback DACL");
         let preferred_after = open_windows_path(
             &preferred,
             FILE_READ_ATTRIBUTES | READ_CONTROL,
             OPEN_EXISTING,
             StorageObjectKind::Directory.open_flags(),
         )
-        .expect("reopen legacy directory");
-        assert!(
+        .expect("RESOLVER-FALLBACK: reopen preferred");
+        check!(
             storage_identity(
                 preferred_after.as_raw_handle() as HANDLE,
                 StorageObjectKind::Directory
             )
-            .expect("reread legacy directory identity")
-                == preferred_identity
+            .expect("RESOLVER-FALLBACK: preferred identity after")
+                == preferred_identity,
+            "RESOLVER-FALLBACK: preferred identity unchanged"
         );
-        assert!(
+        check!(
             read_acl_snapshot(preferred_after.as_raw_handle() as HANDLE)
-                .expect("reread legacy directory DACL")
+                .expect("RESOLVER-FALLBACK: preferred DACL after")
                 == preferred_acl,
-            "resolver never secures the legacy root in place"
+            "RESOLVER-FALLBACK: preferred DACL unchanged"
         );
-        let v1_after = open_windows_path(
-            &v1_path,
-            GENERIC_READ | FILE_READ_ATTRIBUTES,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-        )
-        .expect("reopen legacy v1 sentinel");
-        assert!(regular_file_identity(&v1_after).expect("reread v1 identity") == v1_identity);
-        assert_eq!(fs::read(&v1_path).expect("reread v1 bytes"), v1_bytes);
-        assert_eq!(
+        assert_handle_snapshot(&v1, &v1_snapshot, "RESOLVER-FALLBACK/v1");
+        check!(
             fs::metadata(&v1_path)
-                .expect("reread v1 metadata")
+                .expect("RESOLVER-FALLBACK: v1 metadata after")
                 .modified()
-                .expect("reread v1 mtime"),
-            v1_mtime
+                .expect("RESOLVER-FALLBACK: v1 mtime after")
+                == v1_mtime,
+            "RESOLVER-FALLBACK: v1 mtime unchanged"
         );
-        assert_eq!(
-            fs::read_dir(&preferred)
-                .expect("list legacy directory")
-                .map(|entry| entry.expect("read legacy entry").file_name())
-                .collect::<Vec<_>>(),
-            [std::ffi::OsString::from("codex-weekly-history.json")]
+        drop(ensure_secure_storage_directory(&preferred).expect("RESOLVER-STICKY: preferred"));
+        check!(
+            resolve_secure_storage_directory(&preferred).expect("RESOLVER-STICKY: second")
+                == fallback,
+            "RESOLVER-STICKY: fallback remains authoritative"
         );
-
-        drop(v1_after);
-        drop(v1_handle);
-        drop(preferred_after);
-        drop(preferred_handle);
-        drop(fallback_handle);
-        root.cleanup().expect("remove temporary root");
-    }
-
-    #[test]
-    fn secure_root_resolver_keeps_existing_fallback_sticky() {
-        let root = TempRoot::create().expect("create temporary root");
-        let preferred = root.join("com.nyanako.tokenbar");
-        let fallback = root.join("com.nyanako.tokenbar.secure");
+        let collision = root.join("collision-root");
+        fs::create_dir(&collision).expect("RESOLVER-COLLISION: root");
+        let collision_preferred = collision.join("com.nyanako.tokenbar");
+        let collision_fallback = collision.join("com.nyanako.tokenbar.secure");
+        let fallback_file = create_test_file(&collision_fallback, b"fallback-file")
+            .expect("RESOLVER-COLLISION: file collision");
+        let file_snapshot = snapshot_object(&fallback_file, StorageObjectKind::RegularFile)
+            .expect("RESOLVER-COLLISION: file snapshot");
+        check!(
+            resolve_secure_storage_directory(&collision_preferred).is_err(),
+            "RESOLVER-COLLISION: file collision rejected"
+        );
+        assert_absent(&collision_preferred, "RESOLVER-COLLISION/file preferred");
+        assert_handle_snapshot(&fallback_file, &file_snapshot, "RESOLVER-COLLISION/file");
+        drop(fallback_file);
+        fs::remove_file(&collision_fallback).expect("RESOLVER-COLLISION: remove file collision");
+        let target = collision.join("fallback-target");
+        let target_file = create_test_file(&target, b"fallback-target")
+            .expect("RESOLVER-COLLISION: reparse target");
+        let target_snapshot = snapshot_object(&target_file, StorageObjectKind::RegularFile)
+            .expect("RESOLVER-COLLISION: target snapshot");
+        symlink_file(&target, &collision_fallback).expect("RESOLVER-COLLISION: fallback reparse");
+        check!(
+            resolve_secure_storage_directory(&collision_preferred).is_err(),
+            "RESOLVER-COLLISION: reparse collision rejected"
+        );
+        assert_absent(&collision_preferred, "RESOLVER-COLLISION/reparse preferred");
+        assert_handle_snapshot(
+            &target_file,
+            &target_snapshot,
+            "RESOLVER-COLLISION/reparse target",
+        );
+        fs::remove_file(&collision_fallback).expect("RESOLVER-COLLISION: remove reparse");
+        drop(target_file);
+        let fallback_directory = create_permissive_test_directory(&collision_fallback)
+            .expect("RESOLVER-COLLISION: permissive directory");
+        let directory_snapshot = snapshot_object(&fallback_directory, StorageObjectKind::Directory)
+            .expect("RESOLVER-COLLISION: directory snapshot");
+        check!(
+            resolve_secure_storage_directory(&collision_preferred).is_err(),
+            "RESOLVER-COLLISION: permissive collision rejected"
+        );
+        assert_absent(
+            &collision_preferred,
+            "RESOLVER-COLLISION/directory preferred",
+        );
+        assert_handle_snapshot(
+            &fallback_directory,
+            &directory_snapshot,
+            "RESOLVER-COLLISION/directory",
+        );
+        drop(fallback_directory);
+        let preferred_only = root.join("preferred-only");
+        let preferred_only_fallback = root.join("preferred-only.secure");
         drop(
-            ensure_secure_storage_directory(&fallback)
-                .expect("create exact secure fallback before preferred"),
+            ensure_secure_storage_directory(&preferred_only)
+                .expect("RESOLVER-PREFERRED: preferred"),
         );
-
-        assert_eq!(
-            resolve_secure_storage_directory(&preferred)
-                .expect("existing fallback wins while preferred is absent"),
-            fallback
+        check!(
+            resolve_secure_storage_directory(&preferred_only).expect("RESOLVER-PREFERRED: resolve")
+                == preferred_only,
+            "RESOLVER-PREFERRED: exact preferred selected"
         );
-        drop(
-            ensure_secure_storage_directory(&preferred)
-                .expect("create exact preferred after fallback"),
-        );
-        assert_eq!(
-            resolve_secure_storage_directory(&preferred)
-                .expect("existing fallback remains sticky after preferred is exact"),
-            fallback
-        );
-
-        root.cleanup().expect("remove temporary root");
+        assert_absent(&preferred_only_fallback, "RESOLVER-PREFERRED/fallback");
     }
-
-    #[test]
-    fn secure_root_resolver_uses_exact_preferred_when_fallback_is_absent() {
-        let root = TempRoot::create().expect("create temporary root");
-        let preferred = root.join("com.nyanako.tokenbar");
-        let fallback = root.join("com.nyanako.tokenbar.secure");
-        drop(ensure_secure_storage_directory(&preferred).expect("create exact secure preferred"));
-
-        assert_eq!(
-            resolve_secure_storage_directory(&preferred).expect("resolve exact preferred"),
-            preferred
-        );
-        assert!(
-            !fallback.exists(),
-            "resolver does not create an unused fallback"
-        );
-
-        root.cleanup().expect("remove temporary root");
-    }
-
-    #[test]
-    fn secure_root_resolver_fails_closed_on_fallback_collisions() {
-        {
-            let root = TempRoot::create().expect("create temporary root");
-            let preferred = root.join("com.nyanako.tokenbar");
-            let fallback = root.join("com.nyanako.tokenbar.secure");
-            let fallback_file =
-                create_test_file(&fallback, b"fallback-file").expect("create file collision");
-            let fallback_identity =
-                regular_file_identity(&fallback_file).expect("snapshot file collision identity");
-
-            resolve_secure_storage_directory(&preferred)
-                .expect_err("regular-file fallback collision fails closed");
-            assert!(
-                !preferred.exists(),
-                "preferred receives no secure artifacts"
-            );
-            assert_eq!(
-                fs::read(&fallback).expect("read file collision"),
-                b"fallback-file"
-            );
-            assert!(
-                regular_file_identity(&fallback_file).expect("reread file collision identity")
-                    == fallback_identity
-            );
-
-            drop(fallback_file);
-            root.cleanup().expect("remove temporary root");
-        }
-
-        {
-            let root = TempRoot::create().expect("create temporary root");
-            let preferred = root.join("com.nyanako.tokenbar");
-            let fallback = root.join("com.nyanako.tokenbar.secure");
-            let target = root.join("fallback-target");
-            let target_file =
-                create_test_file(&target, b"fallback-target").expect("create reparse target");
-            let target_identity =
-                regular_file_identity(&target_file).expect("snapshot reparse target identity");
-            symlink_file(&target, &fallback).expect("create fallback reparse collision");
-
-            resolve_secure_storage_directory(&preferred)
-                .expect_err("fallback reparse collision fails closed");
-            assert!(
-                !preferred.exists(),
-                "preferred receives no secure artifacts"
-            );
-            assert!(fs::symlink_metadata(&fallback)
-                .expect("fallback reparse remains")
-                .file_type()
-                .is_symlink());
-            assert_eq!(
-                fs::read(&target).expect("read reparse target"),
-                b"fallback-target"
-            );
-            assert!(
-                regular_file_identity(&target_file).expect("reread reparse target identity")
-                    == target_identity
-            );
-
-            fs::remove_file(&fallback).expect("remove fallback reparse collision");
-            drop(target_file);
-            root.cleanup().expect("remove temporary root");
-        }
-
-        {
-            let root = TempRoot::create().expect("create temporary root");
-            let preferred = root.join("com.nyanako.tokenbar");
-            let fallback = root.join("com.nyanako.tokenbar.secure");
-            let fallback_directory = create_permissive_test_directory(&fallback)
-                .expect("create permissive fallback collision");
-            let fallback_acl = read_acl_snapshot(fallback_directory.as_raw_handle() as HANDLE)
-                .expect("snapshot permissive fallback DACL");
-
-            resolve_secure_storage_directory(&preferred)
-                .expect_err("permissive fallback collision fails closed");
-            assert!(
-                !preferred.exists(),
-                "preferred receives no secure artifacts"
-            );
-            assert!(
-                read_acl_snapshot(fallback_directory.as_raw_handle() as HANDLE)
-                    .expect("reread permissive fallback DACL")
-                    == fallback_acl,
-                "collision rejection never repairs fallback in place"
-            );
-
-            drop(fallback_directory);
-            root.cleanup().expect("remove temporary root");
-        }
-    }
-
     #[test]
     fn new_objects_are_secure_on_their_first_open_handle() {
-        let root = TempRoot::create().expect("create temporary root");
+        let root = TempRoot::create().expect("FIRST-OPEN: root");
         let storage_path = root.join("storage");
         let directory = ensure_secure_storage_directory_with(&storage_path, |created| {
             verify_storage_handle(created.as_raw_handle() as HANDLE)
         })
-        .expect("directory is secure at creation time");
-
-        let create_new_path = storage_path.join("create-new.json");
-        let create_new = open_secure_storage_object_with(
-            &create_new_path,
-            GENERIC_READ | GENERIC_WRITE | STORAGE_SECURITY_ACCESS,
-            CREATE_NEW,
-            StorageObjectKind::RegularFile,
-            |created| verify_storage_handle(created.as_raw_handle() as HANDLE),
-        )
-        .expect("CREATE_NEW file is secure on its first handle");
-
-        let open_always_path = storage_path.join("open-always.json");
-        let open_always = open_secure_storage_object_with(
-            &open_always_path,
-            GENERIC_READ | GENERIC_WRITE | STORAGE_SECURITY_ACCESS,
-            OPEN_ALWAYS,
-            StorageObjectKind::RegularFile,
-            |created| verify_storage_handle(created.as_raw_handle() as HANDLE),
-        )
-        .expect("OPEN_ALWAYS-created file is secure on its first handle");
-
-        drop(open_always);
-        drop(create_new);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
+        .expect("FIRST-OPEN: directory");
+        for (name, disposition) in [
+            ("create-new.json", CREATE_NEW),
+            ("open-always.json", OPEN_ALWAYS),
+        ] {
+            let path = storage_path.join(name);
+            let file = open_secure_storage_object_with(
+                &path,
+                GENERIC_READ | GENERIC_WRITE | STORAGE_SECURITY_ACCESS,
+                disposition,
+                StorageObjectKind::RegularFile,
+                |created| verify_storage_handle(created.as_raw_handle() as HANDLE),
+            )
+            .expect("FIRST-OPEN: file secure on initial handle");
+        }
     }
-
     #[test]
     fn secure_directory_and_files_round_trip_type_dacl_identity_and_bytes() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
+        let workspace = SecureWorkspace::create().expect("OBJECT-ROUNDTRIP: workspace");
+        let storage_path = &workspace.path;
+        let directory = &workspace.directory;
         storage_identity(
             directory.as_raw_handle() as HANDLE,
             StorageObjectKind::Directory,
         )
-        .expect("directory type and identity verify");
-        verify_storage_handle(directory.as_raw_handle() as HANDLE)
-            .expect("directory DACL verifies");
-        flush_secure_storage_directory(&directory).expect("directory flush succeeds");
-
+        .expect("OBJECT-ROUNDTRIP: directory identity");
+        verify_storage_handle(directory.as_raw_handle() as HANDLE).expect("OBJECT-ROUNDTRIP: DACL");
+        flush_secure_storage_directory(&directory).expect("OBJECT-ROUNDTRIP: directory flush");
         let file_path = storage_path.join("history.json");
-        let mut file = create_new_secure_file(&file_path).expect("create secure file");
+        let mut file = create_new_secure_file(&file_path).expect("OBJECT-ROUNDTRIP: file");
         file.write_all(b"secure history")
-            .expect("write secure file");
-        file.sync_all().expect("sync secure file");
-        let original_identity = storage_identity(
-            file.as_raw_handle() as HANDLE,
-            StorageObjectKind::RegularFile,
-        )
-        .expect("file type and identity verify");
-        verify_storage_handle(file.as_raw_handle() as HANDLE).expect("file DACL verifies");
-        verify_secure_file_path(&file, &file_path).expect("file path identity verifies");
-        drop(file);
-
+            .expect("OBJECT-ROUNDTRIP: write");
+        file.sync_all().expect("OBJECT-ROUNDTRIP: sync");
+        let identity = regular_file_identity(&file).expect("OBJECT-ROUNDTRIP: file identity");
+        verify_storage_handle(file.as_raw_handle() as HANDLE).expect("OBJECT-ROUNDTRIP: file DACL");
+        verify_secure_file_path(&file, &file_path).expect("OBJECT-ROUNDTRIP: file path");
         let mut reopened =
-            open_existing_secure_file(&file_path, false).expect("reopen secure file read-only");
-        let reopened_identity = storage_identity(
-            reopened.as_raw_handle() as HANDLE,
-            StorageObjectKind::RegularFile,
-        )
-        .expect("reopened file identity verifies");
-        assert!(
-            original_identity == reopened_identity,
-            "reopen preserves stable file identity"
+            open_existing_secure_file(&file_path, false).expect("OBJECT-ROUNDTRIP: reopen");
+        check!(
+            regular_file_identity(&reopened).expect("OBJECT-ROUNDTRIP: reopen identity")
+                == identity,
+            "OBJECT-ROUNDTRIP: identity stable"
         );
-        assert!(
-            read_open_file(&mut reopened).expect("read reopened secure file") == b"secure history",
-            "reopened bytes match"
+        check!(
+            read_open_file(&mut reopened).expect("OBJECT-ROUNDTRIP: read") == b"secure history",
+            "OBJECT-ROUNDTRIP: bytes stable"
         );
-        let mut writable_reopened =
-            open_existing_secure_file(&file_path, true).expect("reopen secure file read/write");
-        writable_reopened
+        let mut writable =
+            open_existing_secure_file(&file_path, true).expect("OBJECT-ROUNDTRIP: writable reopen");
+        writable
             .seek(SeekFrom::End(0))
-            .expect("seek writable secure file");
-        writable_reopened
-            .write_all(b"!")
-            .expect("write reopened secure file");
-        writable_reopened
-            .sync_all()
-            .expect("sync reopened secure file");
-        verify_secure_file_path(&writable_reopened, &file_path)
-            .expect("writable file path identity verifies");
-        drop(writable_reopened);
-        assert!(
-            read_open_file(&mut reopened).expect("reread secure file") == b"secure history!",
-            "read/write reopen persists bytes"
+            .expect("OBJECT-ROUNDTRIP: seek");
+        writable.write_all(b"!").expect("OBJECT-ROUNDTRIP: append");
+        writable.sync_all().expect("OBJECT-ROUNDTRIP: append sync");
+        drop(writable);
+        check!(
+            read_open_file(&mut reopened).expect("OBJECT-ROUNDTRIP: reread") == b"secure history!",
+            "OBJECT-ROUNDTRIP: append persists"
         );
-
         let lock_path = storage_path.join("history.lock");
-        let lock = open_or_create_secure_file(&lock_path).expect("create secure lock file");
-        let lock_identity = storage_identity(
-            lock.as_raw_handle() as HANDLE,
-            StorageObjectKind::RegularFile,
-        )
-        .expect("lock identity verifies");
+        let lock = open_or_create_secure_file(&lock_path).expect("OBJECT-ROUNDTRIP: lock create");
+        let lock_identity = regular_file_identity(&lock).expect("OBJECT-ROUNDTRIP: lock identity");
         drop(lock);
         let reopened_lock =
-            open_or_create_secure_file(&lock_path).expect("open existing secure lock file");
-        assert!(
-            storage_identity(
-                reopened_lock.as_raw_handle() as HANDLE,
-                StorageObjectKind::RegularFile,
-            )
-            .expect("reopened lock identity verifies")
+            open_or_create_secure_file(&lock_path).expect("OBJECT-ROUNDTRIP: lock reopen");
+        check!(
+            regular_file_identity(&reopened_lock).expect("OBJECT-ROUNDTRIP: lock identity after")
                 == lock_identity,
-            "open-or-create preserves identity"
+            "OBJECT-ROUNDTRIP: lock identity stable"
         );
-
         drop(reopened_lock);
         drop(reopened);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
     }
-
     #[test]
     fn secure_lock_preserves_one_identity_and_blocks_delete_until_handles_drop() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
+        let workspace = SecureWorkspace::create().expect("LOCK-NO-DELETE: workspace");
+        let storage_path = &workspace.path;
+        let directory = &workspace.directory;
         let lock_path = storage_path.join("history.lock");
         let renamed_path = storage_path.join("history.lock.renamed");
-
-        let first = open_secure_lock_file(&lock_path).expect("acquire secure lock");
-        let first_identity = regular_file_identity(&first).expect("read first lock identity");
-        verify_storage_handle(first.as_raw_handle() as HANDLE).expect("lock DACL is exact");
-        verify_secure_file_path(&first, &lock_path).expect("first lock path identity verifies");
-
+        let first = open_secure_lock_file(&lock_path).expect("LOCK-NO-DELETE: first lock");
+        let identity = regular_file_identity(&first).expect("LOCK-NO-DELETE: identity");
         let second = open_windows_path_with_share(
             &lock_path,
             GENERIC_READ | GENERIC_WRITE | STORAGE_SECURITY_ACCESS,
@@ -2240,849 +2162,442 @@ mod tests {
             StorageObjectKind::RegularFile.open_flags(),
             VALIDATION_SHARE_MODE,
         )
-        .expect("open second lock handle");
-        let second_identity = regular_file_identity(&second).expect("read second lock identity");
-        verify_storage_handle(second.as_raw_handle() as HANDLE)
-            .expect("second handle DACL is exact");
-        assert!(
-            first_identity == second_identity,
-            "both lock handles name the same file identity"
+        .expect("LOCK-NO-DELETE: second handle");
+        check!(
+            regular_file_identity(&second).expect("LOCK-NO-DELETE: second identity") == identity,
+            "LOCK-NO-DELETE: identity stable"
         );
-        fs2::FileExt::try_lock_exclusive(&second)
-            .expect_err("second exclusive lock attempt fails while first holds it");
-
-        fs::rename(&lock_path, &renamed_path)
-            .expect_err("live no-share-delete handles block rename");
-        fs::remove_file(&lock_path).expect_err("live no-share-delete handles block delete");
-        assert!(lock_path.exists(), "lock pathname remains installed");
-
-        fs2::FileExt::unlock(&first).expect("release first exclusive lock");
+        fs2::FileExt::try_lock_exclusive(&second).expect_err("LOCK-NO-DELETE: second lock blocked");
+        fs::rename(&lock_path, &renamed_path).expect_err("LOCK-NO-DELETE: rename blocked");
+        fs::remove_file(&lock_path).expect_err("LOCK-NO-DELETE: delete blocked");
+        fs2::FileExt::unlock(&first).expect("LOCK-NO-DELETE: unlock");
         drop(second);
         drop(first);
-        fs::rename(&lock_path, &renamed_path).expect("rename succeeds after lock handles drop");
-        let renamed = open_existing_secure_file(&renamed_path, false)
-            .expect("renamed lock remains an exact secure file");
-        assert!(
-            regular_file_identity(&renamed).expect("read renamed lock identity") == first_identity,
-            "rename preserves the lock identity"
+        fs::rename(&lock_path, &renamed_path).expect("LOCK-NO-DELETE: rename after drop");
+        let renamed =
+            open_existing_secure_file(&renamed_path, false).expect("LOCK-NO-DELETE: renamed open");
+        check!(
+            regular_file_identity(&renamed).expect("LOCK-NO-DELETE: renamed identity") == identity,
+            "LOCK-NO-DELETE: renamed identity stable"
         );
-
         drop(renamed);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
     }
-
     #[test]
-    fn secure_atomic_replace_existing_destination_preserves_staged_identity() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-        let staged_path = storage_path.join("history.tmp");
-        let destination_path = storage_path.join("history.json");
-
-        let (staged, staged_identity) =
-            create_secure_test_file(&staged_path, b"new history").expect("create staged file");
-        let (destination, old_identity) =
-            create_secure_test_file(&destination_path, b"last-good history")
-                .expect("create destination file");
-        assert!(
-            staged_identity != old_identity,
-            "staged and destination identities start distinct"
-        );
-        drop(destination);
-        drop(staged);
-
-        replace_secure_file(&directory, &storage_path, &staged_path, &destination_path)
-            .expect("replace existing destination and flush directory");
-
-        let (bytes, installed_identity) =
-            read_secure_test_file(&destination_path).expect("open exact installed destination");
-        assert!(
-            bytes == b"new history",
-            "installed bytes come from staged file"
-        );
-        assert!(
-            installed_identity == staged_identity,
-            "installed destination keeps staged file identity"
-        );
-        assert!(
-            std::fs::symlink_metadata(&staged_path)
-                .expect_err("staged pathname disappears")
-                .kind()
-                == io::ErrorKind::NotFound,
-            "staged pathname is absent after replace"
-        );
-
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
+    fn replace_success_and_precommit_failure_preserve_boundaries() {
+        for (present, label) in [(true, "REPLACE-SUCCESS"), (false, "REPLACE-ABSENT")] {
+            replace_success_case(present, label).expect("REPLACE-SUCCESS: replacement");
+        }
+        replace_precommit_failure_case().expect("REPLACE-PRECOMMIT: scenario");
     }
-
     #[test]
-    fn secure_atomic_replace_absent_destination_preserves_staged_identity() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-        let staged_path = storage_path.join("account.tmp");
-        let destination_path = storage_path.join("account.json");
-        let (staged, staged_identity) =
-            create_secure_test_file(&staged_path, b"new account").expect("create staged file");
-        drop(staged);
-        assert!(!destination_path.exists(), "destination starts absent");
-
-        replace_secure_file(&directory, &storage_path, &staged_path, &destination_path)
-            .expect("install absent destination and flush directory");
-
-        let (bytes, installed_identity) =
-            read_secure_test_file(&destination_path).expect("open exact installed destination");
-        assert!(
-            bytes == b"new account",
-            "installed bytes come from staged file"
+    fn replace_validation_type_reparse_and_path_boundaries_preserve_objects() {
+        let workspace = SecureWorkspace::create().expect("REPLACE-VALIDATION: workspace");
+        let root = &workspace.path;
+        let directory = &workspace.directory;
+        let reject = |staged: &Path, destination: &Path| {
+            replace_secure_file(directory, root, staged, destination)
+                .expect_err("REPLACE-VALIDATION: invalid object accepted");
+        };
+        for (case, staged_permissive, destination_permissive) in [
+            ("permissive-destination", false, true),
+            ("permissive-staged", true, false),
+        ] {
+            let staged_path = root.join(format!("{case}.tmp"));
+            let destination_path = root.join(format!("{case}.json"));
+            let (staged, staged_snapshot) =
+                file_snapshot_fixture(&staged_path, b"staged", staged_permissive)
+                    .expect("REPLACE-VALIDATION: staged fixture");
+            let (destination, destination_snapshot) =
+                file_snapshot_fixture(&destination_path, b"last-good", destination_permissive)
+                    .expect("REPLACE-VALIDATION: destination fixture");
+            reject(&staged_path, &destination_path);
+            assert_handle_snapshot(&staged, &staged_snapshot, "REPLACE-VALIDATION/staged");
+            assert_handle_snapshot(
+                &destination,
+                &destination_snapshot,
+                "REPLACE-VALIDATION/destination",
+            );
+        }
+        let fixture = |path: &Path, directory: bool, marker: &[u8]| {
+            if directory {
+                let file =
+                    ensure_secure_storage_directory(path).expect("REPLACE-WRONG-TYPE: directory");
+                let marker_path = path.join("marker.bin");
+                fs::write(&marker_path, marker).expect("REPLACE-WRONG-TYPE: marker");
+                (file, Some(marker_path))
+            } else {
+                (
+                    create_new_secure_file(path).expect("REPLACE-WRONG-TYPE: file"),
+                    None,
+                )
+            }
+        };
+        let check_object = |path: &Path, marker: &Option<PathBuf>, expected: &[u8], label: &str| {
+            if let Some(marker) = marker {
+                check!(fs::read(marker).expect(label) == expected, label);
+            } else {
+                check!(path.exists(), label);
+            }
+        };
+        for (case, staged_directory, destination_directory) in [
+            ("directory-staged", true, false),
+            ("directory-destination", false, true),
+        ] {
+            let staged_path = root.join(format!("{case}.tmp"));
+            let destination_path = root.join(format!("{case}.json"));
+            let (staged, staged_marker) = fixture(&staged_path, staged_directory, b"staged marker");
+            let (destination, destination_marker) = fixture(
+                &destination_path,
+                destination_directory,
+                b"destination marker",
+            );
+            reject(&staged_path, &destination_path);
+            check_object(
+                &staged_path,
+                &staged_marker,
+                b"staged marker",
+                "REPLACE-WRONG-TYPE/staged",
+            );
+            check_object(
+                &destination_path,
+                &destination_marker,
+                b"destination marker",
+                "REPLACE-WRONG-TYPE/destination",
+            );
+            drop(destination);
+            drop(staged);
+        }
+        for (case, link_is_staged) in [("destination-link", false), ("staged-link", true)] {
+            let target_path = root.join(format!("{case}-target.json"));
+            let link_path = root.join(format!("{case}-link.json"));
+            let regular_path = root.join(format!("{case}-regular.json"));
+            let (target, target_snapshot) =
+                file_snapshot_fixture(&target_path, b"reparse target", false)
+                    .expect("REPLACE-FINAL-REPARSE: target");
+            let (regular, regular_snapshot) =
+                file_snapshot_fixture(&regular_path, b"last-good", false)
+                    .expect("REPLACE-FINAL-REPARSE: regular");
+            drop(target);
+            drop(regular);
+            let (staged_path, destination_path) = if link_is_staged {
+                (&link_path, &regular_path)
+            } else {
+                (&regular_path, &link_path)
+            };
+            reject_replace_reparse(
+                directory,
+                root,
+                &target_path,
+                &target_snapshot,
+                &link_path,
+                &regular_path,
+                &regular_snapshot,
+                staged_path,
+                destination_path,
+                &format!("REPLACE-FINAL-REPARSE/{case}: link unchanged"),
+            );
+        }
+        let other = workspace.root.join("other-storage");
+        let _other_directory = ensure_secure_storage_directory(&other)
+            .expect("REPLACE-PATH-BOUNDARY: other directory");
+        let cross_staged = other.join("cross.tmp");
+        let local_destination = root.join("cross-destination.json");
+        let (cross_file, cross_snapshot) =
+            file_snapshot_fixture(&cross_staged, b"cross staged", false)
+                .expect("REPLACE-PATH-BOUNDARY: cross staged");
+        let (destination_file, destination_snapshot) =
+            file_snapshot_fixture(&local_destination, b"last-good", false)
+                .expect("REPLACE-PATH-BOUNDARY: destination");
+        let local_staged = root.join("local-staged.tmp");
+        let cross_destination = other.join("cross-destination.json");
+        let (local_file, local_snapshot) =
+            file_snapshot_fixture(&local_staged, b"local staged", false)
+                .expect("REPLACE-PATH-BOUNDARY: local staged");
+        let (remote_file, remote_snapshot) =
+            file_snapshot_fixture(&cross_destination, b"remote", false)
+                .expect("REPLACE-PATH-BOUNDARY: remote destination");
+        for (staged, staged_snapshot, destination, destination_snapshot, label) in [
+            (
+                &cross_staged,
+                &cross_snapshot,
+                &local_destination,
+                &destination_snapshot,
+                "REPLACE-PATH-BOUNDARY/cross-source",
+            ),
+            (
+                &local_staged,
+                &local_snapshot,
+                &cross_destination,
+                &remote_snapshot,
+                "REPLACE-PATH-BOUNDARY/cross-destination",
+            ),
+        ] {
+            reject(staged, destination);
+            assert_snapshot(staged, staged_snapshot, label);
+            assert_snapshot(destination, destination_snapshot, label);
+        }
+        replace_secure_file(directory, root, &local_staged, &local_staged)
+            .expect_err("REPLACE-PATH-BOUNDARY: same path accepted");
+        check!(
+            validate_replace_paths(root, Path::new(""), &local_destination).is_err(),
+            "REPLACE-PATH-BOUNDARY: missing filename rejected"
         );
-        assert!(
-            installed_identity == staged_identity,
-            "new destination keeps staged file identity"
+        let same_identity = root.join("same-identity.json");
+        fs::hard_link(&local_staged, &same_identity).expect("REPLACE-PATH-BOUNDARY: hard link");
+        replace_secure_file(directory, root, &local_staged, &same_identity)
+            .expect_err("REPLACE-PATH-BOUNDARY: same identity accepted");
+        assert_snapshot(
+            &local_staged,
+            &local_snapshot,
+            "REPLACE-PATH-BOUNDARY/same-identity staged",
         );
-        assert!(!staged_path.exists(), "staged pathname disappears");
-
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
+        assert_snapshot(
+            &same_identity,
+            &local_snapshot,
+            "REPLACE-PATH-BOUNDARY/same-identity destination",
+        );
     }
-
-    #[test]
-    fn injected_replace_failure_preserves_destination_and_staged_files() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-        let staged_path = storage_path.join("history.tmp");
-        let destination_path = storage_path.join("history.json");
-        let (staged, staged_identity) =
-            create_secure_test_file(&staged_path, b"staged bytes").expect("create staged file");
-        let (destination, destination_identity) =
-            create_secure_test_file(&destination_path, b"last-good bytes")
-                .expect("create destination file");
-        drop(destination);
-        drop(staged);
-
-        let mut replace_called = false;
-        replace_secure_file_with(
-            &directory,
-            &storage_path,
-            &staged_path,
-            &destination_path,
-            |_, _| {
-                replace_called = true;
-                Err(io::Error::other("injected replace failure"))
-            },
-        )
-        .expect_err("injected replace failure is returned");
-        assert!(replace_called, "replace seam was reached");
-
-        let (destination_bytes, destination_after) =
-            read_secure_test_file(&destination_path).expect("reopen last-good destination");
-        assert!(
-            destination_bytes == b"last-good bytes" && destination_after == destination_identity,
-            "failed replace preserves destination bytes and identity"
-        );
-        let (staged_bytes, staged_after) =
-            read_secure_test_file(&staged_path).expect("reopen caller-owned staged file");
-        assert!(
-            staged_bytes == b"staged bytes" && staged_after == staged_identity,
-            "failed replace leaves staged bytes and identity for caller cleanup"
-        );
-
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
-    }
-
-    #[test]
-    fn secure_replace_rejects_permissive_staged_and_destination_without_mutation() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-
-        let staged_for_destination = storage_path.join("destination-check.tmp");
-        let permissive_destination_path = storage_path.join("permissive-destination.json");
-        let (staged, staged_identity) =
-            create_secure_test_file(&staged_for_destination, b"new bytes")
-                .expect("create secure staged file");
-        let permissive_destination =
-            create_permissive_test_file(&permissive_destination_path, b"permissive last-good")
-                .expect("create permissive destination");
-        let permissive_destination_identity =
-            regular_file_identity(&permissive_destination).expect("read permissive identity");
-        let permissive_destination_acl =
-            read_acl_snapshot(permissive_destination.as_raw_handle() as HANDLE)
-                .expect("snapshot permissive destination DACL");
-        drop(staged);
-
-        replace_secure_file(
-            &directory,
-            &storage_path,
-            &staged_for_destination,
-            &permissive_destination_path,
-        )
-        .expect_err("permissive destination is rejected before replace");
-        assert!(
-            fs::read(&permissive_destination_path).expect("read permissive destination")
-                == b"permissive last-good"
-                && regular_file_identity(&permissive_destination)
-                    .expect("reread permissive destination identity")
-                    == permissive_destination_identity
-                && read_acl_snapshot(permissive_destination.as_raw_handle() as HANDLE)
-                    .expect("reread permissive destination DACL")
-                    == permissive_destination_acl,
-            "destination rejection preserves bytes, identity, and DACL"
-        );
-        let (staged_bytes, staged_after) = read_secure_test_file(&staged_for_destination)
-            .expect("reopen rejected secure staged file");
-        assert!(
-            staged_bytes == b"new bytes" && staged_after == staged_identity,
-            "destination rejection preserves staged file"
-        );
-
-        let permissive_staged_path = storage_path.join("permissive-staged.tmp");
-        let destination_for_staged = storage_path.join("staged-check.json");
-        let permissive_staged =
-            create_permissive_test_file(&permissive_staged_path, b"permissive staged")
-                .expect("create permissive staged file");
-        let permissive_staged_identity =
-            regular_file_identity(&permissive_staged).expect("read permissive staged identity");
-        let permissive_staged_acl = read_acl_snapshot(permissive_staged.as_raw_handle() as HANDLE)
-            .expect("snapshot permissive staged DACL");
-        let (destination, destination_identity) =
-            create_secure_test_file(&destination_for_staged, b"secure last-good")
-                .expect("create secure destination");
-        drop(destination);
-
-        replace_secure_file(
-            &directory,
-            &storage_path,
-            &permissive_staged_path,
-            &destination_for_staged,
-        )
-        .expect_err("permissive staged file is rejected before replace");
-        assert!(
-            fs::read(&permissive_staged_path).expect("read permissive staged file")
-                == b"permissive staged"
-                && regular_file_identity(&permissive_staged)
-                    .expect("reread permissive staged identity")
-                    == permissive_staged_identity
-                && read_acl_snapshot(permissive_staged.as_raw_handle() as HANDLE)
-                    .expect("reread permissive staged DACL")
-                    == permissive_staged_acl,
-            "staged rejection preserves permissive bytes, identity, and DACL"
-        );
-        let (destination_bytes, destination_after) =
-            read_secure_test_file(&destination_for_staged).expect("reopen secure last-good");
-        assert!(
-            destination_bytes == b"secure last-good" && destination_after == destination_identity,
-            "staged rejection preserves destination bytes and identity"
-        );
-
-        drop(permissive_staged);
-        drop(permissive_destination);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
-    }
-
-    #[test]
-    fn secure_replace_rejects_final_reparse_points_without_touching_targets() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-
-        let destination_target_path = storage_path.join("destination-target.json");
-        let destination_link_path = storage_path.join("destination-link.json");
-        let staged_for_link = storage_path.join("destination-link.tmp");
-        let (target, target_identity) =
-            create_secure_test_file(&destination_target_path, b"destination target")
-                .expect("create destination link target");
-        let (staged, staged_identity) =
-            create_secure_test_file(&staged_for_link, b"staged for destination link")
-                .expect("create staged file");
-        drop(target);
-        drop(staged);
-        symlink_file(&destination_target_path, &destination_link_path)
-            .expect("create final destination symlink");
-
-        replace_secure_file(
-            &directory,
-            &storage_path,
-            &staged_for_link,
-            &destination_link_path,
-        )
-        .expect_err("final destination reparse point is rejected");
-        assert!(
-            fs::symlink_metadata(&destination_link_path)
-                .expect("destination link remains")
-                .file_type()
-                .is_symlink(),
-            "destination reparse point is not replaced"
-        );
-        let (target_bytes, target_after) = read_secure_test_file(&destination_target_path)
-            .expect("reopen destination link target");
-        assert!(
-            target_bytes == b"destination target" && target_after == target_identity,
-            "destination link target remains unchanged"
-        );
-        let (staged_bytes, staged_after) =
-            read_secure_test_file(&staged_for_link).expect("reopen staged file");
-        assert!(
-            staged_bytes == b"staged for destination link" && staged_after == staged_identity,
-            "rejected destination link leaves staged file unchanged"
-        );
-
-        let staged_target_path = storage_path.join("staged-target.json");
-        let staged_link_path = storage_path.join("staged-link.tmp");
-        let destination_for_link = storage_path.join("staged-link-destination.json");
-        let (staged_target, staged_target_identity) =
-            create_secure_test_file(&staged_target_path, b"staged target")
-                .expect("create staged link target");
-        let (destination, destination_identity) =
-            create_secure_test_file(&destination_for_link, b"last-good for staged link")
-                .expect("create destination for staged link");
-        drop(staged_target);
-        drop(destination);
-        symlink_file(&staged_target_path, &staged_link_path).expect("create final staged symlink");
-
-        replace_secure_file(
-            &directory,
-            &storage_path,
-            &staged_link_path,
-            &destination_for_link,
-        )
-        .expect_err("final staged reparse point is rejected");
-        assert!(
-            fs::symlink_metadata(&staged_link_path)
-                .expect("staged link remains")
-                .file_type()
-                .is_symlink(),
-            "staged reparse point remains untouched"
-        );
-        let (staged_target_bytes, staged_target_after) =
-            read_secure_test_file(&staged_target_path).expect("reopen staged link target");
-        assert!(
-            staged_target_bytes == b"staged target"
-                && staged_target_after == staged_target_identity,
-            "staged link target remains unchanged"
-        );
-        let (destination_bytes, destination_after) =
-            read_secure_test_file(&destination_for_link).expect("reopen last-good destination");
-        assert!(
-            destination_bytes == b"last-good for staged link"
-                && destination_after == destination_identity,
-            "rejected staged link preserves last-good destination"
-        );
-
-        fs::remove_file(&destination_link_path).expect("remove destination symlink");
-        fs::remove_file(&staged_link_path).expect("remove staged symlink");
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
-    }
-
-    #[test]
-    fn secure_replace_rejects_wrong_types_without_touching_last_good() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-
-        let staged_directory_path = storage_path.join("staged-directory");
-        let staged_directory = ensure_secure_storage_directory(&staged_directory_path)
-            .expect("create wrong-type staged directory");
-        let staged_marker = staged_directory_path.join("marker.bin");
-        fs::write(&staged_marker, b"staged directory marker").expect("write staged marker");
-        let destination_path = storage_path.join("wrong-staged.json");
-        let (destination, destination_identity) =
-            create_secure_test_file(&destination_path, b"last-good wrong staged")
-                .expect("create last-good destination");
-        drop(destination);
-
-        replace_secure_file(
-            &directory,
-            &storage_path,
-            &staged_directory_path,
-            &destination_path,
-        )
-        .expect_err("directory staged object is rejected");
-        assert!(
-            fs::read(&staged_marker).expect("read staged directory marker")
-                == b"staged directory marker",
-            "wrong-type staged directory remains unchanged"
-        );
-        let (destination_bytes, destination_after) =
-            read_secure_test_file(&destination_path).expect("reopen last-good destination");
-        assert!(
-            destination_bytes == b"last-good wrong staged"
-                && destination_after == destination_identity,
-            "wrong-type staged rejection preserves last-good destination"
-        );
-
-        let destination_directory_path = storage_path.join("destination-directory");
-        let destination_directory = ensure_secure_storage_directory(&destination_directory_path)
-            .expect("create wrong-type destination directory");
-        let destination_marker = destination_directory_path.join("marker.bin");
-        fs::write(&destination_marker, b"destination directory marker")
-            .expect("write destination marker");
-        let staged_path = storage_path.join("wrong-destination.tmp");
-        let (staged, staged_identity) =
-            create_secure_test_file(&staged_path, b"staged wrong destination")
-                .expect("create staged file");
-        drop(staged);
-
-        replace_secure_file(
-            &directory,
-            &storage_path,
-            &staged_path,
-            &destination_directory_path,
-        )
-        .expect_err("directory destination object is rejected");
-        assert!(
-            fs::read(&destination_marker).expect("read destination directory marker")
-                == b"destination directory marker",
-            "wrong-type destination directory remains unchanged"
-        );
-        let (staged_bytes, staged_after) =
-            read_secure_test_file(&staged_path).expect("reopen rejected staged file");
-        assert!(
-            staged_bytes == b"staged wrong destination" && staged_after == staged_identity,
-            "wrong-type destination rejection preserves staged file"
-        );
-
-        drop(destination_directory);
-        drop(staged_directory);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
-    }
-
-    #[test]
-    fn secure_replace_rejects_invalid_cross_directory_and_same_identity_paths() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let other_storage_path = root.join("other-storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-        let other_directory = ensure_secure_storage_directory(&other_storage_path)
-            .expect("create second secure directory");
-
-        let cross_staged_path = other_storage_path.join("cross-staged.tmp");
-        let destination_path = storage_path.join("cross-staged.json");
-        let (cross_staged, cross_staged_identity) =
-            create_secure_test_file(&cross_staged_path, b"cross staged")
-                .expect("create cross-directory staged file");
-        let (destination, destination_identity) =
-            create_secure_test_file(&destination_path, b"cross staged last-good")
-                .expect("create destination");
-        drop(cross_staged);
-        drop(destination);
-        replace_secure_file(
-            &directory,
-            &storage_path,
-            &cross_staged_path,
-            &destination_path,
-        )
-        .expect_err("cross-directory staged path is rejected");
-        assert!(
-            read_secure_test_file(&cross_staged_path).expect("reopen cross-directory staged file")
-                == (b"cross staged".to_vec(), cross_staged_identity),
-            "cross-directory staged file remains unchanged"
-        );
-        assert!(
-            read_secure_test_file(&destination_path).expect("reopen cross-staged destination")
-                == (b"cross staged last-good".to_vec(), destination_identity),
-            "cross-directory staged rejection preserves destination"
-        );
-
-        let staged_path = storage_path.join("cross-destination.tmp");
-        let cross_destination_path = other_storage_path.join("cross-destination.json");
-        let (staged, staged_identity) = create_secure_test_file(&staged_path, b"local staged")
-            .expect("create local staged file");
-        let (cross_destination, cross_destination_identity) =
-            create_secure_test_file(&cross_destination_path, b"remote last-good")
-                .expect("create cross-directory destination");
-        drop(staged);
-        drop(cross_destination);
-        replace_secure_file(
-            &directory,
-            &storage_path,
-            &staged_path,
-            &cross_destination_path,
-        )
-        .expect_err("cross-directory destination path is rejected");
-        assert!(
-            read_secure_test_file(&staged_path).expect("reopen local staged file")
-                == (b"local staged".to_vec(), staged_identity),
-            "cross-directory destination rejection preserves staged file"
-        );
-        assert!(
-            read_secure_test_file(&cross_destination_path)
-                .expect("reopen cross-directory destination")
-                == (b"remote last-good".to_vec(), cross_destination_identity),
-            "cross-directory destination remains unchanged"
-        );
-
-        assert!(
-            validate_replace_paths(&storage_path, Path::new(""), &destination_path).is_err(),
-            "missing staged filename is rejected"
-        );
-        replace_secure_file(&directory, &storage_path, &staged_path, &staged_path)
-            .expect_err("identical staged and destination paths are rejected");
-        assert!(
-            read_secure_test_file(&staged_path).expect("reopen identical-path file")
-                == (b"local staged".to_vec(), staged_identity),
-            "identical path rejection leaves file unchanged"
-        );
-
-        let hard_link_path = storage_path.join("same-identity.json");
-        fs::hard_link(&staged_path, &hard_link_path).expect("create same-identity hard link");
-        replace_secure_file(&directory, &storage_path, &staged_path, &hard_link_path)
-            .expect_err("distinct paths with the same file identity are rejected");
-        assert!(
-            read_secure_test_file(&staged_path)
-                .expect("reopen staged hard-link identity")
-                .1
-                == staged_identity
-                && read_secure_test_file(&hard_link_path)
-                    .expect("reopen destination hard-link identity")
-                    .1
-                    == staged_identity,
-            "same-identity rejection preserves both hard-link pathnames"
-        );
-
-        drop(other_directory);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
-    }
-
     #[test]
     fn injected_post_replace_identity_mismatch_is_detected() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-        let staged_path = storage_path.join("history.tmp");
-        let destination_path = storage_path.join("history.json");
-        let alternate_path = storage_path.join("alternate.tmp");
-        let displaced_path = storage_path.join("displaced-staged.json");
-        let (staged, staged_identity) =
-            create_secure_test_file(&staged_path, b"expected staged bytes")
-                .expect("create expected staged file");
-        let (destination, _) = create_secure_test_file(&destination_path, b"old destination")
-            .expect("create old destination");
-        let (alternate, alternate_identity) =
-            create_secure_test_file(&alternate_path, b"unexpected secure bytes")
-                .expect("create alternate secure file");
-        drop(alternate);
-        drop(destination);
-        drop(staged);
-
+        let workspace = SecureWorkspace::create().expect("REPLACE-POSTCOMMIT: workspace");
+        let storage_path = &workspace.path;
+        let directory = &workspace.directory;
+        let staged = storage_path.join("staged.tmp");
+        let destination = storage_path.join("history.json");
+        let alternate = storage_path.join("alternate.tmp");
+        let displaced = storage_path.join("displaced.json");
+        let (staged_file, staged_identity) =
+            create_secure_test_file(&staged, b"expected").expect("REPLACE-POSTCOMMIT: staged");
+        let staged_snapshot = snapshot_object(&staged_file, StorageObjectKind::RegularFile)
+            .expect("REPLACE-POSTCOMMIT: staged snapshot");
+        let (destination_file, _) =
+            create_secure_test_file(&destination, b"old").expect("REPLACE-POSTCOMMIT: destination");
+        let (alternate_file, alternate_identity) =
+            create_secure_test_file(&alternate, b"unexpected")
+                .expect("REPLACE-POSTCOMMIT: alternate");
         replace_secure_file_with(
             &directory,
             &storage_path,
-            &staged_path,
-            &destination_path,
+            &staged,
+            &destination,
             |staged, destination| {
-                tokscale_core::fs_atomic::replace_file(staged, &displaced_path)?;
-                tokscale_core::fs_atomic::replace_file(&alternate_path, destination)
+                tokscale_core::fs_atomic::replace_file(staged, &displaced)?;
+                tokscale_core::fs_atomic::replace_file(&alternate, destination)
             },
         )
-        .expect_err("post-replace identity mismatch is detected");
-
-        let (installed_bytes, installed_identity) =
-            read_secure_test_file(&destination_path).expect("reopen injected destination");
-        assert!(
-            installed_bytes == b"unexpected secure bytes"
-                && installed_identity == alternate_identity
-                && installed_identity != staged_identity,
-            "injected alternate file is present and visibly has the wrong identity"
+        .expect_err("REPLACE-POSTCOMMIT: identity mismatch returned");
+        let installed = snapshot_secure_path(&destination, StorageObjectKind::RegularFile)
+            .expect("REPLACE-POSTCOMMIT: installed snapshot");
+        check!(
+            installed.bytes == b"unexpected",
+            "REPLACE-POSTCOMMIT: alternate bytes installed"
         );
-        let (displaced_bytes, displaced_identity) =
-            read_secure_test_file(&displaced_path).expect("reopen displaced expected staged file");
-        assert!(
-            displaced_bytes == b"expected staged bytes" && displaced_identity == staged_identity,
-            "expected staged identity is distinct and retained by the injected seam"
+        check!(
+            installed.identity == alternate_identity && installed.identity != staged_identity,
+            "REPLACE-POSTCOMMIT: alternate identity detected"
         );
-        assert!(!staged_path.exists(), "original staged pathname is absent");
-
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
+        assert_snapshot(&displaced, &staged_snapshot, "REPLACE-POSTCOMMIT/displaced");
+        assert_absent(&staged, "REPLACE-POSTCOMMIT/staged pathname");
     }
-
     #[test]
     fn secure_quarantine_candidate_preserves_bytes_dacl_identity_and_flushes_directory() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-        let source_path = storage_path.join("history.json");
-        let candidate_path = storage_path.join("history.corrupt-1.json");
-        let (source, source_identity) =
-            create_secure_test_file(&source_path, b"corrupt history bytes")
-                .expect("create quarantine source");
-        let source_acl = read_acl_snapshot(source.as_raw_handle() as HANDLE)
-            .expect("snapshot quarantine source DACL");
-        drop(source);
-
-        quarantine_secure_file_candidate(&directory, &storage_path, &source_path, &candidate_path)
-            .expect("quarantine one candidate and flush directory");
-
-        assert!(
-            fs::symlink_metadata(&source_path)
-                .expect_err("source pathname disappears")
-                .kind()
-                == io::ErrorKind::NotFound,
-            "source pathname is absent after quarantine"
-        );
-        let mut candidate =
-            open_existing_secure_file(&candidate_path, false).expect("open quarantine candidate");
-        assert!(
-            regular_file_identity(&candidate).expect("read quarantine identity") == source_identity,
-            "candidate keeps the source FILE_ID_INFO identity"
-        );
-        assert!(
-            read_open_file(&mut candidate).expect("read quarantine bytes")
-                == b"corrupt history bytes",
-            "candidate keeps source bytes"
-        );
-        assert!(
-            read_acl_snapshot(candidate.as_raw_handle() as HANDLE)
-                .expect("read quarantine candidate DACL")
-                == source_acl,
-            "candidate keeps the source DACL"
-        );
-
-        drop(candidate);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
+        let workspace = SecureWorkspace::create().expect("QUARANTINE-SUCCESS: workspace");
+        let storage_path = &workspace.path;
+        let directory = &workspace.directory;
+        let source = storage_path.join("history.json");
+        let candidate = storage_path.join("history.corrupt-1.json");
+        let (source_file, source_snapshot) =
+            file_snapshot_fixture(&source, b"corrupt bytes", false)
+                .expect("QUARANTINE-SUCCESS: source");
+        quarantine_secure_file_candidate(&directory, &storage_path, &source, &candidate)
+            .expect("QUARANTINE-SUCCESS: commit and flush");
+        assert_absent(&source, "QUARANTINE-SUCCESS/source");
+        assert_snapshot(&candidate, &source_snapshot, "QUARANTINE-SUCCESS/candidate");
     }
-
     #[test]
     fn secure_quarantine_existing_candidate_collision_preserves_both_files() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-        let source_path = storage_path.join("account.json");
-        let candidate_path = storage_path.join("account.corrupt-1.json");
-        let (source, source_identity) = create_secure_test_file(&source_path, b"source evidence")
-            .expect("create quarantine source");
-        let source_acl =
-            read_acl_snapshot(source.as_raw_handle() as HANDLE).expect("snapshot source DACL");
-        let (candidate, candidate_identity) =
-            create_secure_test_file(&candidate_path, b"existing evidence")
-                .expect("create colliding candidate");
-        let candidate_acl = read_acl_snapshot(candidate.as_raw_handle() as HANDLE)
-            .expect("snapshot candidate DACL");
-        assert!(
-            source_identity != candidate_identity,
-            "source and existing candidate identities start distinct"
-        );
-        drop(candidate);
-        drop(source);
-
-        let error = quarantine_secure_file_candidate(
-            &directory,
-            &storage_path,
-            &source_path,
-            &candidate_path,
-        )
-        .expect_err("existing candidate collision is returned");
-        assert!(
+        let workspace = SecureWorkspace::create().expect("QUARANTINE-LINK-FAILURE: workspace");
+        let storage_path = &workspace.path;
+        let directory = &workspace.directory;
+        let source = storage_path.join("account.json");
+        let candidate = storage_path.join("account.corrupt-1.json");
+        let (source_file, source_snapshot) = file_snapshot_fixture(&source, b"source", false)
+            .expect("QUARANTINE-LINK-FAILURE: source");
+        let (candidate_file, candidate_snapshot) =
+            file_snapshot_fixture(&candidate, b"existing", false)
+                .expect("QUARANTINE-LINK-FAILURE: candidate");
+        drop(candidate_file);
+        drop(source_file);
+        let error =
+            quarantine_secure_file_candidate(&directory, &storage_path, &source, &candidate)
+                .expect_err("QUARANTINE-LINK-FAILURE: collision returned");
+        check!(
             error.kind() == io::ErrorKind::AlreadyExists,
-            "native hard-link collision keeps create-new semantics"
+            "QUARANTINE-LINK-FAILURE: native collision kind"
         );
-
-        assert!(
-            read_secure_test_file(&source_path).expect("reopen source after collision")
-                == (b"source evidence".to_vec(), source_identity),
-            "collision preserves source bytes and identity"
-        );
-        let source_after =
-            open_existing_secure_file(&source_path, false).expect("open source after collision");
-        assert!(
-            read_acl_snapshot(source_after.as_raw_handle() as HANDLE)
-                .expect("read source DACL after collision")
-                == source_acl,
-            "collision preserves source DACL"
-        );
-        assert!(
-            read_secure_test_file(&candidate_path).expect("reopen candidate after collision")
-                == (b"existing evidence".to_vec(), candidate_identity),
-            "collision preserves candidate bytes and identity"
-        );
-        let candidate_after = open_existing_secure_file(&candidate_path, false)
-            .expect("open candidate after collision");
-        assert!(
-            read_acl_snapshot(candidate_after.as_raw_handle() as HANDLE)
-                .expect("read candidate DACL after collision")
-                == candidate_acl,
-            "collision preserves candidate DACL"
-        );
-
-        drop(candidate_after);
-        drop(source_after);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
-    }
-
-    #[test]
-    fn secure_quarantine_reparse_and_directory_collisions_touch_no_targets() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-
-        let symlink_source_path = storage_path.join("symlink-source.json");
-        let symlink_candidate_path = storage_path.join("symlink-candidate.json");
-        let symlink_target_path = storage_path.join("symlink-target.json");
-        let (symlink_source, symlink_source_identity) =
-            create_secure_test_file(&symlink_source_path, b"symlink source evidence")
-                .expect("create source for symlink collision");
-        let symlink_source_acl = read_acl_snapshot(symlink_source.as_raw_handle() as HANDLE)
-            .expect("snapshot symlink-collision source DACL");
-        let (symlink_target, symlink_target_identity) =
-            create_secure_test_file(&symlink_target_path, b"symlink target bytes")
-                .expect("create symlink collision target");
-        let symlink_target_acl = read_acl_snapshot(symlink_target.as_raw_handle() as HANDLE)
-            .expect("snapshot symlink target DACL");
-        drop(symlink_target);
-        drop(symlink_source);
-        symlink_file(&symlink_target_path, &symlink_candidate_path)
-            .expect("create colliding final symlink");
-
-        quarantine_secure_file_candidate(
-            &directory,
-            &storage_path,
-            &symlink_source_path,
-            &symlink_candidate_path,
-        )
-        .expect_err("existing symlink candidate is never overwritten");
-        assert!(
-            fs::symlink_metadata(&symlink_candidate_path)
-                .expect("symlink candidate remains")
-                .file_type()
-                .is_symlink(),
-            "candidate symlink remains installed"
-        );
-        assert!(
-            read_secure_test_file(&symlink_source_path)
-                .expect("reopen source after symlink collision")
-                == (b"symlink source evidence".to_vec(), symlink_source_identity),
-            "symlink collision preserves source bytes and identity"
-        );
-        let symlink_source_after = open_existing_secure_file(&symlink_source_path, false)
-            .expect("open source after symlink collision");
-        assert!(
-            read_acl_snapshot(symlink_source_after.as_raw_handle() as HANDLE)
-                .expect("read source DACL after symlink collision")
-                == symlink_source_acl,
-            "symlink collision preserves source DACL"
-        );
-        assert!(
-            read_secure_test_file(&symlink_target_path).expect("reopen symlink collision target")
-                == (b"symlink target bytes".to_vec(), symlink_target_identity),
-            "symlink collision does not touch target bytes or identity"
-        );
-        let symlink_target_after = open_existing_secure_file(&symlink_target_path, false)
-            .expect("open symlink target after collision");
-        assert!(
-            read_acl_snapshot(symlink_target_after.as_raw_handle() as HANDLE)
-                .expect("read symlink target DACL after collision")
-                == symlink_target_acl,
-            "symlink collision does not touch target DACL"
-        );
-
-        let directory_source_path = storage_path.join("directory-source.json");
-        let directory_candidate_path = storage_path.join("directory-candidate");
-        let directory_marker_path = directory_candidate_path.join("marker.bin");
-        let (directory_source, directory_source_identity) =
-            create_secure_test_file(&directory_source_path, b"directory source evidence")
-                .expect("create source for directory collision");
-        let candidate_directory = ensure_secure_storage_directory(&directory_candidate_path)
-            .expect("create colliding candidate directory");
-        let candidate_directory_identity = storage_identity(
-            candidate_directory.as_raw_handle() as HANDLE,
-            StorageObjectKind::Directory,
-        )
-        .expect("read candidate directory identity");
-        let candidate_directory_acl =
-            read_acl_snapshot(candidate_directory.as_raw_handle() as HANDLE)
-                .expect("snapshot candidate directory DACL");
-        fs::write(&directory_marker_path, b"directory target marker")
-            .expect("write candidate directory marker");
-        drop(directory_source);
-
-        quarantine_secure_file_candidate(
-            &directory,
-            &storage_path,
-            &directory_source_path,
-            &directory_candidate_path,
-        )
-        .expect_err("existing directory candidate is never overwritten");
-        assert!(
-            read_secure_test_file(&directory_source_path)
-                .expect("reopen source after directory collision")
-                == (
-                    b"directory source evidence".to_vec(),
-                    directory_source_identity
-                ),
-            "directory collision preserves source bytes and identity"
-        );
-        verify_path_identity(
-            &directory_candidate_path,
-            StorageObjectKind::Directory,
-            candidate_directory_identity,
-        )
-        .expect("candidate directory path and identity remain installed");
-        assert!(
-            read_acl_snapshot(candidate_directory.as_raw_handle() as HANDLE)
-                .expect("read candidate directory DACL after collision")
-                == candidate_directory_acl,
-            "directory collision preserves candidate DACL"
-        );
-        assert!(
-            fs::read(&directory_marker_path).expect("read candidate directory marker")
-                == b"directory target marker",
-            "directory collision preserves target contents"
-        );
-
-        fs::remove_file(&symlink_candidate_path).expect("remove candidate symlink");
-        drop(candidate_directory);
-        drop(symlink_target_after);
-        drop(symlink_source_after);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
-    }
-
-    #[test]
-    fn injected_quarantine_unlink_failure_rolls_back_link_and_preserves_source() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-        let source_path = storage_path.join("history.json");
-        let candidate_path = storage_path.join("history.corrupt-2.json");
-        let (source, source_identity) =
-            create_secure_test_file(&source_path, b"retained source bytes")
-                .expect("create quarantine source");
-        let source_acl =
-            read_acl_snapshot(source.as_raw_handle() as HANDLE).expect("snapshot source DACL");
-        drop(source);
+        assert_path_snapshots([
+            (
+                &source,
+                &source_snapshot,
+                "QUARANTINE-LINK-FAILURE/native/source",
+            ),
+            (
+                &candidate,
+                &candidate_snapshot,
+                "QUARANTINE-LINK-FAILURE/native/candidate",
+            ),
+        ]);
+        let source2 = storage_path.join("generic-source.json");
+        let candidate2 = storage_path.join("generic-candidate.json");
+        let (source2_file, source2_snapshot) =
+            file_snapshot_fixture(&source2, b"source two", false)
+                .expect("QUARANTINE-LINK-FAILURE: generic source");
+        let (candidate2_file, candidate2_snapshot) =
+            file_snapshot_fixture(&candidate2, b"candidate two", false)
+                .expect("QUARANTINE-LINK-FAILURE: generic candidate");
+        let mut unlink_called = false;
         let mut flush_called = false;
-
         quarantine_secure_file_candidate_with(
             &directory,
             &storage_path,
-            &source_path,
-            &candidate_path,
+            &source2,
+            &candidate2,
+            |_, _| Err(io::Error::other("generic hard-link failure")),
+            |_| {
+                unlink_called = true;
+                Err(io::Error::other("unexpected unlink"))
+            },
+            |_| {
+                flush_called = true;
+                Ok(())
+            },
+        )
+        .expect_err("QUARANTINE-LINK-FAILURE: generic link error returned");
+        check!(
+            !unlink_called,
+            "QUARANTINE-LINK-FAILURE: link error does not unlink"
+        );
+        check!(
+            !flush_called,
+            "QUARANTINE-LINK-FAILURE: link error does not flush"
+        );
+        assert_path_snapshots([
+            (
+                &source2,
+                &source2_snapshot,
+                "QUARANTINE-LINK-FAILURE/generic/source",
+            ),
+            (
+                &candidate2,
+                &candidate2_snapshot,
+                "QUARANTINE-LINK-FAILURE/generic/candidate",
+            ),
+        ]);
+    }
+    #[test]
+    fn secure_quarantine_reparse_and_directory_collisions_touch_no_targets() {
+        let workspace =
+            SecureWorkspace::create().expect("QUARANTINE-CANDIDATE-COLLISION: workspace");
+        let storage_path = &workspace.path;
+        let directory = &workspace.directory;
+        let source = storage_path.join("source.json");
+        let candidate = storage_path.join("candidate.json");
+        let target = storage_path.join("target.json");
+        let (source_file, source_snapshot) = file_snapshot_fixture(&source, b"source", false)
+            .expect("QUARANTINE-CANDIDATE-COLLISION: source");
+        let (target_file, target_snapshot) = file_snapshot_fixture(&target, b"target", false)
+            .expect("QUARANTINE-CANDIDATE-COLLISION: target");
+        symlink_file(&target, &candidate)
+            .expect("QUARANTINE-CANDIDATE-COLLISION: symlink candidate");
+        quarantine_secure_file_candidate(&directory, &storage_path, &source, &candidate)
+            .expect_err("QUARANTINE-CANDIDATE-COLLISION: symlink rejected");
+        check!(
+            fs::symlink_metadata(&candidate)
+                .expect("QUARANTINE-CANDIDATE-COLLISION: symlink remains")
+                .file_type()
+                .is_symlink(),
+            "QUARANTINE-CANDIDATE-COLLISION: symlink unchanged"
+        );
+        assert_snapshot(
+            &source,
+            &source_snapshot,
+            "QUARANTINE-CANDIDATE-COLLISION/symlink source",
+        );
+        assert_snapshot(
+            &target,
+            &target_snapshot,
+            "QUARANTINE-CANDIDATE-COLLISION/symlink target",
+        );
+        fs::remove_file(&candidate).expect("QUARANTINE-CANDIDATE-COLLISION: remove symlink");
+        let directory_source = storage_path.join("directory-source.json");
+        let directory_candidate = storage_path.join("directory-candidate");
+        let marker = directory_candidate.join("marker.bin");
+        let (source_file, _) = create_secure_test_file(&directory_source, b"directory source")
+            .expect("QUARANTINE-CANDIDATE-COLLISION: directory source");
+        let source_snapshot = snapshot_object(&source_file, StorageObjectKind::RegularFile)
+            .expect("QUARANTINE-CANDIDATE-COLLISION: directory source snapshot");
+        let candidate_directory = ensure_secure_storage_directory(&directory_candidate)
+            .expect("QUARANTINE-CANDIDATE-COLLISION: candidate directory");
+        let candidate_identity = storage_identity(
+            candidate_directory.as_raw_handle() as HANDLE,
+            StorageObjectKind::Directory,
+        )
+        .expect("QUARANTINE-CANDIDATE-COLLISION: candidate identity");
+        let candidate_acl = read_acl_snapshot(candidate_directory.as_raw_handle() as HANDLE)
+            .expect("QUARANTINE-CANDIDATE-COLLISION: candidate DACL");
+        fs::write(&marker, b"marker").expect("QUARANTINE-CANDIDATE-COLLISION: marker");
+        drop(source_file);
+        quarantine_secure_file_candidate(
+            &directory,
+            &storage_path,
+            &directory_source,
+            &directory_candidate,
+        )
+        .expect_err("QUARANTINE-CANDIDATE-COLLISION: directory rejected");
+        assert_snapshot(
+            &directory_source,
+            &source_snapshot,
+            "QUARANTINE-CANDIDATE-COLLISION/directory source",
+        );
+        verify_path_identity(
+            &directory_candidate,
+            StorageObjectKind::Directory,
+            candidate_identity,
+        )
+        .expect("QUARANTINE-CANDIDATE-COLLISION: directory identity");
+        check!(
+            read_acl_snapshot(candidate_directory.as_raw_handle() as HANDLE)
+                .expect("QUARANTINE-CANDIDATE-COLLISION: directory DACL after")
+                == candidate_acl,
+            "QUARANTINE-CANDIDATE-COLLISION: directory DACL unchanged"
+        );
+        check!(
+            fs::read(&marker).expect("QUARANTINE-CANDIDATE-COLLISION: marker after") == b"marker",
+            "QUARANTINE-CANDIDATE-COLLISION: marker unchanged"
+        );
+    }
+    #[test]
+    fn quarantine_fault_phases_preserve_commit_boundaries() {
+        let workspace = SecureWorkspace::create().expect("QUARANTINE-FAULTS: workspace");
+        let storage_path = &workspace.path;
+        let directory = &workspace.directory;
+        let source = storage_path.join("history.json");
+        let candidate = storage_path.join("history.corrupt-2.json");
+        let (source_file, source_snapshot) = create_secure_test_file(&source, b"source bytes")
+            .map(|(file, _)| (file, ()))
+            .expect("QUARANTINE-ROLLBACK: source");
+        let source_snapshot = snapshot_object(&source_file, StorageObjectKind::RegularFile)
+            .expect("QUARANTINE-ROLLBACK: snapshot");
+        drop(source_file);
+        let mut flush_called = false;
+        quarantine_secure_file_candidate_with(
+            directory,
+            storage_path,
+            &source,
+            &candidate,
             |source, candidate| fs::hard_link(source, candidate),
             |path| {
-                if path == source_path.as_path() {
+                if path == source.as_path() {
                     Err(io::Error::other("injected source unlink failure"))
                 } else {
                     fs::remove_file(path)
@@ -3093,845 +2608,566 @@ mod tests {
                 Ok(())
             },
         )
-        .expect_err("injected source unlink failure is returned");
-        assert!(!flush_called, "failed transaction never flushes as success");
-        assert!(
-            fs::symlink_metadata(&candidate_path)
-                .expect_err("rollback removes candidate link")
-                .kind()
-                == io::ErrorKind::NotFound,
-            "rollback removes only the new candidate link"
+        .expect_err("QUARANTINE-ROLLBACK: unlink failure returned");
+        check!(
+            !flush_called,
+            "QUARANTINE-ROLLBACK: rollback does not flush"
         );
-        assert!(
-            read_secure_test_file(&source_path).expect("reopen source after rollback")
-                == (b"retained source bytes".to_vec(), source_identity),
-            "rollback preserves source bytes and identity"
-        );
-        let source_after =
-            open_existing_secure_file(&source_path, false).expect("open source after rollback");
-        assert!(
-            read_acl_snapshot(source_after.as_raw_handle() as HANDLE)
-                .expect("read source DACL after rollback")
-                == source_acl,
-            "rollback preserves source DACL"
-        );
+        assert_absent(&candidate, "QUARANTINE-ROLLBACK/candidate");
+        assert_snapshot(&source, &source_snapshot, "QUARANTINE-ROLLBACK/source");
 
-        drop(source_after);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
-    }
-
-    #[test]
-    fn injected_quarantine_candidate_identity_mismatch_preserves_unrelated_candidate() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-        let source_path = storage_path.join("account.json");
-        let candidate_path = storage_path.join("account.corrupt-2.json");
-        let (source, source_identity) =
-            create_secure_test_file(&source_path, b"authenticated source evidence")
-                .expect("create quarantine source");
-        let source_acl =
-            read_acl_snapshot(source.as_raw_handle() as HANDLE).expect("snapshot source DACL");
-        drop(source);
-        let mut replacement_identity = None;
-
+        let source = storage_path.join("account.json");
+        let candidate = storage_path.join("account.corrupt-2.json");
+        let (source_file, _) =
+            create_secure_test_file(&source, b"source evidence").expect("QUARANTINE-SWAP: source");
+        let source_snapshot = snapshot_object(&source_file, StorageObjectKind::RegularFile)
+            .expect("QUARANTINE-SWAP: source snapshot");
+        drop(source_file);
+        let mut replacement_snapshot = None;
         quarantine_secure_file_candidate_with(
-            &directory,
-            &storage_path,
-            &source_path,
-            &candidate_path,
+            directory,
+            storage_path,
+            &source,
+            &candidate,
             |source, candidate| fs::hard_link(source, candidate),
             |path| {
-                if path == source_path.as_path() {
-                    fs::remove_file(&candidate_path)?;
-                    let (replacement, identity) =
-                        create_secure_test_file(&candidate_path, b"unrelated candidate bytes")?;
-                    replacement_identity = Some(identity);
+                if path == source.as_path() {
+                    fs::remove_file(&candidate)?;
+                    let (replacement, _) =
+                        create_secure_test_file(&candidate, b"unrelated candidate")?;
+                    replacement_snapshot = Some(snapshot_object(
+                        &replacement,
+                        StorageObjectKind::RegularFile,
+                    )?);
                     drop(replacement);
                     Err(io::Error::other("injected source unlink failure"))
                 } else {
-                    panic!("identity-mismatched rollback candidate must not be unlinked")
+                    panic!("QUARANTINE-SWAP: rollback targeted unrelated candidate")
                 }
             },
-            |_| panic!("identity-mismatched transaction must not flush"),
+            |_| panic!("QUARANTINE-SWAP: identity mismatch must not flush"),
         )
-        .expect_err("rollback detects candidate identity mismatch");
-
-        assert!(
-            read_secure_test_file(&source_path).expect("reopen source after mismatch")
-                == (b"authenticated source evidence".to_vec(), source_identity),
-            "identity mismatch leaves source bytes and identity intact"
+        .expect_err("QUARANTINE-SWAP: candidate identity mismatch returned");
+        assert_snapshot(&source, &source_snapshot, "QUARANTINE-SWAP/source");
+        assert_snapshot(
+            &candidate,
+            &replacement_snapshot.expect("QUARANTINE-SWAP: replacement snapshot"),
+            "QUARANTINE-SWAP/candidate",
         );
-        let source_after =
-            open_existing_secure_file(&source_path, false).expect("open source after mismatch");
-        assert!(
-            read_acl_snapshot(source_after.as_raw_handle() as HANDLE)
-                .expect("read source DACL after mismatch")
-                == source_acl,
-            "identity mismatch leaves source DACL intact"
-        );
-        assert!(
-            read_secure_test_file(&candidate_path).expect("unrelated candidate remains installed")
-                == (
-                    b"unrelated candidate bytes".to_vec(),
-                    replacement_identity.expect("replacement identity was recorded")
-                ),
-            "rollback never deletes an unrelated replacement candidate"
-        );
-
-        drop(source_after);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
     }
-
     #[test]
-    fn secure_quarantine_rejects_unsafe_source_objects_before_link() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-
-        let permissive_source_path = storage_path.join("permissive.json");
-        let permissive_candidate_path = storage_path.join("permissive.corrupt.json");
-        let permissive =
-            create_permissive_test_file(&permissive_source_path, b"permissive evidence")
-                .expect("create permissive source");
-        let permissive_identity =
-            regular_file_identity(&permissive).expect("read permissive source identity");
-        let permissive_acl = read_acl_snapshot(permissive.as_raw_handle() as HANDLE)
-            .expect("snapshot permissive source DACL");
-        let permissive_path_text = permissive_source_path.to_string_lossy().into_owned();
-        let error = quarantine_secure_file_candidate_with(
-            &directory,
-            &storage_path,
-            &permissive_source_path,
-            &permissive_candidate_path,
-            |_, _| panic!("permissive source must be rejected before link"),
-            |_| panic!("permissive source must be rejected before unlink"),
-            |_| panic!("permissive source must be rejected before flush"),
-        )
-        .expect_err("permissive source is rejected");
-        assert_generic_error(&error, &[&permissive_path_text]);
-        assert!(
-            fs::read(&permissive_source_path).expect("read rejected permissive source")
-                == b"permissive evidence"
-                && regular_file_identity(&permissive).expect("reread permissive source identity")
-                    == permissive_identity
-                && read_acl_snapshot(permissive.as_raw_handle() as HANDLE)
-                    .expect("reread permissive source DACL")
-                    == permissive_acl,
-            "permissive rejection preserves source bytes, identity, and DACL"
+    fn quarantine_source_and_path_validation_rejects_without_touching_targets() {
+        let workspace = SecureWorkspace::create().expect("QUARANTINE-VALIDATION: workspace");
+        let storage_path = &workspace.path;
+        let directory = &workspace.directory;
+        let reject = |source: &Path, candidate: &Path, label: &str| {
+            quarantine_secure_file_candidate_with(
+                directory,
+                storage_path,
+                source,
+                candidate,
+                |_, _| panic!("{label}: link called"),
+                |_| panic!("{label}: unlink called"),
+                |_| panic!("{label}: flush called"),
+            )
+            .expect_err("QUARANTINE-VALIDATION: unsafe input accepted");
+        };
+        let permissive_path = storage_path.join("permissive.json");
+        let candidate = storage_path.join("permissive.corrupt.json");
+        let permissive = create_permissive_test_file(&permissive_path, b"permissive")
+            .expect("QUARANTINE-SOURCE-VALIDATION: permissive source");
+        let permissive_snapshot = snapshot_object(&permissive, StorageObjectKind::RegularFile)
+            .expect("QUARANTINE-SOURCE-VALIDATION: permissive snapshot");
+        reject(
+            &permissive_path,
+            &candidate,
+            "QUARANTINE-SOURCE-VALIDATION/permissive",
         );
-        assert!(
-            !permissive_candidate_path.exists(),
-            "permissive rejection creates no candidate"
+        assert_generic_error(
+            &security_verification_failed(),
+            &[&permissive_path.to_string_lossy()],
         );
-
-        let symlink_target_path = storage_path.join("source-target.json");
-        let symlink_source_path = storage_path.join("source-link.json");
-        let symlink_candidate_path = storage_path.join("source-link.corrupt.json");
-        let (symlink_target, symlink_target_identity) =
-            create_secure_test_file(&symlink_target_path, b"source symlink target")
-                .expect("create source symlink target");
-        let symlink_target_acl = read_acl_snapshot(symlink_target.as_raw_handle() as HANDLE)
-            .expect("snapshot source symlink target DACL");
-        drop(symlink_target);
-        symlink_file(&symlink_target_path, &symlink_source_path)
-            .expect("create final source symlink");
-        quarantine_secure_file_candidate_with(
-            &directory,
-            &storage_path,
-            &symlink_source_path,
-            &symlink_candidate_path,
-            |_, _| panic!("source symlink must be rejected before link"),
-            |_| panic!("source symlink must be rejected before unlink"),
-            |_| panic!("source symlink must be rejected before flush"),
-        )
-        .expect_err("final source symlink is rejected");
-        assert!(
-            fs::symlink_metadata(&symlink_source_path)
-                .expect("source symlink remains")
+        assert_handle_snapshot(
+            &permissive,
+            &permissive_snapshot,
+            "QUARANTINE-SOURCE-VALIDATION/permissive",
+        );
+        assert_absent(
+            &candidate,
+            "QUARANTINE-SOURCE-VALIDATION/permissive candidate",
+        );
+        let target = storage_path.join("source-target.json");
+        let source_link = storage_path.join("source-link.json");
+        let link_candidate = storage_path.join("source-link.corrupt.json");
+        let (target_file, _) = create_secure_test_file(&target, b"target")
+            .expect("QUARANTINE-SOURCE-VALIDATION: target");
+        let target_snapshot = snapshot_object(&target_file, StorageObjectKind::RegularFile)
+            .expect("QUARANTINE-SOURCE-VALIDATION: target snapshot");
+        drop(target_file);
+        symlink_file(&target, &source_link).expect("QUARANTINE-SOURCE-VALIDATION: source symlink");
+        reject(
+            &source_link,
+            &link_candidate,
+            "QUARANTINE-SOURCE-VALIDATION/symlink",
+        );
+        check!(
+            fs::symlink_metadata(&source_link)
+                .expect("QUARANTINE-SOURCE-VALIDATION: source symlink remains")
                 .file_type()
                 .is_symlink(),
-            "source symlink remains untouched"
+            "QUARANTINE-SOURCE-VALIDATION: source symlink unchanged"
         );
-        assert!(
-            read_secure_test_file(&symlink_target_path).expect("reopen source symlink target")
-                == (b"source symlink target".to_vec(), symlink_target_identity),
-            "source symlink rejection preserves target bytes and identity"
+        assert_snapshot(
+            &target,
+            &target_snapshot,
+            "QUARANTINE-SOURCE-VALIDATION/target",
         );
-        let symlink_target_after = open_existing_secure_file(&symlink_target_path, false)
-            .expect("open source symlink target after rejection");
-        assert!(
-            read_acl_snapshot(symlink_target_after.as_raw_handle() as HANDLE)
-                .expect("read source symlink target DACL")
-                == symlink_target_acl,
-            "source symlink rejection preserves target DACL"
+        assert_absent(
+            &link_candidate,
+            "QUARANTINE-SOURCE-VALIDATION/symlink candidate",
         );
-        assert!(
-            !symlink_candidate_path.exists(),
-            "source symlink rejection creates no candidate"
-        );
-
-        let directory_source_path = storage_path.join("source-directory");
-        let directory_candidate_path = storage_path.join("source-directory.corrupt");
-        let directory_marker_path = directory_source_path.join("marker.bin");
-        let source_directory = ensure_secure_storage_directory(&directory_source_path)
-            .expect("create wrong-type source directory");
-        let source_directory_identity = storage_identity(
+        fs::remove_file(&source_link).expect("QUARANTINE-SOURCE-VALIDATION: remove source symlink");
+        let source_directory_path = storage_path.join("source-directory");
+        let directory_candidate = storage_path.join("source-directory.corrupt");
+        let marker = source_directory_path.join("marker.bin");
+        let source_directory = ensure_secure_storage_directory(&source_directory_path)
+            .expect("QUARANTINE-SOURCE-VALIDATION: source directory");
+        let directory_identity = storage_identity(
             source_directory.as_raw_handle() as HANDLE,
             StorageObjectKind::Directory,
         )
-        .expect("read source directory identity");
-        let source_directory_acl = read_acl_snapshot(source_directory.as_raw_handle() as HANDLE)
-            .expect("snapshot source directory DACL");
-        fs::write(&directory_marker_path, b"source directory marker")
-            .expect("write source directory marker");
-        quarantine_secure_file_candidate_with(
-            &directory,
-            &storage_path,
-            &directory_source_path,
-            &directory_candidate_path,
-            |_, _| panic!("directory source must be rejected before link"),
-            |_| panic!("directory source must be rejected before unlink"),
-            |_| panic!("directory source must be rejected before flush"),
-        )
-        .expect_err("directory source is rejected");
+        .expect("QUARANTINE-SOURCE-VALIDATION: directory identity");
+        let directory_acl = read_acl_snapshot(source_directory.as_raw_handle() as HANDLE)
+            .expect("QUARANTINE-SOURCE-VALIDATION: directory DACL");
+        fs::write(&marker, b"marker").expect("QUARANTINE-SOURCE-VALIDATION: directory marker");
+        reject(
+            &source_directory_path,
+            &directory_candidate,
+            "QUARANTINE-SOURCE-VALIDATION/directory",
+        );
         verify_path_identity(
-            &directory_source_path,
+            &source_directory_path,
             StorageObjectKind::Directory,
-            source_directory_identity,
+            directory_identity,
         )
-        .expect("source directory path and identity remain installed");
-        assert!(
+        .expect("QUARANTINE-SOURCE-VALIDATION: directory remains");
+        check!(
             read_acl_snapshot(source_directory.as_raw_handle() as HANDLE)
-                .expect("read source directory DACL after rejection")
-                == source_directory_acl,
-            "directory source rejection preserves DACL"
+                .expect("QUARANTINE-SOURCE-VALIDATION: directory DACL after")
+                == directory_acl,
+            "QUARANTINE-SOURCE-VALIDATION: directory DACL unchanged"
         );
-        assert!(
-            fs::read(&directory_marker_path).expect("read source directory marker")
-                == b"source directory marker",
-            "directory source rejection preserves contents"
+        check!(
+            fs::read(&marker).expect("QUARANTINE-SOURCE-VALIDATION: marker after") == b"marker",
+            "QUARANTINE-SOURCE-VALIDATION: marker unchanged"
         );
-        assert!(
-            !directory_candidate_path.exists(),
-            "directory source rejection creates no candidate"
+        assert_absent(
+            &directory_candidate,
+            "QUARANTINE-SOURCE-VALIDATION/directory candidate",
         );
-
-        fs::remove_file(&symlink_source_path).expect("remove source symlink");
-        drop(source_directory);
-        drop(symlink_target_after);
-        drop(permissive);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
+        let other = workspace.root.join("other-storage");
+        let _other_directory = ensure_secure_storage_directory(&other)
+            .expect("QUARANTINE-PATH-BOUNDARY: other directory");
+        let local_source = storage_path.join("local.json");
+        let cross_source = other.join("cross.json");
+        let (local_file, _) = create_secure_test_file(&local_source, b"local")
+            .expect("QUARANTINE-PATH-BOUNDARY: local source");
+        let local_snapshot = snapshot_object(&local_file, StorageObjectKind::RegularFile)
+            .expect("QUARANTINE-PATH-BOUNDARY: local snapshot");
+        let (cross_file, _) = create_secure_test_file(&cross_source, b"cross")
+            .expect("QUARANTINE-PATH-BOUNDARY: cross source");
+        let cross_snapshot = snapshot_object(&cross_file, StorageObjectKind::RegularFile)
+            .expect("QUARANTINE-PATH-BOUNDARY: cross snapshot");
+        let local_candidate = storage_path.join("local.corrupt");
+        for (source, candidate, dir, label) in [
+            (
+                &cross_source,
+                &local_candidate,
+                storage_path,
+                "QUARANTINE-PATH-BOUNDARY/cross source",
+            ),
+            (
+                &local_source,
+                &other.join("local.corrupt"),
+                storage_path,
+                "QUARANTINE-PATH-BOUNDARY/cross candidate",
+            ),
+            (
+                &local_source,
+                &local_source,
+                storage_path,
+                "QUARANTINE-PATH-BOUNDARY/same path",
+            ),
+            (
+                Path::new(""),
+                &local_candidate,
+                storage_path,
+                "QUARANTINE-PATH-BOUNDARY/missing source",
+            ),
+            (
+                &cross_source,
+                &other.join("mismatch.corrupt"),
+                &other,
+                "QUARANTINE-PATH-BOUNDARY/directory mismatch",
+            ),
+        ] {
+            reject(source, candidate, label);
+        }
+        assert_snapshot(
+            &cross_source,
+            &cross_snapshot,
+            "QUARANTINE-PATH-BOUNDARY/cross source",
+        );
+        assert_snapshot(
+            &local_source,
+            &local_snapshot,
+            "QUARANTINE-PATH-BOUNDARY/local source",
+        );
+        assert_absent(&local_candidate, "QUARANTINE-PATH-BOUNDARY/local candidate");
     }
-
-    #[test]
-    fn secure_quarantine_rejects_invalid_paths_and_directory_identity_before_link() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let other_storage_path = root.join("other-storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-        let other_directory = ensure_secure_storage_directory(&other_storage_path)
-            .expect("create second secure directory");
-        let local_source_path = storage_path.join("local.json");
-        let cross_source_path = other_storage_path.join("cross.json");
-        let (local_source, local_identity) =
-            create_secure_test_file(&local_source_path, b"local evidence")
-                .expect("create local source");
-        let (cross_source, cross_identity) =
-            create_secure_test_file(&cross_source_path, b"cross evidence")
-                .expect("create cross-directory source");
-        drop(cross_source);
-        drop(local_source);
-
-        let local_candidate_path = storage_path.join("cross.corrupt.json");
-        quarantine_secure_file_candidate_with(
-            &directory,
-            &storage_path,
-            &cross_source_path,
-            &local_candidate_path,
-            |_, _| panic!("cross-directory source must be rejected before link"),
-            |_| panic!("cross-directory source must be rejected before unlink"),
-            |_| panic!("cross-directory source must be rejected before flush"),
-        )
-        .expect_err("cross-directory source path is rejected");
-        assert!(
-            read_secure_test_file(&cross_source_path).expect("reopen cross-directory source")
-                == (b"cross evidence".to_vec(), cross_identity),
-            "cross-directory source remains unchanged"
-        );
-        assert!(
-            !local_candidate_path.exists(),
-            "cross-directory source creates no candidate"
-        );
-
-        let cross_candidate_path = other_storage_path.join("local.corrupt.json");
-        quarantine_secure_file_candidate_with(
-            &directory,
-            &storage_path,
-            &local_source_path,
-            &cross_candidate_path,
-            |_, _| panic!("cross-directory candidate must be rejected before link"),
-            |_| panic!("cross-directory candidate must be rejected before unlink"),
-            |_| panic!("cross-directory candidate must be rejected before flush"),
-        )
-        .expect_err("cross-directory candidate path is rejected");
-        assert!(
-            read_secure_test_file(&local_source_path).expect("reopen local source")
-                == (b"local evidence".to_vec(), local_identity),
-            "cross-directory candidate rejection preserves source"
-        );
-        assert!(
-            !cross_candidate_path.exists(),
-            "cross-directory candidate is not created"
-        );
-
-        quarantine_secure_file_candidate_with(
-            &directory,
-            &storage_path,
-            &local_source_path,
-            &local_source_path,
-            |_, _| panic!("same path must be rejected before link"),
-            |_| panic!("same path must be rejected before unlink"),
-            |_| panic!("same path must be rejected before flush"),
-        )
-        .expect_err("same source and candidate path is rejected");
-        assert!(
-            read_secure_test_file(&local_source_path).expect("reopen same-path source")
-                == (b"local evidence".to_vec(), local_identity),
-            "same-path rejection preserves source"
-        );
-
-        quarantine_secure_file_candidate_with(
-            &directory,
-            &storage_path,
-            Path::new(""),
-            &local_candidate_path,
-            |_, _| panic!("missing filename must be rejected before link"),
-            |_| panic!("missing filename must be rejected before unlink"),
-            |_| panic!("missing filename must be rejected before flush"),
-        )
-        .expect_err("missing source filename is rejected");
-        assert!(
-            !local_candidate_path.exists(),
-            "missing filename creates no candidate"
-        );
-
-        let mismatched_candidate_path = other_storage_path.join("mismatch.corrupt.json");
-        quarantine_secure_file_candidate_with(
-            &directory,
-            &other_storage_path,
-            &cross_source_path,
-            &mismatched_candidate_path,
-            |_, _| panic!("directory identity mismatch must be rejected before link"),
-            |_| panic!("directory identity mismatch must be rejected before unlink"),
-            |_| panic!("directory identity mismatch must be rejected before flush"),
-        )
-        .expect_err("directory handle and pathname identity mismatch is rejected");
-        assert!(
-            read_secure_test_file(&cross_source_path)
-                .expect("reopen source after directory mismatch")
-                == (b"cross evidence".to_vec(), cross_identity),
-            "directory mismatch preserves source"
-        );
-        assert!(
-            !mismatched_candidate_path.exists(),
-            "directory mismatch creates no candidate"
-        );
-
-        drop(other_directory);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
-    }
-
     #[test]
     fn post_unlink_flush_failure_returns_error_without_false_rollback() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-        let source_path = storage_path.join("history.json");
-        let candidate_path = storage_path.join("history.corrupt-3.json");
-        let (source, source_identity) =
-            create_secure_test_file(&source_path, b"committed quarantine bytes")
-                .expect("create quarantine source");
-        let source_acl =
-            read_acl_snapshot(source.as_raw_handle() as HANDLE).expect("snapshot source DACL");
-        drop(source);
-
+        let workspace = SecureWorkspace::create().expect("QUARANTINE-POSTCOMMIT: workspace");
+        let storage_path = &workspace.path;
+        let directory = &workspace.directory;
+        let source = storage_path.join("history.json");
+        let candidate = storage_path.join("history.corrupt-3.json");
+        let (source_file, _) = create_secure_test_file(&source, b"committed bytes")
+            .expect("QUARANTINE-POSTCOMMIT: source");
+        let source_snapshot = snapshot_object(&source_file, StorageObjectKind::RegularFile)
+            .expect("QUARANTINE-POSTCOMMIT: source snapshot");
+        drop(source_file);
         quarantine_secure_file_candidate_with(
             &directory,
             &storage_path,
-            &source_path,
-            &candidate_path,
+            &source,
+            &candidate,
             |source, candidate| fs::hard_link(source, candidate),
             |path| fs::remove_file(path),
             |_| Err(io::Error::other("injected directory flush failure")),
         )
-        .expect_err("post-unlink flush failure is returned honestly");
-
-        assert!(
-            fs::symlink_metadata(&source_path)
-                .expect_err("committed source pathname remains absent")
-                .kind()
-                == io::ErrorKind::NotFound,
-            "post-commit failure does not recreate the source pathname"
+        .expect_err("QUARANTINE-POSTCOMMIT: flush failure returned");
+        assert_absent(&source, "QUARANTINE-POSTCOMMIT/source");
+        assert_snapshot(
+            &candidate,
+            &source_snapshot,
+            "QUARANTINE-POSTCOMMIT/candidate",
         );
-        let mut candidate = open_existing_secure_file(&candidate_path, false)
-            .expect("open sole retained quarantine candidate");
-        assert!(
-            regular_file_identity(&candidate).expect("read retained candidate identity")
-                == source_identity,
-            "post-commit failure retains the original identity at the candidate"
-        );
-        assert!(
-            read_open_file(&mut candidate).expect("read retained candidate bytes")
-                == b"committed quarantine bytes",
-            "post-commit failure retains source bytes at the candidate"
-        );
-        assert!(
-            read_acl_snapshot(candidate.as_raw_handle() as HANDLE)
-                .expect("read retained candidate DACL")
-                == source_acl,
-            "post-commit failure retains source DACL at the candidate"
-        );
-
-        drop(candidate);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
     }
-
     #[test]
-    fn permissive_existing_file_is_rejected_without_mutation() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-        let file_path = storage_path.join("legacy.json");
-        let mut retained = create_permissive_test_file(&file_path, b"legacy bytes")
-            .expect("create permissive file with a retained writer");
-        let before = read_acl_snapshot(retained.as_raw_handle() as HANDLE)
-            .expect("snapshot permissive file DACL");
-
+    fn existing_permissive_file_and_directory_are_rejected_without_repair() {
+        let workspace = SecureWorkspace::create().expect("OPEN-NO-REPAIR: workspace");
+        let file_path = workspace.path.join("legacy.json");
+        let mut file =
+            create_permissive_test_file(&file_path, b"legacy").expect("OPEN-NO-REPAIR: file");
+        let file_before = snapshot_object(&file, StorageObjectKind::RegularFile)
+            .expect("OPEN-NO-REPAIR: snapshot");
         open_existing_secure_file(&file_path, false)
-            .expect_err("a permissive existing file is never repaired in place");
-        assert!(
-            read_acl_snapshot(retained.as_raw_handle() as HANDLE).expect("read rejected file DACL")
-                == before,
-            "rejection leaves the permissive DACL unchanged"
+            .expect_err("OPEN-NO-REPAIR: permissive rejected");
+        assert_handle_snapshot(&file, &file_before, "OPEN-NO-REPAIR/rejected");
+        file.seek(SeekFrom::End(0))
+            .expect("OPEN-NO-REPAIR: retained seek");
+        file.write_all(b"!")
+            .expect("OPEN-NO-REPAIR: retained write");
+        file.sync_all().expect("OPEN-NO-REPAIR: retained sync");
+        check!(
+            fs::read(&file_path).expect("OPEN-NO-REPAIR: read") == b"legacy!",
+            "OPEN-NO-REPAIR: retained access remains"
         );
-
-        retained
-            .seek(SeekFrom::End(0))
-            .expect("seek retained writer");
-        retained
-            .write_all(b"!")
-            .expect("retained access survives any later DACL change");
-        retained.sync_all().expect("sync retained writer");
-        assert!(
-            fs::read(&file_path).expect("read retained-writer bytes") == b"legacy bytes!",
-            "test demonstrates why in-place DACL repair cannot establish a boundary"
-        );
-
-        drop(retained);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
+        let directory_path = workspace.root.join("legacy-storage");
+        let directory = create_permissive_test_directory(&directory_path)
+            .expect("OPEN-DIR-NO-REPAIR: directory");
+        let directory_before = snapshot_object(&directory, StorageObjectKind::Directory)
+            .expect("OPEN-DIR-NO-REPAIR: snapshot");
+        ensure_secure_storage_directory(&directory_path)
+            .expect_err("OPEN-DIR-NO-REPAIR: permissive rejected");
+        assert_handle_snapshot(&directory, &directory_before, "OPEN-DIR-NO-REPAIR/rejected");
     }
-
-    #[test]
-    fn permissive_existing_directory_is_rejected_without_mutation() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("legacy-storage");
-        let retained =
-            create_permissive_test_directory(&storage_path).expect("create permissive directory");
-        let before = read_acl_snapshot(retained.as_raw_handle() as HANDLE)
-            .expect("snapshot permissive directory DACL");
-
-        ensure_secure_storage_directory(&storage_path)
-            .expect_err("a permissive existing directory is never repaired in place");
-        assert!(
-            read_acl_snapshot(retained.as_raw_handle() as HANDLE)
-                .expect("read rejected directory DACL")
-                == before,
-            "rejection leaves the permissive directory DACL unchanged"
-        );
-
-        drop(retained);
-        root.cleanup().expect("remove temporary root");
-    }
-
     #[test]
     fn final_file_symlink_and_directory_junction_fail_without_touching_targets() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-
+        let workspace = SecureWorkspace::create().expect("FINAL-NO-REPARSE: workspace");
+        let storage_path = &workspace.path;
+        let directory = &workspace.directory;
         let file_target_path = storage_path.join("file-target.json");
-        let file_target = create_permissive_test_file(&file_target_path, b"target file bytes")
-            .expect("create file target");
-        let file_target_acl = read_acl_snapshot(file_target.as_raw_handle() as HANDLE)
-            .expect("snapshot file target DACL");
         let file_link = storage_path.join("file-link.json");
-        symlink_file(&file_target_path, &file_link)
-            .expect("create unprivileged final file symlink");
-
-        assert!(
+        let file_target = create_permissive_test_file(&file_target_path, b"target file")
+            .expect("FINAL-NO-REPARSE: file target");
+        let file_snapshot = snapshot_object(&file_target, StorageObjectKind::RegularFile)
+            .expect("FINAL-NO-REPARSE: file snapshot");
+        symlink_file(&file_target_path, &file_link).expect("FINAL-NO-REPARSE: file link");
+        check!(
             open_existing_secure_file(&file_link, false).is_err(),
-            "final file symlink is rejected"
+            "FINAL-NO-REPARSE: final file symlink rejected"
         );
-        assert!(
-            fs::read(&file_target_path).expect("read file target") == b"target file bytes",
-            "file target bytes are unchanged"
-        );
-        assert!(
-            read_acl_snapshot(file_target.as_raw_handle() as HANDLE)
-                .expect("read file target DACL after rejection")
-                == file_target_acl,
-            "file target DACL is unchanged"
-        );
-        fs::remove_file(&file_link).expect("remove file symlink");
-
+        assert_handle_snapshot(&file_target, &file_snapshot, "FINAL-NO-REPARSE/file target");
+        fs::remove_file(&file_link).expect("FINAL-NO-REPARSE: remove file link");
         let directory_target_path = storage_path.join("directory-target");
-        let directory_target = create_permissive_test_directory(&directory_target_path)
-            .expect("create directory target");
-        let marker_path = directory_target_path.join("marker.bin");
-        fs::write(&marker_path, b"target directory bytes").expect("write target marker");
-        let directory_target_acl = read_acl_snapshot(directory_target.as_raw_handle() as HANDLE)
-            .expect("snapshot directory target DACL");
         let junction_path = storage_path.join("directory-junction");
+        let directory_target = create_permissive_test_directory(&directory_target_path)
+            .expect("FINAL-NO-REPARSE: directory target");
+        let marker = directory_target_path.join("marker.bin");
+        fs::write(&marker, b"target directory").expect("FINAL-NO-REPARSE: marker");
+        let directory_snapshot = snapshot_object(&directory_target, StorageObjectKind::Directory)
+            .expect("FINAL-NO-REPARSE: directory snapshot");
         create_junction(&junction_path, &directory_target_path)
-            .expect("create unprivileged directory junction");
-
-        assert!(
+            .expect("FINAL-NO-REPARSE: junction");
+        check!(
             ensure_secure_storage_directory(&junction_path).is_err(),
-            "final directory junction is rejected"
+            "FINAL-NO-REPARSE: final junction rejected"
         );
-        assert!(
-            fs::read(&marker_path).expect("read target marker") == b"target directory bytes",
-            "directory target bytes are unchanged"
+        assert_handle_snapshot(
+            &directory_target,
+            &directory_snapshot,
+            "FINAL-NO-REPARSE/directory target",
         );
-        assert!(
-            read_acl_snapshot(directory_target.as_raw_handle() as HANDLE)
-                .expect("read directory target DACL after rejection")
-                == directory_target_acl,
-            "directory target DACL is unchanged"
+        check!(
+            fs::read(&marker).expect("FINAL-NO-REPARSE: marker after") == b"target directory",
+            "FINAL-NO-REPARSE: marker unchanged"
         );
-        fs::remove_dir(&junction_path).expect("remove directory junction");
-
-        drop(directory_target);
-        drop(file_target);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
+        fs::remove_dir(&junction_path).expect("FINAL-NO-REPARSE: remove junction");
     }
-
     #[test]
     fn ancestor_junction_resolves_to_real_final_objects_with_matching_identity() {
-        let root = TempRoot::create().expect("create temporary root");
+        let root = TempRoot::create().expect("ANCESTOR-REPARSE-ALLOWED: root");
         let real_parent = root.join("real-parent");
-        fs::create_dir(&real_parent).expect("create real parent");
+        fs::create_dir(&real_parent).expect("ANCESTOR-REPARSE-ALLOWED: real parent");
         let junction_parent = root.join("junction-parent");
-        create_junction(&junction_parent, &real_parent).expect("create ancestor junction");
-
-        let storage_through_junction = junction_parent.join("storage");
-        let storage_physical = real_parent.join("storage");
-        let directory = ensure_secure_storage_directory(&storage_through_junction)
-            .expect("create real final directory through ancestor junction");
+        create_junction(&junction_parent, &real_parent)
+            .expect("ANCESTOR-REPARSE-ALLOWED: junction");
+        let via = junction_parent.join("storage");
+        let physical = real_parent.join("storage");
+        let directory = ensure_secure_storage_directory(&via)
+            .expect("ANCESTOR-REPARSE-ALLOWED: final directory");
         let physical_directory = open_windows_path(
-            &storage_physical,
+            &physical,
             FILE_READ_ATTRIBUTES | READ_CONTROL,
             OPEN_EXISTING,
             StorageObjectKind::Directory.open_flags(),
         )
-        .expect("open physical directory target");
-        assert!(
+        .expect("ANCESTOR-REPARSE-ALLOWED: physical directory");
+        check!(
             storage_identity(
                 directory.as_raw_handle() as HANDLE,
-                StorageObjectKind::Directory,
+                StorageObjectKind::Directory
             )
-            .expect("read junction-path directory identity")
+            .expect("ANCESTOR-REPARSE-ALLOWED: via identity")
                 == storage_identity(
                     physical_directory.as_raw_handle() as HANDLE,
-                    StorageObjectKind::Directory,
+                    StorageObjectKind::Directory
                 )
-                .expect("read physical directory identity"),
-            "junction and physical directory paths name the same final object"
+                .expect("ANCESTOR-REPARSE-ALLOWED: physical identity"),
+            "ANCESTOR-REPARSE-ALLOWED: directory identity"
         );
-
-        let file_through_junction = storage_through_junction.join("history.json");
-        let file_physical = storage_physical.join("history.json");
-        let mut file = create_new_secure_file(&file_through_junction)
-            .expect("create real final file through ancestor junction");
-        file.write_all(b"junction bytes").expect("write file");
-        file.sync_all().expect("sync file");
-        let mut physical_file = open_windows_path(
-            &file_physical,
+        let via_file = via.join("history.json");
+        let physical_file = physical.join("history.json");
+        let mut file =
+            create_new_secure_file(&via_file).expect("ANCESTOR-REPARSE-ALLOWED: via file");
+        file.write_all(b"junction bytes")
+            .expect("ANCESTOR-REPARSE-ALLOWED: write");
+        file.sync_all().expect("ANCESTOR-REPARSE-ALLOWED: sync");
+        let physical_file_handle = open_windows_path(
+            &physical_file,
             GENERIC_READ | FILE_READ_ATTRIBUTES | READ_CONTROL,
             OPEN_EXISTING,
             StorageObjectKind::RegularFile.open_flags(),
         )
-        .expect("open physical file target");
-        assert!(
-            storage_identity(
-                file.as_raw_handle() as HANDLE,
-                StorageObjectKind::RegularFile
-            )
-            .expect("read junction-path file identity")
-                == storage_identity(
-                    physical_file.as_raw_handle() as HANDLE,
-                    StorageObjectKind::RegularFile,
-                )
-                .expect("read physical file identity"),
-            "junction and physical file paths name the same final object"
+        .expect("ANCESTOR-REPARSE-ALLOWED: physical file");
+        check!(
+            regular_file_identity(&file).expect("ANCESTOR-REPARSE-ALLOWED: via file identity")
+                == regular_file_identity(&physical_file_handle)
+                    .expect("ANCESTOR-REPARSE-ALLOWED: physical file identity"),
+            "ANCESTOR-REPARSE-ALLOWED: file identity"
         );
-        assert!(
-            read_open_file(&mut physical_file).expect("read physical file") == b"junction bytes",
-            "physical target contains bytes written through junction"
+        let mut physical_file_handle = physical_file_handle;
+        check!(
+            read_open_file(&mut physical_file_handle)
+                .expect("ANCESTOR-REPARSE-ALLOWED: physical bytes")
+                == b"junction bytes",
+            "ANCESTOR-REPARSE-ALLOWED: physical bytes"
         );
-
-        drop(physical_file);
+        drop(physical_file_handle);
         drop(file);
         drop(physical_directory);
         drop(directory);
-        fs::remove_dir(&junction_parent).expect("remove ancestor junction");
-        root.cleanup().expect("remove temporary root");
+        fs::remove_dir(&junction_parent).expect("ANCESTOR-REPARSE-ALLOWED: remove junction");
     }
-
     #[test]
     fn validation_handle_blocks_replacement_until_identity_check_finishes() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-        let live_path = storage_path.join("history.json");
-        let replacement_path = storage_path.join("replacement.json");
-        let detached_path = storage_path.join("detached.json");
-
-        let original = create_new_secure_file(&live_path).expect("create original file");
-        let original_identity = storage_identity(
+        let workspace = SecureWorkspace::create().expect("VALIDATION-BARRIER: workspace");
+        let storage_path = &workspace.path;
+        let directory = &workspace.directory;
+        let live = storage_path.join("history.json");
+        let replacement = storage_path.join("replacement.json");
+        let detached = storage_path.join("detached.json");
+        let original = create_new_secure_file(&live).expect("VALIDATION-BARRIER: original");
+        let identity = storage_identity(
             original.as_raw_handle() as HANDLE,
             StorageObjectKind::RegularFile,
         )
-        .expect("read original identity");
-        let replacement =
-            create_new_secure_file(&replacement_path).expect("create replacement file");
-        drop(replacement);
-
-        verify_path_identity_with(
-            &live_path,
-            StorageObjectKind::RegularFile,
-            original_identity,
-            |_validation| {
-                OpenOptions::new()
-                    .access_mode(DELETE)
-                    .share_mode(STORAGE_SHARE_MODE)
-                    .open(&live_path)
-                    .expect_err("validation handle blocks a competing DELETE-access open");
-                let blocked = Command::new("cmd")
-                    .arg("/D")
-                    .arg("/C")
-                    .arg("move")
-                    .arg("/Y")
-                    .arg(&live_path)
-                    .arg(&detached_path)
-                    .output()?;
-                assert!(
-                    !blocked.status.success(),
-                    "another process cannot detach the path during validation"
-                );
-                assert!(
-                    live_path.exists(),
-                    "live path remains installed during validation"
-                );
-                assert!(
-                    !detached_path.exists(),
-                    "detached path is absent while validation handle is alive"
-                );
-                Ok(())
-            },
-        )
-        .expect("point-in-time identity validation succeeds");
-
-        let detached = Command::new("cmd")
-            .arg("/D")
-            .arg("/C")
-            .arg("move")
-            .arg("/Y")
-            .arg(&live_path)
-            .arg(&detached_path)
+        .expect("VALIDATION-BARRIER: identity");
+        drop(create_new_secure_file(&replacement).expect("VALIDATION-BARRIER: replacement"));
+        verify_path_identity_with(&live, StorageObjectKind::RegularFile, identity, |_| {
+            OpenOptions::new()
+                .access_mode(DELETE)
+                .share_mode(STORAGE_SHARE_MODE)
+                .open(&live)
+                .expect_err("VALIDATION-BARRIER: delete open blocked");
+            let output = Command::new("cmd")
+                .args(["/D", "/C", "move", "/Y"])
+                .arg(&live)
+                .arg(&detached)
+                .output()?;
+            check!(
+                !output.status.success(),
+                "VALIDATION-BARRIER: detach blocked"
+            );
+            check!(live.exists(), "VALIDATION-BARRIER: live pathname remains");
+            assert_absent(&detached, "VALIDATION-BARRIER/detached");
+            Ok(())
+        })
+        .expect("VALIDATION-BARRIER: identity check");
+        let output = Command::new("cmd")
+            .args(["/D", "/C", "move", "/Y"])
+            .arg(&live)
+            .arg(&detached)
             .output()
-            .expect("run detach rename after validation");
-        assert!(
-            detached.status.success(),
-            "detach rename succeeds after validation handle closes"
+            .expect("VALIDATION-BARRIER: detach after");
+        check!(
+            output.status.success(),
+            "VALIDATION-BARRIER: detach after close"
         );
-        fs::rename(&replacement_path, &live_path)
-            .expect("replacement install succeeds after validation handle closes");
-
-        drop(original);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
+        fs::rename(&replacement, &live).expect("VALIDATION-BARRIER: install replacement");
     }
-
     #[test]
     fn path_replacement_is_detected_without_rewriting_either_file() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-        let live_path = storage_path.join("history.json");
-        let replacement_path = storage_path.join("replacement.json");
-        let detached_path = storage_path.join("detached.json");
-
-        let mut original = create_new_secure_file(&live_path).expect("create original file");
+        let workspace = SecureWorkspace::create().expect("PATH-REPLACEMENT: workspace");
+        let storage_path = &workspace.path;
+        let directory = &workspace.directory;
+        let live = storage_path.join("history.json");
+        let replacement = storage_path.join("replacement.json");
+        let detached = storage_path.join("detached.json");
+        let mut original = create_new_secure_file(&live).expect("PATH-REPLACEMENT: original");
         original
-            .write_all(b"old open handle bytes")
-            .expect("write original file");
-        original.sync_all().expect("sync original file");
-        let original_identity = storage_identity(
-            original.as_raw_handle() as HANDLE,
-            StorageObjectKind::RegularFile,
-        )
-        .expect("read original identity");
-
-        let mut replacement =
-            create_new_secure_file(&replacement_path).expect("create replacement file");
-        replacement
-            .write_all(b"new path bytes")
-            .expect("write replacement file");
-        replacement.sync_all().expect("sync replacement file");
-        let replacement_identity = storage_identity(
-            replacement.as_raw_handle() as HANDLE,
-            StorageObjectKind::RegularFile,
-        )
-        .expect("read replacement identity");
-        assert!(
+            .write_all(b"old bytes")
+            .expect("PATH-REPLACEMENT: old bytes");
+        original.sync_all().expect("PATH-REPLACEMENT: old sync");
+        let original_identity =
+            regular_file_identity(&original).expect("PATH-REPLACEMENT: original identity");
+        let mut replacement_file =
+            create_new_secure_file(&replacement).expect("PATH-REPLACEMENT: replacement");
+        replacement_file
+            .write_all(b"new bytes")
+            .expect("PATH-REPLACEMENT: new bytes");
+        replacement_file
+            .sync_all()
+            .expect("PATH-REPLACEMENT: new sync");
+        let replacement_identity = regular_file_identity(&replacement_file)
+            .expect("PATH-REPLACEMENT: replacement identity");
+        check!(
             original_identity != replacement_identity,
-            "test files have distinct identities"
+            "PATH-REPLACEMENT: identities distinct"
         );
-        drop(replacement);
-
-        fs::rename(&live_path, &detached_path).expect("detach original path");
-        fs::rename(&replacement_path, &live_path).expect("install replacement path");
-        assert!(
-            verify_secure_file_path(&original, &live_path).is_err(),
-            "identity revalidation detects replacement"
+        drop(replacement_file);
+        fs::rename(&live, &detached).expect("PATH-REPLACEMENT: detach");
+        fs::rename(&replacement, &live).expect("PATH-REPLACEMENT: install");
+        check!(
+            verify_secure_file_path(&original, &live).is_err(),
+            "PATH-REPLACEMENT: identity swap detected"
         );
-        assert!(
-            read_open_file(&mut original).expect("read old open handle")
-                == b"old open handle bytes",
-            "old open handle bytes are unchanged"
+        check!(
+            read_open_file(&mut original).expect("PATH-REPLACEMENT: old handle") == b"old bytes",
+            "PATH-REPLACEMENT: old bytes unchanged"
         );
-        assert!(
-            fs::read(&live_path).expect("read replacement path") == b"new path bytes",
-            "replacement path bytes are unchanged"
+        check!(
+            fs::read(&live).expect("PATH-REPLACEMENT: new path") == b"new bytes",
+            "PATH-REPLACEMENT: new bytes unchanged"
         );
-
         drop(original);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
     }
-
     #[test]
     fn file_and_directory_helpers_reject_the_wrong_object_type() {
-        let root = TempRoot::create().expect("create temporary root");
+        let root = TempRoot::create().expect("TYPE-MATRIX: root");
         let directory_path = root.join("permissive-directory");
         let directory =
-            create_permissive_test_directory(&directory_path).expect("create permissive directory");
-        let directory_acl = read_acl_snapshot(directory.as_raw_handle() as HANDLE)
-            .expect("snapshot permissive directory DACL");
-        assert!(
+            create_permissive_test_directory(&directory_path).expect("TYPE-MATRIX: directory");
+        let directory_snapshot = snapshot_object(&directory, StorageObjectKind::Directory)
+            .expect("TYPE-MATRIX: directory snapshot");
+        check!(
             open_existing_secure_file(&directory_path, false).is_err(),
-            "file helper rejects a directory"
+            "TYPE-MATRIX: file helper rejects directory"
         );
-        assert!(
-            read_acl_snapshot(directory.as_raw_handle() as HANDLE)
-                .expect("read rejected directory DACL")
-                == directory_acl,
-            "wrong-type rejection leaves the original permissive directory DACL unchanged"
+        assert_handle_snapshot(&directory, &directory_snapshot, "TYPE-MATRIX/directory");
+        let file_path = root.join("permissive-file");
+        let file = create_permissive_test_file(&file_path, b"bytes").expect("TYPE-MATRIX: file");
+        let file_snapshot = snapshot_object(&file, StorageObjectKind::RegularFile)
+            .expect("TYPE-MATRIX: file snapshot");
+        check!(
+            ensure_secure_storage_directory(&file_path).is_err(),
+            "TYPE-MATRIX: directory helper rejects file"
         );
-
-        let regular_path = root.join("permissive-regular-file");
-        let regular = create_permissive_test_file(&regular_path, b"regular bytes")
-            .expect("create permissive regular file");
-        let regular_acl = read_acl_snapshot(regular.as_raw_handle() as HANDLE)
-            .expect("snapshot permissive regular file DACL");
-        assert!(
-            ensure_secure_storage_directory(&regular_path).is_err(),
-            "directory helper rejects a regular file"
-        );
-        assert!(
-            read_acl_snapshot(regular.as_raw_handle() as HANDLE)
-                .expect("read rejected regular file DACL")
-                == regular_acl,
-            "wrong-type rejection leaves the original permissive file DACL unchanged"
-        );
-
-        drop(regular);
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
+        assert_handle_snapshot(&file, &file_snapshot, "TYPE-MATRIX/file");
     }
-
+    #[test]
+    fn device_kernel_object_is_rejected_as_regular_file() {
+        let device = open_windows_path(
+            Path::new(r"\\.\NUL"),
+            GENERIC_READ,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+        )
+        .expect("TYPE-MATRIX/DEVICE: open deterministic NUL device");
+        check!(
+            storage_identity(
+                device.as_raw_handle() as HANDLE,
+                StorageObjectKind::RegularFile
+            )
+            .is_err(),
+            "TYPE-MATRIX/DEVICE: kernel device rejected as regular file"
+        );
+    }
     #[test]
     fn security_errors_do_not_disclose_path_sid_or_username() {
-        let root = TempRoot::create().expect("create temporary root");
-        let sensitive_path = root.join("private-storage-object");
-        let file = create_permissive_test_file(&sensitive_path, b"private")
-            .expect("create sensitive test file");
-        let path_text = sensitive_path.to_string_lossy().into_owned();
-        let current_user = current_process_user_sid().expect("read current process SID");
-        let sid_text = sid_string(&current_user).expect("format current process SID");
-        let username = std::env::var("USERNAME").expect("read current Windows username");
-
-        let path_error = ensure_secure_storage_directory(&sensitive_path)
-            .expect_err("wrong-type path is rejected generically");
+        let root = TempRoot::create().expect("ERROR-PRIVACY: root");
+        let path = root.join("private-storage-object");
+        let file = create_permissive_test_file(&path, b"private").expect("ERROR-PRIVACY: file");
+        let path_text = path.to_string_lossy().into_owned();
+        let current = current_process_user_sid().expect("ERROR-PRIVACY: current SID");
+        let sid_text = sid_string(&current).expect("ERROR-PRIVACY: SID text");
+        let username = std::env::var("USERNAME").expect("ERROR-PRIVACY: username");
+        let path_error =
+            ensure_secure_storage_directory(&path).expect_err("ERROR-PRIVACY: wrong type rejected");
         assert_generic_error(&path_error, &[&path_text, &sid_text, &username]);
-
-        let local_system = well_known_sid(WinLocalSystemSid).expect("create LocalSystem SID");
-        let everyone = well_known_sid(WinWorldSid).expect("create Everyone SID");
-        let foreign_owner = if current_user.as_bytes() != local_system.as_bytes() {
-            &local_system
+        let system = well_known_sid(WinLocalSystemSid).expect("ERROR-PRIVACY: system SID");
+        let foreign = well_known_sid(WinWorldSid).expect("ERROR-PRIVACY: foreign SID");
+        let foreign = if current.as_bytes() != system.as_bytes() {
+            &system
         } else {
-            &everyone
+            &foreign
         };
-        let owner_error = inspect_owner(foreign_owner.as_bytes(), current_user.as_bytes())
-            .expect_err("foreign owner is rejected generically");
+        let owner_error = inspect_owner(foreign.as_bytes(), current.as_bytes())
+            .expect_err("ERROR-PRIVACY: owner rejected");
         assert_generic_error(&owner_error, &[&path_text, &sid_text, &username]);
-
         drop(file);
-        root.cleanup().expect("remove temporary root");
     }
-
     #[test]
     fn directory_flush_and_missing_inputs_fail_closed() {
-        let root = TempRoot::create().expect("create temporary root");
-        let storage_path = root.join("storage");
-        let directory =
-            ensure_secure_storage_directory(&storage_path).expect("create secure directory");
-        flush_secure_storage_directory(&directory).expect("valid directory flush succeeds");
-        assert!(
+        let workspace = SecureWorkspace::create().expect("FLUSH-MISSING: workspace");
+        let storage_path = &workspace.path;
+        let directory = &workspace.directory;
+        flush_secure_storage_directory(&directory).expect("FLUSH-MISSING: valid flush");
+        check!(
             flush_storage_directory_handle(INVALID_HANDLE_VALUE).is_err(),
-            "invalid handle is rejected"
+            "FLUSH-MISSING: invalid handle rejected"
         );
-
-        let missing_file = storage_path.join("missing.json");
-        assert!(
-            open_existing_secure_file(&missing_file, false).is_err(),
-            "nonexistent file is rejected"
+        check!(
+            open_existing_secure_file(&storage_path.join("missing.json"), false).is_err(),
+            "FLUSH-MISSING: missing file rejected"
         );
-        let missing_parent = root.join("missing-parent");
-        assert!(
+        let missing_parent = workspace.root.join("missing-parent");
+        check!(
             ensure_secure_storage_directory(&missing_parent.join("storage")).is_err(),
-            "missing ancestor is not created"
+            "FLUSH-MISSING: missing parent rejected"
         );
-        assert!(!missing_parent.exists(), "missing ancestor remains absent");
-
-        drop(directory);
-        root.cleanup().expect("remove temporary root");
+        assert_absent(&missing_parent, "FLUSH-MISSING/parent");
     }
 }
