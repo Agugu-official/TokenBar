@@ -6474,12 +6474,13 @@ mod tests {
     }
 
     #[test]
-    fn repair_floor_binds_for_a_surviving_rollover() {
-        let upper_bound = 200;
-        let observation_now = 50;
-        let rollover_activity = 150; // strictly between observation_now and upper_bound
-        let far_reset = upper_bound + 10 * DAY; // a normal rollover's reset_at sits far beyond upper_bound
-        let series = SeriesState {
+    fn clock_repair_loader_ignores_future_rollover_boundary() {
+        let (directory, path) = temp_path("clock-rollover-boundary");
+        let upper_bound = 32_000_000;
+        let observation_now = upper_bound - 100;
+        let rollover_activity = upper_bound - 50;
+        let far_reset = upper_bound + 10 * DAY;
+        let trigger = SeriesState {
             provider_id: "claude".into(),
             account_scope: "acct".into(),
             window_key: "weekly.v1".into(),
@@ -6492,22 +6493,65 @@ mod tests {
             )),
             samples: Vec::new(),
         };
-        let store = Store {
-            schema_version: HISTORY_SCHEMA_VERSION,
-            series: vec![series],
+        let sibling = SeriesState {
+            provider_id: "copilot".into(),
+            account_scope: "acct".into(),
+            window_key: "premium_interactions.v1".into(),
+            active_reset_at: None,
+            last_activity_at: upper_bound - 10,
+            rollover: None,
+            samples: Vec::new(),
         };
+        let sibling_only = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![sibling.clone()],
+        };
+        assert!(validate_store_at(&sibling_only, upper_bound));
 
-        let repaired = repair_store_at(store, upper_bound, observation_now);
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![trigger.clone(), sibling.clone()],
+        };
+        store.series.sort_by(series_order);
+        assert!(validate_store(&store));
         assert!(
-            repaired.series[0].rollover.is_some(),
-            "the rollover itself survives detection"
+            !validate_store_at(&store, upper_bound),
+            "the trigger's observed activity must force the loader through repair"
         );
+        let original_bytes = serde_json::to_vec_pretty(&store).unwrap();
+        fs::write(&path, &original_bytes).unwrap();
+
+        reset_save_call_count();
+        let loaded =
+            load_store_at_with_mode(StorageMode::Generic, &path, upper_bound, observation_now)
+                .unwrap();
+        assert!(!loaded.quarantined);
+
+        let mut expected_trigger = trigger;
+        expected_trigger.last_activity_at = rollover_activity;
+        let mut expected = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![expected_trigger, sibling],
+        };
+        expected.series.sort_by(series_order);
         assert_eq!(
-            repaired.series[0].last_activity_at, rollover_activity,
-            "floor must include the surviving rollover's activity timestamp"
+            loaded.store, expected,
+            "repair must retain a rollover whose activity is trusted even when its reset boundary is in the future"
         );
-        assert!(validate_series(&repaired.series[0]));
-        assert!(validate_store_at(&repaired, upper_bound));
+        assert!(validate_store_at(&loaded.store, upper_bound));
+        assert_eq!(save_call_count(), 0, "loader repair must remain zero-save");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            original_bytes,
+            "loader repair must not rewrite fixture bytes"
+        );
+        assert!(!directory
+            .join(format!(
+                "quota-pace-history-v3.corrupt-{observation_now}.json"
+            ))
+            .exists());
+
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -6570,48 +6614,78 @@ mod tests {
     }
 
     #[test]
-    fn repair_gate_is_load_bearing_inside_repair_store_at() {
-        // The fixture above proves the end-to-end "no save" outcome, but for
-        // a *single-series* store that outcome holds even without the gate:
-        // load_store_at_with_mode only calls repair_store_at when
-        // validate_store_at already failed, which for one series means that
-        // series' own last_activity_at was the thing leading upper_bound.
-        //
-        // The gate is NOT dead code. In a multi-series store — the reported
-        // shape in #144, and any real store — series A can lead upper_bound
-        // and force the repair while sibling B sits in the healthy band
-        // (observation_now, upper_bound] left by a faster concurrent writer.
-        // Without the gate the loader lowers B's last_activity_at to
-        // observation_now, discarding a timestamp another writer committed:
-        // a lost update on the production path. Verified by driving a
-        // two-series store through load_store_at_with_mode with the gate
-        // removed. Do not delete it as unreachable.
-        //
-        // This test calls repair_store_at directly, which production never
-        // does for an already-healthy
-        // series, specifically to pin the internal gate: removing it must
-        // make this test fail even though no real load path currently can.
+    fn clock_repair_loader_preserves_sibling_at_upper_bound() {
+        let (directory, path) = temp_path("clock-gate-loader");
         let upper_bound = 31_000_000;
         let observation_now = upper_bound - 100;
-        let series = SeriesState {
+        let trigger = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "session.v1".into(),
+            active_reset_at: None,
+            last_activity_at: upper_bound + 50,
+            rollover: None,
+            samples: Vec::new(),
+        };
+        let sibling = SeriesState {
             provider_id: "copilot".into(),
             account_scope: "acct".into(),
             window_key: "premium_interactions.v1".into(),
             active_reset_at: None,
-            last_activity_at: observation_now + 50, // within (observation_now, upper_bound]
+            last_activity_at: upper_bound,
             rollover: None,
             samples: Vec::new(),
         };
-        let store = Store {
+        let sibling_only = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
-            series: vec![series.clone()],
+            series: vec![sibling.clone()],
         };
+        assert!(validate_store_at(&sibling_only, upper_bound));
 
-        let repaired = repair_store_at(store, upper_bound, observation_now);
-        assert_eq!(
-            repaired.series[0], series,
-            "a series at or below the ceiling must be returned untouched, field for field"
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![trigger.clone(), sibling.clone()],
+        };
+        store.series.sort_by(series_order);
+        assert!(validate_store(&store));
+        assert!(
+            !validate_store_at(&store, upper_bound),
+            "the trigger must force the loader through repair"
         );
+        let original_bytes = serde_json::to_vec_pretty(&store).unwrap();
+        fs::write(&path, &original_bytes).unwrap();
+
+        reset_save_call_count();
+        let loaded =
+            load_store_at_with_mode(StorageMode::Generic, &path, upper_bound, observation_now)
+                .unwrap();
+        assert!(!loaded.quarantined);
+
+        let mut expected_trigger = trigger;
+        expected_trigger.last_activity_at = observation_now;
+        let mut expected = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![expected_trigger, sibling],
+        };
+        expected.series.sort_by(series_order);
+        assert_eq!(
+            loaded.store, expected,
+            "repair must not lower a sibling timestamp at the inclusive ceiling"
+        );
+        assert!(validate_store_at(&loaded.store, upper_bound));
+        assert_eq!(save_call_count(), 0, "loader repair must remain zero-save");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            original_bytes,
+            "loader repair must not rewrite fixture bytes"
+        );
+        assert!(!directory
+            .join(format!(
+                "quota-pace-history-v3.corrupt-{observation_now}.json"
+            ))
+            .exists());
+
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
