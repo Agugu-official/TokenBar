@@ -210,7 +210,7 @@ A source reader that consumes secondary files must be verified as one unit. The 
 
 ## Cross-port fixture cross-check
 
-Windows port（[Nanako0129/TokenBar-Windows](https://github.com/Nanako0129/TokenBar-Windows)）的 C# `TokenBar.Core` 是 `Sources/TokenBarCore` 的逐檔移植。Native pin 為 `5b5f500d3a8abe66ab5fa44b18f4fc1aaee53947`，Windows 仍為 `84e0d66413d4e0d87b734f66f7a848b3bc323258`；新增的 `DailyContribution.turns_by_client` 是 additive 且 `#[serde(default)]`，未認得它的 decoder 仍可解，故此差異不阻塞 Windows。 same-pin 只證明 shared source 相同，不取代下述 cross-check 這道跨語言 gate；app-owned FFI、Swift 與 C# surfaces 仍可獨立漂移。單元測試的期望值由移植者撰寫，因此對「一致地誤讀 Swift 語意」的移植錯誤沒有偵測力；對拍（cross-check）以同一份 fixture JSON 餵 Swift 與 C# 兩邊、逐欄位 diff 輸出，才是移植忠實度的判準。
+Windows port（[Nanako0129/TokenBar-Windows](https://github.com/Nanako0129/TokenBar-Windows)）的 C# `TokenBar.Core` 是 `Sources/TokenBarCore` 的逐檔移植。Native reviewed pin 為 `731a2dcc2589cbeaf82150933331b5b2b6b590ff`；Windows current pin 與 consumer state 由 Windows repo 自己擁有，Native 不重述。這次 consumer 只採用 exact gitlink，不修改現有 Rust staticlib、C ABI declarations 或 Swift decoders；build-decoder compatibility 由 consumer gates 重驗。LocalOnly、CostCoverage、embedded-cost 與 partial-estimation 語意尚未宣稱已經 C ABI 抵達 Swift。global cache format 與 serialized layout 不變，但 Amp／Cursor／OpenClaw／MiMoCode／Mux identity 由 1 變 2，必要時 cold rebuild。same-pin 只證明 shared source 相同，不取代下述 cross-check 這道跨語言 gate；app-owned FFI、Swift 與 C# surfaces 仍可獨立漂移。單元測試的期望值由移植者撰寫，因此對「一致地誤讀 Swift 語意」的移植錯誤沒有偵測力；對拍（cross-check）以同一份 fixture JSON 餵 Swift 與 C# 兩邊、逐欄位 diff 輸出，才是移植忠實度的判準。
 
 | 項目 | 內容 |
 |---|---|
