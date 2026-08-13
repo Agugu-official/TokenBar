@@ -1862,12 +1862,15 @@ mod tests {
     fn acl_descriptor_and_handle_mutations_fail_closed() {
         let current = current_process_user_sid().expect("ACL: current SID");
         let system = well_known_sid(WinLocalSystemSid).expect("ACL: system SID");
-        let foreign_sid = well_known_sid(WinWorldSid).expect("ACL: foreign SID");
-        let foreign = if current.as_bytes() != system.as_bytes() {
-            &system
-        } else {
-            &foreign_sid
-        };
+        let foreign = well_known_sid(WinWorldSid).expect("ACL: foreign SID");
+        check!(
+            foreign.as_bytes() != current.as_bytes(),
+            "ACL-FOREIGN-SID: distinct from current user"
+        );
+        check!(
+            foreign.as_bytes() != system.as_bytes(),
+            "ACL-FOREIGN-SID: distinct from LocalSystem"
+        );
         let root = TempRoot::create().expect("ACL-ROUNDTRIP: root");
         let path = root.path.join("artifact.tmp");
         let artifact = create_test_file(&path, b"").expect("ACL-ROUNDTRIP: create artifact");
@@ -1913,7 +1916,7 @@ mod tests {
             inspect_owner(current.as_bytes(), current.as_bytes()).is_ok(),
             "ACL-WRONG-OWNER: current owner accepted"
         );
-        reject_acl_mutations(&current, &system, foreign);
+        reject_acl_mutations(&current, &system, &foreign);
     }
     #[test]
     fn secure_root_resolver_preserves_preferred_fallback_sticky_and_collision_cases() {
@@ -3012,11 +3015,14 @@ mod tests {
         .expect("VALIDATION-BARRIER: identity");
         drop(create_new_secure_file(&replacement).expect("VALIDATION-BARRIER: replacement"));
         verify_path_identity_with(&live, StorageObjectKind::RegularFile, identity, |_| {
-            OpenOptions::new()
-                .access_mode(DELETE)
-                .share_mode(STORAGE_SHARE_MODE)
-                .open(&live)
-                .expect_err("VALIDATION-BARRIER: delete open blocked");
+            check!(
+                OpenOptions::new()
+                    .access_mode(DELETE)
+                    .share_mode(STORAGE_SHARE_MODE)
+                    .open(&live)
+                    .is_err(),
+                "VALIDATION-BARRIER: delete open blocked"
+            );
             let output = Command::new("cmd")
                 .args(["/D", "/C", "move", "/Y"])
                 .arg(&live)
