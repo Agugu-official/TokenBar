@@ -2256,7 +2256,7 @@ mod tests {
                 fixture(&destination_path, destination_kind),
             ];
             reject(&staged_path, &destination_path);
-            let cases = [
+            let cases: [(&Path, &FileSnapshot, &str); 2] = [
                 (&staged_path, &snapshots[0], "REPLACE-WRONG-TYPE/staged"),
                 (
                     &destination_path,
