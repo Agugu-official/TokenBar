@@ -1778,6 +1778,7 @@ mod tests {
             "{label}: staged bytes, identity, or DACL changed"
         );
         assert_absent(&staged_path, label);
+        Ok(())
     }
     fn replace_precommit_failure_case() -> io::Result<()> {
         let root = TempRoot::create()?;
@@ -1812,6 +1813,7 @@ mod tests {
                 "REPLACE-PRECOMMIT/destination",
             ),
         ]);
+        Ok(())
     }
     fn assert_path_snapshots<const N: usize>(cases: [(&Path, &FileSnapshot, &str); N]) {
         for (path, snapshot, label) in cases {
@@ -1838,7 +1840,7 @@ mod tests {
                 .expect("REPLACE-FINAL-REPARSE: link remains")
                 .file_type()
                 .is_symlink(),
-            label
+            "{label}"
         );
         assert_snapshot(target, target_snapshot, "REPLACE-FINAL-REPARSE/target");
         assert_snapshot(regular, regular_snapshot, "REPLACE-FINAL-REPARSE/regular");
@@ -2234,9 +2236,9 @@ mod tests {
         };
         let check_object = |path: &Path, marker: &Option<PathBuf>, expected: &[u8], label: &str| {
             if let Some(marker) = marker {
-                check!(fs::read(marker).expect(label) == expected, label);
+                check!(fs::read(marker).expect(label) == expected, "{label}");
             } else {
-                check!(path.exists(), label);
+                check!(path.exists(), "{label}");
             }
         };
         for (case, staged_directory, destination_directory) in [
@@ -2779,35 +2781,37 @@ mod tests {
         let cross_snapshot = snapshot_object(&cross_file, StorageObjectKind::RegularFile)
             .expect("QUARANTINE-PATH-BOUNDARY: cross snapshot");
         let local_candidate = storage_path.join("local.corrupt");
+        let cross_candidate = other.join("local.corrupt");
+        let mismatch_candidate = other.join("mismatch.corrupt");
         for (source, candidate, dir, label) in [
             (
-                &cross_source,
-                &local_candidate,
-                storage_path,
+                cross_source.as_path(),
+                local_candidate.as_path(),
+                storage_path.as_path(),
                 "QUARANTINE-PATH-BOUNDARY/cross source",
             ),
             (
-                &local_source,
-                &other.join("local.corrupt"),
-                storage_path,
+                local_source.as_path(),
+                cross_candidate.as_path(),
+                storage_path.as_path(),
                 "QUARANTINE-PATH-BOUNDARY/cross candidate",
             ),
             (
-                &local_source,
-                &local_source,
-                storage_path,
+                local_source.as_path(),
+                local_source.as_path(),
+                storage_path.as_path(),
                 "QUARANTINE-PATH-BOUNDARY/same path",
             ),
             (
                 Path::new(""),
-                &local_candidate,
-                storage_path,
+                local_candidate.as_path(),
+                storage_path.as_path(),
                 "QUARANTINE-PATH-BOUNDARY/missing source",
             ),
             (
-                &cross_source,
-                &other.join("mismatch.corrupt"),
-                &other,
+                cross_source.as_path(),
+                mismatch_candidate.as_path(),
+                other.as_path(),
                 "QUARANTINE-PATH-BOUNDARY/directory mismatch",
             ),
         ] {
