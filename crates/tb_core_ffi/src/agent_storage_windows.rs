@@ -1574,22 +1574,17 @@ mod tests {
             kind,
         })
     }
-    fn snapshot_secure_path(path: &Path, kind: StorageObjectKind) -> io::Result<FileSnapshot> {
-        let file = open_secure_storage_object(
-            path,
-            if kind.is_directory() {
-                GENERIC_WRITE | FILE_READ_ATTRIBUTES | STORAGE_SECURITY_ACCESS
-            } else {
-                GENERIC_READ | STORAGE_SECURITY_ACCESS
-            },
-            OPEN_EXISTING,
-            kind,
-        )?;
+    fn snapshot_path(path: &Path, kind: StorageObjectKind) -> io::Result<FileSnapshot> {
+        let access = if kind.is_directory() {
+            FILE_READ_ATTRIBUTES | READ_CONTROL
+        } else {
+            GENERIC_READ | READ_CONTROL
+        };
+        let file = open_windows_path(path, access, OPEN_EXISTING, kind.open_flags())?;
         snapshot_object(&file, kind)
     }
     fn assert_snapshot(path: &Path, expected: &FileSnapshot, label: &str) {
-        let actual =
-            snapshot_secure_path(path, expected.kind).expect("secure snapshot remains readable");
+        let actual = snapshot_path(path, expected.kind).expect("snapshot remains readable");
         check!(
             actual.bytes == expected.bytes
                 && actual.identity == expected.identity
@@ -2191,8 +2186,7 @@ mod tests {
     #[test]
     fn replace_validation_type_reparse_and_path_boundaries_preserve_objects() {
         let workspace = SecureWorkspace::create().expect("REPLACE-VALIDATION: workspace");
-        let root = &workspace.path;
-        let directory = &workspace.directory;
+        let (root, directory) = (&workspace.path, &workspace.directory);
         let reject = |staged: &Path, destination: &Path| {
             replace_secure_file(directory, root, staged, destination)
                 .expect_err("REPLACE-VALIDATION: invalid object accepted");
@@ -2210,12 +2204,18 @@ mod tests {
                 file_snapshot_fixture(&destination_path, b"last-good", destination_permissive)
                     .expect("REPLACE-VALIDATION: destination fixture");
             reject(&staged_path, &destination_path);
-            assert_handle_snapshot(&staged, &staged_snapshot, "REPLACE-VALIDATION/staged");
-            assert_handle_snapshot(
-                &destination,
-                &destination_snapshot,
-                "REPLACE-VALIDATION/destination",
-            );
+            assert_path_snapshots([
+                (
+                    &staged_path,
+                    &staged_snapshot,
+                    "REPLACE-VALIDATION/staged path",
+                ),
+                (
+                    &destination_path,
+                    &destination_snapshot,
+                    "REPLACE-VALIDATION/destination path",
+                ),
+            ]);
         }
         let fixture = |path: &Path, directory: bool, marker: &[u8]| {
             if directory {
