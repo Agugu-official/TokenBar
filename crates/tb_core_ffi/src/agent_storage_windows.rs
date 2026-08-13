@@ -1462,9 +1462,6 @@ mod tests {
                 "unable to create temporary storage root",
             ))
         }
-        fn join(&self, name: &str) -> PathBuf {
-            self.path.join(name)
-        }
     }
     impl Drop for TempRoot {
         fn drop(&mut self) {
@@ -1481,7 +1478,7 @@ mod tests {
     impl SecureWorkspace {
         fn create() -> io::Result<Self> {
             let root = TempRoot::create()?;
-            let path = root.join("storage");
+            let path = root.path.join("storage");
             let directory = ensure_secure_storage_directory(&path)?;
             Ok(Self {
                 directory,
@@ -1782,7 +1779,7 @@ mod tests {
     }
     fn replace_precommit_failure_case() -> io::Result<()> {
         let root = TempRoot::create()?;
-        let storage_path = root.join("storage");
+        let storage_path = root.path.join("storage");
         let directory = ensure_secure_storage_directory(&storage_path)?;
         let staged_path = storage_path.join("staged.tmp");
         let destination_path = storage_path.join("history.json");
@@ -1872,7 +1869,7 @@ mod tests {
             &foreign_sid
         };
         let root = TempRoot::create().expect("ACL-ROUNDTRIP: root");
-        let path = root.join("artifact.tmp");
+        let path = root.path.join("artifact.tmp");
         let artifact = create_test_file(&path, b"").expect("ACL-ROUNDTRIP: create artifact");
         verify_storage_handle(artifact.as_raw_handle() as HANDLE)
             .expect("ACL-ROUNDTRIP: creation verifies");
@@ -1921,8 +1918,8 @@ mod tests {
     #[test]
     fn secure_root_resolver_preserves_preferred_fallback_sticky_and_collision_cases() {
         let root = TempRoot::create().expect("RESOLVER: root");
-        let preferred = root.join("com.nyanako.tokenbar");
-        let fallback = root.join("com.nyanako.tokenbar.secure");
+        let preferred = root.path.join("com.nyanako.tokenbar");
+        let fallback = root.path.join("com.nyanako.tokenbar.secure");
         fs::create_dir(&preferred).expect("RESOLVER-FALLBACK: preferred");
         let preferred_handle = open_windows_path(
             &preferred,
@@ -1997,13 +1994,16 @@ mod tests {
                 == v1_mtime,
             "RESOLVER-FALLBACK: v1 mtime unchanged"
         );
+        drop(v1);
+        drop((preferred_after, preferred_handle));
+        fs::remove_dir_all(&preferred).unwrap();
         drop(ensure_secure_storage_directory(&preferred).expect("RESOLVER-STICKY: preferred"));
         check!(
             resolve_secure_storage_directory(&preferred).expect("RESOLVER-STICKY: second")
                 == fallback,
             "RESOLVER-STICKY: fallback remains authoritative"
         );
-        let collision = root.join("collision-root");
+        let collision = root.path.join("collision-root");
         fs::create_dir(&collision).expect("RESOLVER-COLLISION: root");
         let collision_preferred = collision.join("com.nyanako.tokenbar");
         let collision_fallback = collision.join("com.nyanako.tokenbar.secure");
@@ -2055,8 +2055,8 @@ mod tests {
             "RESOLVER-COLLISION/directory",
         );
         drop(fallback_directory);
-        let preferred_only = root.join("preferred-only");
-        let preferred_only_fallback = root.join("preferred-only.secure");
+        let preferred_only = root.path.join("preferred-only");
+        let preferred_only_fallback = root.path.join("preferred-only.secure");
         drop(
             ensure_secure_storage_directory(&preferred_only)
                 .expect("RESOLVER-PREFERRED: preferred"),
@@ -2071,8 +2071,8 @@ mod tests {
     #[test]
     fn new_objects_are_secure_on_their_first_open_handle() {
         let root = TempRoot::create().expect("FIRST-OPEN: root");
-        let storage_path = root.join("storage");
-        let directory = ensure_secure_storage_directory_with(&storage_path, |created| {
+        let storage_path = root.path.join("storage");
+        let _directory = ensure_secure_storage_directory_with(&storage_path, |created| {
             verify_storage_handle(created.as_raw_handle() as HANDLE)
         })
         .expect("FIRST-OPEN: directory");
@@ -2081,7 +2081,7 @@ mod tests {
             ("open-always.json", OPEN_ALWAYS),
         ] {
             let path = storage_path.join(name);
-            let file = open_secure_storage_object_with(
+            let _file = open_secure_storage_object_with(
                 &path,
                 GENERIC_READ | GENERIC_WRITE | STORAGE_SECURITY_ACCESS,
                 disposition,
@@ -2152,7 +2152,6 @@ mod tests {
     fn secure_lock_preserves_one_identity_and_blocks_delete_until_handles_drop() {
         let workspace = SecureWorkspace::create().expect("LOCK-NO-DELETE: workspace");
         let storage_path = &workspace.path;
-        let directory = &workspace.directory;
         let lock_path = storage_path.join("history.lock");
         let renamed_path = storage_path.join("history.lock.renamed");
         let first = open_secure_lock_file(&lock_path).expect("LOCK-NO-DELETE: first lock");
@@ -2204,8 +2203,8 @@ mod tests {
             ("permissive-destination", false, true),
             ("permissive-staged", true, false),
         ] {
-            let staged_path = root.join(format!("{case}.tmp"));
-            let destination_path = root.join(format!("{case}.json"));
+            let staged_path = root.path.join(format!("{case}.tmp"));
+            let destination_path = root.path.join(format!("{case}.json"));
             let (staged, staged_snapshot) =
                 file_snapshot_fixture(&staged_path, b"staged", staged_permissive)
                     .expect("REPLACE-VALIDATION: staged fixture");
@@ -2245,8 +2244,8 @@ mod tests {
             ("directory-staged", true, false),
             ("directory-destination", false, true),
         ] {
-            let staged_path = root.join(format!("{case}.tmp"));
-            let destination_path = root.join(format!("{case}.json"));
+            let staged_path = root.path.join(format!("{case}.tmp"));
+            let destination_path = root.path.join(format!("{case}.json"));
             let (staged, staged_marker) = fixture(&staged_path, staged_directory, b"staged marker");
             let (destination, destination_marker) = fixture(
                 &destination_path,
@@ -2270,9 +2269,9 @@ mod tests {
             drop(staged);
         }
         for (case, link_is_staged) in [("destination-link", false), ("staged-link", true)] {
-            let target_path = root.join(format!("{case}-target.json"));
-            let link_path = root.join(format!("{case}-link.json"));
-            let regular_path = root.join(format!("{case}-regular.json"));
+            let target_path = root.path.join(format!("{case}-target.json"));
+            let link_path = root.path.join(format!("{case}-link.json"));
+            let regular_path = root.path.join(format!("{case}-regular.json"));
             let (target, target_snapshot) =
                 file_snapshot_fixture(&target_path, b"reparse target", false)
                     .expect("REPLACE-FINAL-REPARSE: target");
@@ -2299,18 +2298,18 @@ mod tests {
                 &format!("REPLACE-FINAL-REPARSE/{case}: link unchanged"),
             );
         }
-        let other = workspace.root.join("other-storage");
+        let other = workspace.root.path.join("other-storage");
         let _other_directory = ensure_secure_storage_directory(&other)
             .expect("REPLACE-PATH-BOUNDARY: other directory");
         let cross_staged = other.join("cross.tmp");
-        let local_destination = root.join("cross-destination.json");
+        let local_destination = root.path.join("cross-destination.json");
         let (cross_file, cross_snapshot) =
             file_snapshot_fixture(&cross_staged, b"cross staged", false)
                 .expect("REPLACE-PATH-BOUNDARY: cross staged");
         let (destination_file, destination_snapshot) =
             file_snapshot_fixture(&local_destination, b"last-good", false)
                 .expect("REPLACE-PATH-BOUNDARY: destination");
-        let local_staged = root.join("local-staged.tmp");
+        let local_staged = root.path.join("local-staged.tmp");
         let cross_destination = other.join("cross-destination.json");
         let (local_file, local_snapshot) =
             file_snapshot_fixture(&local_staged, b"local staged", false)
@@ -2344,7 +2343,7 @@ mod tests {
             validate_replace_paths(root, Path::new(""), &local_destination).is_err(),
             "REPLACE-PATH-BOUNDARY: missing filename rejected"
         );
-        let same_identity = root.join("same-identity.json");
+        let same_identity = root.path.join("same-identity.json");
         fs::hard_link(&local_staged, &same_identity).expect("REPLACE-PATH-BOUNDARY: hard link");
         replace_secure_file(directory, root, &local_staged, &same_identity)
             .expect_err("REPLACE-PATH-BOUNDARY: same identity accepted");
@@ -2377,6 +2376,9 @@ mod tests {
         let (alternate_file, alternate_identity) =
             create_secure_test_file(&alternate, b"unexpected")
                 .expect("REPLACE-POSTCOMMIT: alternate");
+        drop(staged_file);
+        drop(destination_file);
+        drop(alternate_file);
         replace_secure_file_with(
             &directory,
             &storage_path,
@@ -2767,7 +2769,7 @@ mod tests {
             &directory_candidate,
             "QUARANTINE-SOURCE-VALIDATION/directory candidate",
         );
-        let other = workspace.root.join("other-storage");
+        let other = workspace.root.path.join("other-storage");
         let _other_directory = ensure_secure_storage_directory(&other)
             .expect("QUARANTINE-PATH-BOUNDARY: other directory");
         let local_source = storage_path.join("local.json");
@@ -2878,7 +2880,7 @@ mod tests {
             fs::read(&file_path).expect("OPEN-NO-REPAIR: read") == b"legacy!",
             "OPEN-NO-REPAIR: retained access remains"
         );
-        let directory_path = workspace.root.join("legacy-storage");
+        let directory_path = workspace.root.path.join("legacy-storage");
         let directory = create_permissive_test_directory(&directory_path)
             .expect("OPEN-DIR-NO-REPAIR: directory");
         let directory_before = snapshot_object(&directory, StorageObjectKind::Directory)
@@ -2933,9 +2935,9 @@ mod tests {
     #[test]
     fn ancestor_junction_resolves_to_real_final_objects_with_matching_identity() {
         let root = TempRoot::create().expect("ANCESTOR-REPARSE-ALLOWED: root");
-        let real_parent = root.join("real-parent");
+        let real_parent = root.path.join("real-parent");
         fs::create_dir(&real_parent).expect("ANCESTOR-REPARSE-ALLOWED: real parent");
-        let junction_parent = root.join("junction-parent");
+        let junction_parent = root.path.join("junction-parent");
         create_junction(&junction_parent, &real_parent)
             .expect("ANCESTOR-REPARSE-ALLOWED: junction");
         let via = junction_parent.join("storage");
@@ -2999,7 +3001,6 @@ mod tests {
     fn validation_handle_blocks_replacement_until_identity_check_finishes() {
         let workspace = SecureWorkspace::create().expect("VALIDATION-BARRIER: workspace");
         let storage_path = &workspace.path;
-        let directory = &workspace.directory;
         let live = storage_path.join("history.json");
         let replacement = storage_path.join("replacement.json");
         let detached = storage_path.join("detached.json");
@@ -3046,7 +3047,6 @@ mod tests {
     fn path_replacement_is_detected_without_rewriting_either_file() {
         let workspace = SecureWorkspace::create().expect("PATH-REPLACEMENT: workspace");
         let storage_path = &workspace.path;
-        let directory = &workspace.directory;
         let live = storage_path.join("history.json");
         let replacement = storage_path.join("replacement.json");
         let detached = storage_path.join("detached.json");
@@ -3091,7 +3091,7 @@ mod tests {
     #[test]
     fn file_and_directory_helpers_reject_the_wrong_object_type() {
         let root = TempRoot::create().expect("TYPE-MATRIX: root");
-        let directory_path = root.join("permissive-directory");
+        let directory_path = root.path.join("permissive-directory");
         let directory =
             create_permissive_test_directory(&directory_path).expect("TYPE-MATRIX: directory");
         let directory_snapshot = snapshot_object(&directory, StorageObjectKind::Directory)
@@ -3101,7 +3101,7 @@ mod tests {
             "TYPE-MATRIX: file helper rejects directory"
         );
         assert_handle_snapshot(&directory, &directory_snapshot, "TYPE-MATRIX/directory");
-        let file_path = root.join("permissive-file");
+        let file_path = root.path.join("permissive-file");
         let file = create_permissive_test_file(&file_path, b"bytes").expect("TYPE-MATRIX: file");
         let file_snapshot = snapshot_object(&file, StorageObjectKind::RegularFile)
             .expect("TYPE-MATRIX: file snapshot");
@@ -3132,7 +3132,7 @@ mod tests {
     #[test]
     fn security_errors_do_not_disclose_path_sid_or_username() {
         let root = TempRoot::create().expect("ERROR-PRIVACY: root");
-        let path = root.join("private-storage-object");
+        let path = root.path.join("private-storage-object");
         let file = create_permissive_test_file(&path, b"private").expect("ERROR-PRIVACY: file");
         let path_text = path.to_string_lossy().into_owned();
         let current = current_process_user_sid().expect("ERROR-PRIVACY: current SID");
@@ -3168,7 +3168,7 @@ mod tests {
             open_existing_secure_file(&storage_path.join("missing.json"), false).is_err(),
             "FLUSH-MISSING: missing file rejected"
         );
-        let missing_parent = workspace.root.join("missing-parent");
+        let missing_parent = workspace.root.path.join("missing-parent");
         check!(
             ensure_secure_storage_directory(&missing_parent.join("storage")).is_err(),
             "FLUSH-MISSING: missing parent rejected"
