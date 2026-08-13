@@ -2667,10 +2667,10 @@ mod tests {
         let workspace = SecureWorkspace::create().expect("QUARANTINE-VALIDATION: workspace");
         let storage_path = &workspace.path;
         let directory = &workspace.directory;
-        let reject = |source: &Path, candidate: &Path, label: &str| {
+        let reject = |dir: &Path, source: &Path, candidate: &Path, label: &str| {
             quarantine_secure_file_candidate_with(
                 directory,
-                storage_path,
+                dir,
                 source,
                 candidate,
                 |_, _| panic!("{label}: link called"),
@@ -2681,25 +2681,21 @@ mod tests {
         };
         let permissive_path = storage_path.join("permissive.json");
         let candidate = storage_path.join("permissive.corrupt.json");
-        let permissive = create_permissive_test_file(&permissive_path, b"permissive")
+        let (_, permissive_snapshot) = file_snapshot_fixture(&permissive_path, b"permissive", true)
             .expect("QUARANTINE-SOURCE-VALIDATION: permissive source");
-        let permissive_snapshot = snapshot_object(&permissive, StorageObjectKind::RegularFile)
-            .expect("QUARANTINE-SOURCE-VALIDATION: permissive snapshot");
         let error = reject(
+            storage_path,
             &permissive_path,
             &candidate,
             "QUARANTINE-SOURCE-VALIDATION/permissive",
         );
         assert_generic_error(&error, &[&permissive_path.to_string_lossy()]);
-        assert_handle_snapshot(
-            &permissive,
+        assert_snapshot(
+            &permissive_path,
             &permissive_snapshot,
             "QUARANTINE-SOURCE-VALIDATION/permissive",
         );
-        assert_absent(
-            &candidate,
-            "QUARANTINE-SOURCE-VALIDATION/permissive candidate",
-        );
+        assert_absent(&candidate, "QUARANTINE-SOURCE-VALIDATION/candidate");
         let target = storage_path.join("source-target.json");
         let source_link = storage_path.join("source-link.json");
         let link_candidate = storage_path.join("source-link.corrupt.json");
@@ -2710,6 +2706,7 @@ mod tests {
         drop(target_file);
         symlink_file(&target, &source_link).expect("QUARANTINE-SOURCE-VALIDATION: source symlink");
         reject(
+            storage_path,
             &source_link,
             &link_candidate,
             "QUARANTINE-SOURCE-VALIDATION/symlink",
@@ -2743,6 +2740,7 @@ mod tests {
             .expect("QUARANTINE-SOURCE-VALIDATION: directory DACL");
         fs::write(&marker, b"marker").expect("QUARANTINE-SOURCE-VALIDATION: directory marker");
         reject(
+            storage_path,
             &source_directory_path,
             &directory_candidate,
             "QUARANTINE-SOURCE-VALIDATION/directory",
@@ -2783,39 +2781,39 @@ mod tests {
         let local_candidate = storage_path.join("local.corrupt");
         let cross_candidate = other.join("local.corrupt");
         let mismatch_candidate = other.join("mismatch.corrupt");
-        for (source, candidate, dir, label) in [
+        for (dir, source, candidate, label) in [
             (
+                storage_path.as_path(),
                 cross_source.as_path(),
                 local_candidate.as_path(),
-                storage_path.as_path(),
                 "QUARANTINE-PATH-BOUNDARY/cross source",
             ),
             (
+                storage_path.as_path(),
                 local_source.as_path(),
                 cross_candidate.as_path(),
-                storage_path.as_path(),
                 "QUARANTINE-PATH-BOUNDARY/cross candidate",
             ),
             (
-                local_source.as_path(),
-                local_source.as_path(),
                 storage_path.as_path(),
+                local_source.as_path(),
+                local_source.as_path(),
                 "QUARANTINE-PATH-BOUNDARY/same path",
             ),
             (
+                storage_path.as_path(),
                 Path::new(""),
                 local_candidate.as_path(),
-                storage_path.as_path(),
                 "QUARANTINE-PATH-BOUNDARY/missing source",
             ),
             (
+                other.as_path(),
                 cross_source.as_path(),
                 mismatch_candidate.as_path(),
-                other.as_path(),
                 "QUARANTINE-PATH-BOUNDARY/directory mismatch",
             ),
         ] {
-            reject(source, candidate, label);
+            reject(dir, source, candidate, label);
         }
         assert_snapshot(
             &cross_source,
@@ -2828,6 +2826,7 @@ mod tests {
             "QUARANTINE-PATH-BOUNDARY/local source",
         );
         assert_absent(&local_candidate, "QUARANTINE-PATH-BOUNDARY/local candidate");
+        assert_absent(&mismatch_candidate, "QUARANTINE-PATH-BOUNDARY/mismatch");
     }
     #[test]
     fn post_unlink_flush_failure_returns_error_without_false_rollback() {
@@ -2903,7 +2902,8 @@ mod tests {
             open_existing_secure_file(&file_link, false).is_err(),
             "FINAL-NO-REPARSE: final file symlink rejected"
         );
-        assert_handle_snapshot(&file_target, &file_snapshot, "FINAL-NO-REPARSE/file target");
+        assert_symlink_target(&file_link, &file_target_path, "FINAL-NO-REPARSE/file link");
+        assert_snapshot(&file_target_path, &file_snapshot, "FINAL-NO-REPARSE/target");
         fs::remove_file(&file_link).expect("FINAL-NO-REPARSE: remove file link");
         let directory_target_path = storage_path.join("directory-target");
         let junction_path = storage_path.join("directory-junction");
