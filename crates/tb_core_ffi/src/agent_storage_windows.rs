@@ -2203,8 +2203,8 @@ mod tests {
             ("permissive-destination", false, true),
             ("permissive-staged", true, false),
         ] {
-            let staged_path = root.path.join(format!("{case}.tmp"));
-            let destination_path = root.path.join(format!("{case}.json"));
+            let staged_path = root.join(format!("{case}.tmp"));
+            let destination_path = root.join(format!("{case}.json"));
             let (staged, staged_snapshot) =
                 file_snapshot_fixture(&staged_path, b"staged", staged_permissive)
                     .expect("REPLACE-VALIDATION: staged fixture");
@@ -2244,8 +2244,8 @@ mod tests {
             ("directory-staged", true, false),
             ("directory-destination", false, true),
         ] {
-            let staged_path = root.path.join(format!("{case}.tmp"));
-            let destination_path = root.path.join(format!("{case}.json"));
+            let staged_path = root.join(format!("{case}.tmp"));
+            let destination_path = root.join(format!("{case}.json"));
             let (staged, staged_marker) = fixture(&staged_path, staged_directory, b"staged marker");
             let (destination, destination_marker) = fixture(
                 &destination_path,
@@ -2269,9 +2269,9 @@ mod tests {
             drop(staged);
         }
         for (case, link_is_staged) in [("destination-link", false), ("staged-link", true)] {
-            let target_path = root.path.join(format!("{case}-target.json"));
-            let link_path = root.path.join(format!("{case}-link.json"));
-            let regular_path = root.path.join(format!("{case}-regular.json"));
+            let target_path = root.join(format!("{case}-target.json"));
+            let link_path = root.join(format!("{case}-link.json"));
+            let regular_path = root.join(format!("{case}-regular.json"));
             let (target, target_snapshot) =
                 file_snapshot_fixture(&target_path, b"reparse target", false)
                     .expect("REPLACE-FINAL-REPARSE: target");
@@ -2302,14 +2302,14 @@ mod tests {
         let _other_directory = ensure_secure_storage_directory(&other)
             .expect("REPLACE-PATH-BOUNDARY: other directory");
         let cross_staged = other.join("cross.tmp");
-        let local_destination = root.path.join("cross-destination.json");
+        let local_destination = root.join("cross-destination.json");
         let (cross_file, cross_snapshot) =
             file_snapshot_fixture(&cross_staged, b"cross staged", false)
                 .expect("REPLACE-PATH-BOUNDARY: cross staged");
         let (destination_file, destination_snapshot) =
             file_snapshot_fixture(&local_destination, b"last-good", false)
                 .expect("REPLACE-PATH-BOUNDARY: destination");
-        let local_staged = root.path.join("local-staged.tmp");
+        let local_staged = root.join("local-staged.tmp");
         let cross_destination = other.join("cross-destination.json");
         let (local_file, local_snapshot) =
             file_snapshot_fixture(&local_staged, b"local staged", false)
@@ -2343,7 +2343,7 @@ mod tests {
             validate_replace_paths(root, Path::new(""), &local_destination).is_err(),
             "REPLACE-PATH-BOUNDARY: missing filename rejected"
         );
-        let same_identity = root.path.join("same-identity.json");
+        let same_identity = root.join("same-identity.json");
         fs::hard_link(&local_staged, &same_identity).expect("REPLACE-PATH-BOUNDARY: hard link");
         replace_secure_file(directory, root, &local_staged, &same_identity)
             .expect_err("REPLACE-PATH-BOUNDARY: same identity accepted");
