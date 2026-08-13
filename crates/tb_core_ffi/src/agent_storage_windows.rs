@@ -1863,9 +1863,15 @@ mod tests {
         let current = current_process_user_sid().expect("ACL: current SID");
         let system = well_known_sid(WinLocalSystemSid).expect("ACL: system SID");
         let foreign = well_known_sid(WinWorldSid).expect("ACL: foreign SID");
-        check!(
-            foreign.as_bytes() != current.as_bytes() && foreign.as_bytes() != system.as_bytes(),
-            "ACL-FOREIGN-SID: distinct from current user and LocalSystem"
+        assert_ne!(
+            foreign.as_bytes(),
+            current.as_bytes(),
+            "ACL-FOREIGN-SID/current"
+        );
+        assert_ne!(
+            foreign.as_bytes(),
+            system.as_bytes(),
+            "ACL-FOREIGN-SID/system"
         );
         let root = TempRoot::create().expect("ACL-ROUNDTRIP: root");
         let path = root.path.join("artifact.tmp");
