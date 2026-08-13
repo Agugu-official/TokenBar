@@ -1429,7 +1429,6 @@ mod tests {
     use windows_sys::Win32::Security::{WinAuthenticatedUserSid, WinWorldSid, INHERITED_ACE};
     use windows_sys::Win32::Storage::FileSystem::{DELETE, READ_CONTROL, WRITE_DAC};
     const ACCESS_DENIED_ACE_TYPE_VALUE: u8 = 1;
-    const OBJECT_INHERIT_ACE_VALUE: u8 = 1;
     macro_rules! check {
         ($condition:expr, $label:expr) => {
             ::std::assert!($condition, $label);
@@ -1739,7 +1738,7 @@ mod tests {
                     ..ace(current_user.as_bytes())
                 }),
                 "inherited" => candidate.aces[0].flags = INHERITED_ACE as u8,
-                "wrong-flags" => candidate.aces[0].flags = OBJECT_INHERIT_ACE_VALUE,
+                "wrong-flags" => candidate.aces[0].flags = 1,
                 "wrong-mask" => candidate.aces[0].mask &= !1,
                 "duplicate-user" => candidate.aces.push(ace(current_user.as_bytes())),
                 "duplicate-system" => candidate.aces.push(ace(local_system.as_bytes())),
