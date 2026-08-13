@@ -1761,7 +1761,7 @@ mod tests {
             drop(destination);
         }
         replace_secure_file(&directory, &storage_path, &staged_path, &destination_path)?;
-        let installed = snapshot_secure_path(&destination_path, StorageObjectKind::RegularFile)?;
+        let installed = snapshot_path(&destination_path, StorageObjectKind::RegularFile)?;
         check!(
             installed.bytes == b"new bytes"
                 && installed.identity == staged_identity
@@ -2388,7 +2388,7 @@ mod tests {
             },
         )
         .expect_err("REPLACE-POSTCOMMIT: identity mismatch returned");
-        let installed = snapshot_secure_path(&destination, StorageObjectKind::RegularFile)
+        let installed = snapshot_path(&destination, StorageObjectKind::RegularFile)
             .expect("REPLACE-POSTCOMMIT: installed snapshot");
         check!(
             installed.bytes == b"unexpected",
