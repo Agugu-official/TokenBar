@@ -1615,14 +1615,19 @@ mod tests {
         let snapshot = snapshot_object(&file, StorageObjectKind::RegularFile)?;
         Ok((file, snapshot))
     }
-
     fn assert_absent(path: &Path, label: &str) {
         match fs::symlink_metadata(path) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             _ => panic!("{label}: pathname remains installed"),
         }
     }
-
+    fn assert_symlink_target(link: &Path, target: &Path, label: &str) {
+        let metadata = fs::symlink_metadata(link).expect(label);
+        check!(
+            metadata.file_type().is_symlink() && fs::read_link(link).expect(label) == target,
+            "{label}"
+        );
+    }
     fn sid_string(sid: &Sid) -> io::Result<String> {
         let mut wide = null_mut();
         if unsafe { ConvertSidToStringSidW(sid.as_psid(), &mut wide) } == 0 {
@@ -1826,13 +1831,7 @@ mod tests {
         symlink_file(target, link).expect("REPLACE-FINAL-REPARSE: link");
         replace_secure_file(directory, storage_path, staged, destination)
             .expect_err("REPLACE-FINAL-REPARSE: link accepted");
-        check!(
-            fs::symlink_metadata(link)
-                .expect("REPLACE-FINAL-REPARSE: link remains")
-                .file_type()
-                .is_symlink(),
-            "{label}"
-        );
+        assert_symlink_target(link, target, label);
         assert_snapshot(target, target_snapshot, "REPLACE-FINAL-REPARSE/target");
         assert_snapshot(regular, regular_snapshot, "REPLACE-FINAL-REPARSE/regular");
         fs::remove_file(link).expect("REPLACE-FINAL-REPARSE: remove link");
@@ -1952,6 +1951,13 @@ mod tests {
                 == fallback,
             "RESOLVER-FALLBACK: fallback selected"
         );
+        check!(
+            fs::read_dir(&preferred)
+                .expect("RESOLVER-FALLBACK: list preferred")
+                .map(|entry| entry.expect("RESOLVER-FALLBACK: preferred entry").path())
+                .eq([v1_path.clone()]),
+            "RESOLVER-FALLBACK: exact legacy membership"
+        );
         let fallback_handle =
             ensure_secure_storage_directory(&fallback).expect("RESOLVER-FALLBACK: exact fallback");
         verify_storage_handle(fallback_handle.as_raw_handle() as HANDLE)
@@ -2000,39 +2006,41 @@ mod tests {
         fs::create_dir(&collision).expect("RESOLVER-COLLISION: root");
         let collision_preferred = collision.join("com.nyanako.tokenbar");
         let collision_fallback = collision.join("com.nyanako.tokenbar.secure");
-        let fallback_file = create_test_file(&collision_fallback, b"fallback-file")
-            .expect("RESOLVER-COLLISION: file collision");
-        let file_snapshot = snapshot_object(&fallback_file, StorageObjectKind::RegularFile)
-            .expect("RESOLVER-COLLISION: file snapshot");
+        let (_, file_snapshot) =
+            file_snapshot_fixture(&collision_fallback, b"fallback-file", false)
+                .expect("RESOLVER-COLLISION: file collision");
         check!(
             resolve_secure_storage_directory(&collision_preferred).is_err(),
             "RESOLVER-COLLISION: file collision rejected"
         );
         assert_absent(&collision_preferred, "RESOLVER-COLLISION/file preferred");
-        assert_handle_snapshot(&fallback_file, &file_snapshot, "RESOLVER-COLLISION/file");
-        drop(fallback_file);
+        assert_snapshot(
+            &collision_fallback,
+            &file_snapshot,
+            "RESOLVER-COLLISION/file",
+        );
         fs::remove_file(&collision_fallback).expect("RESOLVER-COLLISION: remove file collision");
         let target = collision.join("fallback-target");
-        let target_file = create_test_file(&target, b"fallback-target")
+        let (_, target_snapshot) = file_snapshot_fixture(&target, b"fallback-target", false)
             .expect("RESOLVER-COLLISION: reparse target");
-        let target_snapshot = snapshot_object(&target_file, StorageObjectKind::RegularFile)
-            .expect("RESOLVER-COLLISION: target snapshot");
         symlink_file(&target, &collision_fallback).expect("RESOLVER-COLLISION: fallback reparse");
         check!(
             resolve_secure_storage_directory(&collision_preferred).is_err(),
             "RESOLVER-COLLISION: reparse collision rejected"
         );
         assert_absent(&collision_preferred, "RESOLVER-COLLISION/reparse preferred");
-        assert_handle_snapshot(
-            &target_file,
+        assert_symlink_target(&collision_fallback, &target, "RESOLVER-COLLISION/reparse");
+        assert_snapshot(
+            &target,
             &target_snapshot,
             "RESOLVER-COLLISION/reparse target",
         );
         fs::remove_file(&collision_fallback).expect("RESOLVER-COLLISION: remove reparse");
-        drop(target_file);
-        let fallback_directory = create_permissive_test_directory(&collision_fallback)
-            .expect("RESOLVER-COLLISION: permissive directory");
-        let directory_snapshot = snapshot_object(&fallback_directory, StorageObjectKind::Directory)
+        drop(
+            create_permissive_test_directory(&collision_fallback)
+                .expect("RESOLVER-COLLISION: permissive directory"),
+        );
+        let directory_snapshot = snapshot_path(&collision_fallback, StorageObjectKind::Directory)
             .expect("RESOLVER-COLLISION: directory snapshot");
         check!(
             resolve_secure_storage_directory(&collision_preferred).is_err(),
@@ -2042,12 +2050,11 @@ mod tests {
             &collision_preferred,
             "RESOLVER-COLLISION/directory preferred",
         );
-        assert_handle_snapshot(
-            &fallback_directory,
+        assert_snapshot(
+            &collision_fallback,
             &directory_snapshot,
             "RESOLVER-COLLISION/directory",
         );
-        drop(fallback_directory);
         let preferred_only = root.path.join("preferred-only");
         let preferred_only_fallback = root.path.join("preferred-only.secure");
         drop(
@@ -2217,54 +2224,55 @@ mod tests {
                 ),
             ]);
         }
-        let fixture = |path: &Path, directory: bool, marker: &[u8]| {
-            if directory {
-                let file =
-                    ensure_secure_storage_directory(path).expect("REPLACE-WRONG-TYPE: directory");
-                let marker_path = path.join("marker.bin");
-                fs::write(&marker_path, marker).expect("REPLACE-WRONG-TYPE: marker");
-                (file, Some(marker_path))
+        let fixture = |path: &Path, kind: StorageObjectKind| {
+            if kind.is_directory() {
+                drop(ensure_secure_storage_directory(path).expect("REPLACE-WRONG-TYPE: directory"));
+                fs::write(path.join("marker.bin"), b"directory marker")
+                    .expect("REPLACE-WRONG-TYPE: marker");
             } else {
-                (
-                    create_new_secure_file(path).expect("REPLACE-WRONG-TYPE: file"),
-                    None,
-                )
+                drop(
+                    file_snapshot_fixture(path, b"regular bytes", false)
+                        .expect("REPLACE-WRONG-TYPE: file"),
+                );
             }
+            snapshot_path(path, kind).expect("REPLACE-WRONG-TYPE: snapshot")
         };
-        let check_object = |path: &Path, marker: &Option<PathBuf>, expected: &[u8], label: &str| {
-            if let Some(marker) = marker {
-                check!(fs::read(marker).expect(label) == expected, "{label}");
-            } else {
-                check!(path.exists(), "{label}");
-            }
-        };
-        for (case, staged_directory, destination_directory) in [
-            ("directory-staged", true, false),
-            ("directory-destination", false, true),
+        for (case, staged_kind, destination_kind) in [
+            (
+                "directory-staged",
+                StorageObjectKind::Directory,
+                StorageObjectKind::RegularFile,
+            ),
+            (
+                "directory-destination",
+                StorageObjectKind::RegularFile,
+                StorageObjectKind::Directory,
+            ),
         ] {
             let staged_path = root.join(format!("{case}.tmp"));
             let destination_path = root.join(format!("{case}.json"));
-            let (staged, staged_marker) = fixture(&staged_path, staged_directory, b"staged marker");
-            let (destination, destination_marker) = fixture(
-                &destination_path,
-                destination_directory,
-                b"destination marker",
-            );
+            let snapshots = [
+                fixture(&staged_path, staged_kind),
+                fixture(&destination_path, destination_kind),
+            ];
             reject(&staged_path, &destination_path);
-            check_object(
-                &staged_path,
-                &staged_marker,
-                b"staged marker",
-                "REPLACE-WRONG-TYPE/staged",
-            );
-            check_object(
-                &destination_path,
-                &destination_marker,
-                b"destination marker",
-                "REPLACE-WRONG-TYPE/destination",
-            );
-            drop(destination);
-            drop(staged);
+            let cases = [
+                (&staged_path, &snapshots[0], "REPLACE-WRONG-TYPE/staged"),
+                (
+                    &destination_path,
+                    &snapshots[1],
+                    "REPLACE-WRONG-TYPE/destination",
+                ),
+            ];
+            assert_path_snapshots(cases);
+            for (path, snapshot, label) in cases {
+                if snapshot.kind.is_directory() {
+                    check!(
+                        fs::read(path.join("marker.bin")).expect(label) == b"directory marker",
+                        "{label}: marker changed"
+                    );
+                }
+            }
         }
         for (case, link_is_staged) in [("destination-link", false), ("staged-link", true)] {
             let target_path = root.join(format!("{case}-target.json"));
@@ -2513,12 +2521,10 @@ mod tests {
             .expect("QUARANTINE-CANDIDATE-COLLISION: symlink candidate");
         quarantine_secure_file_candidate(&directory, &storage_path, &source, &candidate)
             .expect_err("QUARANTINE-CANDIDATE-COLLISION: symlink rejected");
-        check!(
-            fs::symlink_metadata(&candidate)
-                .expect("QUARANTINE-CANDIDATE-COLLISION: symlink remains")
-                .file_type()
-                .is_symlink(),
-            "QUARANTINE-CANDIDATE-COLLISION: symlink unchanged"
+        assert_symlink_target(
+            &candidate,
+            &target,
+            "QUARANTINE-CANDIDATE-COLLISION/symlink",
         );
         assert_snapshot(
             &source,
@@ -2617,7 +2623,6 @@ mod tests {
         );
         assert_absent(&candidate, "QUARANTINE-ROLLBACK/candidate");
         assert_snapshot(&source, &source_snapshot, "QUARANTINE-ROLLBACK/source");
-
         let source = storage_path.join("account.json");
         let candidate = storage_path.join("account.corrupt-2.json");
         let (source_file, _) =
@@ -2672,7 +2677,7 @@ mod tests {
                 |_| panic!("{label}: unlink called"),
                 |_| panic!("{label}: flush called"),
             )
-            .expect_err("QUARANTINE-VALIDATION: unsafe input accepted");
+            .expect_err("QUARANTINE-VALIDATION: unsafe input accepted")
         };
         let permissive_path = storage_path.join("permissive.json");
         let candidate = storage_path.join("permissive.corrupt.json");
@@ -2680,15 +2685,12 @@ mod tests {
             .expect("QUARANTINE-SOURCE-VALIDATION: permissive source");
         let permissive_snapshot = snapshot_object(&permissive, StorageObjectKind::RegularFile)
             .expect("QUARANTINE-SOURCE-VALIDATION: permissive snapshot");
-        reject(
+        let error = reject(
             &permissive_path,
             &candidate,
             "QUARANTINE-SOURCE-VALIDATION/permissive",
         );
-        assert_generic_error(
-            &security_verification_failed(),
-            &[&permissive_path.to_string_lossy()],
-        );
+        assert_generic_error(&error, &[&permissive_path.to_string_lossy()]);
         assert_handle_snapshot(
             &permissive,
             &permissive_snapshot,
@@ -2712,12 +2714,10 @@ mod tests {
             &link_candidate,
             "QUARANTINE-SOURCE-VALIDATION/symlink",
         );
-        check!(
-            fs::symlink_metadata(&source_link)
-                .expect("QUARANTINE-SOURCE-VALIDATION: source symlink remains")
-                .file_type()
-                .is_symlink(),
-            "QUARANTINE-SOURCE-VALIDATION: source symlink unchanged"
+        assert_symlink_target(
+            &source_link,
+            &target,
+            "QUARANTINE-SOURCE-VALIDATION/symlink",
         );
         assert_snapshot(
             &target,
