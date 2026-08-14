@@ -2088,6 +2088,27 @@ mod tests {
             "authoritative history route"
         );
         backend.cleanup();
+
+        let corrupt = TestBackend::new("authoritative-history-corrupt")
+            .with_installation_key(vec![0x11; INSTALLATION_KEY_BYTES]);
+        let bytes = b"authoritative-history-corrupt-envelope";
+        let active = corrupt.directory.join(METADATA_FILE);
+        fs::write(&active, bytes).unwrap();
+        let quarantine = corrupt.directory.join(format!(
+            "quota-account-scope-v1.corrupt-{}.json",
+            corrupt.now_seconds()
+        ));
+        let lock = Mutex::new(());
+        let id = Some((AuthoritativeIdKind::OpaqueId, "acct-history"));
+        let resolve = || resolve_history_scope_with(&corrupt, &lock, "codex", id);
+        assert!(
+            resolve() == Err(AccountScopeError::MetadataCorrupt)
+                && fs::read(&quarantine).ok().as_deref() == Some(bytes.as_slice())
+                && !active.exists()
+                && resolve().is_ok(),
+            "AUTHORITATIVE-HISTORY-CORRUPTION-ROUTE quarantine/recovery"
+        );
+        corrupt.cleanup();
     }
 
     #[test]
@@ -2531,12 +2552,26 @@ mod tests {
     fn orphan_grammar_inspection_and_nonregular_entries_fail_closed() {
         let canonical = "quota-account-scope-v1.orphaned-1752710400.json";
         let is_orphan = is_orphaned_metadata_name;
-        for (index, name, expected) in [
-            (0, "quota-account-scope-v1.orphaned-0.json", true),
-            (1, "quota-account-scope-v1.orphaned-0.1.json", true),
-            (2, "quota-account-scope-v1.orphaned--1.json", false),
+        for (index, stem, expected) in [
+            (0, "0", true),
+            (1, "0.1", true),
+            (2, "9223372036854775807.4294967295", true),
+            (3, "-1", false),
+            (4, "+1", false),
+            (5, "01", false),
+            (6, "9223372036854775808", false),
+            (7, "0.1.2", false),
+            (8, "0.0", false),
+            (9, "0.+1", false),
+            (10, "0.01", false),
+            (11, "0.4294967296", false),
+            (12, "0.-1", false),
         ] {
-            assert!(is_orphan(name) == expected, "orphan grammar {index}");
+            let name = format!("quota-account-scope-v1.orphaned-{stem}.json");
+            assert!(
+                is_orphan(&name) == expected,
+                "ORPHAN-CANONICAL-GRAMMAR-MATRIX case {index}: {name}"
+            );
         }
         let forged = TestBackend::new("forged-orphan");
         ensure_real_directory(&forged, &forged.directory).unwrap();
@@ -2687,7 +2722,7 @@ mod tests {
                 backend.now_seconds()
             ));
             assert!(
-                fs::read(quarantine).unwrap() == bytes
+                fs::read(quarantine).ok().as_deref() == Some(bytes.as_slice())
                     && !backend.directory.join(METADATA_FILE).exists(),
                 "metadata quarantine {case}"
             );
@@ -2697,6 +2732,27 @@ mod tests {
             );
             backend.cleanup();
         }
+
+        let backend = TestBackend::new("authoritative-corrupt-route")
+            .with_installation_key(vec![0x11; INSTALLATION_KEY_BYTES]);
+        let bytes = b"authoritative-corrupt-envelope";
+        let active = backend.directory.join(METADATA_FILE);
+        fs::write(&active, bytes).unwrap();
+        let quarantine = backend.directory.join(format!(
+            "quota-account-scope-v1.corrupt-{}.json",
+            backend.now_seconds()
+        ));
+        let lock = Mutex::new(());
+        let id = (AuthoritativeIdKind::OpaqueId, "acct-direct");
+        let resolve = || resolve_authoritative_with(&backend, &lock, "codex", id.0, id.1);
+        assert!(
+            resolve() == Err(AccountScopeError::MetadataCorrupt)
+                && fs::read(&quarantine).ok().as_deref() == Some(bytes.as_slice())
+                && !active.exists()
+                && resolve().is_ok(),
+            "AUTHORITATIVE-CORRUPTION-QUARANTINE-ROUTE side effects/recovery"
+        );
+        backend.cleanup();
     }
 
     #[test]
@@ -2995,6 +3051,40 @@ mod tests {
     fn unix_quarantine_collision_and_identity_bound_rollback_are_safe() {
         use std::os::unix::fs::{symlink, MetadataExt as _, PermissionsExt as _};
         let base_name = "quota-account-scope-v1.corrupt-1752710400";
+        let raced = TestBackend::new("quarantine-raced-reservation");
+        fs::create_dir_all(&raced.directory).unwrap();
+        let source = raced.directory.join(METADATA_FILE);
+        let reservation = raced.directory.join(format!("{base_name}.json"));
+        let selected = raced.directory.join(format!("{base_name}.1.json"));
+        let missing = raced.directory.with_extension("raced-missing-target");
+        fs::write(&source, b"source-evidence").unwrap();
+        let source_inode = fs::metadata(&source).unwrap().ino();
+        let mut first_link = true;
+        let quarantined = quarantine_metadata_with(
+            &raced,
+            &source,
+            "corrupt",
+            |source, candidate| {
+                if std::mem::take(&mut first_link) {
+                    symlink(&missing, candidate)?;
+                }
+                fs::hard_link(source, candidate)
+            },
+            |source| fs::remove_file(source),
+        );
+        assert!(
+            quarantined.as_deref() == Ok(selected.as_path())
+                && reservation.is_symlink()
+                && fs::read_link(&reservation).ok().as_deref() == Some(missing.as_path())
+                && !missing.exists()
+                && fs::read(&selected).ok().as_deref() == Some(b"source-evidence".as_slice())
+                && fs::metadata(&selected).map(|metadata| metadata.ino()).ok()
+                    == Some(source_inode)
+                && !source.exists(),
+            "UNIX-QUARANTINE-RACED-ALREADYEXISTS"
+        );
+        raced.cleanup();
+
         let collision = TestBackend::new("quarantine-collision");
         fs::create_dir_all(&collision.directory).unwrap();
         let source = collision.directory.join(METADATA_FILE);
@@ -3087,10 +3177,15 @@ mod tests {
         fs::write(corrupt.directory.join(METADATA_FILE), b"corrupt-evidence").unwrap();
         corrupt.fail_fs(FsOperation::QuarantineMetadata);
         assert!(
-            resolve_test(&corrupt, &Mutex::new(()), b"marker")
-                == Err(AccountScopeError::QuarantineFailed)
+            resolve_authoritative_with(
+                &corrupt,
+                &Mutex::new(()),
+                "codex",
+                AuthoritativeIdKind::OpaqueId,
+                "acct-direct",
+            ) == Err(AccountScopeError::QuarantineFailed)
                 && metadata_bytes(&corrupt) == b"corrupt-evidence",
-            "corrupt quarantine failure preservation"
+            "AUTHORITATIVE-CORRUPTION-QUARANTINE-ROUTE injected failure preservation"
         );
         corrupt.cleanup();
     }
