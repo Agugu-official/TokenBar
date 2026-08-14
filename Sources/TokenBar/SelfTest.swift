@@ -10046,6 +10046,314 @@ enum SelfTest {
             "LP3 indicator: an overtaken fetch's FAILURE cannot clear a newer request's "
                 + "indicator either — ownership applies to both settlement routes")
 
+        let windowMessages = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [
+              {"timestamp":2000,"client":"test","providerId":"test","modelId":"test","input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,"cost":0,"isTurnStart":true},
+              {"timestamp":3000,"client":"test","providerId":"test","modelId":"test","input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,"cost":0,"isTurnStart":false}
+            ]
+            """.utf8)
+        )
+        expect(
+            WindowResolver.resolve(
+                resetsAtMs: nil, durationMs: 5_000, now: 2_000,
+                firstUsageAfterReset: nil
+            ) == .unavailable,
+            "window resolution is unavailable without a reset")
+        expect(
+            WindowResolver.resolve(
+                resetsAtMs: 1_000, durationMs: nil, now: 2_000,
+                firstUsageAfterReset: nil
+            ) == .unavailable,
+            "window resolution is unavailable without a duration")
+        expect(
+            WindowResolver.resolve(
+                resetsAtMs: 1_000, durationMs: 5_000, now: 7_001,
+                firstUsageAfterReset: nil
+            ) == .unavailable,
+            "a reset older than one duration is outside the probe bound")
+        expect(
+            WindowResolver.resolve(
+                resetsAtMs: 2_000, durationMs: 5_000, now: 1_000,
+                firstUsageAfterReset: nil
+            ) == .active(start: -3_000, end: 2_000),
+            "a future reset is an active provider-confirmed window")
+        expect(
+            WindowResolver.resolve(
+                resetsAtMs: 6_000, durationMs: 5_000, now: 1_000,
+                firstUsageAfterReset: nil
+            ) == .active(start: 1_000, end: 6_000),
+            "a reset exactly one duration ahead is still an active window")
+        expect(
+            WindowResolver.resolve(
+                resetsAtMs: 6_001, durationMs: 5_000, now: 1_000,
+                firstUsageAfterReset: nil
+            ) == .unavailable,
+            "a reset more than one duration ahead cannot place a window")
+        expect(
+            WindowResolver.resolve(
+                resetsAtMs: 20_000, durationMs: 5_000, now: 1_000,
+                firstUsageAfterReset: 1_000
+            ) == .unavailable,
+            "a wildly future reset stays unavailable even with usage on hand")
+        expect(
+            WindowResolver.resolve(
+                resetsAtMs: 1_000, durationMs: 5_000, now: 3_000,
+                firstUsageAfterReset: nil
+            ) == .idle,
+            "a bounded past reset with no usage is idle")
+        expect(
+            WindowResolver.resolve(
+                resetsAtMs: 1_000, durationMs: 5_000, now: 6_000,
+                firstUsageAfterReset: nil
+            ) == .idle,
+            "the now-minus-reset equals duration boundary remains idle")
+        expect(
+            WindowResolver.resolve(
+                resetsAtMs: 6_000, durationMs: 5_000, now: 6_000,
+                firstUsageAfterReset: nil
+            ) == .idle,
+            "a reset exactly at now is still idle without usage")
+        expect(
+            WindowResolver.firstUsageAfterReset(messages: windowMessages, resetMs: 1_000)
+                == 2_000,
+            "first usage helper selects the earliest usage after reset")
+        // The `>= resetMs` filter is the sole source of the t0 >= R invariant that
+        // lets `resolve` omit an end-in-past guard. It only does work when a message
+        // predates the reset, so it needs a reset between the two fixture messages.
+        expect(
+            WindowResolver.firstUsageAfterReset(messages: windowMessages, resetMs: 2_500)
+                == 3_000,
+            "first usage helper discards usage that predates the reset")
+        expect(
+            WindowResolver.firstUsageAfterReset(messages: windowMessages, resetMs: 2_000)
+                == 2_000,
+            "first usage helper keeps usage exactly at the reset")
+        expect(
+            WindowResolver.resolve(
+                resetsAtMs: 1_000, durationMs: 5_000, now: 3_000,
+                firstUsageAfterReset: WindowResolver.firstUsageAfterReset(
+                    messages: windowMessages, resetMs: 1_000
+                )
+            ) == .inferred(start: 2_000, end: 7_000),
+            "inferred window starts at the first usage, not the most recent")
+        expect(
+            WindowResolver.resolve(
+                resetsAtMs: 1_000, durationMs: 5_000, now: 3_000,
+                firstUsageAfterReset: 2_000
+            ) == .inferred(start: 2_000, end: 7_000),
+            "the first usage literal opens the expected inferred window")
+        expect(
+            WindowResolver.resolve(
+                resetsAtMs: 1_000, durationMs: 5_000, now: 3_000,
+                firstUsageAfterReset: 3_000
+            ) == .inferred(start: 3_000, end: 8_000)
+                && WindowResolver.resolve(
+                    resetsAtMs: 1_000, durationMs: 5_000, now: 3_000,
+                    firstUsageAfterReset: 3_000
+                ) != .inferred(start: 2_000, end: 7_000),
+            "using the last usage instead would produce a different window")
+
+        // MARK: card geometry (V12-V15)
+
+        func windowMessage(at t: Int64, input: Int64, cacheRead: Int64,
+                           cost: Double = 0) -> WindowMessage {
+            try! JSONDecoder().decode(WindowMessage.self, from: Data("""
+            {"timestamp":\(t),"client":"c","providerId":"p","modelId":"m",
+             "input":\(input),"output":0,"cacheRead":\(cacheRead),
+             "cacheWrite":0,"reasoning":0,"cost":\(cost),"isTurnStart":true}
+            """.utf8))
+        }
+
+        // Deliberately not 50%: there the two metrics coincide and V12 could
+        // pass with `metric` wired straight into the bar height.
+        let geoSamples = [
+            QuotaSample(atMs: 1_000, usedPercent: 12),
+            QuotaSample(atMs: 5_000, usedPercent: 12),
+            QuotaSample(atMs: 9_000, usedPercent: 30),
+        ]
+        let geoMessages = [
+            windowMessage(at: 2_000, input: 400, cacheRead: 90_000),
+            windowMessage(at: 6_000, input: 1_200, cacheRead: 90_000),
+        ]
+        let geoUsed = WindowCardGeometry.chartGeometry(
+            windowStartMs: 0, windowEndMs: 20_000, nowMs: 10_000, samples: geoSamples,
+            messages: geoMessages, metric: .used)
+        let geoRemaining = WindowCardGeometry.chartGeometry(
+            windowStartMs: 0, windowEndMs: 20_000, nowMs: 10_000, samples: geoSamples,
+            messages: geoMessages, metric: .remaining)
+        expect(
+            geoUsed.bars == geoRemaining.bars && geoUsed.hits == geoRemaining.hits,
+            "V12 flipping the quota metric leaves bar and hit geometry identical")
+        expect(
+            geoUsed.samplePoints.map(\.y) == [12, 12, 30]
+                && geoRemaining.samplePoints.map(\.y) == [88, 88, 70],
+            "V12 the metric does reach the line, so the previous check is not vacuous")
+        // Four zones, not three: the region before the first sample and the one
+        // after the last are real intervals that can hold usage, and both must
+        // be hoverable. Their bars are empty here only because the fixture put
+        // no messages there.
+        expect(
+            geoUsed.bars.map(\.isEmpty) == [true, false, false, true],
+            "the pre-sample and trailing regions are zones of their own")
+        expect(
+            geoUsed.hits.map(\.loMs) == [0, 1_000, 5_000, 9_000]
+                && geoUsed.hits.compactMap { $0.closingSample?.usedPercent } == [12, 12, 30],
+            "only the zones that end on a sample carry one; the trailing zone does not")
+
+        // A one-millisecond bucket: far below any plausible minimum width.
+        let narrow = WindowCardGeometry.zones(
+            windowStartMs: 0, windowEndMs: 20_000, nowMs: 10_000,
+            samples: [QuotaSample(atMs: 4_000, usedPercent: 1),
+                      QuotaSample(atMs: 4_001, usedPercent: 2)])
+        expect(
+            narrow.first?.loMs == 0 && narrow.last?.hiMs == 10_000,
+            "V13 hit zones start at the window start and end exactly at now")
+        expect(
+            zip(narrow, narrow.dropFirst()).allSatisfy { $0.hiMs == $1.loMs },
+            "V13 hit zones tile without gap or overlap")
+        expect(
+            narrow.contains { $0.hiMs - $0.loMs == 1 },
+            "V13 a one-millisecond bucket keeps its true width — no minimum")
+        expect(
+            narrow.allSatisfy { $0.hiMs <= 10_000 },
+            "V13 no hit zone reaches past now into the future")
+        // The millisecond edges above are not enough: the overhang this row
+        // exists to catch was in the drawn fractions, where a minimum width
+        // leaves the timestamps untouched and still pushes the last zone past
+        // the right edge.
+        expect(
+            zip(narrow, narrow.dropFirst())
+                .allSatisfy { abs(($0.x + $0.width) - $1.x) < 1e-12 },
+            "V13 drawn zones meet exactly, with no minimum width wedged between")
+        expect(
+            narrow.first.map { abs($0.x) < 1e-12 } == true
+                && narrow.last.map { abs(($0.x + $0.width) - 0.5) < 1e-12 } == true,
+            "V13 the drawn zones span exactly 0...nowX, so none overhangs into the future")
+        expect(
+            geoUsed.nowX == 0.5 && geoUsed.firstSampleX == 0.05
+                && geoUsed.nowX == geoRemaining.nowX,
+            "V13 now and the first sample are placed against the whole window, not the elapsed part")
+        expect(
+            narrow.contains { $0.width < 1e-3 },
+            "V13 the narrow zone stays narrow when drawn, not padded to a floor")
+
+        // Flat, then a jump: the shape that makes Catmull-Rom bulge.
+        let jump = [CurvePoint(x: 0, y: 2), CurvePoint(x: 1, y: 2),
+                    CurvePoint(x: 2, y: 2), CurvePoint(x: 3, y: 7)]
+        let curve = WindowCardGeometry.monotoneCurve(jump)
+        var overshoot = false
+        for (k, pt) in curve.enumerated() where k > 0 {
+            let seg = (k - 1) / WindowCardGeometry.curveResolution
+            let lo = min(jump[seg].y, jump[seg + 1].y)
+            let hi = max(jump[seg].y, jump[seg + 1].y)
+            if pt.y < lo - 1e-9 || pt.y > hi + 1e-9 { overshoot = true }
+        }
+        expect(!overshoot,
+               "V14 interpolation never leaves the span of its two samples (flat then jump)")
+
+        // Two different guards stop overshoot and one fixture cannot exercise
+        // both. The flat run above is held by zeroing BOTH tangents around a
+        // zero secant; a burst between two gentle segments is held by the
+        // alpha^2+beta^2>9 clamp. Without the clamp this one dips to -0.70,
+        // i.e. it draws a refill.
+        let burst = [CurvePoint(x: 0, y: 0), CurvePoint(x: 1, y: 1),
+                     CurvePoint(x: 2, y: 20), CurvePoint(x: 3, y: 21)]
+        let burstCurve = WindowCardGeometry.monotoneCurve(burst)
+        var burstOvershoot = false
+        for (k, pt) in burstCurve.enumerated() where k > 0 {
+            let seg = (k - 1) / WindowCardGeometry.curveResolution
+            let lo = min(burst[seg].y, burst[seg + 1].y)
+            let hi = max(burst[seg].y, burst[seg + 1].y)
+            if pt.y < lo - 1e-9 || pt.y > hi + 1e-9 { burstOvershoot = true }
+        }
+        expect(!burstOvershoot,
+               "V14 a burst between two gentle segments stays within its span too")
+        expect(
+            curve.count == 1 + 3 * WindowCardGeometry.curveResolution
+                && curve.last?.y == 7,
+            "V14 the curve is actually interpolated and lands on the last sample")
+
+        // Same tokens, two different deltas: a hardcoded coefficient would
+        // return the same ratio for both.
+        let eqMessages = [windowMessage(at: 1_500, input: 60_000, cacheRead: 5_000_000,
+                                        cost: 30)]
+        let wide = WindowEquivalence.row(
+            samples: [QuotaSample(atMs: 1_000, usedPercent: 0),
+                      QuotaSample(atMs: 2_000, usedPercent: 10)],
+            messages: eqMessages)
+        let narrower = WindowEquivalence.row(
+            samples: [QuotaSample(atMs: 1_000, usedPercent: 0),
+                      QuotaSample(atMs: 2_000, usedPercent: 20)],
+            messages: eqMessages)
+        expect(
+            wide == .ratio(tokensPerTenth: 60_000, costPerTenth: 30, errorPercent: 5),
+            "V15 the ratio is the measured quotient, not a coefficient")
+        expect(
+            narrower == .ratio(tokensPerTenth: 30_000, costPerTenth: 15, errorPercent: 3),
+            "V15 doubling the quota delta halves the ratio")
+        expect(
+            WindowEquivalence.row(
+                samples: [QuotaSample(atMs: 1_000, usedPercent: 0),
+                          QuotaSample(atMs: 2_000, usedPercent: 1)],
+                messages: eqMessages) == .insufficient(deltaPercent: 1, errorPercent: 50),
+            "V15 a one-point move is muted, and says so with its error")
+        expect(
+            WindowEquivalence.row(
+                samples: [QuotaSample(atMs: 1_000, usedPercent: 0),
+                          QuotaSample(atMs: 2_000, usedPercent: 56)],
+                messages: []) == .unaccounted(deltaPercent: 56),
+            "V15 quota moving with no local usage is reported, never shown as zero")
+        expect(
+            WindowEquivalence.minimumDelta == 5,
+            "V15 the threshold follows from the tolerance, not from a chosen number")
+
+        // Every row string is rendered, not just constructed. A literal `%` in
+        // one of these was read as a `% o` octal conversion, consumed the first
+        // argument, and segfaulted the app on the next `%@` — and nothing in the
+        // suite could have caught it, because the strings lived in a SwiftUI
+        // body. Rendering each one is the whole point of this block.
+        let rowText: (WindowEquivalence.Row) -> String = {
+            WindowEquivalence.text($0, tokens: { "\($0)" }, money: { "$\($0)" })
+        }
+        expect(
+            rowText(.ratio(tokensPerTenth: 7, costPerTenth: 3, errorPercent: 8))
+                == "10% of quota ~ 7 · $3.0 API-equivalent, ±8%",
+            "V15 the ratio row renders its literal percent signs, not an octal conversion")
+        expect(
+            rowText(.insufficient(deltaPercent: 1, errorPercent: 50))
+                == "Quota moved only 1% — too little to estimate (±50%)",
+            "V15 the insufficient row renders both percent signs")
+        expect(
+            rowText(.unaccounted(deltaPercent: 56))
+                == "Quota moved 56%, none of it recorded on this machine",
+            "V15 the unaccounted row renders its percent sign")
+        expect(
+            rowText(.notMoved) == "Quota has not moved yet"
+                && rowText(.unavailable) == "Not enough quota readings yet",
+            "V15 the argument-free rows survive being run through the formatter")
+        // The error term is 0.5/delta. Folding a zero delta into `insufficient`
+        // would divide by zero, so it gets its own case with no error to state.
+        expect(
+            WindowEquivalence.row(
+                samples: [QuotaSample(atMs: 1_000, usedPercent: 2),
+                          QuotaSample(atMs: 2_000, usedPercent: 2)],
+                messages: eqMessages) == .notMoved,
+            "V15 a quota reading that never moved is its own case, not a zero error")
+        expect(
+            WindowEquivalence.row(
+                samples: [QuotaSample(atMs: 1_000, usedPercent: 5),
+                          QuotaSample(atMs: 2_000, usedPercent: 3)],
+                messages: eqMessages) == .notMoved,
+            "V15 a backwards reading is muted too rather than yielding a negative ratio")
+        expect(
+            WindowEquivalence.row(
+                samples: [QuotaSample(atMs: 1_000, usedPercent: 2)],
+                messages: eqMessages) == .unavailable
+                && WindowEquivalence.row(samples: [], messages: eqMessages) == .unavailable,
+            "V15 fewer than two samples yields no delta at all")
+
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
             exit(1)

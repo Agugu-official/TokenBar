@@ -9,6 +9,11 @@ AppLanguage.prepareDirectRunResources()
 if CommandLine.arguments.contains("--smoke") {
     exit(Smoke.run())
 }
+// PROTOTYPE probe — throwaway. Prints the current quota window's attributed
+// totals using real local data, so the seam can be seen working before any UI.
+if CommandLine.arguments.contains("--window-probe") {
+    WindowProbe.run()
+}
 if CommandLine.arguments.contains("--selftest") {
     // Some assertions compare against English UI copy, so on a non-English Mac
     // they would fail for the wrong reason. Say so instead of looking broken.

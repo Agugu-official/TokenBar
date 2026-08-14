@@ -225,6 +225,11 @@ public enum TBCore {
     /// serving a curve.
     ///
     /// Returns nil when the series exists but has no stored history yet.
+    /// PROTOTYPE — usage inside an absolute [from, until) window.
+    public static func windowUsage(from: Int64, until: Int64) throws -> WindowUsage {
+        try unwrap(tb_window_usage(from, until))
+    }
+
     public static func quotaCurve(
         clientId: String, windowKey: String, generation: UInt64
     ) throws -> QuotaCurve? {

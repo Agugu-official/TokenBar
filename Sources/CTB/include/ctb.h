@@ -94,6 +94,9 @@ char *tb_agent_usage(void);
 // request; the returned JSON is released with tb_free.
 char *tb_quota_curve(const char *client_id, const char *window_key, uint64_t generation);
 
+/* PROTOTYPE - usage inside an absolute [from_ms, until_ms) window. */
+char *tb_window_usage(int64_t from_ms, int64_t until_ms);
+
 // Release a string returned by any tb_* entry point.
 void tb_free(char *p);
 

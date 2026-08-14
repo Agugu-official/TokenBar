@@ -987,6 +987,26 @@ private struct DashboardSnapshot {
         }
     }
 
+    /// The selected quota window's card data, or nil when nothing can be shown
+    /// (no selection yet, or a window whose class bars the per-message scan).
+    var windowCard: WindowCardData?
+
+    /// Which agent's tab is open. Nil on the all-agent overview, where this
+    /// card does not belong — that surface answers a cross-subscription
+    /// question and gets its own summary.
+    var windowCardClient: String?
+
+    /// Rebuilt whenever the quota payload changes or the tab moves.
+    func refreshWindowCard() async {
+        guard let clientId = windowCardClient else {
+            windowCard = nil
+            return
+        }
+        windowCard = await WindowCardLoader.load(
+            source: source, payload: agentUsage, clientId: clientId,
+            nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+    }
+
     private func reconcileQuotaRemaining(with payload: AgentUsagePayload) {
         guard source.allowsQuotaCachePersistence else { return }
         let defaults = UserDefaults.standard
@@ -1011,6 +1031,7 @@ private struct DashboardSnapshot {
                 agentUsage = resolved
                 reconcileQuotaRemaining(with: resolved)
                 refreshSnapshotLiveData() // keep the reopen cache's quota cards current
+                await refreshWindowCard()
             }
             // Set on failure too: `agentUsage == nil` alone cannot distinguish
             // "the first attempt is still in flight" from "the attempt finished

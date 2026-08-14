@@ -20,11 +20,44 @@ protocol UsageDataSource: Sendable {
     func agentUsage() async throws -> AgentUsagePayload
     func usageTrace(windowSecs: Int64) async throws -> [TraceBucket]
     func tokensPerMin() async throws -> Double
+    func windowUsage(from: Int64, until: Int64) async throws -> WindowUsage
+    func quotaCurve(
+        clientId: String, windowKey: String, generation: UInt64
+    ) async throws -> QuotaCurve?
+}
+
+extension UsageDataSource {
+    /// Defaulted so the pre-existing test doubles keep compiling. They answer
+    /// "no window data", which the card renders as its unavailable state —
+    /// asserting the card through a double that predates it would test the
+    /// double. The live and demo sources both override.
+    func windowUsage(from: Int64, until: Int64) async throws -> WindowUsage {
+        WindowUsage(messages: [], undatedCount: 0, processingTimeMs: 0)
+    }
+
+    func quotaCurve(
+        clientId: String, windowKey: String, generation: UInt64
+    ) async throws -> QuotaCurve? { nil }
 }
 
 /// The only normal-runtime owner of usage calls into `TBCore`.
 struct LiveUsageDataSource: UsageDataSource {
     let allowsQuotaCachePersistence = true
+
+    func windowUsage(from: Int64, until: Int64) async throws -> WindowUsage {
+        try await Task.detached(priority: .userInitiated) {
+            try TBCore.windowUsage(from: from, until: until)
+        }.value
+    }
+
+    func quotaCurve(
+        clientId: String, windowKey: String, generation: UInt64
+    ) async throws -> QuotaCurve? {
+        try await Task.detached(priority: .userInitiated) {
+            try TBCore.quotaCurve(
+                clientId: clientId, windowKey: windowKey, generation: generation)
+        }.value
+    }
 
     func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
         try await Task.detached(priority: priority) {

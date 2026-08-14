@@ -36,6 +36,9 @@ struct PopoverView: View {
     @AppStorage("tokenbar.chart.view") private var chartViewRaw = ChartView.bars.rawValue
     @AppStorage(ClientTray.activeViewKey) private var activeViewRaw = AppView.overview.rawValue
     @AppStorage("tokenbar.views.hidden") private var hiddenViewsRaw = ""
+    /// The window card's own selection. Rebuilding on change is what makes the
+    /// buttons feel like buttons — the quota poll is a minute apart.
+    @AppStorage(WindowCardLoader.selectionKey) private var windowSelectionRaw = ""
     @AppStorage("tokenbar.bridge.dismissed") private var bridgeDismissed = false
     /// "overview" or a client id. Persisted so the selection survives the
     /// popover's rootView teardown/rebuild cycle (StatusItemController swaps
@@ -220,6 +223,14 @@ struct PopoverView: View {
         // ≤10s). The loop fetches first, then sleeps.
         .task(id: hiddenRaw) { await pollTokensPerMin() }
         .task { await model.pollAgentUsage() }
+        // Same derivation as the body's: a client tab is open only when the
+        // active tab is not the overview and that client is still displayed.
+        .task(id: "\(windowSelectionRaw)|\(activeTab)|\(hiddenRaw)") {
+            model.windowCardClient =
+                (activeTab != ClientTray.overviewTab
+                    && displayClients.contains(activeTab)) ? activeTab : nil
+            await model.refreshWindowCard()
+        }
         .task { await model.pollTrace() }
         .task { await model.pollGraph() }
         .onAppear {
@@ -542,7 +553,8 @@ struct PopoverView: View {
                     trace: model.trace, agentUsage: model.agentUsage,
                     usageAttempted: model.agentUsageAttempted,
                     singleClient: singleClient, year: model.year,
-                    hidden: ClientRegistry.parseIdSet(hiddenRaw))
+                    hidden: ClientRegistry.parseIdSet(hiddenRaw),
+                    windowCard: model.windowCard)
             case .models:
                 ModelsView(
                     report: model.modelReport, clientIds: clientIds, colors: model.colors,

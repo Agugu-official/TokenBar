@@ -26,6 +26,7 @@ mod agent_usage;
 mod agents_report;
 mod filter_parity_probe;
 mod hourly_report;
+mod window_usage;
 mod model_report;
 mod opencode_integrations;
 mod usage_graph;
@@ -235,6 +236,9 @@ static RAYON_INIT: LazyLock<()> = LazyLock::new(|| {
 type GraphCacheEntry = (Instant, u64, serde_json::Value);
 static GRAPH_CACHE: LazyLock<Mutex<HashMap<String, GraphCacheEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+pub(crate) static WINDOW_USAGE_CACHE: LazyLock<
+    Mutex<HashMap<window_usage::CacheKey, window_usage::CacheEntry>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 static TAILER: LazyLock<UsageTailer> = LazyLock::new(UsageTailer::new);
 /// Live-tail tick bookkeeping. `last` is the completion time of the most recent
@@ -1888,4 +1892,14 @@ mod tests {
         // A pathological window must saturate, not panic/overflow.
         assert!(tail.trace(i64::MAX).is_empty());
     }
+}
+
+/// PROTOTYPE — usage inside an absolute [from_ms, until_ms) window.
+/// Throwaway; not for commit.
+#[no_mangle]
+pub extern "C" fn tb_window_usage(from_ms: i64, until_ms: i64) -> *mut c_char {
+    guarded("tb_window_usage", || {
+        let context = LocalSourceContext::current();
+        envelope(window_usage::cached(&context, from_ms, until_ms))
+    })
 }

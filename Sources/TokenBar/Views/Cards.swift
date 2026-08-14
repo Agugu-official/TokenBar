@@ -308,3 +308,51 @@ struct StreaksCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
+
+/// The token-category palette, in display order. Shared because it was already
+/// written out twice inside ModelBreakdownCard and the window card would have
+/// made a third copy — three places to keep in step is how a legend and a chart
+/// drift apart.
+enum TokenKindPalette {
+    static let all: [(label: String, color: String)] = [
+        ("Input", "#3b82f6"),
+        ("Output", "#22c55e"),
+        ("Cache read", "#f59e0b"),
+        ("Cache write", "#a855f7"),
+        ("Reasoning", "#ec4899"),
+    ]
+}
+
+/// Compact segmented control, tighter than the native picker. Lifted out of
+/// UsageChartCard when a second card needed one — including the part that is
+/// not obvious: a plain adaptive fill, because these ride *inside* the card's
+/// glass and nesting glass effects renders as a murky dark blob.
+struct SegmentedPicker<Value: Hashable>: View {
+    @Binding var selection: Value
+    let options: [(value: Value, label: String)]
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(options, id: \.value) { option in
+                let on = selection == option.value
+                Button { selection = option.value } label: {
+                    Text(option.label.localized)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .font(.caption2.weight(on ? .semibold : .regular))
+                        .foregroundStyle(on ? .primary : .secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            on ? AnyShapeStyle(Color.primary.opacity(0.16))
+                               : AnyShapeStyle(.clear),
+                            in: RoundedRectangle(cornerRadius: 4))
+                        .contentShape(RoundedRectangle(cornerRadius: 4))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(1)
+        .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
+    }
+}

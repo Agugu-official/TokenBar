@@ -25,6 +25,10 @@ struct OverviewView: View {
     /// (PopoverView) so the dependency is explicit rather than an imperative
     /// `ClientRegistry.hiddenClients()` read in this body.
     var hidden: Set<String> = []
+    /// The selected quota window, resolved by the model. Nil until the first
+    /// quota payload lands, or when the selected window is not session-class.
+    var windowCard: WindowCardData?
+
 
     /// Master switch: off hides the Agent-limits card everywhere.
     @AppStorage("tokenbar.limits.enabled") private var limitsEnabled = true
@@ -39,6 +43,16 @@ struct OverviewView: View {
         VStack(spacing: 12) {
             if let singleClient {
                 let name = ClientRegistry.style(singleClient).displayName
+                if let windowCard {
+                    WindowUsageCard(
+                        clientId: windowCard.clientId, windowLabel: windowCard.windowLabel,
+                        resolution: windowCard.resolution, samples: windowCard.samples,
+                        mine: windowCard.mine, bars: windowCard.bars,
+                        hits: windowCard.hits, candidates: windowCard.candidates,
+                        cardId: windowCard.cardId, barsSuppressed: windowCard.barsSuppressed,
+                        nowMs: windowCard.nowMs, blockedBy: windowCard.blockedBy)
+                }
+
                 if limitsEnabled && !hiddenLimits.contains(singleClient) {
                     AgentLimitsCard(
                         clients: [singleClient], trace: trace, agentUsage: agentUsage,

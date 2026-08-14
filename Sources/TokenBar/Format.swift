@@ -80,3 +80,32 @@ enum Format {
         return "%lldd ago".localized(diff / 86400)
     }
 }
+
+extension Format {
+    /// Coarse remaining-time, e.g. "54m", "3h 54m", "5d 14h". Answers "how
+    /// long have I got" and nothing finer; a window countdown that ticks
+    /// seconds would redraw the card for no information.
+    static func duration(ms: Int64) -> String {
+        let mins = max(ms / 60_000, 0)
+        if mins < 60 { return "\(mins)m" }
+        let hours = mins / 60
+        if hours < 24 { return "\(hours)h \(mins % 60)m" }
+        return "\(hours / 24)d \(hours % 24)h"
+    }
+
+    /// Wall-clock span of a hovered interval. POSIX locale so the string is
+    /// stable under test, but the user's own time zone and calendar.
+    static func clockRange(fromMs: Int64, toMs: Int64) -> String {
+        let from = Date(timeIntervalSince1970: Double(fromMs) / 1000)
+        let to = Date(timeIntervalSince1970: Double(toMs) / 1000)
+        let time = DateFormatter()
+        time.locale = Locale(identifier: "en_US_POSIX")
+        time.dateFormat = "HH:mm"
+        let sameDay = Calendar.current.isDate(from, inSameDayAs: to)
+        if sameDay { return "\(time.string(from: from)) – \(time.string(from: to))" }
+        let stamp = DateFormatter()
+        stamp.locale = Locale(identifier: "en_US_POSIX")
+        stamp.dateFormat = "MM-dd HH:mm"
+        return "\(stamp.string(from: from)) – \(stamp.string(from: to))"
+    }
+}

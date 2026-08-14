@@ -1,0 +1,322 @@
+import Foundation
+import TokenBarCore
+
+/// PROTOTYPE — throwaway. Resolves the real quota window, then reports what was
+/// spent inside it, attributed. Not part of the shipping app.
+enum WindowProbe {
+    static func run() -> Never {
+        do {
+            let payload = try TBCore.agentUsage()
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            let fmt = ISO8601DateFormatter()
+            fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let plain = ISO8601DateFormatter()
+
+            print("=== quota 窗解析（真實資料）===\n")
+            print("  agents in payload: \(payload.agents.map(\.clientId))")
+            for a in payload.agents where a.error != nil || a.windows.isEmpty {
+                print("    ⚠️ \(a.clientId): error=\(a.error ?? "nil") windows=\(a.windows.count)")
+            }
+            var resolved: [(String, String, WindowResolution)] = []
+            var windowKeys: [String: String?] = [:]
+
+            for agent in payload.agents {
+                for w in agent.windows {
+                    let resetMs = w.resetsAt.flatMap { s -> Int64? in
+                        let d = fmt.date(from: s) ?? plain.date(from: s)
+                        return d.map { Int64($0.timeIntervalSince1970 * 1000) }
+                    }
+                    let durMs = w.durationSeconds.map { $0 * 1000 }
+
+                    // First pass: no usage probe. Only ACTIVE / UNAVAILABLE are
+                    // decidable without it, which is exactly the point — the
+                    // probe is bounded by R1 and must not run when R is stale.
+                    let pre = WindowResolver.resolve(
+                        resetsAtMs: resetMs, durationMs: durMs, now: now,
+                        firstUsageAfterReset: nil)
+
+                    // Only when `pre` is .idle does R1 hold and a usage probe
+                    // become legal — .idle means R is past but within one D.
+                    var final = pre
+                    if case .idle = pre, let r = resetMs, let d = durMs {
+                        let usage = try TBCore.windowUsage(from: r, until: now)
+                        let t0 = WindowResolver.firstUsageAfterReset(
+                            messages: usage.messages, resetMs: r)
+                        final = WindowResolver.resolve(
+                            resetsAtMs: r, durationMs: d, now: now,
+                            firstUsageAfterReset: t0)
+                    }
+                    resolved.append((agent.clientId, w.cardId, final))
+                    windowKeys["\(agent.clientId)|\(w.cardId)"] = w.paceStatus.windowKey
+                }
+            }
+
+            print("  resetsAt 實測：")
+            for a in payload.agents { for w in a.windows where a.clientId == "claude" {
+                print("    \(w.cardId): resetsAt=\(w.resetsAt ?? "nil") "
+                      + "dur=\(w.durationSeconds.map(String.init) ?? "nil") "
+                      + "used=\(w.usedPercent) remain=\(w.remainingPercent) "
+                      + "pace=\(w.paceStatus.state) reason=\(String(describing: w.paceStatus.reason))")
+            } }
+            print("  label 實測值：")
+            for a in payload.agents { for w in a.windows {
+                print("    \(a.clientId)|\(w.cardId)  label=\(String(reflecting: w.label))")
+            } }
+            print("  windowKey 實測值：")
+            for (k, v) in windowKeys.sorted(by: { $0.key < $1.key }) {
+                print("    \(k)  →  \(v ?? "nil")")
+            }
+            for (client, card, state) in resolved {
+                print(String(format: "  %-16@ %-22@ %@",
+                             client as NSString, card as NSString,
+                             describe(state, now: now) as NSString))
+            }
+
+            // Now the number, for every window that resolved to a real interval.
+            let confirmed = UsageAttribution.confirmed().records
+            for (client, card, state) in resolved {
+                guard let (start, end) = interval(state) else { continue }
+                let usage = try TBCore.windowUsage(from: start, until: min(end, now))
+                let (assigned, excluded, unassigned) = usage.totals(confirmed: confirmed)
+                print("\n--- \(client) / \(card)  \(usage.messages.count) 筆"
+                      + (usage.undatedCount == 0 ? ""
+                         : "（另有 \(usage.undatedCount) 筆無時戳、未計入）"))
+                for t in assigned {
+                    print(String(format: "    %-12@ %14ld token   $%.2f",
+                                 t.target as NSString, t.tokens, t.cost))
+                }
+                for (label, t) in [("excluded", excluded), ("unassigned", unassigned)]
+                where t.tokens != 0 {
+                    print(String(format: "    %-12@ %14ld token   $%.2f",
+                                 label as NSString, t.tokens, t.cost))
+                }
+                let n = 12
+                let width = max((min(end, now) - start) / Int64(n), 1)
+                let curve = usage.buckets(from: start, bucketMs: width, count: n)
+                print("    曲線（\(width / 60000) 分一桶，百萬 token）: "
+                      + curve.map { String($0 / 1_000_000) }.joined(separator: " "))
+
+                // Cost of the two halves, on real data. The old body recomputed
+                // BOTH on every hover event.
+                if card.hasPrefix("session") {
+                    let confirmed3 = UsageAttribution.confirmed().records
+                    var t0 = Date()
+                    let mineNow = usage.messages.filter {
+                        UsageAttribution.resolve(
+                            client: $0.client, provider: $0.providerId, model: nil,
+                            records: confirmed3) == .assigned(client)
+                    }
+                    let attrMs = Date().timeIntervalSince(t0) * 1000
+                    let qs = (try? TBCore.quotaCurve(
+                        clientId: client, windowKey: card,
+                        generation: payload.publicationGeneration ?? 0))??.points
+                        .filter { $0.sampledAt >= start / 1000 && $0.sampledAt <= now / 1000 }
+                        .map { QuotaSample(atMs: $0.sampledAt * 1000, usedPercent: $0.usedPercent) }
+                        ?? []
+                    t0 = Date()
+                    let ug = WindowCardGeometry.usageGeometry(
+                        windowStartMs: start, windowEndMs: end, nowMs: min(end, now),
+                        samples: qs, messages: mineNow)
+                    let usageMs = Date().timeIntervalSince(t0) * 1000
+                    t0 = Date()
+                    for _ in 0..<100 {
+                        _ = WindowCardGeometry.quotaGeometry(
+                            windowStartMs: start, windowEndMs: end, nowMs: min(end, now),
+                            samples: qs, metric: .remaining)
+                    }
+                    let quotaMs = Date().timeIntervalSince(t0) * 1000 / 100
+                    print(String(format:
+                        "    ⏱ 每次 body 的成本：歸屬 %.1f ms ＋ bars/zones %.1f ms（舊）"
+                        + "  vs  曲線 %.3f ms（新）｜%d 筆訊息、%d 個 zone",
+                        attrMs, usageMs, quotaMs, mineNow.count, ug.hits.count))
+                }
+
+                // Does the quota line have real samples inside this window?
+                guard let key = windowKeys["\(client)|\(card)"] ?? nil else {
+                    print("    額度線：此窗無 windowKey")
+                    continue
+                }
+                let qc = try TBCore.quotaCurve(
+                    clientId: client, windowKey: key, generation: payload.publicationGeneration ?? 0)
+                guard let qc else { print("    額度線：series 未綁定"); continue }
+                // sampledAt/resetAt are SECONDS — the decoder subtracts
+                // durationSeconds from resetAt directly (QuotaCurve.swift:64).
+                let inWindow = qc.points.filter {
+                    $0.sampledAt >= start / 1000 && $0.sampledAt <= now / 1000
+                }
+                print("    額度線：窗內 \(inWindow.count) 點 / 全序列 \(qc.coverage.sampleCount) 點")
+                if !inWindow.isEmpty {
+                    print("      " + inWindow.map { String(format: "%.3f%%", $0.usedPercent) }
+                        .joined(separator: " → "))
+                    // The pairing check: between consecutive quota samples, how
+                    // many tokens assigned to THIS subscription were spent? If
+                    // the two disagree, the gap is usage this machine can't see.
+                    // Equivalence ratio, measured over the sampled span only —
+                    // the percent delta and the tokens must cover the same
+                    // interval or the ratio is meaningless.
+                    let lo = inWindow.first!, hi2 = inWindow.last!
+                    let dPct = hi2.usedPercent - lo.usedPercent
+                    let spanMine = usage.messages
+                        .filter { $0.timestamp > lo.sampledAt * 1000
+                                  && $0.timestamp <= hi2.sampledAt * 1000 }
+                        .filter { m in
+                            UsageAttribution.resolve(
+                                client: m.client, provider: m.providerId,
+                                model: nil, records: confirmed) == .assigned(client)
+                        }
+                    // Everything except cache read: measured to separate moved
+                    // from still buckets 4.5x, vs 1.2x for input+output+reasoning.
+                    let spanFresh = spanMine.map { $0.tokens - $0.cacheRead }.reduce(0, +)
+                    let spanCost = spanMine.map(\.cost).reduce(0, +)
+                    if dPct <= 0 {
+                        print("      等值比：額度未移動（Δ \(dPct)%），無法計算")
+                    } else if spanFresh == 0 {
+                        print("      等值比：額度動了 \(Int(dPct))% 但本機 0 token，配對破裂，不得顯示")
+                    } else {
+                        print(String(format:
+                            "      等值比（Δ%.0f%% 上量得）: 1%% ≈ %ld 新鮮 token / $%.2f  |  10%% ≈ %ld / $%.2f  |  整窗滿 ≈ $%.0f",
+                            dPct, Int64(Double(spanFresh) / dPct), spanCost / dPct,
+                            Int64(Double(spanFresh) / dPct * 10), spanCost / dPct * 10,
+                            spanCost / dPct * 100))
+                    }
+                    // Which token classes actually track the quota? cacheWrite
+                    // is the trap: it is a cache field by name but costs 1.25x
+                    // base input, so grouping it with cacheRead throws away an
+                    // expensive class. Fit all three against the same delta.
+                    guard dPct > 0 else {
+                        print("      （Δ=0，跳過等值比與分辨力）")
+                        continue
+                    }
+                    var fA: Int64 = 0, fB: Int64 = 0, fC: Int64 = 0
+                    for (a, b) in zip(inWindow, inWindow.dropFirst()) {
+                        let l = a.sampledAt * 1000, h = b.sampledAt * 1000
+                        for m in usage.messages
+                            where m.timestamp > l && m.timestamp <= h
+                            && UsageAttribution.resolve(
+                                client: m.client, provider: m.providerId,
+                                model: nil, records: confirmed) == .assigned(client) {
+                            fA += m.input + m.output + m.reasoning
+                            fB += m.input + m.output + m.reasoning + m.cacheWrite
+                            fC += m.tokens
+                        }
+                    }
+                    print(String(format:
+                        "      每 1%% 等值：in+out+reas %10ld  | ＋cacheWrite %10ld  | 全部 %12ld",
+                        Int64(Double(fA) / dPct), Int64(Double(fB) / dPct),
+                        Int64(Double(fC) / dPct)))
+                    print(String(format:
+                        "      cacheWrite 佔比 %.1f%% of 新鮮 | cacheRead 佔比 %.0fx 新鮮",
+                        Double(fB - fA) / Double(max(fA, 1)) * 100,
+                        Double(fC - fB) / Double(max(fA, 1))))
+                    // Decisive test: which quantity separates the buckets where
+                    // quota moved from the ones where it did not? A hand-picked
+                    // token subset guesses the weights; `cost` already carries
+                    // them from the pricing table.
+                    struct Cand { let name: String; var moved: [Double] = []; var still: [Double] = [] }
+                    var cands = [Cand(name: "in+out+reas"), Cand(name: "＋cacheWrite"),
+                                 Cand(name: "全部 token"), Cand(name: "成本 $")]
+                    for (a, b) in zip(inWindow, inWindow.dropFirst()) {
+                        let l = a.sampledAt * 1000, h = b.sampledAt * 1000
+                        var v = [0.0, 0.0, 0.0, 0.0]
+                        for m in usage.messages
+                            where m.timestamp > l && m.timestamp <= h
+                            && UsageAttribution.resolve(
+                                client: m.client, provider: m.providerId,
+                                model: nil, records: confirmed) == .assigned(client) {
+                            v[0] += Double(m.input + m.output + m.reasoning)
+                            v[1] += Double(m.input + m.output + m.reasoning + m.cacheWrite)
+                            v[2] += Double(m.tokens)
+                            v[3] += m.cost
+                        }
+                        let moved = b.usedPercent > a.usedPercent
+                        for i in 0..<4 { if moved { cands[i].moved.append(v[i]) }
+                                         else { cands[i].still.append(v[i]) } }
+                    }
+                    print("      分辨力（額度有動 vs 沒動的 bucket 中位數）:")
+                    for c2 in cands {
+                        func med(_ a: [Double]) -> Double {
+                            guard !a.isEmpty else { return 0 }
+                            let s = a.sorted(); return s[s.count / 2]
+                        }
+                        let mv = med(c2.moved), st = med(c2.still)
+                        let ratio = st > 0 ? mv / st : Double.infinity
+                        print(String(format: "        %-14@ 動 %12.2f  靜 %12.2f  倍率 %@",
+                                     c2.name as NSString, mv, st,
+                                     (ratio.isFinite ? String(format: "%.1fx", ratio)
+                                      : "∞（靜止組全為 0）") as NSString))
+                    }
+                    // Paste-ready for the design mock: gaps / fresh / cost per
+                    // interval, so no number in the mock is ever invented.
+                    var gaps: [Int] = [], freshes: [Int64] = [], costs: [Double] = []
+                    var kinds: [[Int64]] = []
+                    for (a, b) in zip(inWindow, inWindow.dropFirst()) {
+                        let l = a.sampledAt * 1000, h = b.sampledAt * 1000
+                        let ms = usage.messages
+                            .filter { $0.timestamp > l && $0.timestamp <= h }
+                            .filter { m in
+                                UsageAttribution.resolve(
+                                    client: m.client, provider: m.providerId,
+                                    model: nil, records: confirmed) == .assigned(client)
+                            }
+                        gaps.append(Int((h - l) / 60000))
+                        freshes.append(ms.map { $0.tokens - $0.cacheRead }.reduce(0, +))
+                        costs.append(ms.map(\.cost).reduce(0, +))
+                        kinds.append([ms.map(\.input).reduce(0, +),
+                                      ms.map(\.output).reduce(0, +),
+                                      ms.map(\.cacheRead).reduce(0, +),
+                                      ms.map(\.cacheWrite).reduce(0, +),
+                                      ms.map(\.reasoning).reduce(0, +)])
+                    }
+                    print("      JSON: {\"used\":\(inWindow.map { Int($0.usedPercent) }), "
+                          + "\"gaps\":\(gaps), \"fresh\":\(freshes), "
+                          + "\"cost\":\(costs.map { (($0 * 100).rounded()) / 100 }), "
+                          + "\"kinds\":\(kinds), "
+                          + "\"windowMin\":\((end - start) / 60000), "
+                          + "\"elapsedMin\":\((now - start) / 60000)}")
+                    print("      配對（相鄰取樣之間：額度 Δ% vs 本訂閱 token）:")
+                    for (a, b) in zip(inWindow, inWindow.dropFirst()) {
+                        let lo = a.sampledAt * 1000, hi = b.sampledAt * 1000
+                        let mine = usage.messages
+                            .filter { $0.timestamp > lo && $0.timestamp <= hi }
+                            .filter { m in
+                                UsageAttribution.resolve(
+                                    client: m.client, provider: m.providerId,
+                                    model: nil, records: confirmed) == .assigned(client)
+                            }
+                        // Split it: cache reads dwarf everything by volume but
+                        // cost a fraction of the quota, so a bar sized by total
+                        // tokens cannot track the line by construction.
+                        let spent = mine.map(\.tokens).reduce(0, +)
+                        let fresh = mine.map { $0.input + $0.output + $0.reasoning }.reduce(0, +)
+                        let cacheR = mine.map(\.cacheRead).reduce(0, +)
+                        print(String(format: "        +%.3f%%  總 %9ld (新鮮 %8ld, cacheR %9ld)  (%.0f 分)",
+                                     b.usedPercent - a.usedPercent, spent, fresh, cacheR,
+                                     Double(hi - lo) / 60000))
+                    }
+                }
+            }
+            exit(0)
+        } catch {
+            FileHandle.standardError.write(Data("window probe failed: \(error)\n".utf8))
+            exit(1)
+        }
+    }
+
+    private static func interval(_ s: WindowResolution) -> (Int64, Int64)? {
+        switch s {
+        case let .active(start, end), let .inferred(start, end): return (start, end)
+        case .idle, .unavailable: return nil
+        }
+    }
+
+    private static func describe(_ s: WindowResolution, now: Int64) -> String {
+        switch s {
+        case let .active(start, end):
+            return "ACTIVE       剩 \((end - now) / 60000) 分  窗長 \((end - start) / 60000) 分"
+        case .idle: return "IDLE         窗已結束、其後無用量"
+        case let .inferred(start, end):
+            return "INFERRED     推得，剩 \((end - now) / 60000) 分"
+        case .unavailable: return "UNAVAILABLE  無法判定"
+        }
+    }
+}
