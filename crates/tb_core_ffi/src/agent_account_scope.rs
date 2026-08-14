@@ -2168,6 +2168,24 @@ mod tests {
         );
         backend.cleanup();
 
+        let failed = TestBackend::new("refresh-save-failure");
+        let lock = Mutex::new(());
+        let old = resolve_credential_with(&failed, &lock, "claude", "s", "l", b"old").unwrap();
+        let key = installation_key(&failed);
+        let before = metadata_bytes(&failed);
+        failed.fail_fs(FsOperation::ReplaceFile);
+        assert!(
+            transfer_credential_with(&failed, &lock, &key, "claude", "s", "l", b"old", b"new")
+                == Err(AccountScopeError::MetadataWrite)
+                && metadata_bytes(&failed) == before
+                && resolve_credential_with(&failed, &lock, "claude", "s", "l", b"old").unwrap()
+                    == old
+                && resolve_credential_with(&failed, &lock, "claude", "s", "l", b"new").unwrap()
+                    != old,
+            "transfer metadata-save failure preserves lineage"
+        );
+        failed.cleanup();
+
         let known = TestBackend::new("refresh-known-new");
         let lock = Mutex::new(());
         let known_new = resolve_credential_with(
@@ -2284,24 +2302,16 @@ mod tests {
         let backend = TestBackend::new("key-lifecycle");
         let first = ensure_installation_key(&backend, &Mutex::new(())).unwrap();
         assert!(
-            first == [0x11; INSTALLATION_KEY_BYTES],
-            "exact generated key"
-        );
-        assert!(
-            fs::read(installation_key_path(&backend)).unwrap() == first,
-            "exact persisted key"
+            first == [0x11; INSTALLATION_KEY_BYTES]
+                && fs::read(installation_key_path(&backend)).unwrap() == first,
+            "exact generated and persisted key"
         );
         #[cfg(unix)]
-        {
-            assert!(
-                unix_mode(&backend.directory) == 0o700,
-                "storage directory mode"
-            );
-            assert!(
-                unix_mode(&installation_key_path(&backend)) == 0o600,
-                "installation key mode"
-            );
-        }
+        assert!(
+            unix_mode(&backend.directory) == 0o700
+                && unix_mode(&installation_key_path(&backend)) == 0o600,
+            "installation storage modes"
+        );
         backend.write_installation_key(&[0x52; INSTALLATION_KEY_BYTES]);
         let second = ensure_installation_key(&backend, &Mutex::new(())).unwrap();
         assert!(second == [0x52; INSTALLATION_KEY_BYTES], "key reload value");
@@ -2312,13 +2322,10 @@ mod tests {
         unavailable.set_random(Vec::new());
         assert!(
             resolve_test(&unavailable, &Mutex::new(()), b"marker")
-                == Err(AccountScopeError::RandomUnavailable),
-            "random failure type"
-        );
-        assert!(
-            !installation_key_path(&unavailable).exists()
+                == Err(AccountScopeError::RandomUnavailable)
+                && !installation_key_path(&unavailable).exists()
                 && !unavailable.directory.join(METADATA_FILE).exists(),
-            "random failure artifacts"
+            "random failure type and artifacts"
         );
         unavailable.cleanup();
     }
@@ -2333,12 +2340,9 @@ mod tests {
         read_failure.fail_fs(FsOperation::ReadInstallationKey);
         assert!(
             ensure_installation_key(&read_failure, &Mutex::new(()))
-                == Err(AccountScopeError::InstallationKeyRead),
-            "key read failure type"
-        );
-        assert!(
-            artifact_snapshot(&read_failure) == before,
-            "key read preservation"
+                == Err(AccountScopeError::InstallationKeyRead)
+                && artifact_snapshot(&read_failure) == before,
+            "key read failure preservation"
         );
         read_failure.cleanup();
 
@@ -2349,12 +2353,9 @@ mod tests {
             let before = artifact_snapshot(&backend);
             assert!(
                 ensure_installation_key(&backend, &Mutex::new(()))
-                    == Err(AccountScopeError::InvalidInstallationKey),
-                "invalid key length {case}"
-            );
-            assert!(
-                artifact_snapshot(&backend) == before,
-                "key length preservation {case}"
+                    == Err(AccountScopeError::InvalidInstallationKey)
+                    && artifact_snapshot(&backend) == before,
+                "invalid key length preservation {case}"
             );
             backend.cleanup();
         }
@@ -2852,11 +2853,8 @@ mod tests {
         backend.replace_installation_key_on_validate(vec![0x74; INSTALLATION_KEY_BYTES]);
         assert!(
             ensure_installation_key(&backend, &Mutex::new(()))
-                == Err(AccountScopeError::InvalidInstallationKey),
-            "key inode replacement"
-        );
-        assert!(
-            metadata_bytes(&backend) == b"metadata"
+                == Err(AccountScopeError::InvalidInstallationKey)
+                && metadata_bytes(&backend) == b"metadata"
                 && fs::read(backend.directory.join(V3_HISTORY_FILE)).unwrap() == b"history"
                 && fs::read(installation_key_path(&backend)).unwrap()
                     == [0x74; INSTALLATION_KEY_BYTES],
@@ -2869,6 +2867,29 @@ mod tests {
     #[test]
     fn unix_metadata_and_lock_symlinks_fail_closed_before_mutation() {
         use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+        let missing = TestBackend::new("metadata-symlink-missing-key");
+        ensure_real_directory(&missing, &missing.directory).unwrap();
+        let path = missing.directory.join(METADATA_FILE);
+        let target = missing.directory.with_extension("metadata-no-key-target");
+        fs::write(&target, b"external-metadata").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        symlink(&target, &path).unwrap();
+        let result = resolve_test(&missing, &Mutex::new(()), b"marker");
+        let events = missing.events();
+        assert!(
+            result == Err(AccountScopeError::StorageUnavailable)
+                && fs::read(&target).unwrap() == b"external-metadata"
+                && unix_mode(&target) == 0o640
+                && path.is_symlink()
+                && !installation_key_path(&missing).exists()
+                && events.contains(&FsOperation::InspectArtifacts)
+                && !events.contains(&FsOperation::QuarantineMetadata)
+                && !events.contains(&FsOperation::CreateTemp),
+            "missing-key active metadata symlink boundary"
+        );
+        missing.cleanup();
+        fs::remove_file(target).unwrap();
 
         let metadata = TestBackend::new("metadata-symlink")
             .with_installation_key(vec![0x11; INSTALLATION_KEY_BYTES]);
@@ -2890,13 +2911,11 @@ mod tests {
         let target = lock.directory.with_extension("metadata-lock-target");
         fs::write(&target, b"external-lock").unwrap();
         symlink(&target, lock.directory.join(METADATA_LOCK_FILE)).unwrap();
-        assert!(
-            resolve_test(&lock, &Mutex::new(()), b"marker") == Err(AccountScopeError::MetadataLock),
-            "metadata lock symlink type"
-        );
+        let result = resolve_test(&lock, &Mutex::new(()), b"marker");
         let events = lock.events();
         assert!(
-            fs::read(&target).unwrap() == b"external-lock"
+            result == Err(AccountScopeError::MetadataLock)
+                && fs::read(&target).unwrap() == b"external-lock"
                 && events.contains(&FsOperation::OpenMetadataLock)
                 && !events.contains(&FsOperation::AcquireMetadataLock)
                 && !events.contains(&FsOperation::ReadMetadata),
@@ -2947,14 +2966,11 @@ mod tests {
         symlink(&target, &final_link.directory).unwrap();
         assert!(
             resolve_test(&final_link, &Mutex::new(()), b"marker")
-                == Err(AccountScopeError::StorageUnavailable),
-            "final directory symlink"
-        );
-        assert!(
-            unix_mode(&target) == 0o755
+                == Err(AccountScopeError::StorageUnavailable)
+                && unix_mode(&target) == 0o755
                 && fs::read_dir(&target).unwrap().next().is_none()
                 && !final_link.events().contains(&FsOperation::OpenMetadataLock),
-            "final directory target"
+            "final directory symlink target"
         );
         fs::remove_file(&final_link.directory).unwrap();
         fs::remove_dir(target).unwrap();
@@ -2967,15 +2983,12 @@ mod tests {
         fs::create_dir(&real_parent).unwrap();
         symlink(&real_parent, &linked_parent).unwrap();
         assert!(
-            resolve_test(&ancestor, &Mutex::new(()), b"marker").is_ok(),
+            resolve_test(&ancestor, &Mutex::new(()), b"marker").is_ok()
+                && fs::symlink_metadata(&ancestor.directory)
+                    .unwrap()
+                    .file_type()
+                    .is_dir(),
             "ancestor symlink admission"
-        );
-        assert!(
-            fs::symlink_metadata(&ancestor.directory)
-                .unwrap()
-                .file_type()
-                .is_dir(),
-            "ancestor final directory"
         );
         fs::remove_file(linked_parent).unwrap();
         fs::remove_dir_all(real_parent).unwrap();
@@ -3060,13 +3073,10 @@ mod tests {
         orphan.fail_fs(FsOperation::QuarantineMetadata);
         assert!(
             resolve_test(&orphan, &Mutex::new(()), b"marker")
-                == Err(AccountScopeError::QuarantineFailed),
-            "orphan quarantine failure type"
-        );
-        assert!(
-            metadata_bytes(&orphan) == b"orphan-evidence"
+                == Err(AccountScopeError::QuarantineFailed)
+                && metadata_bytes(&orphan) == b"orphan-evidence"
                 && !installation_key_path(&orphan).exists(),
-            "orphan quarantine preservation"
+            "orphan quarantine failure preservation"
         );
         orphan.cleanup();
 
@@ -3076,12 +3086,9 @@ mod tests {
         corrupt.fail_fs(FsOperation::QuarantineMetadata);
         assert!(
             resolve_test(&corrupt, &Mutex::new(()), b"marker")
-                == Err(AccountScopeError::QuarantineFailed),
-            "corrupt quarantine failure type"
-        );
-        assert!(
-            metadata_bytes(&corrupt) == b"corrupt-evidence",
-            "corrupt quarantine preservation"
+                == Err(AccountScopeError::QuarantineFailed)
+                && metadata_bytes(&corrupt) == b"corrupt-evidence",
+            "corrupt quarantine failure preservation"
         );
         corrupt.cleanup();
     }
