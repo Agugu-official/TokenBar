@@ -65,7 +65,7 @@ The issue-107 `tb_filter_parity_probe` is a separate additive diagnostic. Rust o
 
 ## Windows downstream consumer
 
-C ABI 有第二個消費者：Windows port（[Nanako0129/TokenBar-Windows](https://github.com/Nanako0129/TokenBar-Windows)，WinUI 3 + C#）。Native pin 為 `5b5f500d3a8abe66ab5fa44b18f4fc1aaee53947`，Windows 仍為 `84e0d66413d4e0d87b734f66f7a848b3bc323258`；新增的 `DailyContribution.turns_by_client` 是 additive 且 `#[serde(default)]`，未認得它的 decoder 仍可解，故此差異不阻塞 Windows。 Windows 於 [PR #20](https://github.com/Nanako0129/TokenBar-Windows/pull/20)（merge `eb3a7f3`）完成其 consumer migration 與 gates。Shared parser／cache／aggregation changes belong in `tokscale-core`; each app repository owns its own `tb_core_ffi`、C header、Swift／C# bridge and build wiring. Windows 的 `vendor/ENGINE.md` records its consumer pin and historical sync provenance.
+C ABI 有第二個消費者：Windows port（[Nanako0129/TokenBar-Windows](https://github.com/Nanako0129/TokenBar-Windows)，WinUI 3 + C#）。Native reviewed pin 為 `731a2dcc2589cbeaf82150933331b5b2b6b590ff`；Windows current pin 與 consumer state 由 Windows repo 自己擁有，Native 不重述。這次 consumer 只採用 exact gitlink，不修改現有 Rust staticlib、C ABI declarations 或 Swift decoders；build-decoder compatibility 由 consumer gates 重驗。LocalOnly、CostCoverage、embedded-cost 與 partial-estimation 語意尚未宣稱已經 C ABI 抵達 Swift。Parser consequence 是 global cache format 與 serialized layout 不變，但 Amp／Cursor／OpenClaw／MiMoCode／Mux identity 由 1 變 2，必要時 cold rebuild。Shared parser／cache／aggregation changes belong in `tokscale-core`; each app repository owns its own `tb_core_ffi`、C header、Swift／C# bridge and build wiring. Windows 的 `vendor/ENGINE.md` records its consumer pin and historical sync provenance.
 
 | 不變量 | 規則 |
 |---|---|
