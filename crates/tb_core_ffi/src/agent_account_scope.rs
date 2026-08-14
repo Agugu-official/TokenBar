@@ -1997,41 +1997,29 @@ mod tests {
             b"user@example.com",
         )
         .unwrap();
-        let history = scope_from_history_constant(&key, "claude").unwrap();
-        assert!(
-            account.as_str() == "sK_jjcbkOzChAgJHtE1pPpjKU4AEg_MiNut8GaL1woM",
-            "account known vector"
-        );
-        assert!(
-            history.as_str() == "yPQyLoK4QzpZjG5p_fIxQVkvgRY6mGC9CKn4NMzyqmA",
-            "history known vector"
-        );
+        let claude_history = scope_from_history_constant(&key, "claude").unwrap();
+        let codex_history = scope_from_history_constant(&key, "codex").unwrap();
         let lineage = scope_from_lineage(
             &key,
             "claude",
             &URL_SAFE_NO_PAD.encode([0xA5; LINEAGE_ID_BYTES]),
         )
         .unwrap();
-        let fingerprint = credential_fingerprint(&key, "claude", b"claude").unwrap();
-        let slot = slot_digest(&key, "claude", "claude", "claude").unwrap();
+        let fingerprint = credential_fingerprint(&key, "claude", b"fixture-token").unwrap();
+        let slot = slot_digest(&key, "claude", "environment", "CLAUDE_CODE_OAUTH_TOKEN").unwrap();
         let metadata = encode_digest(&metadata_mac_key(&key).unwrap());
-        for (index, value) in [
-            account.as_str(),
-            lineage.as_str(),
-            fingerprint.as_str(),
-            slot.as_str(),
-            metadata.as_str(),
-        ]
-        .iter()
-        .enumerate()
-        {
-            assert!(
-                history.as_str() != *value,
-                "history domain separation {index}"
-            );
-        }
         assert!(
-            history
+            account.as_str() == "sK_jjcbkOzChAgJHtE1pPpjKU4AEg_MiNut8GaL1woM"
+                && claude_history.as_str() == "yPQyLoK4QzpZjG5p_fIxQVkvgRY6mGC9CKn4NMzyqmA"
+                && codex_history.as_str() == "aiwiKwI-dRUWa0g2x2M7afRU5AiQYm3jCePREw7w_z4"
+                && lineage.as_str() == "QsM_upNybGz6Hljs9K4Qj5uIuBI1HtHpfmPahxb1SEw"
+                && fingerprint.as_str() == "JCR4YryCMKNOeEjYQEHYrXfanXoq24YteoyJyoiSPtc"
+                && slot.as_str() == "1nTOH8E7TUly1xvVG2sbUI_C0AzksMJ3iOj9vt2PNj8"
+                && metadata == "0Lemwp52DQT0sjS4KS28xOdvxWSKXNWAb9Le0wCs6p8",
+            "persisted identity known vectors"
+        );
+        assert!(
+            claude_history
                 != scope_from_history_constant(&[0xFF; INSTALLATION_KEY_BYTES], "claude").unwrap(),
             "history installation separation"
         );
@@ -3188,6 +3176,20 @@ mod tests {
                     "windows consumer privacy"
                 },
             );
+            #[cfg(unix)]
+            {
+                assert!(
+                    unix_mode(&backend.directory) == 0o700,
+                    "privacy directory mode"
+                );
+                for path in [
+                    backend.directory.join(INSTALLATION_KEY_FILE),
+                    backend.directory.join(METADATA_FILE),
+                    backend.directory.join(METADATA_LOCK_FILE),
+                ] {
+                    assert!(unix_mode(&path) == 0o600, "privacy owner-only file mode");
+                }
+            }
 
             fs::write(backend.directory.join(METADATA_FILE), b"corrupt-envelope").unwrap();
             let error = resolve_authoritative_with(
@@ -3224,19 +3226,6 @@ mod tests {
                         !name.contains(&value.to_ascii_lowercase()),
                         "privacy filename {name_index} value {value_index}"
                     );
-                }
-            }
-            #[cfg(unix)]
-            {
-                assert!(
-                    unix_mode(&backend.directory) == 0o700,
-                    "privacy directory mode"
-                );
-                for path in [
-                    backend.directory.join(INSTALLATION_KEY_FILE),
-                    backend.directory.join(METADATA_LOCK_FILE),
-                ] {
-                    assert!(unix_mode(&path) == 0o600, "privacy owner-only file mode");
                 }
             }
             backend.cleanup();
