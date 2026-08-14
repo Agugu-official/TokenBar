@@ -2061,38 +2061,28 @@ mod tests {
 
     #[test]
     fn history_scope_routes_are_constant_authoritative_and_metadata_free() {
-        let backend = TestBackend::new("history-routes");
         let lock = Mutex::new(());
+        let invalid = TestBackend::new("history-key-failure").with_installation_key(vec![0x11; 31]);
+        let key_error = resolve_history_scope_with(&invalid, &lock, "claude", None)
+            == Err(AccountScopeError::InvalidInstallationKey);
+        assert!(key_error, "history constant route key failure");
+        invalid.cleanup();
+        let backend = TestBackend::new("history-routes");
         let constant = resolve_history_scope_with(&backend, &lock, "claude", None).unwrap();
-        assert!(
-            !backend.directory.join(METADATA_FILE).exists()
-                && !backend.events().contains(&FsOperation::ReadMetadata),
-            "constant history metadata-free route"
-        );
+        let metadata_free = !backend.directory.join(METADATA_FILE).exists()
+            && !backend.events().contains(&FsOperation::ReadMetadata);
+        assert!(metadata_free, "constant history metadata-free route");
         let first = resolve_test(&backend, &lock, b"marker-one").unwrap();
         let second = resolve_test(&backend, &lock, b"marker-two").unwrap();
         assert!(first != second, "account rotation precondition");
-        assert!(
-            resolve_history_scope_with(&backend, &lock, "claude", None).unwrap() == constant
-                && constant.as_str() != first.as_str()
-                && constant.as_str() != second.as_str(),
-            "history rotation stability"
-        );
-        let authoritative = resolve_history_scope_with(
-            &backend,
-            &lock,
-            "codex",
-            Some((AuthoritativeIdKind::OpaqueId, "acct-123")),
-        )
-        .unwrap();
-        let account = resolve_authoritative_with(
-            &backend,
-            &lock,
-            "codex",
-            AuthoritativeIdKind::OpaqueId,
-            "acct-123",
-        )
-        .unwrap();
+        let stable = resolve_history_scope_with(&backend, &lock, "claude", None).unwrap()
+            == constant
+            && constant.as_str() != first.as_str()
+            && constant.as_str() != second.as_str();
+        assert!(stable, "history rotation stability");
+        let id = (AuthoritativeIdKind::OpaqueId, "acct-123");
+        let authoritative = resolve_history_scope_with(&backend, &lock, "codex", Some(id)).unwrap();
+        let account = resolve_authoritative_with(&backend, &lock, "codex", id.0, id.1).unwrap();
         assert!(
             authoritative.as_str() == account.as_str(),
             "authoritative history route"
@@ -2539,75 +2529,81 @@ mod tests {
 
     #[test]
     fn orphan_grammar_inspection_and_nonregular_entries_fail_closed() {
-        for (index, (name, expected)) in [
-            ("quota-account-scope-v1.orphaned-0.json", true),
-            ("quota-account-scope-v1.orphaned-0.1.json", true),
-            ("quota-account-scope-v1.orphaned--1.json", false),
-        ]
-        .iter()
-        .enumerate()
-        {
-            assert!(
-                is_orphaned_metadata_name(name) == *expected,
-                "orphan grammar {index}"
-            );
+        let canonical = "quota-account-scope-v1.orphaned-1752710400.json";
+        let is_orphan = is_orphaned_metadata_name;
+        for (index, name, expected) in [
+            (0, "quota-account-scope-v1.orphaned-0.json", true),
+            (1, "quota-account-scope-v1.orphaned-0.1.json", true),
+            (2, "quota-account-scope-v1.orphaned--1.json", false),
+        ] {
+            assert!(is_orphan(name) == expected, "orphan grammar {index}");
         }
-
         let forged = TestBackend::new("forged-orphan");
         ensure_real_directory(&forged, &forged.directory).unwrap();
-        let forged_path = forged
+        let path = forged
             .directory
             .join("quota-account-scope-v1.orphaned--1.json");
-        fs::write(&forged_path, b"forged-evidence").unwrap();
-        assert!(
-            resolve_test(&forged, &Mutex::new(()), b"marker").is_ok()
-                && fs::read(&forged_path).unwrap() == b"forged-evidence",
-            "forged orphan preservation"
-        );
+        fs::write(&path, b"forged-evidence").unwrap();
+        let preserved = resolve_test(&forged, &Mutex::new(()), b"marker").is_ok()
+            && fs::read(&path).unwrap() == b"forged-evidence";
+        assert!(preserved, "forged orphan preservation");
         forged.cleanup();
-
         let inspection = TestBackend::new("orphan-inspection");
         ensure_real_directory(&inspection, &inspection.directory).unwrap();
-        let orphaned = inspection
-            .directory
-            .join("quota-account-scope-v1.orphaned-1752710400.json");
-        fs::write(&orphaned, b"orphan-evidence").unwrap();
+        let path = inspection.directory.join(canonical);
+        fs::write(&path, b"orphan-evidence").unwrap();
         inspection.fail_fs(FsOperation::InspectOrphanedMetadata);
-        assert!(
-            resolve_test(&inspection, &Mutex::new(()), b"marker")
-                == Err(AccountScopeError::StorageUnavailable)
-                && !installation_key_path(&inspection).exists(),
-            "orphan inspection failure"
-        );
-        assert!(
-            resolve_test(&inspection, &Mutex::new(()), b"marker")
-                == Err(AccountScopeError::OrphanedArtifacts)
-                && fs::read(&orphaned).unwrap() == b"orphan-evidence",
-            "orphan inspection retry"
-        );
+        let failed = resolve_test(&inspection, &Mutex::new(()), b"marker")
+            == Err(AccountScopeError::StorageUnavailable)
+            && !installation_key_path(&inspection).exists();
+        assert!(failed, "orphan inspection failure");
+        let retried = resolve_test(&inspection, &Mutex::new(()), b"marker")
+            == Err(AccountScopeError::OrphanedArtifacts)
+            && fs::read(&path).unwrap() == b"orphan-evidence";
+        assert!(retried, "orphan inspection retry");
         inspection.cleanup();
-
         #[cfg(unix)]
         {
             use std::os::unix::fs::{symlink, PermissionsExt as _};
-            let backend = TestBackend::new("orphan-symlink");
-            ensure_real_directory(&backend, &backend.directory).unwrap();
-            let orphaned = backend
-                .directory
-                .join("quota-account-scope-v1.orphaned-1752710400.json");
-            let external = backend.directory.with_extension("orphan-target");
-            fs::write(&external, b"external-evidence").unwrap();
-            fs::set_permissions(&external, fs::Permissions::from_mode(0o640)).unwrap();
-            symlink(&external, &orphaned).unwrap();
-            assert!(
-                resolve_test(&backend, &Mutex::new(()), b"marker")
-                    == Err(AccountScopeError::StorageUnavailable)
-                    && !installation_key_path(&backend).exists()
-                    && fs::read(&external).unwrap() == b"external-evidence",
-                "orphan nonregular entry"
-            );
-            backend.cleanup();
-            fs::remove_file(external).unwrap();
+            for case in ["symlink", "directory"] {
+                let backend = TestBackend::new(&format!("orphan-{case}"));
+                ensure_real_directory(&backend, &backend.directory).unwrap();
+                let path = backend.directory.join(canonical);
+                let target = backend.directory.with_extension(format!("{case}-target"));
+                if case == "symlink" {
+                    fs::write(&target, b"external-evidence").unwrap();
+                    fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+                    symlink(&target, &path).unwrap();
+                } else {
+                    fs::create_dir(&path).unwrap();
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o750)).unwrap();
+                }
+                let result = resolve_test(&backend, &Mutex::new(()), b"marker");
+                let unchanged = if case == "symlink" {
+                    path.is_symlink()
+                        && fs::read_link(&path).unwrap() == target
+                        && fs::read(&target).unwrap() == b"external-evidence"
+                        && unix_mode(&target) == 0o640
+                } else {
+                    !path.is_symlink()
+                        && path.is_dir()
+                        && unix_mode(&path) == 0o750
+                        && fs::read_dir(&path).unwrap().next().is_none()
+                };
+                let artifacts = artifact_snapshot(&backend);
+                let clean = artifacts.key.is_none()
+                    && artifacts.metadata.is_none()
+                    && artifacts.key_temps + artifacts.metadata_temps == 0
+                    && !backend.events().contains(&FsOperation::CreateTemp);
+                let safe =
+                    result == Err(AccountScopeError::StorageUnavailable) && clean && unchanged;
+                assert!(
+                    safe,
+                    "canonical orphan nonregular fail-closed/no-creation {case}"
+                );
+                backend.cleanup();
+                let _ = fs::remove_file(target);
+            }
         }
     }
 
@@ -2997,72 +2993,78 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn unix_quarantine_collision_and_identity_bound_rollback_are_safe() {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-
+        use std::os::unix::fs::{symlink, MetadataExt as _, PermissionsExt as _};
+        let base_name = "quota-account-scope-v1.corrupt-1752710400";
         let collision = TestBackend::new("quarantine-collision");
         fs::create_dir_all(&collision.directory).unwrap();
         let source = collision.directory.join(METADATA_FILE);
-        let first_candidate = collision
-            .directory
-            .join("quota-account-scope-v1.corrupt-1752710400.json");
+        let base = collision.directory.join(format!("{base_name}.json"));
+        let first = collision.directory.join(format!("{base_name}.1.json"));
+        let second = collision.directory.join(format!("{base_name}.2.json"));
+        let missing = collision.directory.with_extension("missing-target");
         fs::write(&source, b"source-evidence").unwrap();
         fs::set_permissions(&source, fs::Permissions::from_mode(0o640)).unwrap();
         let source_inode = fs::metadata(&source).unwrap().ino();
-        fs::write(&first_candidate, b"collision-evidence").unwrap();
-        let quarantined = quarantine_metadata_with(
-            &collision,
-            &source,
-            "corrupt",
-            |source, candidate| fs::hard_link(source, candidate),
-            |source| fs::remove_file(source),
-        )
-        .unwrap();
-        assert!(
-            quarantined
-                == collision
-                    .directory
-                    .join("quota-account-scope-v1.corrupt-1752710400.1.json"),
-            "quarantine collision suffix"
-        );
-        assert!(
-            fs::read(&first_candidate).unwrap() == b"collision-evidence"
-                && fs::read(&quarantined).unwrap() == b"source-evidence"
-                && fs::metadata(&quarantined).unwrap().ino() == source_inode
-                && !source.exists(),
-            "quarantine collision artifacts"
-        );
+        symlink(&missing, &base).unwrap();
+        fs::write(&first, b"collision-evidence").unwrap();
+        let quarantined = quarantine_metadata(&collision, &source, "corrupt");
+        let reserved = base.is_symlink()
+            && fs::read_link(&base).ok().as_deref() == Some(missing.as_path())
+            && !missing.exists();
+        assert!(reserved, "quarantine dangling symlink reservation");
+        let selected = quarantined.as_deref() == Ok(second.as_path());
+        assert!(selected, "quarantine multi-collision selects .2");
+        let preserved = fs::read(&first).unwrap() == b"collision-evidence"
+            && fs::read(&second).unwrap() == b"source-evidence"
+            && fs::metadata(&second).unwrap().ino() == source_inode
+            && !source.exists();
+        assert!(preserved, "quarantine collision artifacts");
         collision.cleanup();
-
-        let rollback = TestBackend::new("quarantine-rollback");
-        fs::create_dir_all(&rollback.directory).unwrap();
-        let source = rollback.directory.join(METADATA_FILE);
-        let candidate = rollback
-            .directory
-            .join("quota-account-scope-v1.corrupt-1752710400.json");
-        fs::write(&source, b"source-evidence").unwrap();
-        fs::set_permissions(&source, fs::Permissions::from_mode(0o640)).unwrap();
-        assert!(
-            quarantine_metadata_with(
+        for (tag, replace) in [
+            ("quarantine-unlink-rollback", false),
+            ("quarantine-rollback", true),
+        ] {
+            let rollback = TestBackend::new(tag);
+            fs::create_dir_all(&rollback.directory).unwrap();
+            let source = rollback.directory.join(METADATA_FILE);
+            let candidate = rollback.directory.join(format!("{base_name}.json"));
+            fs::write(&source, b"source-evidence").unwrap();
+            fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+            let result = quarantine_metadata_with(
                 &rollback,
                 &source,
                 "corrupt",
                 |source, candidate| fs::hard_link(source, candidate),
                 |_source| {
-                    fs::remove_file(&candidate)?;
-                    fs::write(&candidate, b"replacement-evidence")?;
-                    fs::set_permissions(&candidate, fs::Permissions::from_mode(0o600))?;
+                    if replace {
+                        fs::remove_file(&candidate)?;
+                        fs::write(&candidate, b"replacement-evidence")?;
+                        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o600))?;
+                    }
                     Err(io::Error::new(io::ErrorKind::PermissionDenied, "injected"))
                 },
-            ) == Err(AccountScopeError::QuarantineFailed),
-            "quarantine rollback type"
-        );
-        assert!(
-            fs::read(&source).unwrap() == b"source-evidence"
-                && fs::read(&candidate).ok().as_deref() == Some(b"replacement-evidence")
-                && !rollback.events().contains(&FsOperation::SyncDirectory),
-            "quarantine identity-bound rollback"
-        );
-        rollback.cleanup();
+            );
+            let failed = result == Err(AccountScopeError::QuarantineFailed);
+            let unsynced = !rollback.events().contains(&FsOperation::SyncDirectory);
+            if replace {
+                assert!(failed, "quarantine rollback type");
+                let preserved = fs::read(&source).unwrap() == b"source-evidence"
+                    && fs::read(&candidate).ok().as_deref() == Some(b"replacement-evidence")
+                    && unsynced;
+                assert!(preserved, "quarantine identity-bound rollback");
+            } else {
+                let restored = failed
+                    && fs::read(&source).unwrap() == b"source-evidence"
+                    && unix_mode(&source) == 0o600
+                    && !candidate.exists()
+                    && unsynced;
+                assert!(
+                    restored,
+                    "quarantine unlink failure rolls back original candidate"
+                );
+            }
+            rollback.cleanup();
+        }
     }
 
     #[test]
