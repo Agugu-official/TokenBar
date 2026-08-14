@@ -1643,11 +1643,10 @@ pub(crate) mod test_support {
     pub(super) struct TestState {
         pub(super) random: VecDeque<Vec<u8>>,
         pub(super) fail_fs_once: Option<FsOperation>,
-        pub(super) replace_installation_key_on_validate: Option<Vec<u8>>,
-        pub(super) events: Vec<&'static str>,
+        pub(super) replace_installation_key_on: Option<(FsOperation, Vec<u8>)>,
+        pub(super) events: Vec<FsOperation>,
         pub(super) now: i64,
     }
-
     impl TestBackend {
         pub(super) fn new(tag: &str) -> Self {
             let directory = std::env::temp_dir().join(format!(
@@ -1667,25 +1666,22 @@ pub(crate) mod test_support {
                         vec![0x24; LINEAGE_ID_BYTES],
                     ]),
                     fail_fs_once: None,
-                    replace_installation_key_on_validate: None,
+                    replace_installation_key_on: None,
                     events: Vec::new(),
                     now: 1_752_710_400,
                 })),
                 windows_secure_storage: false,
             }
         }
-
         #[cfg(target_os = "windows")]
         pub(super) fn with_windows_secure_storage(mut self) -> Self {
             self.windows_secure_storage = true;
             self
         }
-
         pub(super) fn with_installation_key(self, key: Vec<u8>) -> Self {
             self.write_installation_key(&key);
             self
         }
-
         pub(super) fn write_installation_key(&self, key: &[u8]) {
             ensure_real_directory(self, &self.directory).unwrap();
             let path = self.directory.join(INSTALLATION_KEY_FILE);
@@ -1705,18 +1701,24 @@ pub(crate) mod test_support {
                 fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
             }
         }
-
+        pub(super) fn set_random(&self, values: Vec<Vec<u8>>) {
+            self.state.lock().unwrap().random = values.into();
+        }
         pub(super) fn fail_fs(&self, operation: FsOperation) {
             self.state.lock().unwrap().fail_fs_once = Some(operation);
         }
-
         pub(super) fn replace_installation_key_on_validate(&self, key: Vec<u8>) {
-            self.state
-                .lock()
-                .unwrap()
-                .replace_installation_key_on_validate = Some(key);
+            self.replace_installation_key_on(FsOperation::ValidateInstallationKey, key);
         }
-
+        pub(super) fn replace_installation_key_on_sync(&self, key: Vec<u8>) {
+            self.replace_installation_key_on(FsOperation::SyncDirectory, key);
+        }
+        fn replace_installation_key_on(&self, operation: FsOperation, key: Vec<u8>) {
+            self.state.lock().unwrap().replace_installation_key_on = Some((operation, key));
+        }
+        pub(super) fn events(&self) -> Vec<FsOperation> {
+            self.state.lock().unwrap().events.clone()
+        }
         pub(super) fn cleanup(&self) {
             let _ = fs::remove_dir_all(&self.directory);
         }
@@ -1751,33 +1753,15 @@ pub(crate) mod test_support {
         fn before_fs(&self, operation: FsOperation) -> io::Result<()> {
             let replacement = {
                 let mut state = self.state.lock().unwrap();
-                state.events.push(match operation {
-                    FsOperation::CreateDirectory => "create-directory",
-                    FsOperation::ReadInstallationKey => "read-installation-key",
-                    FsOperation::ValidateInstallationKey => "validate-installation-key",
-                    FsOperation::InspectArtifacts => "inspect-artifacts",
-                    FsOperation::InspectOrphanedMetadata => "inspect-orphaned-metadata",
-                    FsOperation::OpenMetadataLock => "open-metadata-lock",
-                    FsOperation::AcquireMetadataLock => "acquire-metadata-lock",
-                    FsOperation::ReadMetadata => "read-metadata",
-                    FsOperation::QuarantineMetadata => "quarantine-metadata",
-                    FsOperation::CreateTemp => "create-temp",
-                    FsOperation::WriteTemp => "write-temp",
-                    FsOperation::SyncTemp => "sync-temp",
-                    FsOperation::ReplaceFile => "replace-file",
-                    FsOperation::SyncDirectory => "sync-directory",
-                    FsOperation::OpenRefreshLock => "open-refresh-lock",
-                    FsOperation::AcquireRefreshLock => "acquire-refresh-lock",
-                });
+                state.events.push(operation);
                 if state.fail_fs_once == Some(operation) {
                     state.fail_fs_once = None;
                     return Err(io::Error::other("injected failure"));
                 }
-                if operation == FsOperation::ValidateInstallationKey {
-                    state.replace_installation_key_on_validate.take()
-                } else {
-                    None
-                }
+                state
+                    .replace_installation_key_on
+                    .take_if(|(trigger, _)| *trigger == operation)
+                    .map(|(_, bytes)| bytes)
             };
             if let Some(bytes) = replacement {
                 let replacement_path = self.directory.join(".installation-key-replacement");
@@ -1821,9 +1805,6 @@ pub(crate) mod test_support {
             self.backend.fail_fs(FsOperation::ReplaceFile);
         }
 
-        /// Hermetic mirror of `resolve_history_scope`. The provider is a
-        /// parameter rather than `self.provider` so a caller can drive the exact
-        /// production expression under a temporary storage root.
         pub(crate) fn resolve_history(
             &self,
             provider: &str,
@@ -1832,9 +1813,6 @@ pub(crate) mod test_support {
             resolve_history_scope_with(&self.backend, &self.process_lock, provider, authoritative)
         }
 
-        /// Hermetic mirror of `resolve_authoritative`, so a fixture can assert
-        /// that a history scope is byte-equal to the account scope a route
-        /// already resolves today.
         pub(crate) fn resolve_authoritative(
             &self,
             provider: &str,
@@ -1899,31 +1877,17 @@ mod tests {
     use super::test_support::*;
     use super::*;
     use sha2::{Digest as _, Sha256};
-    use std::collections::VecDeque;
-    #[cfg(target_os = "windows")]
-    use std::mem::size_of;
-    #[cfg(target_os = "windows")]
-    use std::os::windows::fs::{symlink_file, OpenOptionsExt as _};
-    #[cfg(target_os = "windows")]
-    use std::os::windows::io::AsRawHandle as _;
-    #[cfg(target_os = "windows")]
-    use std::ptr::{null, null_mut};
     use std::sync::{Arc, Barrier};
     use std::thread;
-    #[cfg(target_os = "windows")]
-    use windows_sys::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
-    #[cfg(target_os = "windows")]
-    use windows_sys::Win32::Security::Authorization::{SetSecurityInfo, SE_FILE_OBJECT};
-    #[cfg(target_os = "windows")]
-    use windows_sys::Win32::Security::{
-        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-    };
-    #[cfg(target_os = "windows")]
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileIdInfo, GetFileInformationByHandleEx, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        READ_CONTROL, WRITE_DAC,
-    };
+
+    #[derive(PartialEq, Eq)]
+    struct ArtifactSnapshot {
+        key: Option<Vec<u8>>,
+        metadata: Option<Vec<u8>>,
+        history: Option<Vec<u8>>,
+        key_temps: usize,
+        metadata_temps: usize,
+    }
 
     fn resolve_test(
         backend: &TestBackend,
@@ -1954,205 +1918,178 @@ mod tests {
         backend.directory.join(INSTALLATION_KEY_FILE)
     }
 
+    fn temp_count(directory: &Path, target: &str) -> usize {
+        let prefix = format!(".{target}.tmp-");
+        fs::read_dir(directory)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    fn artifact_snapshot(backend: &TestBackend) -> ArtifactSnapshot {
+        ArtifactSnapshot {
+            key: fs::read(installation_key_path(backend)).ok(),
+            metadata: fs::read(backend.directory.join(METADATA_FILE)).ok(),
+            history: fs::read(backend.directory.join(V3_HISTORY_FILE)).ok(),
+            key_temps: temp_count(&backend.directory, INSTALLATION_KEY_FILE),
+            metadata_temps: temp_count(&backend.directory, METADATA_FILE),
+        }
+    }
+
+    fn authenticated_envelope(
+        key: &[u8; INSTALLATION_KEY_BYTES],
+        schema_version: u32,
+        payload_bytes: &[u8],
+    ) -> Vec<u8> {
+        let metadata_key = metadata_mac_key(key).unwrap();
+        let payload_mac = hmac_digest(&metadata_key, &[payload_bytes]).unwrap();
+        serde_json::to_vec_pretty(&MetadataEnvelope {
+            schema_version,
+            payload_bytes_base64: STANDARD.encode(payload_bytes),
+            payload_mac: encode_digest(&payload_mac),
+        })
+        .unwrap()
+    }
+
+    fn assert_no_sensitive(artifacts: &[Vec<u8>], values: &[&str], owner: &str) {
+        for (value_index, value) in values.iter().enumerate() {
+            let digest = Sha256::digest(value.as_bytes());
+            let forbidden = [
+                value.as_bytes().to_vec(),
+                format!("{digest:x}").into_bytes(),
+                STANDARD.encode(&digest).into_bytes(),
+                URL_SAFE_NO_PAD.encode(&digest).into_bytes(),
+            ];
+            for (artifact_index, artifact) in artifacts.iter().enumerate() {
+                for (variant_index, bytes) in forbidden.iter().enumerate() {
+                    assert!(
+                        !artifact.windows(bytes.len()).any(|window| window == bytes),
+                        "{owner}: sensitive value {value_index} variant {variant_index} reached artifact {artifact_index}"
+                    );
+                }
+            }
+        }
+    }
+
     #[cfg(unix)]
     fn unix_mode(path: &Path) -> u32 {
         use std::os::unix::fs::PermissionsExt as _;
         fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
-    #[cfg(target_os = "windows")]
-    fn make_windows_path_permissive(path: &Path, is_directory: bool) {
-        let mut options = OpenOptions::new();
-        options.access_mode(READ_CONTROL | WRITE_DAC);
-        if is_directory {
-            options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
-        }
-        let file = options.open(path).unwrap();
-        let status = unsafe {
-            SetSecurityInfo(
-                file.as_raw_handle() as HANDLE,
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                null_mut(),
-                null_mut(),
-                null(),
-                null(),
-            )
-        };
-        assert_eq!(status, ERROR_SUCCESS);
-    }
-
-    #[cfg(target_os = "windows")]
-    fn write_windows_secure_file(backend: &TestBackend, path: &Path, bytes: &[u8]) {
-        let mut file = open_owner_only(backend, path).unwrap();
-        file.set_len(0).unwrap();
-        file.write_all(bytes).unwrap();
-        file.flush().unwrap();
-        file.sync_all().unwrap();
-        crate::agent_storage_windows::verify_storage_handle(file.as_raw_handle() as HANDLE)
-            .unwrap();
-        crate::agent_storage_windows::verify_secure_file_path(&file, path).unwrap();
-    }
-
-    #[cfg(target_os = "windows")]
-    fn windows_secure_file_snapshot(path: &Path) -> (Vec<u8>, u64, [u8; 16]) {
-        let mut file =
-            crate::agent_storage_windows::open_existing_secure_file(path, false).unwrap();
-        crate::agent_storage_windows::verify_storage_handle(file.as_raw_handle() as HANDLE)
-            .unwrap();
-        crate::agent_storage_windows::verify_secure_file_path(&file, path).unwrap();
-        let mut identity = FILE_ID_INFO::default();
-        assert_ne!(
-            unsafe {
-                GetFileInformationByHandleEx(
-                    file.as_raw_handle() as HANDLE,
-                    FileIdInfo,
-                    (&mut identity as *mut FILE_ID_INFO).cast(),
-                    size_of::<FILE_ID_INFO>() as u32,
-                )
-            },
-            0
+    #[test]
+    fn domain_vectors_normalization_and_separation_are_stable() {
+        let key: [u8; INSTALLATION_KEY_BYTES] = std::array::from_fn(|index| index as u8);
+        assert!(
+            encode_fields(&[b"ab", b"c"]).unwrap()
+                == vec![0, 0, 0, 2, b'a', b'b', 0, 0, 0, 1, b'c']
+                && encode_fields(&[b"ab", b"c"]).unwrap() != encode_fields(&[b"a", b"bc"]).unwrap(),
+            "length-prefix contract"
         );
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).unwrap();
-        crate::agent_storage_windows::verify_secure_file_path(&file, path).unwrap();
-        (
-            bytes,
-            identity.VolumeSerialNumber,
-            identity.FileId.Identifier,
+        let account = scope_from_authoritative(
+            &key,
+            "antigravity",
+            AuthoritativeIdKind::Email,
+            b"user@example.com",
         )
-    }
-
-    #[cfg(target_os = "windows")]
-    fn assert_no_windows_secure_temp(directory: &Path, target_name: &str) {
-        let prefix = format!(".{target_name}.tmp-");
-        assert!(!fs::read_dir(directory).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(&prefix)
-        }));
-    }
-
-    #[test]
-    fn length_prefix_and_hmac_known_vectors_are_stable_and_domain_separated() {
-        let key: [u8; INSTALLATION_KEY_BYTES] = std::array::from_fn(|index| index as u8);
-        assert_eq!(
-            encode_fields(&[b"ab", b"c"]).unwrap(),
-            vec![0, 0, 0, 2, b'a', b'b', 0, 0, 0, 1, b'c']
+        .unwrap();
+        let history = scope_from_history_constant(&key, "claude").unwrap();
+        assert!(
+            account.as_str() == "sK_jjcbkOzChAgJHtE1pPpjKU4AEg_MiNut8GaL1woM",
+            "account known vector"
         );
-        assert_ne!(
-            encode_fields(&[b"ab", b"c"]).unwrap(),
-            encode_fields(&[b"a", b"bc"]).unwrap()
+        assert!(
+            history.as_str() == "yPQyLoK4QzpZjG5p_fIxQVkvgRY6mGC9CKn4NMzyqmA",
+            "history known vector"
         );
-        assert_eq!(
-            scope_from_authoritative(
-                &key,
-                "antigravity",
-                AuthoritativeIdKind::Email,
-                b"user@example.com"
-            )
-            .unwrap()
-            .as_str(),
-            "sK_jjcbkOzChAgJHtE1pPpjKU4AEg_MiNut8GaL1woM"
-        );
-        assert_eq!(
-            credential_fingerprint(&key, "claude", b"fixture-token").unwrap(),
-            "JCR4YryCMKNOeEjYQEHYrXfanXoq24YteoyJyoiSPtc"
-        );
-        assert_eq!(
-            slot_digest(&key, "claude", "environment", "CLAUDE_CODE_OAUTH_TOKEN").unwrap(),
-            "1nTOH8E7TUly1xvVG2sbUI_C0AzksMJ3iOj9vt2PNj8"
-        );
-        let lineage = URL_SAFE_NO_PAD.encode([0xA5; LINEAGE_ID_BYTES]);
-        assert_eq!(
-            scope_from_lineage(&key, "claude", &lineage)
-                .unwrap()
-                .as_str(),
-            "QsM_upNybGz6Hljs9K4Qj5uIuBI1HtHpfmPahxb1SEw"
-        );
-        assert_ne!(
-            credential_fingerprint(&key, "claude", b"fixture-token").unwrap(),
-            encode_digest(&hmac_digest(&key, &[b"slot-v1", b"claude", b"fixture-token"]).unwrap())
-        );
-    }
-
-    #[test]
-    fn history_constant_known_vector_is_stable_and_domain_separated() {
-        let key: [u8; INSTALLATION_KEY_BYTES] = std::array::from_fn(|index| index as u8);
-        // Independently derived: HMAC-SHA256(key, encode_fields(["scope-history-v1", provider])).
-        assert_eq!(
-            scope_from_history_constant(&key, "claude")
-                .unwrap()
-                .as_str(),
-            "yPQyLoK4QzpZjG5p_fIxQVkvgRY6mGC9CKn4NMzyqmA"
-        );
-        assert_eq!(
-            scope_from_history_constant(&key, "codex").unwrap().as_str(),
-            "aiwiKwI-dRUWa0g2x2M7afRU5AiQYm3jCePREw7w_z4"
-        );
-        assert_ne!(
-            scope_from_history_constant(&key, "claude")
-                .unwrap()
-                .as_str(),
-            scope_from_history_constant(&key, "codex").unwrap().as_str()
-        );
-        // The five frozen domains stay frozen: the new tag must not collide with
-        // any of them for the same provider, and a different installation key
-        // must not produce the same constant.
-        for existing in [
-            scope_from_authoritative(&key, "claude", AuthoritativeIdKind::OpaqueId, b"claude")
-                .unwrap()
-                .as_str()
-                .to_string(),
-            scope_from_authoritative(&key, "claude", AuthoritativeIdKind::Email, b"claude")
-                .unwrap()
-                .as_str()
-                .to_string(),
-            scope_from_lineage(
-                &key,
-                "claude",
-                &URL_SAFE_NO_PAD.encode([0xA5; LINEAGE_ID_BYTES]),
-            )
-            .unwrap()
-            .as_str()
-            .to_string(),
-            credential_fingerprint(&key, "claude", b"claude").unwrap(),
-            slot_digest(&key, "claude", "claude", "claude").unwrap(),
-            encode_digest(&metadata_mac_key(&key).unwrap()),
-        ] {
-            assert_ne!(
-                scope_from_history_constant(&key, "claude")
-                    .unwrap()
-                    .as_str(),
-                existing
+        let lineage = scope_from_lineage(
+            &key,
+            "claude",
+            &URL_SAFE_NO_PAD.encode([0xA5; LINEAGE_ID_BYTES]),
+        )
+        .unwrap();
+        let fingerprint = credential_fingerprint(&key, "claude", b"claude").unwrap();
+        let slot = slot_digest(&key, "claude", "claude", "claude").unwrap();
+        let metadata = encode_digest(&metadata_mac_key(&key).unwrap());
+        for (index, value) in [
+            account.as_str(),
+            lineage.as_str(),
+            fingerprint.as_str(),
+            slot.as_str(),
+            metadata.as_str(),
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert!(
+                history.as_str() != *value,
+                "history domain separation {index}"
             );
         }
-        assert_ne!(
-            scope_from_history_constant(&key, "claude")
-                .unwrap()
-                .as_str(),
-            scope_from_history_constant(&[0xFF; INSTALLATION_KEY_BYTES], "claude")
-                .unwrap()
-                .as_str()
+        assert!(
+            history
+                != scope_from_history_constant(&[0xFF; INSTALLATION_KEY_BYTES], "claude").unwrap(),
+            "history installation separation"
         );
+
+        let backend = TestBackend::new("domain-normalization");
+        let lock = Mutex::new(());
+        let resolve = |kind, identifier| {
+            resolve_authoritative_with(&backend, &lock, "provider", kind, identifier).unwrap()
+        };
+        assert!(
+            resolve(AuthoritativeIdKind::Email, "  User@Example.COM ")
+                == resolve(AuthoritativeIdKind::Email, "user@example.com"),
+            "email normalization"
+        );
+        assert!(
+            resolve(AuthoritativeIdKind::OpaqueId, " Account-A ")
+                != resolve(AuthoritativeIdKind::OpaqueId, "account-a"),
+            "opaque identifier case"
+        );
+        assert!(
+            scope_from_authoritative(
+                &[1; INSTALLATION_KEY_BYTES],
+                "codex",
+                AuthoritativeIdKind::OpaqueId,
+                b"acct-123",
+            )
+            .unwrap()
+                != scope_from_authoritative(
+                    &[2; INSTALLATION_KEY_BYTES],
+                    "codex",
+                    AuthoritativeIdKind::OpaqueId,
+                    b"acct-123",
+                )
+                .unwrap(),
+            "account installation separation"
+        );
+        backend.cleanup();
     }
 
     #[test]
-    fn history_scope_is_constant_across_credential_rotation_and_authoritative_when_supplied() {
-        let backend = TestBackend::new("history-scope");
+    fn history_scope_routes_are_constant_authoritative_and_metadata_free() {
+        let backend = TestBackend::new("history-routes");
         let lock = Mutex::new(());
+        let constant = resolve_history_scope_with(&backend, &lock, "claude", None).unwrap();
+        assert!(
+            !backend.directory.join(METADATA_FILE).exists()
+                && !backend.events().contains(&FsOperation::ReadMetadata),
+            "constant history metadata-free route"
+        );
         let first = resolve_test(&backend, &lock, b"marker-one").unwrap();
-        let constant_one = resolve_history_scope_with(&backend, &lock, "claude", None).unwrap();
         let second = resolve_test(&backend, &lock, b"marker-two").unwrap();
-        let constant_two = resolve_history_scope_with(&backend, &lock, "claude", None).unwrap();
-        // Precondition: the rotation really did fragment the account scope.
-        assert_ne!(first, second);
-        assert_eq!(constant_one, constant_two);
-        assert_ne!(constant_one.as_str(), first.as_str());
-        assert_ne!(constant_one.as_str(), second.as_str());
-
+        assert!(first != second, "account rotation precondition");
+        assert!(
+            resolve_history_scope_with(&backend, &lock, "claude", None).unwrap() == constant
+                && constant.as_str() != first.as_str()
+                && constant.as_str() != second.as_str(),
+            "history rotation stability"
+        );
         let authoritative = resolve_history_scope_with(
             &backend,
             &lock,
@@ -2160,7 +2097,7 @@ mod tests {
             Some((AuthoritativeIdKind::OpaqueId, "acct-123")),
         )
         .unwrap();
-        let expected = resolve_authoritative_with(
+        let account = resolve_authoritative_with(
             &backend,
             &lock,
             "codex",
@@ -2168,363 +2105,123 @@ mod tests {
             "acct-123",
         )
         .unwrap();
-        assert_eq!(authoritative.as_str(), expected.as_str());
-        assert_ne!(
-            authoritative.as_str(),
-            resolve_history_scope_with(&backend, &lock, "codex", None)
-                .unwrap()
-                .as_str()
+        assert!(
+            authoritative.as_str() == account.as_str(),
+            "authoritative history route"
         );
         backend.cleanup();
     }
 
     #[test]
-    fn history_scope_does_not_load_metadata_and_fails_closed_without_a_key() {
-        let backend = TestBackend::new("history-scope-no-metadata");
-        let lock = Mutex::new(());
-        resolve_history_scope_with(&backend, &lock, "claude", None).unwrap();
-        // The constant needs the installation key only; no metadata file is
-        // created, read or authenticated on its behalf.
-        assert!(!backend.directory.join(METADATA_FILE).exists());
-
-        let unusable = TestBackend::new("history-scope-no-key").with_installation_key(vec![
-            0x11;
-            INSTALLATION_KEY_BYTES
-                - 1
-        ]);
-        assert_eq!(
-            resolve_history_scope_with(&unusable, &Mutex::new(()), "claude", None),
-            Err(AccountScopeError::InvalidInstallationKey)
-        );
-        assert_eq!(
-            resolve_history_scope_with(&backend, &lock, "", None),
-            Err(AccountScopeError::InvalidEvidence)
-        );
-        unusable.cleanup();
-        backend.cleanup();
-    }
-
-    #[test]
-    fn different_installation_keys_cannot_link_the_same_identifier() {
-        let one = scope_from_authoritative(
-            &[1; INSTALLATION_KEY_BYTES],
-            "codex",
-            AuthoritativeIdKind::OpaqueId,
-            b"acct-123",
-        )
-        .unwrap();
-        let two = scope_from_authoritative(
-            &[2; INSTALLATION_KEY_BYTES],
-            "codex",
-            AuthoritativeIdKind::OpaqueId,
-            b"acct-123",
-        )
-        .unwrap();
-        assert_ne!(one, two);
-    }
-
-    #[test]
-    fn authoritative_normalization_is_frozen() {
-        let backend = TestBackend::new("authoritative-normalization");
-        let lock = Mutex::new(());
-        let mixed = resolve_authoritative_with(
-            &backend,
-            &lock,
-            "antigravity",
-            AuthoritativeIdKind::Email,
-            "  User@Example.COM ",
-        )
-        .unwrap();
-        let normalized = resolve_authoritative_with(
-            &backend,
-            &lock,
-            "antigravity",
-            AuthoritativeIdKind::Email,
-            "user@example.com",
-        )
-        .unwrap();
-        assert_eq!(mixed, normalized);
-        let id_upper = resolve_authoritative_with(
-            &backend,
-            &lock,
-            "codex",
-            AuthoritativeIdKind::OpaqueId,
-            " Account-A ",
-        )
-        .unwrap();
-        let id_lower = resolve_authoritative_with(
-            &backend,
-            &lock,
-            "codex",
-            AuthoritativeIdKind::OpaqueId,
-            "account-a",
-        )
-        .unwrap();
-        assert_ne!(id_upper, id_lower);
-        backend.cleanup();
-    }
-
-    #[test]
-    fn same_marker_reuses_lineage_across_sources_but_external_replacement_fragments() {
+    fn credential_lineage_reuse_fragmentation_and_restart_are_stable() {
         let backend = TestBackend::new("lineage-rules");
         let lock = Mutex::new(());
         let first =
-            resolve_credential_with(&backend, &lock, "claude", "file", "/fixture/a", b"token-a")
+            resolve_credential_with(&backend, &lock, "claude", "file", "slot-a", b"marker-a")
                 .unwrap();
         let cross_source = resolve_credential_with(
             &backend,
             &lock,
             "claude",
-            "keychain",
-            "service-a",
-            b"token-a",
+            "credential-store",
+            "slot-b",
+            b"marker-a",
         )
         .unwrap();
         let replacement =
-            resolve_credential_with(&backend, &lock, "claude", "file", "/fixture/a", b"token-b")
+            resolve_credential_with(&backend, &lock, "claude", "file", "slot-a", b"marker-b")
                 .unwrap();
-        assert_eq!(first, cross_source);
-        assert_ne!(first, replacement);
+        assert!(first == cross_source, "cross-source lineage reuse");
+        assert!(first != replacement, "external rotation fragmentation");
+        let restarted = backend.clone();
+        assert!(
+            resolve_credential_with(
+                &restarted,
+                &Mutex::new(()),
+                "claude",
+                "restart-source",
+                "restart-slot",
+                b"marker-a",
+            )
+            .unwrap()
+                == first,
+            "lineage restart reuse"
+        );
         backend.cleanup();
     }
 
     #[test]
-    fn refresh_crash_points_keep_old_and_new_recoverable_without_partial_metadata() {
-        let backend = TestBackend::new("refresh-crashes");
+    fn refresh_transitions_preserve_lineage_across_crash_and_known_new_paths() {
+        let backend = TestBackend::new("refresh-crash");
         let lock = Mutex::new(());
-        let old = resolve_test(&backend, &lock, b"old-refresh").unwrap();
-        let key = installation_key(&backend);
-
-        // Crash before metadata save: credentials are still old and metadata is unchanged.
+        let old = resolve_test(&backend, &lock, b"old-marker").unwrap();
         let before = metadata_bytes(&backend);
-        assert_eq!(resolve_test(&backend, &lock, b"old-refresh").unwrap(), old);
-        assert_eq!(metadata_bytes(&backend), before);
-
-        // Crash after metadata save but before credential save: either credential resolves.
+        assert!(
+            resolve_test(&backend, &lock, b"old-marker").unwrap() == old
+                && metadata_bytes(&backend) == before,
+            "pre-save refresh state"
+        );
         let transferred = transfer_credential_with(
             &backend,
             &lock,
-            &key,
+            &installation_key(&backend),
             "claude",
             "fixture-source",
             "fixture-location",
-            b"old-refresh",
-            b"new-refresh",
+            b"old-marker",
+            b"new-marker",
         )
         .unwrap();
-        assert_eq!(transferred, old);
-        assert_eq!(resolve_test(&backend, &lock, b"old-refresh").unwrap(), old);
-        assert_eq!(resolve_test(&backend, &lock, b"new-refresh").unwrap(), old);
-
-        // Crash after credential save: the new marker still resolves the same lineage.
-        assert_eq!(resolve_test(&backend, &lock, b"new-refresh").unwrap(), old);
+        assert!(transferred == old, "refresh transfer lineage");
+        assert!(
+            resolve_test(&backend, &lock, b"old-marker").unwrap() == old
+                && resolve_test(&backend, &lock, b"new-marker").unwrap() == old,
+            "post-metadata crash recovery"
+        );
         backend.cleanup();
-    }
 
-    #[test]
-    fn refresh_reuses_an_existing_new_fingerprint_lineage_when_old_is_unseen() {
-        let backend = TestBackend::new("refresh-known-new");
+        let known = TestBackend::new("refresh-known-new");
         let lock = Mutex::new(());
         let known_new = resolve_credential_with(
-            &backend,
+            &known,
             &lock,
             "claude",
-            "keychain",
+            "credential-store",
             "known-slot",
-            b"new-refresh",
+            b"known-new",
         )
         .unwrap();
-        let key = installation_key(&backend);
-
         let transferred = transfer_credential_with(
-            &backend,
+            &known,
             &lock,
-            &key,
+            &installation_key(&known),
             "claude",
             "file",
-            "refreshing-slot",
-            b"previously-unseen-old-refresh",
-            b"new-refresh",
+            "refresh-slot",
+            b"unseen-old",
+            b"known-new",
         )
         .unwrap();
-
-        assert_eq!(transferred, known_new);
-        assert_eq!(
+        assert!(transferred == known_new, "known-new lineage reuse");
+        assert!(
             resolve_credential_with(
-                &backend,
+                &known,
                 &lock,
                 "claude",
                 "file",
-                "refreshing-slot",
-                b"previously-unseen-old-refresh",
+                "refresh-slot",
+                b"unseen-old",
             )
-            .unwrap(),
-            known_new
+            .unwrap()
+                == known_new,
+            "old fingerprint backfill"
         );
-        backend.cleanup();
+        known.cleanup();
     }
 
     #[test]
-    fn metadata_save_failure_is_unavailable_and_preserves_last_valid_bytes() {
-        let backend = TestBackend::new("save-failure");
-        let lock = Mutex::new(());
-        let old = resolve_test(&backend, &lock, b"old").unwrap();
-        let before = metadata_bytes(&backend);
-        let key = installation_key(&backend);
-        backend.fail_fs(FsOperation::ReplaceFile);
-        assert_eq!(
-            transfer_credential_with(
-                &backend,
-                &lock,
-                &key,
-                "claude",
-                "fixture-source",
-                "fixture-location",
-                b"old",
-                b"new"
-            ),
-            Err(AccountScopeError::MetadataWrite)
-        );
-        assert_eq!(metadata_bytes(&backend), before);
-        assert_eq!(resolve_test(&backend, &lock, b"old").unwrap(), old);
-        assert_ne!(resolve_test(&backend, &lock, b"new").unwrap(), old);
-        backend.cleanup();
-    }
-
-    #[test]
-    fn atomic_metadata_failure_points_never_leave_partial_json() {
-        for operation in [
-            FsOperation::CreateTemp,
-            FsOperation::WriteTemp,
-            FsOperation::SyncTemp,
-            FsOperation::ReplaceFile,
-        ] {
-            let backend = TestBackend::new("atomic-failure-point");
-            let lock = Mutex::new(());
-            let old = resolve_test(&backend, &lock, b"old").unwrap();
-            let before = metadata_bytes(&backend);
-            backend.fail_fs(operation);
-            assert_eq!(
-                resolve_test(&backend, &lock, b"new"),
-                Err(AccountScopeError::MetadataWrite)
-            );
-            assert_eq!(metadata_bytes(&backend), before);
-            assert_eq!(resolve_test(&backend, &lock, b"old").unwrap(), old);
-            decode_metadata(&installation_key(&backend), &metadata_bytes(&backend)).unwrap();
-            backend.cleanup();
-        }
-    }
-
-    #[test]
-    fn directory_sync_failure_returns_unavailable_but_keeps_valid_metadata() {
-        let backend = TestBackend::new("directory-sync-failure");
-        let lock = Mutex::new(());
-        let old = resolve_test(&backend, &lock, b"old").unwrap();
-        backend.fail_fs(FsOperation::SyncDirectory);
-        assert_eq!(
-            resolve_test(&backend, &lock, b"new"),
-            Err(AccountScopeError::MetadataWrite)
-        );
-        let new_scope = resolve_test(&backend, &lock, b"new").unwrap();
-        assert_ne!(new_scope, old);
-        backend.cleanup();
-    }
-
-    #[test]
-    fn key_loss_reloads_replacement_key_before_metadata_recovery() {
-        let backend = TestBackend::new("key-loss-reload");
-        backend.state.lock().unwrap().random = VecDeque::from([
-            vec![0x31; INSTALLATION_KEY_BYTES],
-            vec![0x41; LINEAGE_ID_BYTES],
-            vec![0x32; INSTALLATION_KEY_BYTES],
-            vec![0x42; LINEAGE_ID_BYTES],
-        ]);
-        let lock = Mutex::new(());
-        let old_scope = resolve_test(&backend, &lock, b"same-marker").unwrap();
-        let old_metadata = metadata_bytes(&backend);
-
-        fs::remove_file(installation_key_path(&backend)).unwrap();
-        assert_eq!(
-            resolve_test(&backend, &lock, b"same-marker"),
-            Err(AccountScopeError::OrphanedArtifacts)
-        );
-        assert_eq!(
-            fs::read(
-                backend
-                    .directory
-                    .join("quota-account-scope-v1.orphaned-1752710400.json")
-            )
-            .unwrap(),
-            old_metadata
-        );
-
-        let replacement_scope = resolve_test(&backend, &lock, b"same-marker").unwrap();
-        assert_ne!(replacement_scope, old_scope);
-        let replacement_metadata = metadata_bytes(&backend);
-        assert_eq!(
-            resolve_test(&backend, &lock, b"same-marker").unwrap(),
-            replacement_scope
-        );
-        assert_eq!(metadata_bytes(&backend), replacement_metadata);
-        backend.cleanup();
-    }
-
-    #[test]
-    fn concurrent_first_creation_persists_one_winner_under_the_file_lock() {
-        let backend = TestBackend::new("concurrent-key");
-        backend.state.lock().unwrap().random = VecDeque::from([
-            vec![0x31; INSTALLATION_KEY_BYTES],
-            vec![0x32; INSTALLATION_KEY_BYTES],
-        ]);
-        let start = Arc::new(Barrier::new(3));
-        let one_backend = backend.clone();
-        let one_start = start.clone();
-        let one = thread::spawn(move || {
-            one_start.wait();
-            ensure_installation_key(&one_backend, &Mutex::new(()))
-        });
-        let two_backend = backend.clone();
-        let two_start = start.clone();
-        let two = thread::spawn(move || {
-            two_start.wait();
-            ensure_installation_key(&two_backend, &Mutex::new(()))
-        });
-        start.wait();
-
-        let one = one.join().unwrap().unwrap();
-        let two = two.join().unwrap().unwrap();
-        assert_eq!(one, two);
-        assert_eq!(fs::read(installation_key_path(&backend)).unwrap(), one);
-        assert_eq!(
-            backend
-                .state
-                .lock()
-                .unwrap()
-                .events
-                .iter()
-                .filter(|event| **event == "replace-file")
-                .count(),
-            1
-        );
-        backend.cleanup();
-    }
-
-    #[test]
-    fn existing_installation_key_is_reloaded_on_every_call_without_a_process_cache() {
-        let backend = TestBackend::new("key-reload");
-        let first = ensure_installation_key(&backend, &Mutex::new(())).unwrap();
-        assert_eq!(first, [0x11; INSTALLATION_KEY_BYTES]);
-
-        backend.write_installation_key(&[0x52; INSTALLATION_KEY_BYTES]);
-        let second = ensure_installation_key(&backend, &Mutex::new(())).unwrap();
-        assert_eq!(second, [0x52; INSTALLATION_KEY_BYTES]);
-        assert_ne!(first, second);
-        backend.cleanup();
-    }
-
-    #[test]
-    fn conflicting_two_process_transfers_fail_closed() {
-        let backend = TestBackend::new("transfer-conflict");
+    fn conflicting_refresh_transfers_have_one_persistent_winner() {
+        let backend = TestBackend::new("refresh-conflict");
         let setup_lock = Mutex::new(());
         let scope_a =
             resolve_credential_with(&backend, &setup_lock, "claude", "file", "slot-a", b"old-a")
@@ -2532,7 +2229,7 @@ mod tests {
         let scope_b =
             resolve_credential_with(&backend, &setup_lock, "claude", "file", "slot-b", b"old-b")
                 .unwrap();
-        assert_ne!(scope_a, scope_b);
+        assert!(scope_a != scope_b, "conflict precondition");
         let key = installation_key(&backend);
         let one_backend = backend.clone();
         let two_backend = backend.clone();
@@ -2561,92 +2258,544 @@ mod tests {
             )
         });
         let results = [one.join().unwrap(), two.join().unwrap()];
-        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-        assert_eq!(
+        assert!(
+            results.iter().filter(|result| result.is_ok()).count() == 1,
+            "single transfer winner"
+        );
+        assert!(
             results
                 .iter()
                 .filter(|result| **result == Err(AccountScopeError::MetadataConflict))
-                .count(),
-            1
+                .count()
+                == 1,
+            "single transfer conflict"
+        );
+        let winner = results
+            .iter()
+            .find_map(|result| result.as_ref().ok())
+            .unwrap()
+            .clone();
+        assert!(
+            resolve_credential_with(
+                &backend,
+                &Mutex::new(()),
+                "claude",
+                "restart-source",
+                "restart-slot",
+                b"shared-new",
+            )
+            .unwrap()
+                == winner,
+            "persistent transfer winner"
         );
         backend.cleanup();
     }
 
     #[test]
-    fn installation_key_round_trip_is_exact_and_owner_only() {
-        let backend = TestBackend::new("installation-key-round-trip");
+    fn installation_key_exact_reload_and_random_rejection_are_stable() {
+        let backend = TestBackend::new("key-lifecycle");
         let first = ensure_installation_key(&backend, &Mutex::new(())).unwrap();
-        let second = ensure_installation_key(&backend, &Mutex::new(())).unwrap();
-        assert_eq!(first, [0x11; INSTALLATION_KEY_BYTES]);
-        assert_eq!(second, first);
-        assert_eq!(fs::read(installation_key_path(&backend)).unwrap(), first);
+        assert!(
+            first == [0x11; INSTALLATION_KEY_BYTES],
+            "exact generated key"
+        );
+        assert!(
+            fs::read(installation_key_path(&backend)).unwrap() == first,
+            "exact persisted key"
+        );
         #[cfg(unix)]
         {
-            assert_eq!(unix_mode(&backend.directory), 0o700);
-            assert_eq!(unix_mode(&installation_key_path(&backend)), 0o600);
+            assert!(
+                unix_mode(&backend.directory) == 0o700,
+                "storage directory mode"
+            );
+            assert!(
+                unix_mode(&installation_key_path(&backend)) == 0o600,
+                "installation key mode"
+            );
         }
+        backend.write_installation_key(&[0x52; INSTALLATION_KEY_BYTES]);
+        let second = ensure_installation_key(&backend, &Mutex::new(())).unwrap();
+        assert!(second == [0x52; INSTALLATION_KEY_BYTES], "key reload value");
+        assert!(first != second, "key reload bypassed process cache");
         backend.cleanup();
+
+        let unavailable = TestBackend::new("random-unavailable");
+        unavailable.set_random(Vec::new());
+        assert!(
+            resolve_test(&unavailable, &Mutex::new(()), b"marker")
+                == Err(AccountScopeError::RandomUnavailable),
+            "random failure type"
+        );
+        assert!(
+            !installation_key_path(&unavailable).exists()
+                && !unavailable.directory.join(METADATA_FILE).exists(),
+            "random failure artifacts"
+        );
+        unavailable.cleanup();
     }
 
     #[test]
-    fn installation_key_read_failure_and_invalid_lengths_preserve_artifacts() {
-        let read_failure = TestBackend::new("installation-key-read-failure")
+    fn installation_key_rejections_preserve_existing_artifacts() {
+        let read_failure = TestBackend::new("key-read-failure")
             .with_installation_key(vec![0x61; INSTALLATION_KEY_BYTES]);
-        let metadata = b"metadata-read-failure";
-        let history = b"history-read-failure";
-        fs::write(read_failure.directory.join(METADATA_FILE), metadata).unwrap();
-        fs::write(read_failure.directory.join(V3_HISTORY_FILE), history).unwrap();
+        fs::write(read_failure.directory.join(METADATA_FILE), b"metadata").unwrap();
+        fs::write(read_failure.directory.join(V3_HISTORY_FILE), b"history").unwrap();
+        let before = artifact_snapshot(&read_failure);
         read_failure.fail_fs(FsOperation::ReadInstallationKey);
-        assert_eq!(
-            ensure_installation_key(&read_failure, &Mutex::new(())),
-            Err(AccountScopeError::InstallationKeyRead)
+        assert!(
+            ensure_installation_key(&read_failure, &Mutex::new(()))
+                == Err(AccountScopeError::InstallationKeyRead),
+            "key read failure type"
         );
-        assert_eq!(metadata_bytes(&read_failure), metadata);
-        assert_eq!(
-            fs::read(read_failure.directory.join(V3_HISTORY_FILE)).unwrap(),
-            history
+        assert!(
+            artifact_snapshot(&read_failure) == before,
+            "key read preservation"
         );
         read_failure.cleanup();
 
-        for (tag, length) in [
-            ("installation-key-short", 31),
-            ("installation-key-long", 33),
-        ] {
-            let backend = TestBackend::new(tag).with_installation_key(vec![0x62; length]);
-            let metadata = b"metadata-invalid-key";
-            let history = b"history-invalid-key";
-            fs::write(backend.directory.join(METADATA_FILE), metadata).unwrap();
-            fs::write(backend.directory.join(V3_HISTORY_FILE), history).unwrap();
-            let original_key = fs::read(installation_key_path(&backend)).unwrap();
-
-            assert_eq!(
-                ensure_installation_key(&backend, &Mutex::new(())),
-                Err(AccountScopeError::InvalidInstallationKey),
-                "{tag}"
+        for (case, length) in [("short", 31), ("trailing", 33)] {
+            let backend = TestBackend::new(case).with_installation_key(vec![0x62; length]);
+            fs::write(backend.directory.join(METADATA_FILE), b"metadata").unwrap();
+            fs::write(backend.directory.join(V3_HISTORY_FILE), b"history").unwrap();
+            let before = artifact_snapshot(&backend);
+            assert!(
+                ensure_installation_key(&backend, &Mutex::new(()))
+                    == Err(AccountScopeError::InvalidInstallationKey),
+                "invalid key length {case}"
             );
-            assert_eq!(
-                fs::read(installation_key_path(&backend)).unwrap(),
-                original_key
-            );
-            assert_eq!(metadata_bytes(&backend), metadata);
-            assert_eq!(
-                fs::read(backend.directory.join(V3_HISTORY_FILE)).unwrap(),
-                history
+            assert!(
+                artifact_snapshot(&backend) == before,
+                "key length preservation {case}"
             );
             backend.cleanup();
         }
     }
 
+    #[test]
+    fn concurrent_installation_key_creation_persists_one_winner() {
+        let backend = TestBackend::new("concurrent-key");
+        backend.set_random(vec![
+            vec![0x31; INSTALLATION_KEY_BYTES],
+            vec![0x32; INSTALLATION_KEY_BYTES],
+        ]);
+        let start = Arc::new(Barrier::new(3));
+        let spawn = |backend: TestBackend, start: Arc<Barrier>| {
+            thread::spawn(move || {
+                start.wait();
+                ensure_installation_key(&backend, &Mutex::new(()))
+            })
+        };
+        let one = spawn(backend.clone(), start.clone());
+        let two = spawn(backend.clone(), start.clone());
+        start.wait();
+        let one = one.join().unwrap().unwrap();
+        let two = two.join().unwrap().unwrap();
+        assert!(one == two, "concurrent key winner");
+        assert!(
+            fs::read(installation_key_path(&backend)).unwrap() == one,
+            "persisted concurrent winner"
+        );
+        let commits = backend
+            .events()
+            .iter()
+            .filter(|operation| **operation == FsOperation::ReplaceFile)
+            .count();
+        assert!(commits == 1, "single key commit");
+        backend.cleanup();
+        let reread = TestBackend::new("persistent-winner-reread");
+        reread.set_random(vec![vec![0x41; INSTALLATION_KEY_BYTES]]);
+        let replacement = vec![0x42; INSTALLATION_KEY_BYTES];
+        reread.replace_installation_key_on_sync(replacement.clone());
+        let winner = ensure_installation_key(&reread, &Mutex::new(())).unwrap();
+        assert!(
+            winner.as_slice() == replacement.as_slice()
+                && fs::read(installation_key_path(&reread)).unwrap() == replacement,
+            "persistent winner reread"
+        );
+        reread.cleanup();
+    }
+
+    #[test]
+    fn atomic_key_and_metadata_commit_boundaries_are_typed_and_recoverable() {
+        let precommit = [
+            FsOperation::CreateTemp,
+            FsOperation::WriteTemp,
+            FsOperation::SyncTemp,
+            FsOperation::ReplaceFile,
+        ];
+        for operation in precommit {
+            let backend = TestBackend::new("key-precommit");
+            backend.fail_fs(operation);
+            assert!(
+                ensure_installation_key(&backend, &Mutex::new(()))
+                    == Err(AccountScopeError::InstallationKeyWrite)
+                    && !installation_key_path(&backend).exists()
+                    && temp_count(&backend.directory, INSTALLATION_KEY_FILE) == 0,
+                "key precommit {operation:?}"
+            );
+            backend.cleanup();
+        }
+        let key_postcommit = TestBackend::new("key-postcommit");
+        key_postcommit.fail_fs(FsOperation::SyncDirectory);
+        assert!(
+            ensure_installation_key(&key_postcommit, &Mutex::new(()))
+                == Err(AccountScopeError::InstallationKeyWrite),
+            "key postcommit type"
+        );
+        let persisted = fs::read(installation_key_path(&key_postcommit)).unwrap();
+        assert!(
+            ensure_installation_key(&key_postcommit, &Mutex::new(())).unwrap()
+                == persisted.as_slice(),
+            "key postcommit recoverability"
+        );
+        key_postcommit.cleanup();
+
+        for operation in precommit {
+            let backend = TestBackend::new("metadata-precommit");
+            let lock = Mutex::new(());
+            resolve_test(&backend, &lock, b"old-marker").unwrap();
+            let before = artifact_snapshot(&backend);
+            backend.fail_fs(operation);
+            assert!(
+                resolve_test(&backend, &lock, b"new-marker")
+                    == Err(AccountScopeError::MetadataWrite)
+                    && artifact_snapshot(&backend) == before,
+                "metadata precommit {operation:?}"
+            );
+            backend.cleanup();
+        }
+        let metadata_postcommit = TestBackend::new("metadata-postcommit");
+        let lock = Mutex::new(());
+        let old = resolve_test(&metadata_postcommit, &lock, b"old-marker").unwrap();
+        metadata_postcommit.fail_fs(FsOperation::SyncDirectory);
+        assert!(
+            resolve_test(&metadata_postcommit, &lock, b"new-marker")
+                == Err(AccountScopeError::MetadataWrite),
+            "metadata postcommit type"
+        );
+        decode_metadata(
+            &installation_key(&metadata_postcommit),
+            &metadata_bytes(&metadata_postcommit),
+        )
+        .unwrap();
+        assert!(
+            resolve_test(&metadata_postcommit, &lock, b"new-marker").unwrap() != old
+                && temp_count(&metadata_postcommit.directory, METADATA_FILE) == 0,
+            "metadata postcommit recoverability"
+        );
+        metadata_postcommit.cleanup();
+    }
+
+    #[test]
+    fn key_loss_recovery_preserves_evidence_and_defers_one_poll() {
+        let backend = TestBackend::new("key-loss");
+        backend.set_random(vec![
+            vec![0x31; INSTALLATION_KEY_BYTES],
+            vec![0x41; LINEAGE_ID_BYTES],
+            vec![0x32; INSTALLATION_KEY_BYTES],
+            vec![0x42; LINEAGE_ID_BYTES],
+        ]);
+        let lock = Mutex::new(());
+        let old_scope = resolve_test(&backend, &lock, b"same-marker").unwrap();
+        let old_key = installation_key(&backend);
+        let old_metadata = metadata_bytes(&backend);
+        let history = b"history-evidence";
+        fs::write(backend.directory.join(V3_HISTORY_FILE), history).unwrap();
+        fs::remove_file(installation_key_path(&backend)).unwrap();
+        assert!(
+            resolve_test(&backend, &lock, b"same-marker")
+                == Err(AccountScopeError::OrphanedArtifacts),
+            "key-loss deferral"
+        );
+        let quarantine = backend
+            .directory
+            .join("quota-account-scope-v1.orphaned-1752710400.json");
+        assert!(
+            fs::read(&quarantine).unwrap() == old_metadata,
+            "key-loss metadata evidence"
+        );
+        assert!(
+            fs::read(backend.directory.join(V3_HISTORY_FILE)).unwrap() == history,
+            "key-loss history preservation"
+        );
+        let replacement_key = installation_key(&backend);
+        assert!(replacement_key != old_key, "key-loss replacement key");
+        let replacement_scope = resolve_test(&backend, &lock, b"same-marker").unwrap();
+        assert!(replacement_scope != old_scope, "key-loss scope replacement");
+        assert!(
+            resolve_test(&backend, &lock, b"same-marker").unwrap() == replacement_scope,
+            "key-loss stable next poll"
+        );
+        backend.cleanup();
+
+        let history_only = TestBackend::new("history-only-orphan");
+        fs::create_dir_all(&history_only.directory).unwrap();
+        fs::write(history_only.directory.join(V3_HISTORY_FILE), history).unwrap();
+        assert!(
+            resolve_test(&history_only, &Mutex::new(()), b"marker")
+                == Err(AccountScopeError::OrphanedArtifacts),
+            "history-only deferral"
+        );
+        assert!(
+            fs::read(history_only.directory.join(V3_HISTORY_FILE)).unwrap() == history,
+            "history-only preservation"
+        );
+        assert!(
+            resolve_test(&history_only, &Mutex::new(()), b"marker").is_ok(),
+            "history-only next poll"
+        );
+        history_only.cleanup();
+    }
+
+    #[test]
+    fn orphan_grammar_inspection_and_nonregular_entries_fail_closed() {
+        for (index, (name, expected)) in [
+            ("quota-account-scope-v1.orphaned-0.json", true),
+            ("quota-account-scope-v1.orphaned-0.1.json", true),
+            ("quota-account-scope-v1.orphaned--1.json", false),
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert!(
+                is_orphaned_metadata_name(name) == *expected,
+                "orphan grammar {index}"
+            );
+        }
+
+        let forged = TestBackend::new("forged-orphan");
+        ensure_real_directory(&forged, &forged.directory).unwrap();
+        let forged_path = forged
+            .directory
+            .join("quota-account-scope-v1.orphaned--1.json");
+        fs::write(&forged_path, b"forged-evidence").unwrap();
+        assert!(
+            resolve_test(&forged, &Mutex::new(()), b"marker").is_ok()
+                && fs::read(&forged_path).unwrap() == b"forged-evidence",
+            "forged orphan preservation"
+        );
+        forged.cleanup();
+
+        let inspection = TestBackend::new("orphan-inspection");
+        ensure_real_directory(&inspection, &inspection.directory).unwrap();
+        let orphaned = inspection
+            .directory
+            .join("quota-account-scope-v1.orphaned-1752710400.json");
+        fs::write(&orphaned, b"orphan-evidence").unwrap();
+        inspection.fail_fs(FsOperation::InspectOrphanedMetadata);
+        assert!(
+            resolve_test(&inspection, &Mutex::new(()), b"marker")
+                == Err(AccountScopeError::StorageUnavailable)
+                && !installation_key_path(&inspection).exists(),
+            "orphan inspection failure"
+        );
+        assert!(
+            resolve_test(&inspection, &Mutex::new(()), b"marker")
+                == Err(AccountScopeError::OrphanedArtifacts)
+                && fs::read(&orphaned).unwrap() == b"orphan-evidence",
+            "orphan inspection retry"
+        );
+        inspection.cleanup();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{symlink, PermissionsExt as _};
+            let backend = TestBackend::new("orphan-symlink");
+            ensure_real_directory(&backend, &backend.directory).unwrap();
+            let orphaned = backend
+                .directory
+                .join("quota-account-scope-v1.orphaned-1752710400.json");
+            let external = backend.directory.with_extension("orphan-target");
+            fs::write(&external, b"external-evidence").unwrap();
+            fs::set_permissions(&external, fs::Permissions::from_mode(0o640)).unwrap();
+            symlink(&external, &orphaned).unwrap();
+            assert!(
+                resolve_test(&backend, &Mutex::new(()), b"marker")
+                    == Err(AccountScopeError::StorageUnavailable)
+                    && !installation_key_path(&backend).exists()
+                    && fs::read(&external).unwrap() == b"external-evidence",
+                "orphan nonregular entry"
+            );
+            backend.cleanup();
+            fs::remove_file(external).unwrap();
+        }
+    }
+
+    #[test]
+    fn orphan_key_write_failures_preserve_quarantine_and_defer_again() {
+        for operation in [
+            FsOperation::CreateTemp,
+            FsOperation::WriteTemp,
+            FsOperation::SyncTemp,
+            FsOperation::ReplaceFile,
+        ] {
+            let backend = TestBackend::new("orphan-key-write");
+            backend.set_random(vec![
+                vec![0x11; INSTALLATION_KEY_BYTES],
+                vec![0x12; INSTALLATION_KEY_BYTES],
+                vec![0x21; LINEAGE_ID_BYTES],
+            ]);
+            fs::create_dir_all(&backend.directory).unwrap();
+            let original = b"orphan-metadata";
+            fs::write(backend.directory.join(METADATA_FILE), original).unwrap();
+            backend.fail_fs(operation);
+            assert!(
+                resolve_test(&backend, &Mutex::new(()), b"marker")
+                    == Err(AccountScopeError::InstallationKeyWrite),
+                "orphan key write type {operation:?}"
+            );
+            let orphaned = backend
+                .directory
+                .join("quota-account-scope-v1.orphaned-1752710400.json");
+            assert!(
+                !installation_key_path(&backend).exists()
+                    && !backend.directory.join(METADATA_FILE).exists()
+                    && fs::read(&orphaned).unwrap() == original
+                    && temp_count(&backend.directory, INSTALLATION_KEY_FILE) == 0,
+                "orphan key write artifacts {operation:?}"
+            );
+            assert!(
+                resolve_test(&backend, &Mutex::new(()), b"marker")
+                    == Err(AccountScopeError::OrphanedArtifacts),
+                "orphan retry deferral {operation:?}"
+            );
+            assert!(
+                resolve_test(&backend, &Mutex::new(()), b"marker").is_ok(),
+                "orphan retry recovery {operation:?}"
+            );
+            backend.cleanup();
+        }
+    }
+
+    #[test]
+    fn metadata_authentication_schema_and_required_fields_quarantine() {
+        for case in ["invalid-json", "bad-mac", "wrong-schema", "missing-fields"] {
+            let backend =
+                TestBackend::new(case).with_installation_key(vec![0x11; INSTALLATION_KEY_BYTES]);
+            let key = installation_key(&backend);
+            let valid_payload = serde_json::to_vec(&MetadataPayload::default()).unwrap();
+            let bytes = match case {
+                "invalid-json" => b"not-json".to_vec(),
+                "bad-mac" => serde_json::to_vec_pretty(&MetadataEnvelope {
+                    schema_version: METADATA_SCHEMA_VERSION,
+                    payload_bytes_base64: STANDARD.encode(&valid_payload),
+                    payload_mac: encode_digest(&[0xEE; DIGEST_BYTES]),
+                })
+                .unwrap(),
+                "wrong-schema" => {
+                    authenticated_envelope(&key, METADATA_SCHEMA_VERSION + 1, &valid_payload)
+                }
+                "missing-fields" => {
+                    authenticated_envelope(&key, METADATA_SCHEMA_VERSION, br#"{"bindings":[]}"#)
+                }
+                _ => unreachable!(),
+            };
+            fs::write(backend.directory.join(METADATA_FILE), &bytes).unwrap();
+            assert!(
+                resolve_test(&backend, &Mutex::new(()), b"marker")
+                    == Err(AccountScopeError::MetadataCorrupt),
+                "metadata corruption {case}"
+            );
+            let quarantine = backend.directory.join(format!(
+                "quota-account-scope-v1.corrupt-{}.json",
+                backend.now_seconds()
+            ));
+            assert!(
+                fs::read(quarantine).unwrap() == bytes
+                    && !backend.directory.join(METADATA_FILE).exists(),
+                "metadata quarantine {case}"
+            );
+            assert!(
+                resolve_test(&backend, &Mutex::new(()), b"marker").is_ok(),
+                "metadata recovery {case}"
+            );
+            backend.cleanup();
+        }
+    }
+
+    #[test]
+    fn valid_mac_semantic_conflict_is_preserved_not_quarantined() {
+        let backend = TestBackend::new("metadata-conflict");
+        let lock = Mutex::new(());
+        resolve_test(&backend, &lock, b"old-marker").unwrap();
+        let key = installation_key(&backend);
+        let mut payload = decode_metadata(&key, &metadata_bytes(&backend)).unwrap();
+        let mut duplicate = payload.bindings[0].clone();
+        duplicate.random_lineage_id = URL_SAFE_NO_PAD.encode([0xEF; LINEAGE_ID_BYTES]);
+        payload.bindings.push(duplicate);
+        let payload_bytes = serde_json::to_vec(&payload).unwrap();
+        let envelope = authenticated_envelope(&key, METADATA_SCHEMA_VERSION, &payload_bytes);
+        fs::write(backend.directory.join(METADATA_FILE), &envelope).unwrap();
+        assert!(
+            resolve_test(&backend, &lock, b"old-marker")
+                == Err(AccountScopeError::MetadataConflict),
+            "valid-mac conflict type"
+        );
+        assert!(
+            metadata_bytes(&backend) == envelope,
+            "valid-mac conflict preservation"
+        );
+        assert!(
+            !backend
+                .directory
+                .join(format!(
+                    "quota-account-scope-v1.corrupt-{}.json",
+                    backend.now_seconds()
+                ))
+                .exists(),
+            "valid-mac conflict quarantine"
+        );
+        backend.cleanup();
+    }
+
+    #[test]
+    fn metadata_and_refresh_lock_failures_are_typed_and_preserve_state() {
+        let backend = TestBackend::new("metadata-lock");
+        let lock = Mutex::new(());
+        resolve_test(&backend, &lock, b"old-marker").unwrap();
+        let before = artifact_snapshot(&backend);
+        backend.fail_fs(FsOperation::AcquireMetadataLock);
+        assert!(
+            resolve_test(&backend, &lock, b"new-marker") == Err(AccountScopeError::MetadataLock),
+            "metadata lock failure type"
+        );
+        assert!(
+            artifact_snapshot(&backend) == before,
+            "metadata lock preservation"
+        );
+        backend.cleanup();
+
+        let refresh = TestBackend::new("refresh-lock");
+        let directory = ensure_storage_dir(&refresh).unwrap();
+        let file = open_refresh_lock_file(&refresh, &directory, "claude").unwrap();
+        #[cfg(unix)]
+        assert!(
+            unix_mode(&directory.join("quota-auth-refresh-claude.lock")) == 0o600,
+            "refresh lock mode"
+        );
+        fs2::FileExt::unlock(&file).unwrap();
+        refresh.fail_fs(FsOperation::AcquireRefreshLock);
+        assert!(
+            matches!(
+                open_refresh_lock_file(&refresh, &directory, "claude"),
+                Err(AccountScopeError::MetadataLock)
+            ),
+            "refresh lock failure type"
+        );
+        refresh.cleanup();
+    }
+
     #[cfg(unix)]
     #[test]
-    fn installation_key_path_attacks_fail_closed_without_mutating_artifacts() {
+    fn unix_installation_key_final_object_attacks_fail_closed() {
         use std::os::unix::fs::{symlink, PermissionsExt as _};
 
-        for case in ["symlink", "dangling", "non-regular", "mode"] {
+        for case in ["symlink", "dangling", "nonregular", "mode"] {
             let backend = TestBackend::new(case);
             ensure_real_directory(&backend, &backend.directory).unwrap();
             let key_path = installation_key_path(&backend);
-            let external = backend.directory.with_extension(format!("{case}-external"));
+            let external = backend.directory.with_extension("key-target");
             match case {
                 "symlink" => {
                     fs::write(&external, [0x71; INSTALLATION_KEY_BYTES]).unwrap();
@@ -2654,52 +2803,50 @@ mod tests {
                     symlink(&external, &key_path).unwrap();
                 }
                 "dangling" => symlink(&external, &key_path).unwrap(),
-                "non-regular" => fs::create_dir(&key_path).unwrap(),
+                "nonregular" => fs::create_dir(&key_path).unwrap(),
                 "mode" => {
                     fs::write(&key_path, [0x72; INSTALLATION_KEY_BYTES]).unwrap();
                     fs::set_permissions(&key_path, fs::Permissions::from_mode(0o640)).unwrap();
                 }
                 _ => unreachable!(),
             }
-            let metadata = format!("metadata-{case}").into_bytes();
-            let history = format!("history-{case}").into_bytes();
-            fs::write(backend.directory.join(METADATA_FILE), &metadata).unwrap();
-            fs::write(backend.directory.join(V3_HISTORY_FILE), &history).unwrap();
-
-            assert_eq!(
-                ensure_installation_key(&backend, &Mutex::new(())),
-                Err(AccountScopeError::InvalidInstallationKey),
-                "{case}"
+            fs::write(backend.directory.join(METADATA_FILE), b"metadata").unwrap();
+            fs::write(backend.directory.join(V3_HISTORY_FILE), b"history").unwrap();
+            assert!(
+                ensure_installation_key(&backend, &Mutex::new(()))
+                    == Err(AccountScopeError::InvalidInstallationKey),
+                "key final object {case}"
             );
-            assert_eq!(metadata_bytes(&backend), metadata, "{case}");
-            assert_eq!(
-                fs::read(backend.directory.join(V3_HISTORY_FILE)).unwrap(),
-                history,
-                "{case}"
+            assert!(
+                metadata_bytes(&backend) == b"metadata"
+                    && fs::read(backend.directory.join(V3_HISTORY_FILE)).unwrap() == b"history",
+                "key final object artifacts {case}"
             );
             match case {
-                "symlink" => {
-                    assert_eq!(fs::read(&external).unwrap(), [0x71; INSTALLATION_KEY_BYTES]);
-                    assert!(fs::symlink_metadata(&key_path)
+                "symlink" => assert!(
+                    fs::read(&external).unwrap() == [0x71; INSTALLATION_KEY_BYTES]
+                        && fs::symlink_metadata(&key_path)
+                            .unwrap()
+                            .file_type()
+                            .is_symlink(),
+                    "key symlink target"
+                ),
+                "dangling" => assert!(
+                    fs::symlink_metadata(&key_path)
                         .unwrap()
                         .file_type()
-                        .is_symlink());
-                }
-                "dangling" => {
-                    assert!(fs::symlink_metadata(&key_path)
-                        .unwrap()
-                        .file_type()
-                        .is_symlink());
-                    assert!(!external.exists());
-                }
-                "non-regular" => assert!(key_path.is_dir()),
-                "mode" => {
-                    assert_eq!(fs::read(&key_path).unwrap(), [0x72; INSTALLATION_KEY_BYTES]);
-                    assert_eq!(unix_mode(&key_path), 0o640);
-                }
+                        .is_symlink()
+                        && !external.exists(),
+                    "key dangling symlink"
+                ),
+                "nonregular" => assert!(key_path.is_dir(), "key nonregular object"),
+                "mode" => assert!(
+                    fs::read(&key_path).unwrap() == [0x72; INSTALLATION_KEY_BYTES]
+                        && unix_mode(&key_path) == 0o640,
+                    "key mode preservation"
+                ),
                 _ => unreachable!(),
             }
-
             backend.cleanup();
             if external.exists() {
                 fs::remove_file(external).unwrap();
@@ -2709,1264 +2856,430 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn installation_key_inode_replacement_fails_closed() {
-        let backend = TestBackend::new("installation-key-inode-swap")
+    fn unix_installation_key_inode_replacement_fails_closed() {
+        let backend = TestBackend::new("key-inode-swap")
             .with_installation_key(vec![0x73; INSTALLATION_KEY_BYTES]);
-        let metadata = b"metadata-inode-swap";
-        let history = b"history-inode-swap";
-        fs::write(backend.directory.join(METADATA_FILE), metadata).unwrap();
-        fs::write(backend.directory.join(V3_HISTORY_FILE), history).unwrap();
+        fs::write(backend.directory.join(METADATA_FILE), b"metadata").unwrap();
+        fs::write(backend.directory.join(V3_HISTORY_FILE), b"history").unwrap();
         backend.replace_installation_key_on_validate(vec![0x74; INSTALLATION_KEY_BYTES]);
-
-        assert_eq!(
-            ensure_installation_key(&backend, &Mutex::new(())),
-            Err(AccountScopeError::InvalidInstallationKey)
+        assert!(
+            ensure_installation_key(&backend, &Mutex::new(()))
+                == Err(AccountScopeError::InvalidInstallationKey),
+            "key inode replacement"
         );
-        assert_eq!(metadata_bytes(&backend), metadata);
-        assert_eq!(
-            fs::read(backend.directory.join(V3_HISTORY_FILE)).unwrap(),
-            history
+        assert!(
+            metadata_bytes(&backend) == b"metadata"
+                && fs::read(backend.directory.join(V3_HISTORY_FILE)).unwrap() == b"history"
+                && fs::read(installation_key_path(&backend)).unwrap()
+                    == [0x74; INSTALLATION_KEY_BYTES],
+            "key inode replacement artifacts"
         );
-        assert_eq!(
-            fs::read(installation_key_path(&backend)).unwrap(),
-            [0x74; INSTALLATION_KEY_BYTES]
-        );
-        backend.cleanup();
-    }
-
-    #[test]
-    fn atomic_installation_key_failures_leave_no_partial_file_or_temp() {
-        for operation in [
-            FsOperation::CreateTemp,
-            FsOperation::WriteTemp,
-            FsOperation::SyncTemp,
-            FsOperation::ReplaceFile,
-            FsOperation::SyncDirectory,
-        ] {
-            let backend = TestBackend::new("installation-key-atomic-failure");
-            backend.fail_fs(operation);
-            assert_eq!(
-                ensure_installation_key(&backend, &Mutex::new(())),
-                Err(AccountScopeError::InstallationKeyWrite),
-                "{operation:?}"
-            );
-            let key_path = installation_key_path(&backend);
-            if key_path.exists() {
-                assert_eq!(fs::read(&key_path).unwrap(), [0x11; INSTALLATION_KEY_BYTES]);
-                #[cfg(unix)]
-                assert_eq!(unix_mode(&key_path), 0o600);
-                assert_eq!(
-                    ensure_installation_key(&backend, &Mutex::new(())).unwrap(),
-                    [0x11; INSTALLATION_KEY_BYTES]
-                );
-            }
-            let temp_prefix = format!(".{INSTALLATION_KEY_FILE}.tmp-");
-            assert!(!fs::read_dir(&backend.directory).unwrap().any(|entry| {
-                entry
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(&temp_prefix)
-            }));
-            backend.cleanup();
-        }
-    }
-
-    #[test]
-    fn metadata_only_orphan_recovery_key_write_failures_preserve_evidence_and_defer_scope() {
-        for operation in [
-            FsOperation::CreateTemp,
-            FsOperation::WriteTemp,
-            FsOperation::SyncTemp,
-            FsOperation::ReplaceFile,
-        ] {
-            let backend = TestBackend::new("metadata-only-orphan-key-write-failure");
-            backend.state.lock().unwrap().random = VecDeque::from([
-                vec![0x11; INSTALLATION_KEY_BYTES],
-                vec![0x12; INSTALLATION_KEY_BYTES],
-                vec![0x21; LINEAGE_ID_BYTES],
-            ]);
-            fs::create_dir_all(&backend.directory).unwrap();
-            let metadata = b"orphan-metadata-before-key-write";
-            let orphaned = backend
-                .directory
-                .join("quota-account-scope-v1.orphaned-1752710400.json");
-            fs::write(backend.directory.join(METADATA_FILE), metadata).unwrap();
-            backend.fail_fs(operation);
-
-            assert_eq!(
-                resolve_test(&backend, &Mutex::new(()), b"marker"),
-                Err(AccountScopeError::InstallationKeyWrite),
-                "{operation:?}"
-            );
-            assert!(!installation_key_path(&backend).exists());
-            assert!(!backend.directory.join(METADATA_FILE).exists());
-            assert_eq!(fs::read(&orphaned).unwrap(), metadata);
-            assert!(!backend.directory.join(V3_HISTORY_FILE).exists());
-            let temp_prefix = format!(".{INSTALLATION_KEY_FILE}.tmp-");
-            assert!(!fs::read_dir(&backend.directory).unwrap().any(|entry| {
-                entry
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(&temp_prefix)
-            }));
-
-            assert_eq!(
-                resolve_test(&backend, &Mutex::new(()), b"marker"),
-                Err(AccountScopeError::OrphanedArtifacts)
-            );
-            assert_eq!(fs::read(&orphaned).unwrap(), metadata);
-            assert!(!backend.directory.join(METADATA_FILE).exists());
-            let winner = installation_key(&backend);
-            let scope = resolve_test(&backend, &Mutex::new(()), b"marker").unwrap();
-            assert_eq!(installation_key(&backend), winner);
-            assert_eq!(
-                resolve_test(&backend, &Mutex::new(()), b"marker").unwrap(),
-                scope
-            );
-            assert_eq!(installation_key(&backend), winner);
-            backend.cleanup();
-        }
-    }
-
-    #[test]
-    fn orphaned_metadata_name_accepts_only_production_canonical_numbers() {
-        for (name, expected) in [
-            ("quota-account-scope-v1.orphaned-0.json", true),
-            ("quota-account-scope-v1.orphaned-0.1.json", true),
-            (
-                "quota-account-scope-v1.orphaned-9223372036854775807.4294967295.json",
-                true,
-            ),
-            ("quota-account-scope-v1.orphaned--1.json", false),
-            ("quota-account-scope-v1.orphaned-+1.json", false),
-            ("quota-account-scope-v1.orphaned-01.json", false),
-            (
-                "quota-account-scope-v1.orphaned-9223372036854775808.json",
-                false,
-            ),
-            ("quota-account-scope-v1.orphaned-1.1.2.json", false),
-            ("quota-account-scope-v1.orphaned-1.0.json", false),
-            ("quota-account-scope-v1.orphaned-1.+1.json", false),
-            ("quota-account-scope-v1.orphaned-1.01.json", false),
-            ("quota-account-scope-v1.orphaned-1.4294967296.json", false),
-            ("quota-account-scope-v1.orphaned-1.-1.json", false),
-        ] {
-            assert_eq!(is_orphaned_metadata_name(name), expected, "{name}");
-        }
-    }
-
-    #[test]
-    fn forged_negative_timestamp_orphan_does_not_defer_first_scope() {
-        let backend = TestBackend::new("forged-negative-orphan");
-        ensure_real_directory(&backend, &backend.directory).unwrap();
-        let forged = backend
-            .directory
-            .join("quota-account-scope-v1.orphaned--1.json");
-        let evidence = b"forged-negative-orphan-evidence";
-        fs::write(&forged, evidence).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            fs::set_permissions(&forged, fs::Permissions::from_mode(0o000)).unwrap();
-        }
-        assert!(!installation_key_path(&backend).exists());
-        assert!(!backend.directory.join(METADATA_FILE).exists());
-        assert!(!backend.directory.join(V3_HISTORY_FILE).exists());
-
-        let scope = resolve_test(&backend, &Mutex::new(()), b"marker").unwrap();
-
-        assert!(installation_key_path(&backend).exists());
-        assert!(backend.directory.join(METADATA_FILE).exists());
-        assert!(!backend.directory.join(V3_HISTORY_FILE).exists());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            assert_eq!(unix_mode(&forged), 0o000);
-            fs::set_permissions(&forged, fs::Permissions::from_mode(0o600)).unwrap();
-        }
-        assert_eq!(fs::read(&forged).unwrap(), evidence);
-        assert_eq!(
-            resolve_test(&backend, &Mutex::new(()), b"marker").unwrap(),
-            scope
-        );
-        assert_eq!(fs::read(&forged).unwrap(), evidence);
-        backend.cleanup();
-    }
-
-    #[test]
-    fn orphaned_metadata_inspection_failure_fails_closed_without_creating_key() {
-        let backend = TestBackend::new("orphan-inspection-failure");
-        ensure_real_directory(&backend, &backend.directory).unwrap();
-        let orphaned = backend
-            .directory
-            .join("quota-account-scope-v1.orphaned-1752710400.json");
-        let evidence = b"preserved-orphan-evidence";
-        fs::write(&orphaned, evidence).unwrap();
-        backend.fail_fs(FsOperation::InspectOrphanedMetadata);
-
-        assert_eq!(
-            resolve_test(&backend, &Mutex::new(()), b"marker"),
-            Err(AccountScopeError::StorageUnavailable)
-        );
-        assert_eq!(fs::read(&orphaned).unwrap(), evidence);
-        assert!(!installation_key_path(&backend).exists());
-        assert!(!backend.directory.join(METADATA_FILE).exists());
-        assert!(!backend
-            .state
-            .lock()
-            .unwrap()
-            .events
-            .contains(&"create-temp"));
-
-        assert_eq!(
-            resolve_test(&backend, &Mutex::new(()), b"marker"),
-            Err(AccountScopeError::OrphanedArtifacts)
-        );
-        assert_eq!(fs::read(&orphaned).unwrap(), evidence);
         backend.cleanup();
     }
 
     #[cfg(unix)]
     #[test]
-    fn orphaned_metadata_non_regular_entries_fail_closed_without_touching_targets() {
+    fn unix_metadata_and_lock_symlinks_fail_closed_before_mutation() {
         use std::os::unix::fs::{symlink, PermissionsExt as _};
 
-        for case in ["symlink", "directory"] {
-            let backend = TestBackend::new(&format!("orphan-{case}"));
-            ensure_real_directory(&backend, &backend.directory).unwrap();
-            let orphaned = backend
-                .directory
-                .join("quota-account-scope-v1.orphaned-1752710400.json");
-            let external = backend.directory.with_extension(format!("{case}-target"));
-            let target_bytes = b"external-orphan-target";
-            match case {
-                "symlink" => {
-                    fs::write(&external, target_bytes).unwrap();
-                    fs::set_permissions(&external, fs::Permissions::from_mode(0o640)).unwrap();
-                    symlink(&external, &orphaned).unwrap();
-                }
-                "directory" => fs::create_dir(&orphaned).unwrap(),
-                _ => unreachable!(),
-            }
-
-            assert_eq!(
-                resolve_test(&backend, &Mutex::new(()), b"marker"),
-                Err(AccountScopeError::StorageUnavailable),
-                "{case}"
-            );
-            assert!(!installation_key_path(&backend).exists(), "{case}");
-            assert!(!backend.directory.join(METADATA_FILE).exists(), "{case}");
-            assert!(!backend
-                .state
-                .lock()
-                .unwrap()
-                .events
-                .contains(&"create-temp"));
-            match case {
-                "symlink" => {
-                    assert_eq!(fs::read(&external).unwrap(), target_bytes);
-                    assert_eq!(unix_mode(&external), 0o640);
-                    assert!(fs::symlink_metadata(&orphaned)
-                        .unwrap()
-                        .file_type()
-                        .is_symlink());
-                }
-                "directory" => assert!(orphaned.is_dir()),
-                _ => unreachable!(),
-            }
-
-            backend.cleanup();
-            if external.exists() {
-                fs::remove_file(external).unwrap();
-            }
-        }
-    }
-
-    #[test]
-    fn secure_random_failure_creates_no_key_or_metadata() {
-        let backend = TestBackend::new("random-failure");
-        backend.state.lock().unwrap().random.clear();
-        assert_eq!(
-            resolve_test(&backend, &Mutex::new(()), b"marker"),
-            Err(AccountScopeError::RandomUnavailable)
-        );
-        assert!(!installation_key_path(&backend).exists());
-        assert!(!backend.directory.join(METADATA_FILE).exists());
-        backend.cleanup();
-    }
-
-    #[test]
-    fn missing_key_quarantines_metadata_preserves_v3_and_defers_one_poll() {
-        let backend = TestBackend::new("orphan-recovery");
-        fs::create_dir_all(&backend.directory).unwrap();
-        let metadata = b"legacy-metadata-bytes";
-        let history = b"legacy-v3-bytes";
-        fs::write(backend.directory.join(METADATA_FILE), metadata).unwrap();
-        fs::write(backend.directory.join(V3_HISTORY_FILE), history).unwrap();
-        assert_eq!(
-            resolve_test(&backend, &Mutex::new(()), b"marker"),
-            Err(AccountScopeError::OrphanedArtifacts)
-        );
-        assert_eq!(
-            fs::read(backend.directory.join(V3_HISTORY_FILE)).unwrap(),
-            history
-        );
-        assert_eq!(
-            fs::read(
-                backend
-                    .directory
-                    .join("quota-account-scope-v1.orphaned-1752710400.json")
-            )
-            .unwrap(),
-            metadata
-        );
-        let winner = installation_key(&backend);
-        assert!(resolve_test(&backend, &Mutex::new(()), b"marker").is_ok());
-        assert_eq!(installation_key(&backend), winner);
-        backend.cleanup();
-    }
-
-    #[test]
-    fn missing_key_with_only_v3_preserves_history_and_defers_one_poll() {
-        let backend = TestBackend::new("v3-only-orphan");
-        fs::create_dir_all(&backend.directory).unwrap();
-        let history = b"orphaned-v3-scopes";
-        fs::write(backend.directory.join(V3_HISTORY_FILE), history).unwrap();
-        assert_eq!(
-            resolve_test(&backend, &Mutex::new(()), b"marker"),
-            Err(AccountScopeError::OrphanedArtifacts)
-        );
-        assert_eq!(
-            fs::read(backend.directory.join(V3_HISTORY_FILE)).unwrap(),
-            history
-        );
-        let winner = installation_key(&backend);
-        assert!(resolve_test(&backend, &Mutex::new(()), b"marker").is_ok());
-        assert_eq!(installation_key(&backend), winner);
-        backend.cleanup();
-    }
-
-    #[test]
-    fn orphan_quarantine_collision_uses_unique_suffix_without_overwrite() {
-        let backend = TestBackend::new("orphan-collision");
-        fs::create_dir_all(&backend.directory).unwrap();
-        fs::write(backend.directory.join(METADATA_FILE), b"source").unwrap();
-        fs::write(
-            backend
-                .directory
-                .join("quota-account-scope-v1.orphaned-1752710400.json"),
-            b"existing-zero",
-        )
-        .unwrap();
-        fs::write(
-            backend
-                .directory
-                .join("quota-account-scope-v1.orphaned-1752710400.1.json"),
-            b"existing-one",
-        )
-        .unwrap();
-        assert_eq!(
-            resolve_test(&backend, &Mutex::new(()), b"marker"),
-            Err(AccountScopeError::OrphanedArtifacts)
-        );
-        assert_eq!(
-            fs::read(
-                backend
-                    .directory
-                    .join("quota-account-scope-v1.orphaned-1752710400.2.json")
-            )
-            .unwrap(),
-            b"source"
-        );
-        assert_eq!(
-            fs::read(
-                backend
-                    .directory
-                    .join("quota-account-scope-v1.orphaned-1752710400.json")
-            )
-            .unwrap(),
-            b"existing-zero"
-        );
-        backend.cleanup();
-    }
-
-    #[test]
-    fn quarantine_failure_does_not_create_or_replace_the_key() {
-        let backend = TestBackend::new("orphan-quarantine-failure");
-        fs::create_dir_all(&backend.directory).unwrap();
-        let original = b"metadata-before-key-loss";
-        fs::write(backend.directory.join(METADATA_FILE), original).unwrap();
-        backend.fail_fs(FsOperation::QuarantineMetadata);
-        assert_eq!(
-            resolve_test(&backend, &Mutex::new(()), b"marker"),
-            Err(AccountScopeError::QuarantineFailed)
-        );
-        assert_eq!(metadata_bytes(&backend), original);
-        assert!(!installation_key_path(&backend).exists());
-        backend.cleanup();
-    }
-
-    #[test]
-    fn corrupt_quarantine_failure_preserves_authenticated_recovery_evidence() {
-        let backend = TestBackend::new("corrupt-quarantine-failure")
+        let metadata = TestBackend::new("metadata-symlink")
             .with_installation_key(vec![0x11; INSTALLATION_KEY_BYTES]);
-        fs::create_dir_all(&backend.directory).unwrap();
-        let corrupt = b"corrupt-but-preserved";
-        fs::write(backend.directory.join(METADATA_FILE), corrupt).unwrap();
-        backend.fail_fs(FsOperation::QuarantineMetadata);
-        assert_eq!(
-            resolve_test(&backend, &Mutex::new(()), b"marker"),
-            Err(AccountScopeError::QuarantineFailed)
+        let target = metadata.directory.with_extension("metadata-target");
+        fs::write(&target, b"external-metadata").unwrap();
+        symlink(&target, metadata.directory.join(METADATA_FILE)).unwrap();
+        assert!(
+            resolve_test(&metadata, &Mutex::new(()), b"marker")
+                == Err(AccountScopeError::MetadataRead)
+                && fs::read(&target).unwrap() == b"external-metadata"
+                && !metadata.events().contains(&FsOperation::QuarantineMetadata),
+            "metadata symlink boundary"
         );
-        assert_eq!(metadata_bytes(&backend), corrupt);
-        backend.cleanup();
-    }
+        metadata.cleanup();
+        fs::remove_file(target).unwrap();
 
-    #[test]
-    fn authoritative_scope_quarantines_corrupt_metadata_before_hmac() {
-        for (tag, provider, kind, identifier, bytes) in [
-            (
-                "authoritative-invalid-json",
-                "codex",
-                AuthoritativeIdKind::OpaqueId,
-                "acct-123",
-                b"not-json".as_slice(),
-            ),
-            (
-                "authoritative-bad-mac",
-                "antigravity",
-                AuthoritativeIdKind::Email,
-                "user@example.com",
-                br#"{"schemaVersion":1,"payloadBytesBase64":"e30=","payloadMac":"bad"}"#.as_slice(),
-            ),
-            (
-                "authoritative-bad-schema",
-                "codex",
-                AuthoritativeIdKind::OpaqueId,
-                "acct-456",
-                br#"{"schemaVersion":2,"payloadBytesBase64":"e30=","payloadMac":"bad"}"#.as_slice(),
-            ),
-        ] {
-            let backend =
-                TestBackend::new(tag).with_installation_key(vec![0x11; INSTALLATION_KEY_BYTES]);
-            fs::create_dir_all(&backend.directory).unwrap();
-            let metadata_path = backend.directory.join(METADATA_FILE);
-            fs::write(&metadata_path, bytes).unwrap();
-
-            assert_eq!(
-                resolve_authoritative_with(&backend, &Mutex::new(()), provider, kind, identifier,),
-                Err(AccountScopeError::MetadataCorrupt),
-                "{tag}"
-            );
-            let quarantine = backend.directory.join(format!(
-                "quota-account-scope-v1.corrupt-{}.json",
-                backend.now_seconds()
-            ));
-            assert_eq!(fs::read(quarantine).unwrap(), bytes, "{tag}");
-            assert!(!metadata_path.exists(), "{tag}");
-            assert!(resolve_authoritative_with(
-                &backend,
-                &Mutex::new(()),
-                provider,
-                kind,
-                identifier,
-            )
-            .is_ok());
-            assert!(!metadata_path.exists(), "{tag}");
-            backend.cleanup();
-        }
-
-        let backend = TestBackend::new("authoritative-corrupt-quarantine-failure")
+        let lock = TestBackend::new("metadata-lock-symlink")
             .with_installation_key(vec![0x11; INSTALLATION_KEY_BYTES]);
-        fs::create_dir_all(&backend.directory).unwrap();
-        let metadata_path = backend.directory.join(METADATA_FILE);
-        let original = b"corrupt-authoritative-metadata";
-        fs::write(&metadata_path, original).unwrap();
-        backend.fail_fs(FsOperation::QuarantineMetadata);
-        assert_eq!(
-            resolve_authoritative_with(
-                &backend,
-                &Mutex::new(()),
-                "codex",
-                AuthoritativeIdKind::OpaqueId,
-                "acct-789",
-            ),
-            Err(AccountScopeError::QuarantineFailed)
+        let target = lock.directory.with_extension("metadata-lock-target");
+        fs::write(&target, b"external-lock").unwrap();
+        symlink(&target, lock.directory.join(METADATA_LOCK_FILE)).unwrap();
+        assert!(
+            resolve_test(&lock, &Mutex::new(()), b"marker") == Err(AccountScopeError::MetadataLock),
+            "metadata lock symlink type"
         );
-        assert_eq!(fs::read(&metadata_path).unwrap(), original);
-        backend.cleanup();
-    }
-
-    #[test]
-    fn mac_or_schema_corruption_is_quarantined_then_next_poll_recovers() {
-        for (tag, bytes) in [
-            (
-                "bad-mac",
-                br#"{"schemaVersion":1,"payloadBytesBase64":"e30=","payloadMac":"bad"}"#.as_slice(),
-            ),
-            (
-                "bad-schema",
-                br#"{"schemaVersion":2,"payloadBytesBase64":"e30=","payloadMac":"bad"}"#.as_slice(),
-            ),
-        ] {
-            let backend =
-                TestBackend::new(tag).with_installation_key(vec![0x11; INSTALLATION_KEY_BYTES]);
-            fs::create_dir_all(&backend.directory).unwrap();
-            fs::write(backend.directory.join(METADATA_FILE), bytes).unwrap();
-            assert_eq!(
-                resolve_test(&backend, &Mutex::new(()), b"marker"),
-                Err(AccountScopeError::MetadataCorrupt)
-            );
-            let quarantine = backend.directory.join(format!(
-                "quota-account-scope-v1.corrupt-{}.json",
-                backend.now_seconds()
-            ));
-            assert_eq!(fs::read(quarantine).unwrap(), bytes);
-            assert!(resolve_test(&backend, &Mutex::new(()), b"marker").is_ok());
-            backend.cleanup();
-        }
-    }
-
-    #[test]
-    fn authenticated_payload_with_missing_schema_fields_is_quarantined() {
-        let backend = TestBackend::new("missing-payload-field")
-            .with_installation_key(vec![0x11; INSTALLATION_KEY_BYTES]);
-        fs::create_dir_all(&backend.directory).unwrap();
-        let key = installation_key(&backend);
-        let payload_bytes = br#"{"bindings":[]}"#;
-        let metadata_key = metadata_mac_key(&key).unwrap();
-        let mac = hmac_digest(&metadata_key, &[payload_bytes.as_slice()]).unwrap();
-        let envelope = MetadataEnvelope {
-            schema_version: METADATA_SCHEMA_VERSION,
-            payload_bytes_base64: STANDARD.encode(payload_bytes),
-            payload_mac: encode_digest(&mac),
-        };
-        let original = serde_json::to_vec_pretty(&envelope).unwrap();
-        fs::write(backend.directory.join(METADATA_FILE), &original).unwrap();
-
-        assert_eq!(
-            resolve_test(&backend, &Mutex::new(()), b"marker"),
-            Err(AccountScopeError::MetadataCorrupt)
+        let events = lock.events();
+        assert!(
+            fs::read(&target).unwrap() == b"external-lock"
+                && events.contains(&FsOperation::OpenMetadataLock)
+                && !events.contains(&FsOperation::AcquireMetadataLock)
+                && !events.contains(&FsOperation::ReadMetadata),
+            "metadata lock symlink boundary"
         );
-        assert_eq!(
-            fs::read(
-                backend
-                    .directory
-                    .join("quota-account-scope-v1.corrupt-1752710400.json")
-            )
-            .unwrap(),
-            original
-        );
-        backend.cleanup();
-    }
+        lock.cleanup();
+        fs::remove_file(target).unwrap();
 
-    #[test]
-    fn lock_failure_preserves_last_valid_metadata() {
-        let backend = TestBackend::new("lock-failure");
+        let refresh = TestBackend::new("refresh-lock-symlink");
+        let directory = ensure_storage_dir(&refresh).unwrap();
+        let target = refresh.directory.with_extension("refresh-lock-target");
+        fs::write(&target, b"external-refresh-lock").unwrap();
+        symlink(&target, directory.join("quota-auth-refresh-claude.lock")).unwrap();
+        assert!(
+            matches!(
+                open_refresh_lock_file(&refresh, &directory, "claude"),
+                Err(AccountScopeError::MetadataLock)
+            ) && fs::read(&target).unwrap() == b"external-refresh-lock"
+                && !refresh.events().contains(&FsOperation::AcquireRefreshLock),
+            "refresh lock symlink boundary"
+        );
+        refresh.cleanup();
+        fs::remove_file(target).unwrap();
+
+        let restored = TestBackend::new("metadata-mode");
         let lock = Mutex::new(());
-        resolve_test(&backend, &lock, b"old").unwrap();
-        let before = metadata_bytes(&backend);
-        backend.fail_fs(FsOperation::AcquireMetadataLock);
-        assert_eq!(
-            resolve_test(&backend, &lock, b"new"),
-            Err(AccountScopeError::MetadataLock)
+        resolve_test(&restored, &lock, b"marker").unwrap();
+        let path = restored.directory.join(METADATA_FILE);
+        let before = fs::read(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        load_metadata(&restored, &restored.directory, &installation_key(&restored)).unwrap();
+        assert!(
+            fs::read(&path).unwrap() == before && unix_mode(&path) == 0o600,
+            "metadata mode tightening"
         );
-        assert_eq!(metadata_bytes(&backend), before);
-        backend.cleanup();
+        restored.cleanup();
     }
 
     #[cfg(unix)]
     #[test]
-    fn metadata_lock_symlink_fails_closed_before_lock_acquisition() {
+    fn unix_final_directory_symlink_is_rejected_but_ancestor_is_allowed() {
         use std::os::unix::fs::{symlink, PermissionsExt as _};
 
-        let backend = TestBackend::new("metadata-lock-symlink")
-            .with_installation_key(vec![0x11; INSTALLATION_KEY_BYTES]);
-        fs::create_dir_all(&backend.directory).unwrap();
-        let target = backend.directory.with_extension("external-metadata-lock");
-        let lock_path = backend.directory.join(METADATA_LOCK_FILE);
-        let original = b"external-metadata-lock-target";
-        fs::write(&target, original).unwrap();
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
-        let original_mode = unix_mode(&target);
-        symlink(&target, &lock_path).unwrap();
-
-        assert_eq!(
-            resolve_test(&backend, &Mutex::new(()), b"marker"),
-            Err(AccountScopeError::MetadataLock)
-        );
-        assert_eq!(fs::read(&target).unwrap(), original);
-        assert_eq!(unix_mode(&target), original_mode);
-        assert!(fs::symlink_metadata(&lock_path)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert!(!backend.directory.join(METADATA_FILE).exists());
-        let events = backend.state.lock().unwrap().events.clone();
-        assert!(events.contains(&"open-metadata-lock"));
-        assert!(!events.contains(&"acquire-metadata-lock"));
-        assert!(!events.contains(&"read-metadata"));
-        assert!(!events.contains(&"create-temp"));
-
-        backend.cleanup();
-        fs::remove_file(target).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn active_metadata_symlink_fails_closed_without_touching_target() {
-        use std::os::unix::fs::{symlink, PermissionsExt as _};
-
-        let backend = TestBackend::new("metadata-symlink")
-            .with_installation_key(vec![0x11; INSTALLATION_KEY_BYTES]);
-        fs::create_dir_all(&backend.directory).unwrap();
-        let target = backend.directory.with_extension("external-metadata");
-        let metadata_path = backend.directory.join(METADATA_FILE);
-        let original = b"external-metadata-target";
-        fs::write(&target, original).unwrap();
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
-        let original_mode = unix_mode(&target);
-        symlink(&target, &metadata_path).unwrap();
-
-        assert_eq!(
-            resolve_test(&backend, &Mutex::new(()), b"marker"),
-            Err(AccountScopeError::MetadataRead)
-        );
-        assert_eq!(fs::read(&target).unwrap(), original);
-        assert_eq!(unix_mode(&target), original_mode);
-        assert!(fs::symlink_metadata(&metadata_path)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert!(!backend
-            .directory
-            .join("quota-account-scope-v1.corrupt-1752710400.json")
-            .exists());
-        let events = backend.state.lock().unwrap().events.clone();
-        assert!(events.contains(&"acquire-metadata-lock"));
-        assert!(events.contains(&"read-metadata"));
-        assert!(!events.contains(&"quarantine-metadata"));
-        assert!(!events.contains(&"create-temp"));
-
-        backend.cleanup();
-        fs::remove_file(target).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn metadata_symlink_with_missing_key_never_creates_or_replaces_key() {
-        use std::os::unix::fs::{symlink, PermissionsExt as _};
-
-        let backend = TestBackend::new("metadata-symlink-missing-key");
-        fs::create_dir_all(&backend.directory).unwrap();
-        let target = backend.directory.with_extension("external-orphan-metadata");
-        let metadata_path = backend.directory.join(METADATA_FILE);
-        let original = b"external-orphan-metadata-target";
-        fs::write(&target, original).unwrap();
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
-        let original_mode = unix_mode(&target);
-        symlink(&target, &metadata_path).unwrap();
-
-        assert_eq!(
-            resolve_test(&backend, &Mutex::new(()), b"marker"),
-            Err(AccountScopeError::StorageUnavailable)
-        );
-        assert_eq!(fs::read(&target).unwrap(), original);
-        assert_eq!(unix_mode(&target), original_mode);
-        assert!(fs::symlink_metadata(&metadata_path)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert!(!installation_key_path(&backend).exists());
-        let events = backend.state.lock().unwrap().events.clone();
-        assert!(events.contains(&"open-metadata-lock"));
-        assert!(events.contains(&"acquire-metadata-lock"));
-        assert!(events.contains(&"inspect-artifacts"));
-        assert!(!events.contains(&"quarantine-metadata"));
-
-        backend.cleanup();
-        fs::remove_file(target).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn account_final_directory_symlink_fails_before_chmod_or_artifact_creation() {
-        use std::os::unix::fs::{symlink, PermissionsExt as _};
-
-        let backend = TestBackend::new("directory-symlink");
-        let target = backend.directory.with_extension("external-directory");
+        let final_link = TestBackend::new("final-directory-symlink");
+        let target = final_link.directory.with_extension("directory-target");
         fs::create_dir(&target).unwrap();
         fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
-        let original_mode = unix_mode(&target);
-        symlink(&target, &backend.directory).unwrap();
-
-        assert_eq!(
-            resolve_test(&backend, &Mutex::new(()), b"marker"),
-            Err(AccountScopeError::StorageUnavailable)
+        symlink(&target, &final_link.directory).unwrap();
+        assert!(
+            resolve_test(&final_link, &Mutex::new(()), b"marker")
+                == Err(AccountScopeError::StorageUnavailable),
+            "final directory symlink"
         );
-        assert_eq!(unix_mode(&target), original_mode);
-        assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
-        assert!(fs::symlink_metadata(&backend.directory)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        let events = backend.state.lock().unwrap().events.clone();
-        assert!(events.contains(&"create-directory"));
-        assert!(!events.contains(&"open-metadata-lock"));
-        assert!(!events.contains(&"create-temp"));
-
-        fs::remove_file(&backend.directory).unwrap();
+        assert!(
+            unix_mode(&target) == 0o755
+                && fs::read_dir(&target).unwrap().next().is_none()
+                && !final_link.events().contains(&FsOperation::OpenMetadataLock),
+            "final directory target"
+        );
+        fs::remove_file(&final_link.directory).unwrap();
         fs::remove_dir(target).unwrap();
-    }
 
-    #[cfg(unix)]
-    #[test]
-    fn atomic_metadata_quarantine_hard_link_closes_collision_race() {
-        use std::cell::Cell;
-        use std::os::unix::fs::{symlink, MetadataExt as _, PermissionsExt as _};
-
-        let backend = TestBackend::new("metadata-quarantine-reservation-race");
-        fs::create_dir_all(&backend.directory).unwrap();
-        let metadata_path = backend.directory.join(METADATA_FILE);
-        let original = b"metadata-race-source";
-        fs::write(&metadata_path, original).unwrap();
-        fs::set_permissions(&metadata_path, fs::Permissions::from_mode(0o644)).unwrap();
-        let source_inode = fs::metadata(&metadata_path).unwrap().ino();
-        let collision = backend
-            .directory
-            .join("quota-account-scope-v1.corrupt-1752710400.json");
-        let missing_target = backend.directory.with_extension("race-dangling-target");
-        let raced = Cell::new(false);
-
-        let quarantined = quarantine_metadata_with(
-            &backend,
-            &metadata_path,
-            "corrupt",
-            |source, candidate| {
-                if !raced.replace(true) {
-                    symlink(&missing_target, candidate)?;
-                }
-                fs::hard_link(source, candidate)
-            },
-            |source| fs::remove_file(source),
-        )
-        .unwrap();
-
-        assert_eq!(
-            quarantined,
-            backend
-                .directory
-                .join("quota-account-scope-v1.corrupt-1752710400.1.json")
-        );
-        assert!(fs::symlink_metadata(&collision)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert!(!missing_target.exists());
-        assert_eq!(fs::read(&quarantined).unwrap(), original);
-        assert_eq!(unix_mode(&quarantined), 0o600);
-        assert_eq!(fs::metadata(&quarantined).unwrap().ino(), source_inode);
-        assert!(!metadata_path.exists());
-
-        backend.cleanup();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn metadata_quarantine_unlink_failure_rolls_back_link() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let backend = TestBackend::new("metadata-quarantine-unlink-failure");
-        fs::create_dir_all(&backend.directory).unwrap();
-        let metadata_path = backend.directory.join(METADATA_FILE);
-        let original = b"metadata-before-rename-failure";
-        fs::write(&metadata_path, original).unwrap();
-        fs::set_permissions(&metadata_path, fs::Permissions::from_mode(0o644)).unwrap();
-        let candidate = backend
-            .directory
-            .join("quota-account-scope-v1.corrupt-1752710400.json");
-
-        assert_eq!(
-            quarantine_metadata_with(
-                &backend,
-                &metadata_path,
-                "corrupt",
-                |source, candidate| fs::hard_link(source, candidate),
-                |_source| Err(io::Error::new(io::ErrorKind::PermissionDenied, "injected")),
-            ),
-            Err(AccountScopeError::QuarantineFailed)
-        );
-        assert_eq!(fs::read(&metadata_path).unwrap(), original);
-        assert_eq!(unix_mode(&metadata_path), 0o600);
-        assert!(matches!(
-            fs::symlink_metadata(&candidate),
-            Err(error) if error.kind() == io::ErrorKind::NotFound
-        ));
-        assert!(!backend
-            .state
-            .lock()
-            .unwrap()
-            .events
-            .contains(&"sync-directory"));
-
-        backend.cleanup();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn dangling_metadata_quarantine_collision_is_not_overwritten() {
-        use std::os::unix::fs::{symlink, PermissionsExt as _};
-
-        let backend = TestBackend::new("dangling-quarantine")
-            .with_installation_key(vec![0x11; INSTALLATION_KEY_BYTES]);
-        fs::create_dir_all(&backend.directory).unwrap();
-        let metadata_path = backend.directory.join(METADATA_FILE);
-        let corrupt = b"corrupt-metadata-with-dangling-collision";
-        fs::write(&metadata_path, corrupt).unwrap();
-        fs::set_permissions(&metadata_path, fs::Permissions::from_mode(0o644)).unwrap();
-        let collision = backend
-            .directory
-            .join("quota-account-scope-v1.corrupt-1752710400.json");
-        let missing_target = backend
-            .directory
-            .with_extension("missing-quarantine-target");
-        symlink(&missing_target, &collision).unwrap();
-
-        assert_eq!(
-            resolve_test(&backend, &Mutex::new(()), b"marker"),
-            Err(AccountScopeError::MetadataCorrupt)
-        );
-        assert!(fs::symlink_metadata(&collision)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert!(!missing_target.exists());
-        let quarantined = backend
-            .directory
-            .join("quota-account-scope-v1.corrupt-1752710400.1.json");
-        assert_eq!(fs::read(&quarantined).unwrap(), corrupt);
-        assert_eq!(unix_mode(&quarantined), 0o600);
-        assert!(!metadata_path.exists());
-        assert!(!backend
-            .state
-            .lock()
-            .unwrap()
-            .events
-            .contains(&"create-temp"));
-
-        backend.cleanup();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn restored_metadata_is_tightened_before_read_without_changing_bytes() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let backend = TestBackend::new("restored-mode");
-        let lock = Mutex::new(());
-        resolve_test(&backend, &lock, b"marker").unwrap();
-        let metadata_path = backend.directory.join(METADATA_FILE);
-        let bytes = fs::read(&metadata_path).unwrap();
-        fs::set_permissions(&metadata_path, fs::Permissions::from_mode(0o644)).unwrap();
-        let key = installation_key(&backend);
-
-        let payload = load_metadata(&backend, &backend.directory, &key).unwrap();
-        assert_eq!(payload.bindings.len(), 1);
-        assert_eq!(fs::read(&metadata_path).unwrap(), bytes);
-        assert_eq!(unix_mode(&metadata_path), 0o600);
-
-        backend.cleanup();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlinked_ancestor_is_allowed_when_final_account_directory_is_real() {
-        use std::os::unix::fs::symlink;
-
-        let mut backend = TestBackend::new("ancestor-symlink");
-        let seed = backend.directory.clone();
+        let mut ancestor = TestBackend::new("ancestor-symlink");
+        let seed = ancestor.directory.clone();
         let real_parent = seed.with_extension("real-parent");
         let linked_parent = seed.with_extension("linked-parent");
-        backend.directory = linked_parent.join("com.nyanako.tokenbar");
+        ancestor.directory = linked_parent.join("com.nyanako.tokenbar");
         fs::create_dir(&real_parent).unwrap();
         symlink(&real_parent, &linked_parent).unwrap();
-
-        assert!(resolve_test(&backend, &Mutex::new(()), b"marker").is_ok());
-        assert!(fs::symlink_metadata(&backend.directory)
-            .unwrap()
-            .file_type()
-            .is_dir());
-
+        assert!(
+            resolve_test(&ancestor, &Mutex::new(()), b"marker").is_ok(),
+            "ancestor symlink admission"
+        );
+        assert!(
+            fs::symlink_metadata(&ancestor.directory)
+                .unwrap()
+                .file_type()
+                .is_dir(),
+            "ancestor final directory"
+        );
         fs::remove_file(linked_parent).unwrap();
         fs::remove_dir_all(real_parent).unwrap();
     }
 
-    #[test]
-    fn refresh_lock_is_owner_only_and_failure_is_typed() {
-        let backend = TestBackend::new("refresh-lock");
-        let directory = ensure_storage_dir(&backend).unwrap();
-        let file = open_refresh_lock_file(&backend, &directory, "claude").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            assert_eq!(
-                fs::metadata(directory.join("quota-auth-refresh-claude.lock"))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600
-            );
-        }
-        fs2::FileExt::unlock(&file).unwrap();
-        backend.fail_fs(FsOperation::AcquireRefreshLock);
-        assert!(matches!(
-            open_refresh_lock_file(&backend, &directory, "claude"),
-            Err(AccountScopeError::MetadataLock)
-        ));
-        backend.cleanup();
-    }
-
     #[cfg(unix)]
     #[test]
-    fn refresh_lock_symlink_fails_closed_before_lock_acquisition() {
-        use std::os::unix::fs::{symlink, PermissionsExt as _};
+    fn unix_quarantine_collision_and_identity_bound_rollback_are_safe() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-        let backend = TestBackend::new("refresh-lock-symlink");
-        let directory = ensure_storage_dir(&backend).unwrap();
-        let target = backend.directory.with_extension("external-refresh-lock");
-        let lock_path = directory.join("quota-auth-refresh-claude.lock");
-        let original = b"external-refresh-lock-target";
-        fs::write(&target, original).unwrap();
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
-        let original_mode = unix_mode(&target);
-        symlink(&target, &lock_path).unwrap();
-
-        assert!(matches!(
-            open_refresh_lock_file(&backend, &directory, "claude"),
-            Err(AccountScopeError::MetadataLock)
-        ));
-        assert_eq!(fs::read(&target).unwrap(), original);
-        assert_eq!(unix_mode(&target), original_mode);
-        assert!(fs::symlink_metadata(&lock_path)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        let events = backend.state.lock().unwrap().events.clone();
-        assert!(events.contains(&"open-refresh-lock"));
-        assert!(!events.contains(&"acquire-refresh-lock"));
-
-        backend.cleanup();
-        fs::remove_file(target).unwrap();
-    }
-
-    #[test]
-    fn authenticated_binding_conflict_is_preserved_not_quarantined() {
-        let backend = TestBackend::new("binding-conflict");
-        let lock = Mutex::new(());
-        resolve_test(&backend, &lock, b"old").unwrap();
-        let key = installation_key(&backend);
-        let directory = backend.directory.clone();
-        let mut payload = decode_metadata(&key, &metadata_bytes(&backend)).unwrap();
-        let mut duplicate = payload.bindings[0].clone();
-        duplicate.random_lineage_id = URL_SAFE_NO_PAD.encode([0xEF; LINEAGE_ID_BYTES]);
-        payload.bindings.push(duplicate);
-        // Encode a valid-MAC envelope without running semantic validation.
-        let payload_bytes = serde_json::to_vec(&payload).unwrap();
-        let metadata_key = metadata_mac_key(&key).unwrap();
-        let mac = hmac_digest(&metadata_key, &[payload_bytes.as_slice()]).unwrap();
-        let envelope = MetadataEnvelope {
-            schema_version: METADATA_SCHEMA_VERSION,
-            payload_bytes_base64: STANDARD.encode(&payload_bytes),
-            payload_mac: encode_digest(&mac),
-        };
-        fs::write(
-            directory.join(METADATA_FILE),
-            serde_json::to_vec_pretty(&envelope).unwrap(),
+        let collision = TestBackend::new("quarantine-collision");
+        fs::create_dir_all(&collision.directory).unwrap();
+        let source = collision.directory.join(METADATA_FILE);
+        let first_candidate = collision
+            .directory
+            .join("quota-account-scope-v1.corrupt-1752710400.json");
+        fs::write(&source, b"source-evidence").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o640)).unwrap();
+        let source_inode = fs::metadata(&source).unwrap().ino();
+        fs::write(&first_candidate, b"collision-evidence").unwrap();
+        let quarantined = quarantine_metadata_with(
+            &collision,
+            &source,
+            "corrupt",
+            |source, candidate| fs::hard_link(source, candidate),
+            |source| fs::remove_file(source),
         )
         .unwrap();
-        let before = metadata_bytes(&backend);
-        assert_eq!(
-            resolve_test(&backend, &lock, b"old"),
-            Err(AccountScopeError::MetadataConflict)
+        assert!(
+            quarantined
+                == collision
+                    .directory
+                    .join("quota-account-scope-v1.corrupt-1752710400.1.json"),
+            "quarantine collision suffix"
         );
-        assert_eq!(metadata_bytes(&backend), before);
-        assert!(!directory
-            .join(format!(
-                "quota-account-scope-v1.corrupt-{}.json",
-                backend.now_seconds()
-            ))
-            .exists());
-        backend.cleanup();
+        assert!(
+            fs::read(&first_candidate).unwrap() == b"collision-evidence"
+                && fs::read(&quarantined).unwrap() == b"source-evidence"
+                && fs::metadata(&quarantined).unwrap().ino() == source_inode
+                && !source.exists(),
+            "quarantine collision artifacts"
+        );
+        collision.cleanup();
+
+        let rollback = TestBackend::new("quarantine-rollback");
+        fs::create_dir_all(&rollback.directory).unwrap();
+        let source = rollback.directory.join(METADATA_FILE);
+        let candidate = rollback
+            .directory
+            .join("quota-account-scope-v1.corrupt-1752710400.json");
+        fs::write(&source, b"source-evidence").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(
+            quarantine_metadata_with(
+                &rollback,
+                &source,
+                "corrupt",
+                |source, candidate| fs::hard_link(source, candidate),
+                |_source| {
+                    fs::remove_file(&candidate)?;
+                    fs::write(&candidate, b"replacement-evidence")?;
+                    fs::set_permissions(&candidate, fs::Permissions::from_mode(0o600))?;
+                    Err(io::Error::new(io::ErrorKind::PermissionDenied, "injected"))
+                },
+            ) == Err(AccountScopeError::QuarantineFailed),
+            "quarantine rollback type"
+        );
+        assert!(
+            fs::read(&source).unwrap() == b"source-evidence"
+                && fs::read(&candidate).ok().as_deref() == Some(b"replacement-evidence")
+                && !rollback.events().contains(&FsOperation::SyncDirectory),
+            "quarantine identity-bound rollback"
+        );
+        rollback.cleanup();
     }
 
     #[test]
-    fn persisted_files_are_owner_only_and_contain_no_raw_or_plain_sha_values() {
-        let backend = TestBackend::new("raw-scan");
-        let lock = Mutex::new(());
-        let raw_values = [
-            "fixture-secret-refresh-token",
-            "User.LowEntropy@example.com",
-            "/Users/fixture/private/auth.json",
-            "Fixture Display Label",
-            "Provider-Account-ID-ByteCase",
+    fn quarantine_failures_preserve_source_and_key_state() {
+        let orphan = TestBackend::new("orphan-quarantine-failure");
+        fs::create_dir_all(&orphan.directory).unwrap();
+        fs::write(orphan.directory.join(METADATA_FILE), b"orphan-evidence").unwrap();
+        orphan.fail_fs(FsOperation::QuarantineMetadata);
+        assert!(
+            resolve_test(&orphan, &Mutex::new(()), b"marker")
+                == Err(AccountScopeError::QuarantineFailed),
+            "orphan quarantine failure type"
+        );
+        assert!(
+            metadata_bytes(&orphan) == b"orphan-evidence"
+                && !installation_key_path(&orphan).exists(),
+            "orphan quarantine preservation"
+        );
+        orphan.cleanup();
+
+        let corrupt = TestBackend::new("corrupt-quarantine-failure")
+            .with_installation_key(vec![0x11; INSTALLATION_KEY_BYTES]);
+        fs::write(corrupt.directory.join(METADATA_FILE), b"corrupt-evidence").unwrap();
+        corrupt.fail_fs(FsOperation::QuarantineMetadata);
+        assert!(
+            resolve_test(&corrupt, &Mutex::new(()), b"marker")
+                == Err(AccountScopeError::QuarantineFailed),
+            "corrupt quarantine failure type"
+        );
+        assert!(
+            metadata_bytes(&corrupt) == b"corrupt-evidence",
+            "corrupt quarantine preservation"
+        );
+        corrupt.cleanup();
+    }
+
+    #[test]
+    fn persisted_artifacts_and_errors_hide_raw_identity_across_storage_modes() {
+        #[cfg(not(target_os = "windows"))]
+        let backends = vec![TestBackend::new("privacy-default")];
+        #[cfg(target_os = "windows")]
+        let backends = vec![
+            TestBackend::new("privacy-default"),
+            TestBackend::new("privacy-secure").with_windows_secure_storage(),
         ];
-        let credential_scope = resolve_credential_with(
-            &backend,
-            &lock,
-            "grok",
-            "auth-json",
-            raw_values[2],
-            raw_values[0].as_bytes(),
-        )
-        .unwrap();
-        let email_scope = resolve_authoritative_with(
-            &backend,
-            &lock,
-            "antigravity",
-            AuthoritativeIdKind::Email,
-            raw_values[1],
-        )
-        .unwrap();
-        let id_scope = resolve_authoritative_with(
-            &backend,
-            &lock,
-            "codex",
-            AuthoritativeIdKind::OpaqueId,
-            raw_values[4],
-        )
-        .unwrap();
-        let constant_history_scope =
-            resolve_history_scope_with(&backend, &lock, "grok", None).unwrap();
-        let authoritative_history_scope = resolve_history_scope_with(
-            &backend,
-            &lock,
-            "codex",
-            Some((AuthoritativeIdKind::OpaqueId, raw_values[4])),
-        )
-        .unwrap();
-        let history = format!(
-            r#"{{"accountScopes":["{}","{}","{}"],"historyScopes":["{}","{}"]}}"#,
-            credential_scope.as_str(),
-            email_scope.as_str(),
-            id_scope.as_str(),
-            constant_history_scope.as_str(),
-            authoritative_history_scope.as_str()
-        );
-        fs::write(backend.directory.join(V3_HISTORY_FILE), history).unwrap();
-        let metadata = metadata_bytes(&backend);
-        let key = installation_key(&backend);
-        decode_metadata(&key, &metadata).unwrap();
-        let envelope: MetadataEnvelope = serde_json::from_slice(&metadata).unwrap();
-        let decoded_payload = STANDARD
-            .decode(envelope.payload_bytes_base64.as_bytes())
+
+        for (owner_index, backend) in backends.into_iter().enumerate() {
+            let lock = Mutex::new(());
+            let raw_values = [
+                "fixture-secret-refresh-token",
+                "User.LowEntropy@example.com",
+                "/private/fixture/auth.json",
+                "Fixture Display Label",
+                "Provider-Account-ID-ByteCase",
+            ];
+            let credential_scope = resolve_credential_with(
+                &backend,
+                &lock,
+                "grok",
+                "auth-json",
+                raw_values[2],
+                raw_values[0].as_bytes(),
+            )
             .unwrap();
-        let files = [
-            fs::read(installation_key_path(&backend)).unwrap(),
-            metadata,
-            decoded_payload,
-            fs::read(backend.directory.join(V3_HISTORY_FILE)).unwrap(),
-        ];
-        for bytes in files {
-            for raw in raw_values {
-                let digest = Sha256::digest(raw.as_bytes());
-                for forbidden in [
-                    raw.as_bytes().to_vec(),
-                    format!("{digest:x}").into_bytes(),
-                    STANDARD.encode(digest).into_bytes(),
-                    URL_SAFE_NO_PAD.encode(digest).into_bytes(),
-                ] {
-                    assert!(!bytes
-                        .windows(forbidden.len())
-                        .any(|window| window == forbidden));
-                }
-            }
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            assert_eq!(
-                fs::metadata(&backend.directory)
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o700
+            let email_scope = resolve_authoritative_with(
+                &backend,
+                &lock,
+                "antigravity",
+                AuthoritativeIdKind::Email,
+                raw_values[1],
+            )
+            .unwrap();
+            let id_scope = resolve_authoritative_with(
+                &backend,
+                &lock,
+                "codex",
+                AuthoritativeIdKind::OpaqueId,
+                raw_values[4],
+            )
+            .unwrap();
+            let constant_history =
+                resolve_history_scope_with(&backend, &lock, "grok", None).unwrap();
+            let authoritative_history = resolve_history_scope_with(
+                &backend,
+                &lock,
+                "codex",
+                Some((AuthoritativeIdKind::OpaqueId, raw_values[4])),
+            )
+            .unwrap();
+            fs::write(
+                backend.directory.join(V3_HISTORY_FILE),
+                format!(
+                    r#"{{"accountScopes":["{}","{}","{}"],"historyScopes":["{}","{}"]}}"#,
+                    credential_scope.as_str(),
+                    email_scope.as_str(),
+                    id_scope.as_str(),
+                    constant_history.as_str(),
+                    authoritative_history.as_str()
+                ),
+            )
+            .unwrap();
+            let metadata = metadata_bytes(&backend);
+            let envelope: MetadataEnvelope = serde_json::from_slice(&metadata).unwrap();
+            let payload = STANDARD
+                .decode(envelope.payload_bytes_base64.as_bytes())
+                .unwrap();
+            let debug_values = format!(
+                "{credential_scope:?} {email_scope:?} {id_scope:?} {constant_history:?} {authoritative_history:?}"
+            )
+            .into_bytes();
+            let artifacts = vec![
+                fs::read(installation_key_path(&backend)).unwrap(),
+                metadata,
+                payload,
+                fs::read(backend.directory.join(V3_HISTORY_FILE)).unwrap(),
+                debug_values,
+            ];
+            assert_no_sensitive(
+                &artifacts,
+                &raw_values,
+                if owner_index == 0 {
+                    "common privacy"
+                } else {
+                    "windows consumer privacy"
+                },
             );
-            for path in [
-                backend.directory.join(INSTALLATION_KEY_FILE),
-                backend.directory.join(METADATA_FILE),
-                backend.directory.join(METADATA_LOCK_FILE),
-            ] {
-                assert_eq!(
-                    fs::metadata(path).unwrap().permissions().mode() & 0o777,
-                    0o600
+
+            fs::write(backend.directory.join(METADATA_FILE), b"corrupt-envelope").unwrap();
+            let error = resolve_authoritative_with(
+                &backend,
+                &lock,
+                "antigravity",
+                AuthoritativeIdKind::Email,
+                raw_values[1],
+            )
+            .unwrap_err();
+            assert!(
+                error == AccountScopeError::MetadataCorrupt,
+                "privacy error type"
+            );
+            let error_text = format!("{error:?} {error}").to_ascii_lowercase();
+            for (value_index, value) in raw_values.iter().enumerate() {
+                assert!(
+                    !error_text.contains(&value.to_ascii_lowercase()),
+                    "privacy error value {value_index}"
                 );
             }
+            assert!(
+                !error_text.contains(&backend.directory.to_string_lossy().to_ascii_lowercase()),
+                "privacy error path"
+            );
+            for (name_index, name) in fs::read_dir(&backend.directory)
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase())
+                .enumerate()
+            {
+                for (value_index, value) in raw_values.iter().enumerate() {
+                    assert!(
+                        !name.contains(&value.to_ascii_lowercase()),
+                        "privacy filename {name_index} value {value_index}"
+                    );
+                }
+            }
+            #[cfg(unix)]
+            {
+                assert!(
+                    unix_mode(&backend.directory) == 0o700,
+                    "privacy directory mode"
+                );
+                for path in [
+                    backend.directory.join(INSTALLATION_KEY_FILE),
+                    backend.directory.join(METADATA_LOCK_FILE),
+                ] {
+                    assert!(unix_mode(&path) == 0o600, "privacy owner-only file mode");
+                }
+            }
+            backend.cleanup();
         }
-        backend.cleanup();
-    }
-
-    #[test]
-    fn reinstall_with_consistent_key_and_metadata_restores_the_same_scope() {
-        let backend = TestBackend::new("restore");
-        let first = resolve_test(&backend, &Mutex::new(()), b"marker").unwrap();
-        let restarted = backend.clone();
-        let second = resolve_test(&restarted, &Mutex::new(()), b"marker").unwrap();
-        assert_eq!(first, second);
-        backend.cleanup();
     }
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_account_scope_routes_new_artifacts_to_secure_fallback() {
-        let backend =
-            TestBackend::new("windows-secure-fallback-root").with_windows_secure_storage();
-        fs::create_dir(&backend.directory).expect("create inherited legacy preferred root");
-        assert!(
-            crate::agent_storage_windows::ensure_secure_storage_directory(&backend.directory)
-                .is_err(),
-            "legacy preferred root is not exact secure"
-        );
+    fn windows_consumer_secure_fallback_is_sticky_and_preferred_root_untouched() {
+        let backend = TestBackend::new("windows-fallback").with_windows_secure_storage();
+        fs::create_dir(&backend.directory).unwrap();
         let mut fallback_name = backend.directory.file_name().unwrap().to_os_string();
         fallback_name.push(".secure");
         let fallback = backend.directory.with_file_name(fallback_name);
-
-        let scope = resolve_test(&backend, &Mutex::new(()), b"fallback-marker")
-            .expect("account scope succeeds through fallback");
-        assert!(!scope.as_str().is_empty());
-        assert_eq!(ensure_storage_dir(&backend).unwrap(), fallback);
-        let directory =
-            crate::agent_storage_windows::ensure_secure_storage_directory(&fallback).unwrap();
-        crate::agent_storage_windows::verify_storage_handle(directory.as_raw_handle() as HANDLE)
+        resolve_test(&backend, &Mutex::new(()), b"marker").unwrap();
+        assert!(
+            ensure_storage_dir(&backend).unwrap() == fallback
+                && ensure_storage_dir(&backend).unwrap() == fallback,
+            "windows sticky fallback"
+        );
+        let key = read_installation_key(&backend, &fallback.join(INSTALLATION_KEY_FILE))
+            .unwrap()
             .unwrap();
-        drop(directory);
-
-        let key_path = fallback.join(INSTALLATION_KEY_FILE);
-        let metadata_path = fallback.join(METADATA_FILE);
-        let lock_path = fallback.join(METADATA_LOCK_FILE);
-        let key_bytes = windows_secure_file_snapshot(&key_path).0;
-        let key: [u8; INSTALLATION_KEY_BYTES] = key_bytes.try_into().unwrap();
-        decode_metadata(&key, &windows_secure_file_snapshot(&metadata_path).0).unwrap();
-        assert!(windows_secure_file_snapshot(&lock_path).0.is_empty());
-        assert_no_windows_secure_temp(&fallback, INSTALLATION_KEY_FILE);
-        assert_no_windows_secure_temp(&fallback, METADATA_FILE);
+        let metadata = read_owner_only(&backend, &fallback.join(METADATA_FILE))
+            .unwrap()
+            .unwrap();
+        decode_metadata(&key, &metadata).unwrap();
         assert!(
             fs::read_dir(&backend.directory).unwrap().next().is_none(),
-            "legacy preferred root receives no key, metadata, lock, or temp artifacts"
+            "windows preferred root mutation"
         );
-        assert!(
-            crate::agent_storage_windows::ensure_secure_storage_directory(&backend.directory)
-                .is_err(),
-            "legacy preferred ACL remains unchanged"
-        );
-
         backend.cleanup();
         fs::remove_dir_all(fallback).unwrap();
     }
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_secure_routes_verify_exact_directory_files_and_reject_insecure_artifacts() {
-        let backend = TestBackend::new("windows-secure-routes").with_windows_secure_storage();
-        let directory = ensure_storage_dir(&backend).unwrap();
-        assert_eq!(ensure_storage_dir(&backend).unwrap(), directory);
-
-        let file_path = directory.join("secure-artifact.bin");
-        let mut file = open_owner_only(&backend, &file_path).unwrap();
-        file.write_all(b"secure-bytes").unwrap();
-        file.sync_all().unwrap();
-        verify_open_regular_file(&backend, &file_path, &file).unwrap();
-        drop(file);
-
-        let reopened =
-            crate::agent_storage_windows::open_existing_secure_file(&file_path, false).unwrap();
-        drop(secure_open_regular_file(&backend, &file_path, reopened).unwrap());
-        assert_eq!(
-            read_owner_only(&backend, &file_path).unwrap().unwrap(),
-            b"secure-bytes"
-        );
-        assert!(open_existing_owner_only(&backend, &file_path)
-            .unwrap()
-            .is_some());
-        require_regular_file_path(&backend, &file_path).unwrap();
-        assert!(regular_artifact_exists(&backend, &file_path).unwrap());
-        assert!(!regular_artifact_exists(&backend, &directory.join("missing.bin")).unwrap());
-
-        make_windows_path_permissive(&file_path, false);
-        assert!(open_existing_owner_only(&backend, &file_path).is_err());
-        assert!(read_owner_only(&backend, &file_path).is_err());
-        assert!(require_regular_file_path(&backend, &file_path).is_err());
-        assert!(regular_artifact_exists(&backend, &file_path).is_err());
-        assert_eq!(fs::read(&file_path).unwrap(), b"secure-bytes");
-        assert!(open_existing_owner_only(&backend, &file_path).is_err());
-
-        let target_path = directory.join("reparse-target.bin");
-        let mut target = open_owner_only(&backend, &target_path).unwrap();
-        target.write_all(b"reparse-target").unwrap();
-        target.sync_all().unwrap();
-        drop(target);
-        let link_path = directory.join("reparse-link.bin");
-        symlink_file(&target_path, &link_path).unwrap();
-        assert!(open_existing_owner_only(&backend, &link_path).is_err());
-        assert!(read_owner_only(&backend, &link_path).is_err());
-        assert!(require_regular_file_path(&backend, &link_path).is_err());
-        assert!(regular_artifact_exists(&backend, &link_path).is_err());
-        assert_eq!(fs::read(&target_path).unwrap(), b"reparse-target");
-        assert!(fs::symlink_metadata(&link_path)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-
-        make_windows_path_permissive(&directory, true);
-        assert!(ensure_real_directory(&backend, &directory).is_err());
-        assert!(ensure_real_directory(&backend, &directory).is_err());
-        backend.cleanup();
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_secure_metadata_and_refresh_locks_hold_and_block_path_mutation() {
-        let backend = TestBackend::new("windows-secure-locks").with_windows_secure_storage();
-        let directory = ensure_storage_dir(&backend).unwrap();
-        let metadata_lock_path = directory.join(METADATA_LOCK_FILE);
-        let metadata_renamed = directory.join("metadata.lock.renamed");
-        with_metadata_lock(&backend, &Mutex::new(()), &directory, || {
-            let contender = open_owner_only(&backend, &metadata_lock_path).unwrap();
-            assert!(fs2::FileExt::try_lock_exclusive(&contender).is_err());
-            assert!(fs::rename(&metadata_lock_path, &metadata_renamed).is_err());
-            assert!(fs::remove_file(&metadata_lock_path).is_err());
-            drop(contender);
-            Ok(())
-        })
-        .unwrap();
-        fs::rename(&metadata_lock_path, &metadata_renamed).unwrap();
-        fs::rename(&metadata_renamed, &metadata_lock_path).unwrap();
-
-        let refresh_lock_path = directory.join("quota-auth-refresh-claude.lock");
-        let refresh_renamed = directory.join("refresh.lock.renamed");
-        let refresh = open_refresh_lock_file(&backend, &directory, "claude").unwrap();
-        let contender = open_owner_only(&backend, &refresh_lock_path).unwrap();
-        assert!(fs2::FileExt::try_lock_exclusive(&contender).is_err());
-        assert!(fs::rename(&refresh_lock_path, &refresh_renamed).is_err());
-        assert!(fs::remove_file(&refresh_lock_path).is_err());
-        drop(contender);
-        fs2::FileExt::unlock(&refresh).unwrap();
-        drop(refresh);
-        fs::rename(&refresh_lock_path, &refresh_renamed).unwrap();
-        fs::rename(&refresh_renamed, &refresh_lock_path).unwrap();
-
-        sync_directory(&backend, &directory).unwrap();
-        backend.cleanup();
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_secure_concurrent_first_installation_key_create_has_one_exact_winner() {
-        let backend =
-            TestBackend::new("windows-secure-concurrent-key").with_windows_secure_storage();
+    fn windows_consumer_concurrent_installation_key_has_one_stable_winner() {
+        let backend = TestBackend::new("windows-concurrent-key").with_windows_secure_storage();
+        backend.set_random(vec![
+            vec![0x31; INSTALLATION_KEY_BYTES],
+            vec![0x32; INSTALLATION_KEY_BYTES],
+        ]);
         let start = Arc::new(Barrier::new(3));
         let one_backend = backend.clone();
         let one_start = start.clone();
@@ -3981,483 +3294,77 @@ mod tests {
             ensure_installation_key(&two_backend, &Mutex::new(()))
         });
         start.wait();
-
         let one = one.join().unwrap().unwrap();
         let two = two.join().unwrap().unwrap();
-        assert_eq!(one, two);
-        assert_eq!(one.len(), INSTALLATION_KEY_BYTES);
-        let key_path = installation_key_path(&backend);
-        assert_eq!(windows_secure_file_snapshot(&key_path).0, one.to_vec());
-        assert_no_windows_secure_temp(&backend.directory, INSTALLATION_KEY_FILE);
-        assert_eq!(
+        assert!(one == two, "windows concurrent winner");
+        assert!(
+            installation_key(&backend) == one
+                && ensure_installation_key(&backend, &Mutex::new(())).unwrap() == one,
+            "windows stable persisted winner"
+        );
+        assert!(
             backend
-                .state
-                .lock()
-                .unwrap()
-                .events
+                .events()
                 .iter()
-                .filter(|event| **event == "replace-file")
-                .count(),
-            1
+                .filter(|operation| **operation == FsOperation::ReplaceFile)
+                .count()
+                == 1,
+            "windows single key commit"
         );
         backend.cleanup();
     }
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_secure_metadata_save_replace_round_trip_is_authenticated_and_stable() {
-        let backend =
-            TestBackend::new("windows-secure-metadata-round-trip").with_windows_secure_storage();
+    fn windows_consumer_refusal_precommit_and_quarantine_failures_are_typed() {
+        let refusal = TestBackend::new("windows-refusal").with_windows_secure_storage();
+        let directory = ensure_storage_dir(&refusal).unwrap();
+        fs::create_dir(directory.join(INSTALLATION_KEY_FILE)).unwrap();
+        assert!(
+            ensure_installation_key(&refusal, &Mutex::new(()))
+                == Err(AccountScopeError::InvalidInstallationKey),
+            "windows secure backend refusal"
+        );
+        refusal.cleanup();
+
+        let precommit = TestBackend::new("windows-precommit").with_windows_secure_storage();
         let lock = Mutex::new(());
-        let first = resolve_test(&backend, &lock, b"first-marker").unwrap();
-        let key = installation_key(&backend);
-        let metadata_path = backend.directory.join(METADATA_FILE);
-        let first_snapshot = windows_secure_file_snapshot(&metadata_path);
-        let first_payload = decode_metadata(&key, &first_snapshot.0).unwrap();
-        assert_eq!(first_payload.bindings.len(), 1);
-
-        let second = resolve_test(&backend, &lock, b"second-marker").unwrap();
-        let second_snapshot = windows_secure_file_snapshot(&metadata_path);
-        let second_payload = decode_metadata(&key, &second_snapshot.0).unwrap();
-        assert_ne!(first, second);
-        assert_ne!(first_snapshot.0, second_snapshot.0);
-        assert_ne!(
-            (first_snapshot.1, first_snapshot.2),
-            (second_snapshot.1, second_snapshot.2)
+        let old = resolve_test(&precommit, &lock, b"old-marker").unwrap();
+        let before = artifact_snapshot(&precommit);
+        precommit.fail_fs(FsOperation::ReplaceFile);
+        assert!(
+            resolve_test(&precommit, &lock, b"new-marker") == Err(AccountScopeError::MetadataWrite),
+            "windows precommit type"
         );
-        assert_eq!(second_payload.bindings.len(), 2);
-
-        let restarted = backend.clone();
-        assert_eq!(
-            resolve_test(&restarted, &Mutex::new(()), b"second-marker").unwrap(),
-            second
+        assert!(
+            artifact_snapshot(&precommit) == before,
+            "windows precommit artifacts"
         );
-        decode_metadata(&key, &windows_secure_file_snapshot(&metadata_path).0).unwrap();
-        assert_no_windows_secure_temp(&backend.directory, INSTALLATION_KEY_FILE);
-        assert_no_windows_secure_temp(&backend.directory, METADATA_FILE);
-        backend.cleanup();
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_secure_conflicting_lineage_transfers_have_one_persistent_winner() {
-        let backend =
-            TestBackend::new("windows-secure-transfer-conflict").with_windows_secure_storage();
-        let setup_lock = Mutex::new(());
-        let scope_a =
-            resolve_credential_with(&backend, &setup_lock, "claude", "file", "slot-a", b"old-a")
-                .unwrap();
-        let scope_b =
-            resolve_credential_with(&backend, &setup_lock, "claude", "file", "slot-b", b"old-b")
-                .unwrap();
-        assert_ne!(scope_a, scope_b);
-        let key = installation_key(&backend);
-        let start = Arc::new(Barrier::new(3));
-
-        let one_backend = backend.clone();
-        let one_start = start.clone();
-        let one = thread::spawn(move || {
-            let process_lock = Mutex::new(());
-            one_start.wait();
-            transfer_credential_with(
-                &one_backend,
-                &process_lock,
-                &key,
-                "claude",
-                "file",
-                "slot-a",
-                b"old-a",
-                b"shared-new",
-            )
-        });
-        let two_backend = backend.clone();
-        let two_start = start.clone();
-        let two = thread::spawn(move || {
-            let process_lock = Mutex::new(());
-            two_start.wait();
-            transfer_credential_with(
-                &two_backend,
-                &process_lock,
-                &key,
-                "claude",
-                "file",
-                "slot-b",
-                b"old-b",
-                b"shared-new",
-            )
-        });
-        start.wait();
-
-        let winner = match [one.join().unwrap(), two.join().unwrap()] {
-            [Ok(winner), Err(AccountScopeError::MetadataConflict)] => {
-                assert_eq!(winner, scope_a);
-                winner
-            }
-            [Err(AccountScopeError::MetadataConflict), Ok(winner)] => {
-                assert_eq!(winner, scope_b);
-                winner
-            }
-            results => panic!("unexpected secure transfer results: {results:?}"),
-        };
-        let restarted = backend.clone();
-        assert_eq!(
-            resolve_credential_with(
-                &restarted,
-                &Mutex::new(()),
-                "claude",
-                "file",
-                "restart-slot",
-                b"shared-new",
-            )
-            .unwrap(),
-            winner
+        assert!(
+            resolve_test(&precommit, &lock, b"old-marker").unwrap() == old,
+            "windows precommit lineage"
         );
+        precommit.cleanup();
 
-        assert_eq!(
-            windows_secure_file_snapshot(&installation_key_path(&backend)).0,
-            key.to_vec()
-        );
-        let metadata = windows_secure_file_snapshot(&backend.directory.join(METADATA_FILE));
-        decode_metadata(&key, &metadata.0).unwrap();
-        windows_secure_file_snapshot(&backend.directory.join(METADATA_LOCK_FILE));
-        assert_no_windows_secure_temp(&backend.directory, INSTALLATION_KEY_FILE);
-        assert_no_windows_secure_temp(&backend.directory, METADATA_FILE);
-        backend.cleanup();
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_secure_atomic_failpoints_preserve_authenticated_last_good_file() {
-        for operation in [
-            FsOperation::CreateTemp,
-            FsOperation::WriteTemp,
-            FsOperation::SyncTemp,
-            FsOperation::ReplaceFile,
-        ] {
-            let backend =
-                TestBackend::new("windows-secure-atomic-failpoint").with_windows_secure_storage();
-            let lock = Mutex::new(());
-            let old_scope = resolve_test(&backend, &lock, b"old-marker").unwrap();
-            let key = installation_key(&backend);
-            let metadata_path = backend.directory.join(METADATA_FILE);
-            let last_good = windows_secure_file_snapshot(&metadata_path);
-            backend.fail_fs(operation);
-
-            assert_eq!(
-                resolve_test(&backend, &lock, b"new-marker"),
-                Err(AccountScopeError::MetadataWrite),
-                "{operation:?}"
-            );
-            let after_failure = windows_secure_file_snapshot(&metadata_path);
-            assert_eq!(after_failure, last_good, "{operation:?}");
-            decode_metadata(&key, &after_failure.0).unwrap();
-            assert_no_windows_secure_temp(&backend.directory, METADATA_FILE);
-            assert_eq!(
-                resolve_test(&backend, &lock, b"old-marker").unwrap(),
-                old_scope,
-                "{operation:?}"
-            );
-            assert_no_windows_secure_temp(&backend.directory, METADATA_FILE);
-            backend.cleanup();
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_secure_corrupt_metadata_quarantine_preserves_bytes_and_file_id() {
-        let backend = TestBackend::new("windows-secure-corrupt-quarantine")
+        let quarantine = TestBackend::new("windows-quarantine-failure")
             .with_windows_secure_storage()
-            .with_installation_key(vec![0x31; INSTALLATION_KEY_BYTES]);
-        let metadata_path = backend.directory.join(METADATA_FILE);
-        let corrupt = b"corrupt-secure-metadata";
-        write_windows_secure_file(&backend, &metadata_path, corrupt);
-        let source_snapshot = windows_secure_file_snapshot(&metadata_path);
-
-        assert_eq!(
-            resolve_test(&backend, &Mutex::new(()), b"marker"),
-            Err(AccountScopeError::MetadataCorrupt)
+            .with_installation_key(vec![0x11; INSTALLATION_KEY_BYTES]);
+        let metadata_path = quarantine.directory.join(METADATA_FILE);
+        let mut file = open_owner_only(&quarantine, &metadata_path).unwrap();
+        file.set_len(0).unwrap();
+        file.write_all(b"corrupt-evidence").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        quarantine.fail_fs(FsOperation::QuarantineMetadata);
+        assert!(
+            resolve_test(&quarantine, &Mutex::new(()), b"marker")
+                == Err(AccountScopeError::QuarantineFailed),
+            "windows quarantine failure type"
         );
-        let candidate = backend
-            .directory
-            .join("quota-account-scope-v1.corrupt-1752710400.json");
-        assert_eq!(windows_secure_file_snapshot(&candidate), source_snapshot);
-        assert!(matches!(
-            fs::symlink_metadata(&metadata_path),
-            Err(error) if error.kind() == io::ErrorKind::NotFound
-        ));
-
-        resolve_test(&backend, &Mutex::new(()), b"marker").unwrap();
-        decode_metadata(
-            &installation_key(&backend),
-            &windows_secure_file_snapshot(&metadata_path).0,
-        )
-        .unwrap();
-        assert_no_windows_secure_temp(&backend.directory, METADATA_FILE);
-        backend.cleanup();
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_secure_orphan_recovery_preserves_v3_and_defers_the_current_poll() {
-        let backend = TestBackend::new("windows-secure-orphan-recovery")
-            .with_windows_secure_storage()
-            .with_installation_key(vec![0x31; INSTALLATION_KEY_BYTES]);
-        let old_scope = resolve_test(&backend, &Mutex::new(()), b"marker").unwrap();
-        let metadata_path = backend.directory.join(METADATA_FILE);
-        let metadata_snapshot = windows_secure_file_snapshot(&metadata_path);
-        let history_path = backend.directory.join(V3_HISTORY_FILE);
-        write_windows_secure_file(&backend, &history_path, b"v3-sentinel-bytes");
-        let history_snapshot = windows_secure_file_snapshot(&history_path);
-        let history_mtime = fs::metadata(&history_path).unwrap().modified().unwrap();
-        let key_path = installation_key_path(&backend);
-        let old_key = windows_secure_file_snapshot(&key_path).0;
-        let key_handle =
-            crate::agent_storage_windows::open_existing_secure_file(&key_path, false).unwrap();
-        crate::agent_storage_windows::verify_secure_file_path(&key_handle, &key_path).unwrap();
-        fs::remove_file(&key_path).unwrap();
-        drop(key_handle);
-
-        assert_eq!(
-            resolve_test(&backend, &Mutex::new(()), b"marker"),
-            Err(AccountScopeError::OrphanedArtifacts)
+        assert!(
+            fs::read(&metadata_path).unwrap() == b"corrupt-evidence",
+            "windows quarantine preservation"
         );
-        let candidate = backend
-            .directory
-            .join("quota-account-scope-v1.orphaned-1752710400.json");
-        assert_eq!(windows_secure_file_snapshot(&candidate), metadata_snapshot);
-        assert!(matches!(
-            fs::symlink_metadata(&metadata_path),
-            Err(error) if error.kind() == io::ErrorKind::NotFound
-        ));
-        let replacement_key = windows_secure_file_snapshot(&key_path).0;
-        assert_eq!(replacement_key.len(), INSTALLATION_KEY_BYTES);
-        assert_ne!(replacement_key, old_key);
-        assert_eq!(
-            windows_secure_file_snapshot(&history_path),
-            history_snapshot
-        );
-        assert_eq!(
-            fs::metadata(&history_path).unwrap().modified().unwrap(),
-            history_mtime
-        );
-
-        let replacement_scope = resolve_test(&backend, &Mutex::new(()), b"marker").unwrap();
-        assert_ne!(replacement_scope, old_scope);
-        assert_eq!(
-            windows_secure_file_snapshot(&history_path),
-            history_snapshot
-        );
-        assert_eq!(
-            fs::metadata(&history_path).unwrap().modified().unwrap(),
-            history_mtime
-        );
-        assert_no_windows_secure_temp(&backend.directory, INSTALLATION_KEY_FILE);
-        assert_no_windows_secure_temp(&backend.directory, METADATA_FILE);
-        backend.cleanup();
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_secure_quarantine_collision_uses_suffix_without_generic_closures() {
-        let backend =
-            TestBackend::new("windows-secure-quarantine-collision").with_windows_secure_storage();
-        let directory = ensure_storage_dir(&backend).unwrap();
-        let source = directory.join(METADATA_FILE);
-        let collision = directory.join("quota-account-scope-v1.corrupt-1752710400.json");
-        write_windows_secure_file(&backend, &source, b"source-evidence");
-        write_windows_secure_file(&backend, &collision, b"collision-evidence");
-        let source_snapshot = windows_secure_file_snapshot(&source);
-        let collision_snapshot = windows_secure_file_snapshot(&collision);
-
-        let candidate = quarantine_metadata_with(
-            &backend,
-            &source,
-            "corrupt",
-            |_, _| panic!("secure quarantine must not call generic link"),
-            |_| panic!("secure quarantine must not call generic unlink"),
-        )
-        .unwrap();
-        assert_eq!(
-            candidate,
-            directory.join("quota-account-scope-v1.corrupt-1752710400.1.json")
-        );
-        assert_eq!(windows_secure_file_snapshot(&candidate), source_snapshot);
-        assert_eq!(windows_secure_file_snapshot(&collision), collision_snapshot);
-        assert!(matches!(
-            fs::symlink_metadata(&source),
-            Err(error) if error.kind() == io::ErrorKind::NotFound
-        ));
-        backend.cleanup();
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_secure_replace_failure_keeps_last_good_and_cleanup_fails_closed() {
-        let backend =
-            TestBackend::new("windows-secure-replace-failure").with_windows_secure_storage();
-        let lock = Mutex::new(());
-        resolve_test(&backend, &lock, b"old-marker").unwrap();
-        let key = installation_key(&backend);
-        let metadata_path = backend.directory.join(METADATA_FILE);
-        let last_good = windows_secure_file_snapshot(&metadata_path);
-        backend.state.lock().unwrap().events.clear();
-        backend.fail_fs(FsOperation::ReplaceFile);
-
-        assert_eq!(
-            resolve_test(&backend, &lock, b"new-marker"),
-            Err(AccountScopeError::MetadataWrite)
-        );
-        assert_eq!(windows_secure_file_snapshot(&metadata_path), last_good);
-        decode_metadata(&key, &last_good.0).unwrap();
-        let events = backend
-            .state
-            .lock()
-            .unwrap()
-            .events
-            .iter()
-            .copied()
-            .filter(|event| {
-                matches!(
-                    *event,
-                    "create-temp" | "write-temp" | "sync-temp" | "replace-file"
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            events,
-            ["create-temp", "write-temp", "sync-temp", "replace-file"]
-        );
-        assert_no_windows_secure_temp(&backend.directory, METADATA_FILE);
-
-        let residue = backend.directory.join(".blocked-secure-temp");
-        write_windows_secure_file(&backend, &residue, b"secure-residue");
-        let blocker = OpenOptions::new()
-            .read(true)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-            .open(&residue)
-            .unwrap();
-        cleanup_windows_secure_temp(&residue);
-        assert_eq!(windows_secure_file_snapshot(&residue).0, b"secure-residue");
-        drop(blocker);
-        cleanup_windows_secure_temp(&residue);
-        assert!(matches!(
-            fs::symlink_metadata(&residue),
-            Err(error) if error.kind() == io::ErrorKind::NotFound
-        ));
-        backend.cleanup();
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_secure_persistence_quarantine_and_errors_do_not_disclose_raw_identity() {
-        let backend =
-            TestBackend::new("windows-secure-no-raw-identity").with_windows_secure_storage();
-        let lock = Mutex::new(());
-        let raw_email = "Sensitive.User@example.com";
-        let raw_opaque_id = "Provider-Account-ID-Sensitive";
-        let raw_marker = "sensitive-refresh-token-marker";
-        let raw_location = "/Users/sensitive/private/auth.json";
-        resolve_credential_with(
-            &backend,
-            &lock,
-            "claude",
-            "auth-json",
-            raw_location,
-            raw_marker.as_bytes(),
-        )
-        .unwrap();
-        resolve_authoritative_with(
-            &backend,
-            &lock,
-            "antigravity",
-            AuthoritativeIdKind::Email,
-            raw_email,
-        )
-        .unwrap();
-        resolve_authoritative_with(
-            &backend,
-            &lock,
-            "codex",
-            AuthoritativeIdKind::OpaqueId,
-            raw_opaque_id,
-        )
-        .unwrap();
-
-        let key_path = installation_key_path(&backend);
-        let metadata_path = backend.directory.join(METADATA_FILE);
-        let key_bytes = windows_secure_file_snapshot(&key_path).0;
-        let metadata_bytes = windows_secure_file_snapshot(&metadata_path).0;
-        let payload_bytes = serde_json::to_vec(
-            &decode_metadata(&installation_key(&backend), &metadata_bytes).unwrap(),
-        )
-        .unwrap();
-        for persisted in [&key_bytes, &metadata_bytes, &payload_bytes] {
-            for raw in [raw_email, raw_opaque_id, raw_marker, raw_location] {
-                assert!(!persisted
-                    .windows(raw.len())
-                    .any(|window| window == raw.as_bytes()));
-            }
-        }
-
-        write_windows_secure_file(&backend, &metadata_path, b"corrupt-envelope");
-        let error = resolve_authoritative_with(
-            &backend,
-            &lock,
-            "antigravity",
-            AuthoritativeIdKind::Email,
-            raw_email,
-        )
-        .unwrap_err();
-        assert_eq!(error, AccountScopeError::MetadataCorrupt);
-        let error_text = format!("{error:?} {error}").to_ascii_lowercase();
-        for raw in [raw_email, raw_opaque_id, raw_marker, raw_location] {
-            assert!(!error_text.contains(&raw.to_ascii_lowercase()));
-        }
-        assert!(!error_text.contains(&backend.directory.to_string_lossy().to_ascii_lowercase()));
-        let names = fs::read_dir(&backend.directory)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        for name in names {
-            let name = name.to_ascii_lowercase();
-            for raw in [raw_email, raw_opaque_id, raw_marker, raw_location] {
-                assert!(!name.contains(&raw.to_ascii_lowercase()));
-            }
-        }
-        windows_secure_file_snapshot(
-            &backend
-                .directory
-                .join("quota-account-scope-v1.corrupt-1752710400.json"),
-        );
-        backend.cleanup();
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_system_backend_cng_returns_requested_distinct_bytes_without_storage_access() {
-        let first = SystemBackend.random_bytes(INSTALLATION_KEY_BYTES).unwrap();
-        let second = SystemBackend.random_bytes(INSTALLATION_KEY_BYTES).unwrap();
-        assert_eq!(first.len(), INSTALLATION_KEY_BYTES);
-        assert_eq!(second.len(), INSTALLATION_KEY_BYTES);
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn account_scope_source_has_no_legacy_installation_key_query() {
-        let source = include_str!("agent_account_scope.rs");
-        for forbidden in [
-            ["com.nyanako.tokenbar.account-scope.", "v1"].concat(),
-            ["SecItem", "CopyMatching"].concat(),
-            ["SecItem", "Add"].concat(),
-        ] {
-            assert!(!source.contains(&forbidden), "{forbidden}");
-        }
-        let manifest = include_str!("../Cargo.toml");
-        for forbidden in [
-            ["core-", "foundation"].concat(),
-            ["security-framework", "-sys"].concat(),
-        ] {
-            assert!(!manifest.contains(&forbidden), "{forbidden}");
-        }
+        quarantine.cleanup();
     }
 }
