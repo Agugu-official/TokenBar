@@ -70,7 +70,7 @@ struct WindowUsageCard: View {
         case let .noQuotaHistory(_, label, candidates, cardId):
             DashCard("%@ window".localized(label), subtitle: "No quota history") {
                 windowButtons(candidates: candidates, cardId: cardId)
-                Text("This window has no recorded quota history, so there is no line to draw.")
+                Text("This window has no recorded quota history, so there is no line to draw.".localized)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -170,9 +170,9 @@ struct WindowUsageCard: View {
     private func emptyText(_ quota: WindowQuotaHalf) -> String {
         switch quota.resolution {
         case .idle:
-            return "The last window ended and nothing has been used since — no window is running."
+            return "The last window ended and nothing has been used since — no window is running.".localized
         case .unavailable:
-            return "This subscription did not report a usable reset time, so the window cannot be placed."
+            return "This subscription did not report a usable reset time, so the window cannot be placed.".localized
         default: return ""
         }
     }
@@ -183,11 +183,11 @@ struct WindowUsageCard: View {
             if let latest = geo.samplePoints.last {
                 Text(verbatim: "\(Int(latest.y.rounded()))%")
                     .font(.system(size: 22, weight: .semibold))
-                Text(asUsed ? "used" : "remaining")
+                Text((asUsed ? "used" : "remaining").localized)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                Text("No quota reading in this window")
+                Text("No quota reading in this window".localized)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -425,7 +425,7 @@ private struct WindowHoverTooltip: View {
             Text(zone.closingSample.map {
                 "Quota %@%% %@".localized(
                     String(Int(metric.value(fromUsedPercent: $0.usedPercent).rounded())),
-                    metric == .used ? "used" : "remaining")
+                    (metric == .used ? "used" : "remaining").localized)
             } ?? "No quota reading in this interval".localized)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -461,7 +461,7 @@ private struct WindowHoverTooltip: View {
                 .font(.caption2)
             }
             if kinds.isEmpty {
-                Text("No usage in this interval")
+                Text("No usage in this interval".localized)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }

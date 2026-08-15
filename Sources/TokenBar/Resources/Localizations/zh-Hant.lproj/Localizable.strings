@@ -350,6 +350,41 @@
 "%lldd" = "%lld天";
 "%lldd %lldh" = "%1$lld天%2$lld小時";
 
+/* ===== 額度時間窗卡片 ===== */
+"Session window" = "工作階段時間窗";
+"Loading" = "載入中";
+"Waiting for quota…" = "正在等待額度…";
+"Waiting for quota" = "等待額度中";
+"%@ window" = "%@ 時間窗";
+"No quota history" = "沒有額度歷史紀錄";
+"This window has no recorded quota history, so there is no line to draw." = "這個時間窗沒有額度歷史紀錄，因此無法繪製曲線。";
+"Remaining" = "剩餘";
+"Used" = "已用";
+"Placing the window…" = "正在定位時間窗…";
+"Placing the window" = "正在定位時間窗";
+"Inferred window · resets in %@" = "推算時間窗 · %@ 後重置";
+"No window running" = "目前沒有執行中的時間窗";
+"Window unavailable" = "時間窗無法使用";
+"The last window ended and nothing has been used since — no window is running." = "上一個時間窗已結束，之後尚無用量——目前沒有執行中的時間窗。";
+"This subscription did not report a usable reset time, so the window cannot be placed." = "這個訂閱未回報可用的重置時間，因此無法定位時間窗。";
+"used" = "已用";
+"remaining" = "剩餘";
+"No quota reading in this window" = "這個時間窗內沒有額度讀數";
+"Reading local usage…" = "正在讀取本機用量…";
+"%@ readings" = "%@ 筆讀數";
+"Quota" = "額度";
+"Usage" = "用量";
+"No sample" = "無樣本";
+"No usage in this interval" = "這個區間沒有用量";
+"No quota reading in this interval" = "這個區間沒有額度讀數";
+"Quota %@%% %@" = "額度%2$@ %1$@%%";
+"%@%@%% this interval" = "此區間 %1$@%2$@%%";
+"10%% of quota ~ %@ · %@ API-equivalent, ±%@%%" = "額度 10%% ≈ %@ token · %@（API 等值，誤差 ±%@%%）";
+"Quota moved only %@%% — too little to estimate (±%@%%)" = "額度僅變動 %@%%，資料太少無法估算（±%@%%）";
+"Quota has not moved yet" = "額度尚未變動";
+"Quota moved %@%%, none of it recorded on this machine" = "額度變動了 %@%%，但這台機器上沒有記錄到";
+"Not enough quota readings yet" = "額度讀數還不夠";
+
 /* ===== 視窗 ===== */
 "TokenBar Settings" = "TokenBar 設定";
 "Sponsor" = "贊助";

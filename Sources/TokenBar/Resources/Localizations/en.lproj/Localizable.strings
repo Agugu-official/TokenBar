@@ -21,3 +21,39 @@
 "%@ turns" = "%@ turns";
 "Turns · %@ only" = "Turns · %@ only";
 "Turns · %@ + %@ only" = "Turns · %@ + %@ only";
+
+/* Window usage card — English is already the key for these, but listed
+   explicitly so the key set stays visible in one place. */
+"Session window" = "Session window";
+"Loading" = "Loading";
+"Waiting for quota…" = "Waiting for quota…";
+"Waiting for quota" = "Waiting for quota";
+"%@ window" = "%@ window";
+"No quota history" = "No quota history";
+"This window has no recorded quota history, so there is no line to draw." = "This window has no recorded quota history, so there is no line to draw.";
+"Remaining" = "Remaining";
+"Used" = "Used";
+"Placing the window…" = "Placing the window…";
+"Placing the window" = "Placing the window";
+"Inferred window · resets in %@" = "Inferred window · resets in %@";
+"No window running" = "No window running";
+"Window unavailable" = "Window unavailable";
+"The last window ended and nothing has been used since — no window is running." = "The last window ended and nothing has been used since — no window is running.";
+"This subscription did not report a usable reset time, so the window cannot be placed." = "This subscription did not report a usable reset time, so the window cannot be placed.";
+"used" = "used";
+"remaining" = "remaining";
+"No quota reading in this window" = "No quota reading in this window";
+"Reading local usage…" = "Reading local usage…";
+"%@ readings" = "%@ readings";
+"Quota" = "Quota";
+"Usage" = "Usage";
+"No sample" = "No sample";
+"No usage in this interval" = "No usage in this interval";
+"No quota reading in this interval" = "No quota reading in this interval";
+"Quota %@%% %@" = "Quota %@%% %@";
+"%@%@%% this interval" = "%@%@%% this interval";
+"10%% of quota ~ %@ · %@ API-equivalent, ±%@%%" = "10%% of quota ~ %@ · %@ API-equivalent, ±%@%%";
+"Quota moved only %@%% — too little to estimate (±%@%%)" = "Quota moved only %@%% — too little to estimate (±%@%%)";
+"Quota has not moved yet" = "Quota has not moved yet";
+"Quota moved %@%%, none of it recorded on this machine" = "Quota moved %@%%, none of it recorded on this machine";
+"Not enough quota readings yet" = "Not enough quota readings yet";
