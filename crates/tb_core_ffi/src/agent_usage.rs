@@ -3636,31 +3636,60 @@ fn claude_keychain_target<'a>(
     Ok((captured_account, current_root))
 }
 
-fn validate_claude_keychain_target(
-    credentials: &ClaudeCredentials,
-) -> Result<(), RefreshTargetError> {
+fn claude_keychain_target_with<'a, Account, Item>(
+    credentials: &'a ClaudeCredentials,
+    current_account: Account,
+    current_item: Item,
+) -> Result<(&'a str, Value), RefreshTargetError>
+where
+    Account: FnOnce() -> Result<Option<String>, ()>,
+    Item: FnOnce(&str) -> Result<Option<String>, ()>,
+{
     let captured_account = credentials
         .keychain_account
         .as_deref()
         .ok_or(RefreshTargetError::TargetUnverified)?;
-    let current_raw = load_claude_credentials_from_keychain_item(Some(captured_account))
-        .map_err(|_| RefreshTargetError::TargetUnverified)?;
-    let current_account = claude_keychain_account().ok_or(RefreshTargetError::TargetUnverified)?;
+    // Read the exact captured item first so its disappearance remains
+    // TargetMissing even when the account query can no longer find any item.
+    let current_raw = current_item(captured_account);
+    let current_account = current_account();
     claude_keychain_target(
         credentials,
-        Ok(Some(current_account.as_str())),
-        Ok(current_raw.as_deref()),
+        current_account
+            .as_ref()
+            .map(|value| value.as_deref())
+            .map_err(|_| ()),
+        current_raw
+            .as_ref()
+            .map(|value| value.as_deref())
+            .map_err(|_| ()),
+    )
+}
+
+fn validate_claude_keychain_target(
+    credentials: &ClaudeCredentials,
+) -> Result<(), RefreshTargetError> {
+    claude_keychain_target_with(
+        credentials,
+        || Ok(claude_keychain_account()),
+        |captured_account| {
+            load_claude_credentials_from_keychain_item(Some(captured_account)).map_err(|_| ())
+        },
     )
     .map(|_| ())
 }
 
-fn prepare_claude_keychain_write<'a>(
+fn prepare_claude_keychain_write_with<'a, Account, Item>(
     credentials: &'a ClaudeCredentials,
-    current_account: Result<Option<&str>, ()>,
-    current_raw: Result<Option<&str>, ()>,
-) -> Result<(&'a str, String), RefreshTargetError> {
+    current_account: Account,
+    current_item: Item,
+) -> Result<(&'a str, String), RefreshTargetError>
+where
+    Account: FnOnce() -> Result<Option<String>, ()>,
+    Item: FnOnce(&str) -> Result<Option<String>, ()>,
+{
     let (captured_account, current_root) =
-        claude_keychain_target(credentials, current_account, current_raw)?;
+        claude_keychain_target_with(credentials, current_account, current_item)?;
     let data = encode_refreshed_claude_root(credentials, current_root)?;
     Ok((captured_account, data))
 }
@@ -3669,17 +3698,12 @@ fn prepare_claude_keychain_write<'a>(
 fn save_claude_credentials_to_keychain(
     credentials: &ClaudeCredentials,
 ) -> Result<(), RefreshTargetError> {
-    let captured_account = credentials
-        .keychain_account
-        .as_deref()
-        .ok_or(RefreshTargetError::TargetUnverified)?;
-    let current_raw = load_claude_credentials_from_keychain_item(Some(captured_account))
-        .map_err(|_| RefreshTargetError::TargetUnverified)?;
-    let current_account = claude_keychain_account().ok_or(RefreshTargetError::TargetUnverified)?;
-    let (account, data) = prepare_claude_keychain_write(
+    let (account, data) = prepare_claude_keychain_write_with(
         credentials,
-        Ok(Some(current_account.as_str())),
-        Ok(current_raw.as_deref()),
+        || Ok(claude_keychain_account()),
+        |captured_account| {
+            load_claude_credentials_from_keychain_item(Some(captured_account)).map_err(|_| ())
+        },
     )?;
 
     // NOTE: security(1) has no compare-and-swap operation. The exact-item read,
@@ -9242,12 +9266,10 @@ mod tests {
         fn preflight(&self, credentials: &ClaudeCredentials) -> Result<(), RefreshTargetError> {
             match self {
                 Self::File(path) => validate_claude_credentials_file(credentials, path),
-                Self::Keychain { account, item } => claude_keychain_target(
-                    credentials,
-                    borrowed_target(account),
-                    borrowed_target(item),
-                )
-                .map(|_| ()),
+                Self::Keychain { account, item } => {
+                    claude_keychain_target_with(credentials, || account.clone(), |_| item.clone())
+                        .map(|_| ())
+                }
             }
         }
 
@@ -9272,7 +9294,10 @@ mod tests {
                 },
                 ClaudeTargetCase::PreflightMissing | ClaudeTargetCase::PostMissing => match self {
                     Self::File(path) => fs::remove_file(path).unwrap(),
-                    Self::Keychain { item, .. } => *item = Ok(None),
+                    Self::Keychain { account, item } => {
+                        *item = Ok(None);
+                        *account = Ok(None);
+                    }
                 },
                 ClaudeTargetCase::PreflightLogout => self.write_raw(
                     serde_json::json!({
@@ -9335,10 +9360,12 @@ mod tests {
                     })
                 }
                 Self::Keychain { account, item } => {
-                    let (pinned, data) = prepare_claude_keychain_write(
+                    let current_account = account.clone();
+                    let current_item = item.clone();
+                    let (pinned, data) = prepare_claude_keychain_write_with(
                         credentials,
-                        borrowed_target(account),
-                        borrowed_target(item),
+                        || current_account,
+                        |_| current_item,
                     )?;
                     observation.writer.set(observation.writer.get() + 1);
                     observation.pin.set(pinned == "account-a");
