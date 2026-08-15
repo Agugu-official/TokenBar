@@ -977,11 +977,12 @@ fn grok_current_target_root(
     let current_object = current_entry
         .as_object()
         .ok_or(RefreshTargetError::TargetMalformed)?;
-    let access =
-        credential_token(current_object, "key").map_err(|_| RefreshTargetError::TargetMalformed)?;
+    credential_token(current_object, "key").map_err(|_| RefreshTargetError::TargetMalformed)?;
     let refresh = credential_token(current_object, "refresh_token")
         .map_err(|_| RefreshTargetError::TargetMalformed)?;
-    if access.is_none() || refresh.is_none() {
+    // The loader accepts refresh-only entries; this transaction supplies the
+    // missing access token, so only the trusted refresh marker is required.
+    if refresh.is_none() {
         return Err(RefreshTargetError::TargetMalformed);
     }
     let expected_entry = credentials
@@ -2220,9 +2221,10 @@ mod tests {
         PostUnverified,
         Persistence,
         Success,
+        RefreshOnlySuccess,
     }
 
-    const GROK_TARGET_CASES: [GrokTargetCase; 10] = [
+    const GROK_TARGET_CASES: [GrokTargetCase; 11] = [
         GrokTargetCase::PreflightChanged,
         GrokTargetCase::PreflightMissing,
         GrokTargetCase::PreflightMalformed,
@@ -2233,6 +2235,7 @@ mod tests {
         GrokTargetCase::PostUnverified,
         GrokTargetCase::Persistence,
         GrokTargetCase::Success,
+        GrokTargetCase::RefreshOnlySuccess,
     ];
 
     impl GrokTargetCase {
@@ -2254,7 +2257,14 @@ mod tests {
         }
 
         fn continues(self) -> bool {
-            matches!(self, Self::Persistence | Self::Success)
+            matches!(
+                self,
+                Self::Persistence | Self::Success | Self::RefreshOnlySuccess
+            )
+        }
+
+        fn cacheable(self) -> bool {
+            matches!(self, Self::Success | Self::RefreshOnlySuccess)
         }
 
         fn expected_display(self) -> Option<&'static str> {
@@ -2271,7 +2281,7 @@ mod tests {
                 Self::PreflightUnverified | Self::PostUnverified => {
                     Some("Grok credential target could not be verified during refresh.")
                 }
-                Self::Persistence | Self::Success => None,
+                Self::Persistence | Self::Success | Self::RefreshOnlySuccess => None,
             }
         }
     }
@@ -2363,7 +2373,7 @@ mod tests {
                 fs::remove_file(path).unwrap();
                 fs::create_dir(path).unwrap();
             }
-            GrokTargetCase::Success => {
+            GrokTargetCase::Success | GrokTargetCase::RefreshOnlySuccess => {
                 let mut root: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
                 let root = root.as_object_mut().unwrap();
                 root.insert(
@@ -2395,6 +2405,11 @@ mod tests {
 
     async fn run_grok_target_case(case: GrokTargetCase) {
         let (scope, path, old_scope, metadata_before, location) = setup_refresh("grok-target");
+        if case == GrokTargetCase::RefreshOnlySuccess {
+            let mut root: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            root[TEST_ENTRY].as_object_mut().unwrap().remove("key");
+            write_grok_fixture(&path, root);
+        }
         let outer = load_credentials_entry_from(&path, Some(TEST_ENTRY))
             .unwrap()
             .unwrap();
@@ -2406,7 +2421,8 @@ mod tests {
             resolves: std::cell::Cell::new(0),
             transfers: std::cell::Cell::new(0),
         };
-        let expected_binding = (case == GrokTargetCase::Success)
+        let expected_binding = case
+            .cacheable()
             .then(|| ProviderCacheBinding::primary(old_scope.clone()));
         let request_path = path.clone();
         let preflight_path = path.clone();
@@ -2451,9 +2467,7 @@ mod tests {
                             .preflight
                             .set(preflight_observation.preflight.get() + 1);
                         let result = validate_refresh_target(credentials);
-                        if result.is_ok()
-                            && (case.post_terminal() || case == GrokTargetCase::Success)
-                        {
+                        if result.is_ok() && (case.post_terminal() || case.cacheable()) {
                             *preflight_expected.borrow_mut() =
                                 apply_grok_target_case(&preflight_path, case);
                         }
@@ -2503,6 +2517,9 @@ mod tests {
         } else {
             "REFRESH-TARGET-POST-PREFLIGHT-TERMINAL"
         };
+        if case == GrokTargetCase::RefreshOnlySuccess {
+            assert!(result.is_ok(), "REFRESH-TARGET-REFRESH-ONLY");
+        }
         if let Some(display) = case.expected_display() {
             assert!(
                 matches!(&result, Err(ProviderFetchFailure::Terminal { display: actual }) if actual == display),
@@ -2566,7 +2583,7 @@ mod tests {
         );
         assert_eq!(
             recording.resolves.get(),
-            1 + usize::from(case == GrokTargetCase::Success),
+            1 + usize::from(case.cacheable()),
             "REFRESH-TARGET-CHECKPOINT-SEQUENCE"
         );
         assert_eq!(
