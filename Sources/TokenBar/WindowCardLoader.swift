@@ -211,7 +211,11 @@ enum WindowCardLoader {
     /// the decoder subtracts `durationSeconds` from `resetAt` directly — while
     /// every window bound here is milliseconds. Comparing the two units gives
     /// an empty series that looks exactly like a missing data path.
-    private static func curveSamples(
+    /// Not private: `AgentLimitsCard`'s sparkline needs the same series for
+    /// every window a client offers, not just the one the card selected. Same
+    /// function so the two surfaces cannot disagree about which readings belong
+    /// to a window.
+    static func curveSamples(
         payload: AgentUsagePayload, clientId: String, window: UsageWindow,
         curve read: (String, String, UInt64) -> QuotaCurve?, nowMs: Int64
     ) -> [QuotaSample] {

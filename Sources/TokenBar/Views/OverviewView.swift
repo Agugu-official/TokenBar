@@ -28,6 +28,10 @@ struct OverviewView: View {
     /// The selected quota window's card state. Nil only when this is not a
     /// single-client tab — the card itself is never absent for one.
     var windowCard: WindowCardState?
+    /// Quota readings per `"<clientId>|<cardId>"`, for the Agent-limits
+    /// sparkline. Empty is a valid state, not an error: it just means every row
+    /// draws the bar instead.
+    var windowCurves: [String: [QuotaSample]] = [:]
 
 
     /// Master switch: off hides the Agent-limits card everywhere.
@@ -68,7 +72,7 @@ struct OverviewView: View {
                     AgentLimitsCard(
                         clients: clientIds, trace: trace, agentUsage: agentUsage,
                         usageAttempted: usageAttempted,
-                        reorderable: true)
+                        reorderable: true, curves: windowCurves)
                 }
                 UsageTraceCard(buckets: trace, windowSecs: 600, hidden: hidden)
                 ModelBreakdownCard(

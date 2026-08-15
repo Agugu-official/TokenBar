@@ -226,8 +226,21 @@ struct PopoverView: View {
         // The card's own trigger, deliberately not inside the quota poll. The
         // union range must cover every displayed client, not just the open tab,
         // so one scan can serve a later switch without rescanning.
-        .task(id: "\(windowSelectionRaw)|\(activeTab)|\(hiddenRaw)") {
+        // `displayClients` is in the identity because the closure READS it, and
+        // it derives from `stats.presentClients` — graph data that arrives
+        // after this view first appears. Without it the first firing captures
+        // an empty client list, and since nothing else in the identity moves,
+        // the task never runs again: opening straight onto an agent tab left
+        // the card permanently absent until you switched tabs. Same trap the
+        // `.onChange` below documents for `presentClients`.
+        .task(id: "\(windowSelectionRaw)|\(activeTab)|\(hiddenRaw)|"
+              + displayClients.joined(separator: ",")) {
             model.windowCardClients = displayClients
+            // The scan follows what is on screen; the curves do not. See
+            // `windowUsageClient`.
+            model.windowUsageClient =
+                (activeTab != ClientTray.overviewTab
+                    && displayClients.contains(activeTab)) ? activeTab : nil
             model.refreshWindowQuotaHalves()   // synchronous: lands this frame
             await model.refreshWindowUsage()
         }
@@ -554,7 +567,14 @@ struct PopoverView: View {
                     usageAttempted: model.agentUsageAttempted,
                     singleClient: singleClient, year: model.year,
                     hidden: ClientRegistry.parseIdSet(hiddenRaw),
-                    windowCard: singleClient.flatMap { model.windowCards[$0] })
+                    windowCard: singleClient.flatMap { model.windowCards[$0] },
+                    // Only the multi-agent overview draws sparklines, and
+                    // `@Observable` tracks per property: reading this
+                    // unconditionally made every `refreshWindowQuotaHalves()`
+                    // write invalidate the whole body even on tabs that never
+                    // draw one. The ternary keeps that dependency where the
+                    // data is actually used.
+                    windowCurves: singleClient == nil ? model.windowCurves : [:])
             case .models:
                 ModelsView(
                     report: model.modelReport, clientIds: clientIds, colors: model.colors,

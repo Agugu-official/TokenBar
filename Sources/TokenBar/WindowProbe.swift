@@ -12,7 +12,83 @@ enum WindowProbe {
             fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             let plain = ISO8601DateFormatter()
 
-            print("=== quota 窗解析（真實資料）===\n")
+            print("=== PERF（我加進 main actor 的兩件事）===")
+            var perfT = Date()
+            var curveMs: [(String, Double)] = []
+            for agent in payload.agents {
+                for w in agent.uniqueCardWindows {
+                    let t = Date()
+                    _ = WindowCardLoader.curveSamples(
+                        payload: payload, clientId: agent.clientId, window: w,
+                        curve: { c, k, g in
+                            (try? TBCore.quotaCurve(clientId: c, windowKey: k, generation: g)) ?? nil
+                        }, nowMs: now)
+                    curveMs.append(("\(agent.clientId)|\(w.cardId)",
+                                    Date().timeIntervalSince(t) * 1000))
+                }
+            }
+            for (k, ms) in curveMs.sorted(by: { $0.1 > $1.1 }) {
+                print(String(format: "  curveSamples  %8.1f ms  %@", ms, k as NSString))
+            }
+            print(String(format: "  === 整圈合計 %.1f ms（每次 poll 都同步跑一次）",
+                         Date().timeIntervalSince(perfT) * 1000))
+
+            perfT = Date()
+            let sw = payload.agents[0].uniqueCardWindows[0]
+            for _ in 0..<1000 {
+                _ = AgentLimitsCard.sparklineInterval(window: sw, samples: [], nowMs: now)
+            }
+            print(String(format: "  sparklineInterval  %.4f ms/次（body 每次重算每列一次）",
+                         Date().timeIntervalSince(perfT)))
+
+            print("\n=== SPARK ELIGIBILITY（Agent limits 每列會畫線還是長條）===")
+            for agent in payload.agents {
+                for w in agent.uniqueCardWindows {
+                    let samples = WindowCardLoader.curveSamples(
+                        payload: payload, clientId: agent.clientId, window: w,
+                        curve: { c, k, g in
+                            (try? TBCore.quotaCurve(clientId: c, windowKey: k, generation: g)) ?? nil
+                        }, nowMs: now)
+                    let res = WindowCardLoader.resolution(
+                        window: w, nowMs: now, firstUsageAfterReset: nil)
+                    let iv = WindowCardLoader.interval(res)
+                    let inside = iv.map { i in
+                        samples.filter { $0.atMs >= i.start && $0.atMs <= now }.count } ?? 0
+                    let verdict = AgentLimitsCard.sparklineInterval(
+                        window: w, samples: samples, nowMs: now) != nil ? "LINE" : "BAR "
+                    print(String(format: "  %@  %-10@ %-24@ samples=%3d  interval=%@  inside=%3d",
+                                 verdict as NSString, agent.clientId as NSString,
+                                 w.cardId as NSString, samples.count,
+                                 (iv == nil ? "nil   " : "yes   ") as NSString, inside))
+                }
+            }
+
+            print("\n=== SPARK SHAPE（線實際佔多寬、y 跨多少）===")
+            for agent in payload.agents {
+                for w in agent.uniqueCardWindows {
+                    let samples = WindowCardLoader.curveSamples(
+                        payload: payload, clientId: agent.clientId, window: w,
+                        curve: { c, k, g in
+                            (try? TBCore.quotaCurve(clientId: c, windowKey: k, generation: g)) ?? nil
+                        }, nowMs: now)
+                    guard let iv = AgentLimitsCard.sparklineInterval(
+                        window: w, samples: samples, nowMs: now) else { continue }
+                    let g = WindowCardGeometry.quotaGeometry(
+                        windowStartMs: iv.start, windowEndMs: iv.end,
+                        nowMs: min(now, iv.end), samples: samples, metric: .remaining)
+                    let ys = g.curve.map(\.y)
+                    let pace = UsagePace.compute(window: w, mode: .historical)
+                    print(String(format:
+                        "  %-10@ %-20@ x %.2f→%.2f (%.0f%% 寬)  y %.1f→%.1f (跨 %.1f 點, 26px 裡 %.1fpx)  pace 期望剩 %@",
+                        agent.clientId as NSString, w.cardId as NSString,
+                        g.firstSampleX, g.nowX, (g.nowX - g.firstSampleX) * 100,
+                        ys.max() ?? 0, ys.min() ?? 0, (ys.max() ?? 0) - (ys.min() ?? 0),
+                        ((ys.max() ?? 0) - (ys.min() ?? 0)) / 100 * 22,
+                        (pace.map { String(format: "%.1f", 100 - $0.expectedUsedPercent) } ?? "—") as NSString))
+                }
+            }
+
+            print("\n=== quota 窗解析（真實資料）===\n")
             print("  agents in payload: \(payload.agents.map(\.clientId))")
             for a in payload.agents where a.error != nil || a.windows.isEmpty {
                 print("    ⚠️ \(a.clientId): error=\(a.error ?? "nil") windows=\(a.windows.count)")

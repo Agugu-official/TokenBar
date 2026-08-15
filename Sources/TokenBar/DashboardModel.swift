@@ -1021,20 +1021,38 @@ private struct DashboardSnapshot {
     /// Which agent tabs may need a card. Drives the union range.
     var windowCardClients: [String] = []
 
+    /// Quota readings for EVERY window each client offers, keyed
+    /// `"<clientId>|<cardId>"` — the same identity the card's candidates use.
+    ///
+    /// `windowCards` above holds only the selected window, which is all the
+    /// detail card needs. The Agent-limits sparkline draws one line per row, so
+    /// it needs the others too. Each entry is a ~2ms read of an already
+    /// persisted file, so filling all of them stays inside the "instant" half.
+    var windowCurves: [String: [QuotaSample]] = [:]
+
     /// Stage 1. Synchronous and local: reads the in-memory payload and the
     /// persisted quota curve. Deliberately NOT async and NOT driven from the
     /// quota poll — the whole point is that it does not wait on the network.
     func refreshWindowQuotaHalves() {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let readCurve: (String, String, UInt64) -> QuotaCurve? = { [source] client, key, gen in
+            (try? source.quotaCurveSync(clientId: client, windowKey: key, generation: gen)) ?? nil
+        }
+        if let payload = agentUsage {
+            for agent in payload.agents where windowCardClients.contains(agent.clientId) {
+                for window in agent.uniqueCardWindows {
+                    windowCurves["\(agent.clientId)|\(window.cardId)"] =
+                        WindowCardLoader.curveSamples(
+                            payload: payload, clientId: agent.clientId, window: window,
+                            curve: readCurve, nowMs: now)
+                }
+            }
+        }
         for clientId in windowCardClients {
             let state = WindowCardLoader.quotaHalf(
                 payload: agentUsage, clientId: clientId,
                 attempted: agentUsageAttempted,
-                curve: { [source] client, key, generation in
-                    (try? source.quotaCurveSync(
-                        clientId: client, windowKey: key, generation: generation)) ?? nil
-                },
-                nowMs: now)
+                curve: readCurve, nowMs: now)
             // Fold in a usage half we already hold, so a stage-1 refresh does
             // not throw away a completed scan and blink back to loading.
             if case let .quotaOnly(q) = state, let scan = unionScan,
@@ -1047,12 +1065,26 @@ private struct DashboardSnapshot {
         }
     }
 
-    /// Stage 2. One scan for every displayed client, then each card filters
-    /// from it in memory.
+    /// Whose usage bars are actually on screen, or nil on the all-agent
+    /// overview, which renders no window card at all.
+    ///
+    /// Deliberately NOT `windowCardClients`. That set drives the quota curves,
+    /// which are a ~2ms file read each and are wanted for every row. This one
+    /// drives the message scan, and scoping the two together was a measured
+    /// mistake: `copilot chat.v1` is a 31-day window, so unioning every
+    /// displayed client stretched the range to 14.93 days and 109,278 messages
+    /// — 67s cold — on a tab that displays none of it. The version before the
+    /// two-stage split returned early here whenever no agent tab was open;
+    /// this restores that bound without giving up the shared scan.
+    var windowUsageClient: String?
+
+    /// Stage 2. One scan for the open agent tab, which every card for that
+    /// client then filters from in memory.
     func refreshWindowUsage() async {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
+        guard let client = windowUsageClient else { return }
         guard let from = WindowCardLoader.unionStart(
-            payload: agentUsage, clients: windowCardClients, nowMs: now)
+            payload: agentUsage, clients: [client], nowMs: now)
         else { return }
         // Serve the cached scan while it still covers the range and is fresh.
         // Rescanning on every reopen was the whole complaint: the staging made

@@ -395,6 +395,47 @@ private struct DashboardModelTestSource: UsageDataSource {
     func tokensPerMin() async throws -> Double { DemoData.tokensPerMin }
 }
 
+/// Counts message scans so the "no open agent tab, no scan" bound is assertable
+/// rather than asserted in a comment. Everything else forwards to the ordinary
+/// double; only `windowUsage` is instrumented.
+private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendable {
+    private let inner = DashboardModelTestSource(failingGraphYear: "")
+    private let payload: AgentUsagePayload
+    var scans = 0
+
+    init(payload: AgentUsagePayload) { self.payload = payload }
+
+    var allowsQuotaCachePersistence: Bool { false }
+    func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        try await inner.graph(year: year, priority: priority)
+    }
+    func refreshGraph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        try await inner.refreshGraph(year: year, priority: priority)
+    }
+    func modelReport(year: String?, priority: TaskPriority) async throws -> ModelReport {
+        try await inner.modelReport(year: year, priority: priority)
+    }
+    func hourlyReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> HourlyReport {
+        try await inner.hourlyReport(year: year, clients: clients, priority: priority)
+    }
+    func agentsReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> AgentsReport {
+        try await inner.agentsReport(year: year, clients: clients, priority: priority)
+    }
+    func agentUsage() async throws -> AgentUsagePayload { payload }
+    func usageTrace(windowSecs: Int64) async throws -> [TraceBucket] {
+        try await inner.usageTrace(windowSecs: windowSecs)
+    }
+    func tokensPerMin() async throws -> Double { try await inner.tokensPerMin() }
+    func windowUsage(from: Int64, until: Int64) async throws -> WindowUsage {
+        scans += 1
+        return WindowUsage(messages: [], undatedCount: 0, processingTimeMs: 0)
+    }
+}
+
 private final class AttributedSeriesTestSource: UsageDataSource, @unchecked Sendable {
     let graphPayload: UsagePayload
     let refreshPayload: UsagePayload
@@ -10754,6 +10795,86 @@ enum SelfTest {
                 WindowCardLoader.usageHalf(quota: q, scan: covering, confirmed: []) != nil,
                 "L2a a covering scan answers, so the previous check is not vacuous")
         }
+
+        // MARK: Agent-limits sparkline eligibility
+        //
+        // The one place that decides whether a row draws a line or the bar.
+        // Getting it wrong is not a cosmetic slip: a series that misses the
+        // window entirely still interpolates, so the row would show a confident
+        // flat line for a window nobody has sampled.
+        let sparkWindow = wPayload.agents[0].uniqueCardWindows[0]
+        let sparkNow = wNow * 1000
+        let sparkStart = (wReset - 18_000) * 1000
+
+        expect(
+            AgentLimitsCard.sparklineInterval(
+                window: sparkWindow,
+                samples: [QuotaSample(atMs: sparkNow - 3_000_000, usedPercent: 4),
+                          QuotaSample(atMs: sparkNow - 600_000, usedPercent: 9)],
+                nowMs: sparkNow).map { $0.start } == sparkStart,
+            "SP1 two readings inside the window draw a line spanning R - D to R")
+
+        // The load-bearing one. Both readings predate this window's start, so
+        // the count alone is satisfied and only the interval filter rejects it.
+        expect(
+            AgentLimitsCard.sparklineInterval(
+                window: sparkWindow,
+                samples: [QuotaSample(atMs: sparkStart - 90_000_000, usedPercent: 40),
+                          QuotaSample(atMs: sparkStart - 80_000_000, usedPercent: 55)],
+                nowMs: sparkNow) == nil,
+            "SP2 readings from before this window cannot draw its line")
+
+        expect(
+            AgentLimitsCard.sparklineInterval(
+                window: sparkWindow,
+                samples: [QuotaSample(atMs: sparkNow - 600_000, usedPercent: 9)],
+                nowMs: sparkNow) == nil,
+            "SP3 one reading is a dot, not a line, so the bar stays")
+
+        expect(
+            AgentLimitsCard.sparklineInterval(
+                window: sparkWindow, samples: [], nowMs: sparkNow) == nil,
+            "SP4 no readings at all keeps the bar")
+
+        // MARK: scan scope (SC)
+        //
+        // The message scan follows what is on screen. Measured 2026-08-16:
+        // unioning every displayed client stretched the range to 14.93 days and
+        // 109,278 messages because `copilot chat.v1` is a 31-day window, and it
+        // ran on the all-agent overview, which renders no window card at all —
+        // 67 seconds of scanning for output nothing displayed.
+        let scanCounts: (idle: Int, open: Int)? = awaitMainActorValue {
+            let src = WindowScanCountingSource(payload: wPayload)
+            let m = DashboardModel(source: src, initialYear: nil)
+            // `agentUsage` is private(set), so the poll is the only way in.
+            // One turn is enough; cancel and drain before counting anything.
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while m.agentUsage == nil, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            poll.cancel()
+            _ = await poll.value
+            m.windowCardClients = ["codex"]
+            src.scans = 0
+
+            // Overview: curves still wanted for the sparklines, no card on screen.
+            m.windowUsageClient = nil
+            await m.refreshWindowUsage()
+            let idle = src.scans
+
+            // Agent tab open: the same call must reach a scan, or the check
+            // above is satisfied by a method that never scans under any
+            // condition — which is exactly how this regression hid.
+            m.windowUsageClient = "codex"
+            await m.refreshWindowUsage()
+            return (idle: idle, open: src.scans)
+        }
+        expect(scanCounts?.idle == 0,
+               "SC1 no agent tab open issues no message scan")
+        expect((scanCounts?.open ?? 0) >= 1,
+               "SC1 an open agent tab does scan, so the bound above is not vacuous")
 
         expect(
             WindowEquivalence.minimumDelta == 5,

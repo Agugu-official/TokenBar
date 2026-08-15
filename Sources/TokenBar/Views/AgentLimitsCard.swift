@@ -35,6 +35,11 @@ struct AgentLimitsCard: View {
     /// When true, cards can be reordered by dragging their grip handle; the
     /// order persists to UserDefaults. Only the multi-agent overview opts in.
     var reorderable = false
+    /// Quota readings per `"<clientId>|<cardId>"`. Present only on the
+    /// multi-agent overview; a single-client tab passes nothing, because the
+    /// full window card sits directly above this one there and a second, smaller
+    /// drawing of the same series reads as a thumbnail of the card above it.
+    var curves: [String: [QuotaSample]] = [:]
 
     /// Bar fills by used (true) or remaining (false).
     @AppStorage("tokenbar.limits.asUsed") private var asUsed = false
@@ -53,6 +58,56 @@ struct AgentLimitsCard: View {
 
     private var paceMode: PaceMode { PaceMode(rawValue: paceModeRaw) ?? .historical }
     private var classic: Bool { LimitsLayout(rawValue: layoutRaw) ?? .full == .classic }
+    private var metric: QuotaMetric { asUsed ? .used : .remaining }
+
+    /// Sparkline dimensions. Named because these are the numbers that get tuned
+    /// against the running app, and a named constant makes the next adjustment
+    /// one line instead of a hunt through a draw call.
+    private enum Spark {
+        /// Tall enough to read a slope; short enough that five agents with two
+        /// windows each still fit the popover. The bar it replaces was 6.
+        static let height: CGFloat = 26
+        /// Keeps a line pinned at 0% or 100% from being clipped by the frame.
+        static let inset: CGFloat = 2
+        /// Thinner than the detail card's 1.8: this one is a glance, not a
+        /// reading surface.
+        static let lineWidth: CGFloat = 1.4
+        /// Dashed so the expected line reads as a prediction rather than a
+        /// second measurement.
+        static let paceWidth: CGFloat = 1
+        static let paceDash: [CGFloat] = [3, 2]
+        /// Tint under the curve.
+        ///
+        /// Load-bearing, not decoration. Measured 2026-08-16 on live data: over
+        /// a fixed 0...100 axis 26px tall, two of four eligible windows moved
+        /// 2.6px and 2.9px — flat lines, indistinguishable from each other and
+        /// from an untouched window. Height alone cannot carry the reading at
+        /// this size, and rescaling the axis to fit would make 7% used and 63%
+        /// used look identical, which is the thing the fixed axis exists to
+        /// prevent. Area carries it instead: the axis stays honest and the fill
+        /// reads at a glance. Raise the alpha before raising `height` — rows
+        /// multiply, and ten of them do not fit the popover.
+        static let fillOpacity: Double = 0.22
+    }
+
+    /// Whether a row can draw a line instead of a bar, and over what interval.
+    ///
+    /// Pure and static so the rule is assertable: this is the single place that
+    /// decides which of the two drawings the user sees. Two readings must fall
+    /// INSIDE the drawn interval, not merely exist on file — a series whose
+    /// points all predate this window would otherwise draw a flat line at
+    /// whatever the last one said, which is a confident lie about a window
+    /// nobody has sampled yet.
+    static func sparklineInterval(
+        window: UsageWindow, samples: [QuotaSample], nowMs: Int64
+    ) -> (start: Int64, end: Int64)? {
+        guard let interval = WindowCardLoader.interval(
+            WindowCardLoader.resolution(
+                window: window, nowMs: nowMs, firstUsageAfterReset: nil))
+        else { return nil }
+        let inside = samples.filter { $0.atMs >= interval.start && $0.atMs <= nowMs }
+        return inside.count >= 2 ? interval : nil
+    }
 
     /// Pure state presentation shared by every AgentLimitsCard consumer.
     enum PacePresentation {
@@ -345,7 +400,7 @@ struct AgentLimitsCard: View {
                 VStack(spacing: 8) {
                     if !uniqueWindows.isEmpty {
                         ForEach(uniqueWindows, id: \.cardId) { window in
-                            windowRow(window, brand: style.color)
+                            windowRow(window, clientId: id, brand: style.color)
                                 .id("\(id):\(window.cardId)")
                         }
                     } else {
@@ -453,7 +508,9 @@ struct AgentLimitsCard: View {
         return Color(red: 0.133, green: 0.773, blue: 0.369)
     }
 
-    @ViewBuilder private func windowRow(_ window: UsageWindow, brand: String) -> some View {
+    @ViewBuilder private func windowRow(
+        _ window: UsageWindow, clientId: String, brand: String
+    ) -> some View {
         let remaining = min(100, max(0, window.remainingPercent))
         let used = min(100, max(0, window.usedPercent))
         // Pace is suppressed entirely in the classic layout and when the user
@@ -507,13 +564,25 @@ struct AgentLimitsCard: View {
                             .foregroundStyle(.tertiary)
                     }
                 }
-                bar(
-                    fillPercent: fill, color: gauge,
-                    paceLeft: pace.map {
-                        let left = asUsed ? $0.expectedUsedPercent : 100 - $0.expectedUsedPercent
-                        return min(100, max(0, left))
-                    },
-                    paceIsDeficit: Self.PacePresentation.isDeficit(pace))
+                // The line replaces the bar only where it has something to draw
+                // and somewhere to draw it. A single-client tab passes no
+                // curves, so it keeps the bar and does not repeat the full card
+                // sitting directly above it.
+                let samples = curves["\(clientId)|\(window.cardId)"] ?? []
+                if let interval = Self.sparklineInterval(
+                    window: window, samples: samples,
+                    nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+                {
+                    sparkline(samples: samples, interval: interval, color: gauge, pace: pace)
+                } else {
+                    bar(
+                        fillPercent: fill, color: gauge,
+                        paceLeft: pace.map {
+                            let left = asUsed ? $0.expectedUsedPercent : 100 - $0.expectedUsedPercent
+                            return min(100, max(0, left))
+                        },
+                        paceIsDeficit: Self.PacePresentation.isDeficit(pace))
+                }
                 paceFooter(window: window, leftLabel: leftLabel, pace: pace)
             }
         }
@@ -615,6 +684,68 @@ struct AgentLimitsCard: View {
                     .foregroundStyle(.tertiary)
             }
         }
+    }
+
+    /// The quota over the window's own time axis, with the pace estimate as a
+    /// second line rather than a marker.
+    ///
+    /// Pace means "at this rate you should have used X% by now", which is a rate
+    /// over time. On a bar there is no time axis, so it can only collapse to a
+    /// point; here it is the straight line from the window's start to that
+    /// value at `now`. Straight because a single expected percentage is all
+    /// `UsagePace` exposes — this draws the number the bar's marker already
+    /// carried, on an axis that can show it.
+    ///
+    /// y is fixed 0...100 and never rescaled to the data, for the same reason
+    /// the detail card fixes it: autoscaling makes 7% used and 63% used look
+    /// identical, which is the one comparison these rows exist to support.
+    private func sparkline(
+        samples: [QuotaSample], interval: (start: Int64, end: Int64),
+        color: Color, pace: UsagePace?
+    ) -> some View {
+        let nowMs = min(Int64(Date().timeIntervalSince1970 * 1000), interval.end)
+        let geo = WindowCardGeometry.quotaGeometry(
+            windowStartMs: interval.start, windowEndMs: interval.end,
+            nowMs: nowMs, samples: samples, metric: metric)
+        let deficit = Self.PacePresentation.isDeficit(pace)
+        return Canvas { ctx, size in
+            func at(_ p: CurvePoint) -> CGPoint {
+                CGPoint(
+                    x: p.x * size.width,
+                    y: Spark.inset + (1 - p.y / 100) * (size.height - Spark.inset * 2))
+            }
+            if let pace {
+                var expected = Path()
+                expected.move(to: at(CurvePoint(x: 0, y: metric.value(fromUsedPercent: 0))))
+                expected.addLine(to: at(CurvePoint(
+                    x: geo.nowX,
+                    y: metric.value(fromUsedPercent: min(100, max(0, pace.expectedUsedPercent))))))
+                ctx.stroke(
+                    expected,
+                    with: .color(deficit ? .orange : .secondary.opacity(0.55)),
+                    style: StrokeStyle(lineWidth: Spark.paceWidth, dash: Spark.paceDash))
+            }
+            guard geo.curve.count > 1 else { return }
+            var line = Path()
+            for (i, p) in geo.curve.enumerated() {
+                i == 0 ? line.move(to: at(p)) : line.addLine(to: at(p))
+            }
+            // Area first, line on top. The fill is what makes a 12-point move
+            // legible at this height — see `Spark.fillOpacity`.
+            var area = line
+            let floorY = at(CurvePoint(x: 0, y: 0)).y
+            if let last = geo.curve.last, let first = geo.curve.first {
+                area.addLine(to: CGPoint(x: at(last).x, y: floorY))
+                area.addLine(to: CGPoint(x: at(first).x, y: floorY))
+                area.closeSubpath()
+                ctx.fill(area, with: .color(color.opacity(Spark.fillOpacity)))
+            }
+            ctx.stroke(
+                line, with: .color(color),
+                style: StrokeStyle(
+                    lineWidth: Spark.lineWidth, lineCap: .round, lineJoin: .round))
+        }
+        .frame(height: Spark.height)
     }
 
     private func bar(
