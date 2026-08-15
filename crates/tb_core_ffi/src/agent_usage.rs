@@ -347,6 +347,21 @@ where
     request(binding?).await
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefreshTargetError {
+    TargetMissing,
+    TargetChanged,
+    TargetMalformed,
+    TargetUnverified,
+    Persistence,
+}
+
+impl RefreshTargetError {
+    pub(crate) fn is_persistence(self) -> bool {
+        matches!(self, Self::Persistence)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum ProviderFetchFailure {
     Transient {
@@ -2575,14 +2590,7 @@ fn resolve_stored_claude_login(raw: &str, source: ClaudeCredentialSource) -> Cla
     let explicitly_logged_out = raw_root
         .get("claudeAiOauth")
         .and_then(Value::as_object)
-        .is_some_and(|oauth| {
-            oauth.contains_key("refreshToken")
-                && match oauth.get("accessToken") {
-                    None | Some(Value::Null) => true,
-                    Some(Value::String(token)) => token.trim().is_empty(),
-                    _ => false,
-                }
-        });
+        .is_some_and(claude_oauth_is_explicit_logout);
     if explicitly_logged_out {
         return ClaudeLoginResolution::ExplicitLogout;
     }
@@ -2787,7 +2795,7 @@ fn claude_credentials_from_access_token(token: ResolvedClaudeToken) -> ClaudeCre
         rate_limit_tier: None,
         subscription_type: None,
         // A bare setup-token has no refresh token and no backing store to write
-        // to, so treat it as read-only — save_claude_credentials skips it.
+        // to, so treat it as read-only and never enter the refresh transaction.
         source: ClaudeCredentialSource::Environment,
         raw_root: None,
         keychain_account: None,
@@ -3160,6 +3168,7 @@ async fn refresh_claude_credentials(
         &refresh,
         reload_claude_credentials,
         request_claude_refresh,
+        validate_claude_refresh_target,
         save_claude_credentials,
         |_| Ok(()),
     )
@@ -3219,11 +3228,20 @@ async fn request_claude_refresh(
     })
 }
 
-async fn refresh_claude_credentials_with<R, Reload, Request, RequestFuture, Save, Checkpoint>(
+async fn refresh_claude_credentials_with<
+    R,
+    Reload,
+    Request,
+    RequestFuture,
+    Preflight,
+    Save,
+    Checkpoint,
+>(
     original: &ClaudeCredentials,
     refresh: &R,
     reload: Reload,
     request: Request,
+    preflight: Preflight,
     save: Save,
     mut checkpoint: Checkpoint,
 ) -> Result<
@@ -3240,7 +3258,8 @@ where
     Request: FnOnce(String, ProviderCacheBinding) -> RequestFuture,
     RequestFuture:
         std::future::Future<Output = Result<ClaudeRefreshResponse, ProviderFetchFailure>>,
-    Save: FnOnce(&ClaudeCredentials) -> Result<(), String>,
+    Preflight: FnOnce(&ClaudeCredentials) -> Result<(), RefreshTargetError>,
+    Save: FnOnce(&ClaudeCredentials) -> Result<(), RefreshTargetError>,
     Checkpoint: FnMut(RefreshCheckpoint) -> Result<(), ProviderFetchFailure>,
 {
     let credentials = reload(original).map_err(ProviderFetchFailure::terminal)?;
@@ -3302,6 +3321,7 @@ where
     let new_marker = refreshed.scope_marker().ok_or_else(|| {
         ProviderFetchFailure::terminal("Claude refreshed credential has no trusted marker.")
     })?;
+    preflight(&credentials).map_err(claude_refresh_target_failure)?;
     let scope = refresh
         .transfer(
             refreshed.scope_slot.semantic_source,
@@ -3313,10 +3333,10 @@ where
             ProviderFetchFailure::terminal("Claude credential lineage could not be preserved.")
         })?;
     checkpoint(RefreshCheckpoint::MetadataHandled)?;
-    let persisted = save(&refreshed).is_ok();
+    let save_result = save(&refreshed);
     checkpoint(RefreshCheckpoint::CredentialsPersisted)?;
-    let cache_binding = if persisted {
-        Some(ProviderCacheBinding::primary(
+    let cache_binding = match save_result {
+        Ok(()) => Some(ProviderCacheBinding::primary(
             refresh
                 .resolve_current(
                     refreshed.scope_slot.semantic_source,
@@ -3328,9 +3348,9 @@ where
                         "Claude account identity could not be verified after refresh.",
                     )
                 })?,
-        ))
-    } else {
-        None
+        )),
+        Err(error) if error.is_persistence() => None,
+        Err(error) => return Err(claude_refresh_target_failure(error)),
     };
     Ok((refreshed, scope, cache_binding))
 }
@@ -3361,26 +3381,82 @@ fn reload_claude_credentials(original: &ClaudeCredentials) -> Result<ClaudeCrede
     }
 }
 
+fn claude_refresh_target_failure(error: RefreshTargetError) -> ProviderFetchFailure {
+    let display = match error {
+        RefreshTargetError::TargetMissing => "Claude credential target disappeared during refresh.",
+        RefreshTargetError::TargetChanged => "Claude credential target changed during refresh.",
+        RefreshTargetError::TargetMalformed => {
+            "Claude credential target became malformed during refresh."
+        }
+        RefreshTargetError::TargetUnverified => {
+            "Claude credential target could not be verified during refresh."
+        }
+        RefreshTargetError::Persistence => "Claude refreshed credential could not be persisted.",
+    };
+    ProviderFetchFailure::terminal(display)
+}
+
+fn validate_claude_refresh_target(
+    credentials: &ClaudeCredentials,
+) -> Result<(), RefreshTargetError> {
+    match credentials.source {
+        ClaudeCredentialSource::Keychain => validate_claude_keychain_target(credentials),
+        ClaudeCredentialSource::File => {
+            validate_claude_credentials_file(credentials, &claude_credentials_path())
+        }
+        ClaudeCredentialSource::Environment => Err(RefreshTargetError::TargetUnverified),
+    }
+}
+
 /// Merge the rotated access/refresh tokens back into the credentials store they
 /// came from, preserving every other field the Claude CLI wrote.
-fn save_claude_credentials(credentials: &ClaudeCredentials) -> Result<(), String> {
+fn save_claude_credentials(credentials: &ClaudeCredentials) -> Result<(), RefreshTargetError> {
     match credentials.source {
         ClaudeCredentialSource::Keychain => save_claude_credentials_to_keychain(credentials),
         ClaudeCredentialSource::File => {
             save_claude_credentials_to_file(credentials, &claude_credentials_path())
         }
-        ClaudeCredentialSource::Environment => Ok(()),
+        ClaudeCredentialSource::Environment => Err(RefreshTargetError::TargetUnverified),
     }
+}
+
+fn read_claude_credentials_target(path: &Path) -> Result<String, RefreshTargetError> {
+    let bytes = fs::read(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RefreshTargetError::TargetMissing
+        } else {
+            RefreshTargetError::TargetUnverified
+        }
+    })?;
+    String::from_utf8(bytes).map_err(|_| RefreshTargetError::TargetMalformed)
+}
+
+fn validate_claude_credentials_file(
+    credentials: &ClaudeCredentials,
+    path: &Path,
+) -> Result<(), RefreshTargetError> {
+    let current_raw = read_claude_credentials_target(path)?;
+    claude_current_target_root(credentials, &current_raw).map(|_| ())
 }
 
 fn save_claude_credentials_to_file(
     credentials: &ClaudeCredentials,
     path: &Path,
-) -> Result<(), String> {
-    let current_raw = fs::read_to_string(path)
-        .map_err(|e| format!("read current Claude credentials file: {e}"))?;
+) -> Result<(), RefreshTargetError> {
+    save_claude_credentials_to_file_with(credentials, path, atomic_write)
+}
+
+fn save_claude_credentials_to_file_with<Write>(
+    credentials: &ClaudeCredentials,
+    path: &Path,
+    write: Write,
+) -> Result<(), RefreshTargetError>
+where
+    Write: FnOnce(&Path, &str) -> Result<(), String>,
+{
+    let current_raw = read_claude_credentials_target(path)?;
     let data = merge_claude_credentials_json(credentials, &current_raw)?;
-    atomic_write(path, &data)
+    write(path, &data).map_err(|_| RefreshTargetError::Persistence)
 }
 
 /// Replace `path` atomically: write a sibling temp file, then rename over the
@@ -3450,36 +3526,66 @@ fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Merge rotated tokens into the current credentials JSON only when the
-/// `claudeAiOauth` object still matches the one captured at refresh reload.
-/// Top-level siblings come from `current_raw`, so unrelated concurrent writes
-/// survive. Pure so both file and Keychain decisions are fixture-testable.
-fn merge_claude_credentials_json(
+fn claude_oauth_is_explicit_logout(oauth: &serde_json::Map<String, Value>) -> bool {
+    oauth.contains_key("refreshToken")
+        && match oauth.get("accessToken") {
+            None | Some(Value::Null) => true,
+            Some(Value::String(token)) => token.trim().is_empty(),
+            _ => false,
+        }
+}
+
+fn claude_current_target_root(
     credentials: &ClaudeCredentials,
     current_raw: &str,
-) -> Result<String, String> {
+) -> Result<Value, RefreshTargetError> {
+    let current_root: Value =
+        serde_json::from_str(current_raw).map_err(|_| RefreshTargetError::TargetMalformed)?;
+    let current_object = current_root
+        .as_object()
+        .ok_or(RefreshTargetError::TargetMalformed)?;
+    let current_oauth = match current_object.get("claudeAiOauth") {
+        None | Some(Value::Null) => return Err(RefreshTargetError::TargetMissing),
+        Some(Value::Object(oauth)) => oauth,
+        Some(_) => return Err(RefreshTargetError::TargetMalformed),
+    };
+    if claude_oauth_is_explicit_logout(current_oauth) {
+        return Err(RefreshTargetError::TargetMissing);
+    }
+    let parsed: ClaudeCredentialsOauth =
+        serde_json::from_value(Value::Object(current_oauth.clone()))
+            .map_err(|_| RefreshTargetError::TargetMalformed)?;
+    let access_valid = parsed
+        .access_token
+        .as_deref()
+        .is_some_and(|token| !token.trim().is_empty());
+    let refresh_valid = parsed
+        .refresh_token
+        .as_deref()
+        .is_some_and(|token| !token.trim().is_empty());
+    if !access_valid || !refresh_valid {
+        return Err(RefreshTargetError::TargetMalformed);
+    }
     let expected_oauth = credentials
         .raw_root
         .as_ref()
         .and_then(|root| root.get("claudeAiOauth"))
         .and_then(Value::as_object)
-        .ok_or_else(|| "Reloaded Claude credentials have no claudeAiOauth object.".to_string())?;
-    let mut current_root: Value = serde_json::from_str(current_raw)
-        .map_err(|e| format!("decode current Claude credentials: {e}"))?;
-    let current_oauth = current_root
-        .get("claudeAiOauth")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "Current Claude credentials have no claudeAiOauth object.".to_string())?;
+        .ok_or(RefreshTargetError::TargetUnverified)?;
     if current_oauth != expected_oauth {
-        return Err(
-            "Claude credentials changed during refresh; refusing stale write-back.".to_string(),
-        );
+        return Err(RefreshTargetError::TargetChanged);
     }
+    Ok(current_root)
+}
 
+fn encode_refreshed_claude_root(
+    credentials: &ClaudeCredentials,
+    mut current_root: Value,
+) -> Result<String, RefreshTargetError> {
     let oauth = current_root
         .get_mut("claudeAiOauth")
         .and_then(Value::as_object_mut)
-        .ok_or_else(|| "Current Claude credentials have no claudeAiOauth object.".to_string())?;
+        .ok_or(RefreshTargetError::TargetMalformed)?;
     oauth.insert(
         "accessToken".to_string(),
         Value::String(credentials.access_token.clone()),
@@ -3493,36 +3599,112 @@ fn merge_claude_credentials_json(
             Value::Number(expires_at.timestamp_millis().into()),
         );
     }
-    serde_json::to_string(&current_root).map_err(|e| format!("encode Claude credentials: {}", e))
+    serde_json::to_string(&current_root).map_err(|_| RefreshTargetError::Persistence)
 }
 
-fn prepare_claude_keychain_write<'a>(
-    credentials: &'a ClaudeCredentials,
-    current_account: Option<&str>,
+/// Merge rotated tokens into the current credentials JSON only when the
+/// `claudeAiOauth` object still matches the one captured at refresh reload.
+/// Top-level siblings come from `current_raw`, so unrelated concurrent writes
+/// survive. Pure so both file and Keychain decisions are fixture-testable.
+fn merge_claude_credentials_json(
+    credentials: &ClaudeCredentials,
     current_raw: &str,
-) -> Result<(&'a str, String), String> {
-    let captured_account = credentials.keychain_account.as_deref().ok_or_else(|| {
-        "Claude Keychain refresh has no captured account; refusing write-back.".to_string()
-    })?;
-    if current_account != Some(captured_account) {
-        return Err(
-            "Claude Keychain account changed during refresh; refusing write-back.".to_string(),
-        );
+) -> Result<String, RefreshTargetError> {
+    let current_root = claude_current_target_root(credentials, current_raw)?;
+    encode_refreshed_claude_root(credentials, current_root)
+}
+
+fn claude_keychain_target<'a>(
+    credentials: &'a ClaudeCredentials,
+    current_account: Result<Option<&str>, ()>,
+    current_raw: Result<Option<&str>, ()>,
+) -> Result<(&'a str, Value), RefreshTargetError> {
+    let captured_account = credentials
+        .keychain_account
+        .as_deref()
+        .ok_or(RefreshTargetError::TargetUnverified)?;
+    let current_raw = current_raw
+        .map_err(|_| RefreshTargetError::TargetUnverified)?
+        .ok_or(RefreshTargetError::TargetMissing)?;
+    let current_root = claude_current_target_root(credentials, current_raw)?;
+    let current_account = current_account
+        .map_err(|_| RefreshTargetError::TargetUnverified)?
+        .ok_or(RefreshTargetError::TargetUnverified)?;
+    if current_account != captured_account {
+        return Err(RefreshTargetError::TargetChanged);
     }
-    let data = merge_claude_credentials_json(credentials, current_raw)?;
+    Ok((captured_account, current_root))
+}
+
+fn claude_keychain_target_with<'a, Account, Item>(
+    credentials: &'a ClaudeCredentials,
+    current_account: Account,
+    current_item: Item,
+) -> Result<(&'a str, Value), RefreshTargetError>
+where
+    Account: FnOnce() -> Result<Option<String>, ()>,
+    Item: FnOnce(&str) -> Result<Option<String>, ()>,
+{
+    let captured_account = credentials
+        .keychain_account
+        .as_deref()
+        .ok_or(RefreshTargetError::TargetUnverified)?;
+    // Read the exact captured item first so its disappearance remains
+    // TargetMissing even when the account query can no longer find any item.
+    let current_raw = current_item(captured_account);
+    let current_account = current_account();
+    claude_keychain_target(
+        credentials,
+        current_account
+            .as_ref()
+            .map(|value| value.as_deref())
+            .map_err(|_| ()),
+        current_raw
+            .as_ref()
+            .map(|value| value.as_deref())
+            .map_err(|_| ()),
+    )
+}
+
+fn validate_claude_keychain_target(
+    credentials: &ClaudeCredentials,
+) -> Result<(), RefreshTargetError> {
+    claude_keychain_target_with(
+        credentials,
+        || Ok(claude_keychain_account()),
+        |captured_account| {
+            load_claude_credentials_from_keychain_item(Some(captured_account)).map_err(|_| ())
+        },
+    )
+    .map(|_| ())
+}
+
+fn prepare_claude_keychain_write_with<'a, Account, Item>(
+    credentials: &'a ClaudeCredentials,
+    current_account: Account,
+    current_item: Item,
+) -> Result<(&'a str, String), RefreshTargetError>
+where
+    Account: FnOnce() -> Result<Option<String>, ()>,
+    Item: FnOnce(&str) -> Result<Option<String>, ()>,
+{
+    let (captured_account, current_root) =
+        claude_keychain_target_with(credentials, current_account, current_item)?;
+    let data = encode_refreshed_claude_root(credentials, current_root)?;
     Ok((captured_account, data))
 }
 
 #[cfg(target_os = "macos")]
-fn save_claude_credentials_to_keychain(credentials: &ClaudeCredentials) -> Result<(), String> {
-    let captured_account = credentials.keychain_account.as_deref().ok_or_else(|| {
-        "Claude Keychain refresh has no captured account; refusing write-back.".to_string()
-    })?;
-    let current_raw = load_claude_credentials_from_keychain_item(Some(captured_account))?
-        .ok_or_else(|| "Claude Keychain credentials disappeared during refresh.".to_string())?;
-    let current_account = claude_keychain_account();
-    let (account, data) =
-        prepare_claude_keychain_write(credentials, current_account.as_deref(), &current_raw)?;
+fn save_claude_credentials_to_keychain(
+    credentials: &ClaudeCredentials,
+) -> Result<(), RefreshTargetError> {
+    let (account, data) = prepare_claude_keychain_write_with(
+        credentials,
+        || Ok(claude_keychain_account()),
+        |captured_account| {
+            load_claude_credentials_from_keychain_item(Some(captured_account)).map_err(|_| ())
+        },
+    )?;
 
     // NOTE: security(1) has no compare-and-swap operation. The exact-item read,
     // account guard, and target comparison close the network-wait race and the
@@ -3543,16 +3725,18 @@ fn save_claude_credentials_to_keychain(credentials: &ClaudeCredentials) -> Resul
             &data,
         ])
         .status()
-        .map_err(|e| format!("write Claude Keychain credentials: {}", e))?;
+        .map_err(|_| RefreshTargetError::Persistence)?;
     if !status.success() {
-        return Err("security add-generic-password failed for Claude credentials.".to_string());
+        return Err(RefreshTargetError::Persistence);
     }
     Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn save_claude_credentials_to_keychain(_credentials: &ClaudeCredentials) -> Result<(), String> {
-    Err("Keychain writes are only supported on macOS.".to_string())
+fn save_claude_credentials_to_keychain(
+    _credentials: &ClaudeCredentials,
+) -> Result<(), RefreshTargetError> {
+    Err(RefreshTargetError::TargetUnverified)
 }
 
 /// Read the account name the Claude Keychain item is stored under so the
@@ -6980,47 +7164,6 @@ mod tests {
     }
 
     #[test]
-    fn claude_keychain_write_decision_pins_account_and_rejects_target_mismatch() {
-        let raw_a = r#"{
-            "claudeAiOauth": {
-                "accessToken": "old-access",
-                "refreshToken": "old-refresh",
-                "expiresAt": 0
-            },
-            "sibling": "a"
-        }"#;
-        let mut credentials =
-            parse_claude_credentials_data(raw_a, ClaudeCredentialSource::Keychain).unwrap();
-        credentials.keychain_account = Some("account-a".to_string());
-        credentials.access_token = "new-access".to_string();
-        credentials.refresh_token = Some("new-refresh".to_string());
-
-        let (account, merged) =
-            prepare_claude_keychain_write(&credentials, Some("account-a"), raw_a).unwrap();
-        assert_eq!(account, "account-a");
-        assert_eq!(
-            serde_json::from_str::<Value>(&merged).unwrap()["claudeAiOauth"]["accessToken"],
-            "new-access"
-        );
-
-        assert!(prepare_claude_keychain_write(&credentials, Some("account-b"), raw_a).is_err());
-        assert!(prepare_claude_keychain_write(&credentials, None, raw_a).is_err());
-
-        let raw_changed_target = r#"{
-            "claudeAiOauth": {
-                "accessToken": "account-b-access",
-                "refreshToken": "account-b-refresh",
-                "expiresAt": 0
-            },
-            "sibling": "b"
-        }"#;
-        assert!(
-            prepare_claude_keychain_write(&credentials, Some("account-a"), raw_changed_target,)
-                .is_err()
-        );
-    }
-
-    #[test]
     fn atomic_write_replaces_existing_file_contents() {
         let dir = std::env::temp_dir().join(format!("tb_atomic_{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
@@ -8929,6 +9072,7 @@ mod tests {
         ProviderFetchFailure,
     > {
         let reload_path = path.to_path_buf();
+        let preflight_path = path.to_path_buf();
         let save_path = path.to_path_buf();
         refresh_claude_credentials_with(
             original,
@@ -8942,6 +9086,7 @@ mod tests {
                 Ok(credentials)
             },
             claude_test_response,
+            move |credentials| validate_claude_credentials_file(credentials, &preflight_path),
             move |credentials| save_claude_credentials_to_file(credentials, &save_path),
             checkpoint_at(crash),
         )
@@ -8957,61 +9102,590 @@ mod tests {
         .refresh_token
     }
 
-    #[tokio::test]
-    async fn claude_file_refresh_rejects_concurrent_target_change_without_touching_b() {
-        const B_BYTES: &[u8] = br#"{
-  "claudeAiOauth": {
-    "accessToken": "account-b-access",
-    "refreshToken": "account-b-refresh",
-    "expiresAt": 4102444800000
-  },
-  "sibling": {"writer": "b", "revision": 2}
-}
-"#;
-        let (scope, path, original, old_scope, _, _) =
-            setup_claude_refresh("claude-file-target-race");
-        let reload_path = path.clone();
-        let request_path = path.clone();
-        let save_path = path.clone();
-        let save_failed = std::rc::Rc::new(std::cell::Cell::new(false));
-        let observed_save_failure = std::rc::Rc::clone(&save_failed);
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ClaudeTargetCase {
+        PreflightChanged,
+        PreflightAccountChanged,
+        PreflightMissing,
+        PreflightLogout,
+        PreflightMcpOnly,
+        PreflightMalformed,
+        PreflightUnverified,
+        PostChanged,
+        PostAccountChanged,
+        PostMissing,
+        PostMalformed,
+        PostUnverified,
+        Persistence,
+        Success,
+    }
 
-        let (refreshed, scope_outcome, cache_binding) = refresh_claude_credentials_with(
-            &original,
-            &scope,
-            move |template| {
-                let raw = fs::read_to_string(&reload_path)
-                    .map_err(|error| format!("reload Claude test credentials: {error}"))?;
-                let mut credentials =
-                    parse_claude_credentials_data(&raw, ClaudeCredentialSource::File)?;
-                credentials.scope_slot = template.scope_slot.clone();
-                Ok(credentials)
+    const CLAUDE_TARGET_CASES: [ClaudeTargetCase; 12] = [
+        ClaudeTargetCase::PreflightChanged,
+        ClaudeTargetCase::PreflightMissing,
+        ClaudeTargetCase::PreflightLogout,
+        ClaudeTargetCase::PreflightMcpOnly,
+        ClaudeTargetCase::PreflightMalformed,
+        ClaudeTargetCase::PreflightUnverified,
+        ClaudeTargetCase::PostChanged,
+        ClaudeTargetCase::PostMissing,
+        ClaudeTargetCase::PostMalformed,
+        ClaudeTargetCase::PostUnverified,
+        ClaudeTargetCase::Persistence,
+        ClaudeTargetCase::Success,
+    ];
+
+    const CLAUDE_KEYCHAIN_ACCOUNT_CASES: [ClaudeTargetCase; 2] = [
+        ClaudeTargetCase::PreflightAccountChanged,
+        ClaudeTargetCase::PostAccountChanged,
+    ];
+
+    impl ClaudeTargetCase {
+        fn preflight_terminal(self) -> bool {
+            matches!(
+                self,
+                Self::PreflightChanged
+                    | Self::PreflightAccountChanged
+                    | Self::PreflightMissing
+                    | Self::PreflightLogout
+                    | Self::PreflightMcpOnly
+                    | Self::PreflightMalformed
+                    | Self::PreflightUnverified
+            )
+        }
+
+        fn post_terminal(self) -> bool {
+            matches!(
+                self,
+                Self::PostChanged
+                    | Self::PostAccountChanged
+                    | Self::PostMissing
+                    | Self::PostMalformed
+                    | Self::PostUnverified
+            )
+        }
+
+        fn continues(self) -> bool {
+            matches!(self, Self::Persistence | Self::Success)
+        }
+
+        fn expected_display(self) -> Option<&'static str> {
+            match self {
+                Self::PreflightMissing
+                | Self::PreflightLogout
+                | Self::PreflightMcpOnly
+                | Self::PostMissing => Some("Claude credential target disappeared during refresh."),
+                Self::PreflightChanged
+                | Self::PreflightAccountChanged
+                | Self::PostChanged
+                | Self::PostAccountChanged => {
+                    Some("Claude credential target changed during refresh.")
+                }
+                Self::PreflightMalformed | Self::PostMalformed => {
+                    Some("Claude credential target became malformed during refresh.")
+                }
+                Self::PreflightUnverified | Self::PostUnverified => {
+                    Some("Claude credential target could not be verified during refresh.")
+                }
+                Self::Persistence | Self::Success => None,
+            }
+        }
+    }
+
+    #[derive(Clone, PartialEq, Eq)]
+    enum ClaudeStoreSnapshot {
+        Missing,
+        Directory,
+        File(Vec<u8>),
+        Keychain(Result<Option<String>, ()>, Result<Option<String>, ()>),
+    }
+
+    enum ClaudeTestStore {
+        File(PathBuf),
+        Keychain {
+            account: Result<Option<String>, ()>,
+            item: Result<Option<String>, ()>,
+        },
+    }
+
+    fn borrowed_target(value: &Result<Option<String>, ()>) -> Result<Option<&str>, ()> {
+        value.as_ref().map(|value| value.as_deref()).map_err(|_| ())
+    }
+
+    impl ClaudeTestStore {
+        fn snapshot(&self) -> ClaudeStoreSnapshot {
+            match self {
+                Self::File(path) => match fs::symlink_metadata(path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        ClaudeStoreSnapshot::Missing
+                    }
+                    Ok(metadata) if metadata.is_dir() => ClaudeStoreSnapshot::Directory,
+                    Ok(_) => ClaudeStoreSnapshot::File(
+                        fs::read(path).expect("fixture file must be readable"),
+                    ),
+                    Err(_) => panic!("fixture path state could not be inspected"),
+                },
+                Self::Keychain { account, item } => {
+                    ClaudeStoreSnapshot::Keychain(account.clone(), item.clone())
+                }
+            }
+        }
+
+        fn raw(&self) -> Option<String> {
+            match self {
+                Self::File(path) => fs::read_to_string(path).ok(),
+                Self::Keychain { item, .. } => item.clone().ok().flatten(),
+            }
+        }
+
+        fn write_raw(&mut self, raw: String) {
+            match self {
+                Self::File(path) => fs::write(path, raw).unwrap(),
+                Self::Keychain { item, .. } => *item = Ok(Some(raw)),
+            }
+        }
+
+        fn reload(&self, template: &ClaudeCredentials) -> Result<ClaudeCredentials, String> {
+            let raw = self
+                .raw()
+                .ok_or_else(|| "fixture target unavailable".to_string())?;
+            let source = match self {
+                Self::File(_) => ClaudeCredentialSource::File,
+                Self::Keychain { .. } => ClaudeCredentialSource::Keychain,
+            };
+            let mut credentials = parse_claude_credentials_data(&raw, source)?;
+            if let Self::Keychain { account, .. } = self {
+                credentials.keychain_account = borrowed_target(account)
+                    .map_err(|_| "fixture account query failed".to_string())?
+                    .map(str::to_string);
+            }
+            credentials.scope_slot = template.scope_slot.clone();
+            Ok(credentials)
+        }
+
+        fn preflight(&self, credentials: &ClaudeCredentials) -> Result<(), RefreshTargetError> {
+            match self {
+                Self::File(path) => validate_claude_credentials_file(credentials, path),
+                Self::Keychain { account, item } => {
+                    claude_keychain_target_with(credentials, || account.clone(), |_| item.clone())
+                        .map(|_| ())
+                }
+            }
+        }
+
+        fn apply(&mut self, case: ClaudeTargetCase) {
+            match case {
+                ClaudeTargetCase::PreflightChanged | ClaudeTargetCase::PostChanged => self
+                    .write_raw(
+                        serde_json::json!({
+                            "claudeAiOauth": {
+                                "accessToken": "account-b-access",
+                                "refreshToken": "account-b-refresh",
+                                "expiresAt": 4_102_444_800_000_i64
+                            },
+                            "sibling": {"writer": "b", "revision": 2}
+                        })
+                        .to_string(),
+                    ),
+                ClaudeTargetCase::PreflightAccountChanged
+                | ClaudeTargetCase::PostAccountChanged => match self {
+                    Self::Keychain { account, .. } => *account = Ok(Some("account-b".to_string())),
+                    Self::File(_) => unreachable!("account-only mutation is Keychain-specific"),
+                },
+                ClaudeTargetCase::PreflightMissing | ClaudeTargetCase::PostMissing => match self {
+                    Self::File(path) => fs::remove_file(path).unwrap(),
+                    Self::Keychain { account, item } => {
+                        *item = Ok(None);
+                        *account = Ok(None);
+                    }
+                },
+                ClaudeTargetCase::PreflightLogout => self.write_raw(
+                    serde_json::json!({
+                        "claudeAiOauth": {
+                            "accessToken": Value::Null,
+                            "refreshToken": "claude-old-refresh"
+                        }
+                    })
+                    .to_string(),
+                ),
+                ClaudeTargetCase::PreflightMcpOnly => {
+                    self.write_raw(serde_json::json!({"mcpOAuth": {"fixture": true}}).to_string())
+                }
+                ClaudeTargetCase::PreflightMalformed | ClaudeTargetCase::PostMalformed => self
+                    .write_raw(
+                        serde_json::json!({
+                            "claudeAiOauth": {
+                                "accessToken": {"invalid": true},
+                                "refreshToken": "claude-old-refresh"
+                            }
+                        })
+                        .to_string(),
+                    ),
+                ClaudeTargetCase::PreflightUnverified | ClaudeTargetCase::PostUnverified => {
+                    match self {
+                        Self::File(path) => {
+                            fs::remove_file(&*path).unwrap();
+                            fs::create_dir(path).unwrap();
+                        }
+                        Self::Keychain { account, .. } => *account = Err(()),
+                    }
+                }
+                ClaudeTargetCase::Success => {
+                    let mut root: Value = serde_json::from_str(&self.raw().unwrap()).unwrap();
+                    root.as_object_mut().unwrap().insert(
+                        "sibling".to_string(),
+                        serde_json::json!({"writer": "claude-cli", "revision": 2}),
+                    );
+                    self.write_raw(root.to_string());
+                }
+                ClaudeTargetCase::Persistence => {}
+            }
+        }
+
+        fn save(
+            &mut self,
+            credentials: &ClaudeCredentials,
+            fail_writer: bool,
+            observation: &ClaudeTargetObservation,
+        ) -> Result<(), RefreshTargetError> {
+            match self {
+                Self::File(path) => {
+                    save_claude_credentials_to_file_with(credentials, path, |path, data| {
+                        observation.writer.set(observation.writer.get() + 1);
+                        if fail_writer {
+                            Err("injected writer failure".to_string())
+                        } else {
+                            atomic_write(path, data)
+                        }
+                    })
+                }
+                Self::Keychain { account, item } => {
+                    let current_account = account.clone();
+                    let current_item = item.clone();
+                    let (pinned, data) = prepare_claude_keychain_write_with(
+                        credentials,
+                        || current_account,
+                        |_| current_item,
+                    )?;
+                    observation.writer.set(observation.writer.get() + 1);
+                    observation.pin.set(pinned == "account-a");
+                    if fail_writer {
+                        Err(RefreshTargetError::Persistence)
+                    } else {
+                        *item = Ok(Some(data));
+                        Ok(())
+                    }
+                }
+            }
+        }
+
+        fn success_preserved(&self) -> bool {
+            let Some(raw) = self.raw() else {
+                return false;
+            };
+            let Ok(root) = serde_json::from_str::<Value>(&raw) else {
+                return false;
+            };
+            root["claudeAiOauth"]["accessToken"] == "claude-new-access"
+                && root["claudeAiOauth"]["refreshToken"] == "claude-new-refresh"
+                && root["sibling"]["writer"] == "claude-cli"
+        }
+    }
+
+    #[derive(Default)]
+    struct ClaudeTargetObservation {
+        request: std::cell::Cell<usize>,
+        preflight: std::cell::Cell<usize>,
+        save: std::cell::Cell<usize>,
+        writer: std::cell::Cell<usize>,
+        header: std::cell::Cell<usize>,
+        usage: std::cell::Cell<usize>,
+        token: std::cell::Cell<bool>,
+        scope: std::cell::Cell<bool>,
+        binding: std::cell::Cell<bool>,
+        gate_binding: std::cell::Cell<bool>,
+        pin: std::cell::Cell<bool>,
+        checkpoints: std::cell::RefCell<Vec<RefreshCheckpoint>>,
+    }
+
+    async fn run_claude_target_case(case: ClaudeTargetCase, keychain: bool) {
+        let (scope, store, original, old_scope, metadata_before, location) = if keychain {
+            let scope = TestRefreshScope::new("claude", "claude-keychain-target");
+            let raw = serde_json::json!({
+                "claudeAiOauth": {
+                    "accessToken": "claude-old-access",
+                    "refreshToken": "claude-old-refresh",
+                    "expiresAt": 0
+                },
+                "sibling": {"writer": "initial", "revision": 1}
+            })
+            .to_string();
+            let mut original =
+                parse_claude_credentials_data(&raw, ClaudeCredentialSource::Keychain).unwrap();
+            original.keychain_account = Some("account-a".to_string());
+            original.scope_slot = CredentialSlot {
+                semantic_source: "claude-login-keychain",
+                canonical_location: "fixture-keychain-item".to_string(),
+            };
+            let old_scope = scope
+                .resolve_current(
+                    original.scope_slot.semantic_source,
+                    &original.scope_slot.canonical_location,
+                    original.scope_marker().unwrap(),
+                )
+                .unwrap();
+            let metadata = scope.metadata_bytes();
+            (
+                scope,
+                ClaudeTestStore::Keychain {
+                    account: Ok(Some("account-a".to_string())),
+                    item: Ok(Some(raw)),
+                },
+                original,
+                old_scope,
+                metadata,
+                "fixture-keychain-item".to_string(),
+            )
+        } else {
+            let (scope, path, original, old_scope, metadata, location) =
+                setup_claude_refresh("claude-file-target");
+            (
+                scope,
+                ClaudeTestStore::File(path),
+                original,
+                old_scope,
+                metadata,
+                location,
+            )
+        };
+        let source = original.scope_slot.semantic_source;
+        let initial = store.snapshot();
+        let store = std::rc::Rc::new(std::cell::RefCell::new(store));
+        let expected = std::rc::Rc::new(std::cell::RefCell::new(initial.clone()));
+        let observation = std::rc::Rc::new(ClaudeTargetObservation::default());
+        let recording = RecordingRefreshScope::new(&scope);
+        let expected_usage_binding = (case == ClaudeTargetCase::Success)
+            .then(|| ProviderCacheBinding::primary(old_scope.clone()));
+        let store_reload = std::rc::Rc::clone(&store);
+        let store_request = std::rc::Rc::clone(&store);
+        let store_preflight = std::rc::Rc::clone(&store);
+        let store_save = std::rc::Rc::clone(&store);
+        let expected_request = std::rc::Rc::clone(&expected);
+        let expected_preflight = std::rc::Rc::clone(&expected);
+        let obs_request = std::rc::Rc::clone(&observation);
+        let obs_preflight = std::rc::Rc::clone(&observation);
+        let obs_save = std::rc::Rc::clone(&observation);
+        let obs_checkpoint = std::rc::Rc::clone(&observation);
+        let obs_header = std::rc::Rc::clone(&observation);
+        let obs_usage = std::rc::Rc::clone(&observation);
+        let expected_scope = old_scope.clone();
+        let expected_gate = ProviderCacheBinding::primary(old_scope.clone());
+        let transaction_scope = &recording;
+
+        let (route, outcome) = fetch_claude_login_usage_with(
+            original,
+            ProviderCacheBinding::primary(old_scope.clone()),
+            DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            |_, _| None,
+            move |outer| async move {
+                refresh_claude_credentials_with(
+                    &outer,
+                    transaction_scope,
+                    move |template| store_reload.borrow().reload(template),
+                    move |refresh_token, _| async move {
+                        obs_request.request.set(obs_request.request.get() + 1);
+                        assert!(
+                            refresh_token == "claude-old-refresh",
+                            "REFRESH-TARGET-CHECKPOINT-SEQUENCE"
+                        );
+                        if case.preflight_terminal() {
+                            let mut current = store_request.borrow_mut();
+                            current.apply(case);
+                            *expected_request.borrow_mut() = current.snapshot();
+                        }
+                        Ok(ClaudeRefreshResponse {
+                            access_token: "claude-new-access".to_string(),
+                            refresh_token: Some("claude-new-refresh".to_string()),
+                            expires_in: 3_600,
+                        })
+                    },
+                    move |credentials| {
+                        obs_preflight
+                            .preflight
+                            .set(obs_preflight.preflight.get() + 1);
+                        let result = store_preflight.borrow().preflight(credentials);
+                        if result.is_ok()
+                            && (case.post_terminal() || case == ClaudeTargetCase::Success)
+                        {
+                            let mut current = store_preflight.borrow_mut();
+                            current.apply(case);
+                            *expected_preflight.borrow_mut() = current.snapshot();
+                        }
+                        result
+                    },
+                    move |credentials| {
+                        obs_save.save.set(obs_save.save.get() + 1);
+                        store_save.borrow_mut().save(
+                            credentials,
+                            case == ClaudeTargetCase::Persistence,
+                            &obs_save,
+                        )
+                    },
+                    move |checkpoint| {
+                        obs_checkpoint.checkpoints.borrow_mut().push(checkpoint);
+                        Ok(())
+                    },
+                )
+                .await
             },
-            move |refresh_token, _attempt_binding| async move {
-                assert_eq!(refresh_token, "claude-old-refresh");
-                fs::write(&request_path, B_BYTES).unwrap();
-                Ok(ClaudeRefreshResponse {
-                    access_token: "claude-new-access".to_string(),
-                    refresh_token: Some("claude-new-refresh".to_string()),
-                    expires_in: 3_600,
-                })
+            move |_, _, _| async move {
+                obs_header.header.set(obs_header.header.get() + 1);
+                claude_test_success_outcome()
             },
-            move |credentials| {
-                let result = save_claude_credentials_to_file(credentials, &save_path);
-                observed_save_failure.set(result.is_err());
-                result
+            move |credentials, account_scope, binding, gate_binding| async move {
+                obs_usage.usage.set(obs_usage.usage.get() + 1);
+                obs_usage
+                    .token
+                    .set(credentials.access_token == "claude-new-access");
+                obs_usage.scope.set(account_scope == expected_scope);
+                obs_usage.binding.set(binding == expected_usage_binding);
+                obs_usage.gate_binding.set(gate_binding == expected_gate);
+                ("oauth", claude_test_success_outcome())
             },
-            checkpoint_at(None),
         )
-        .await
-        .unwrap();
+        .await;
 
-        assert_eq!(refreshed.access_token, "claude-new-access");
-        assert_eq!(scope_outcome, old_scope);
-        assert_eq!(cache_binding, None);
-        assert!(save_failed.get());
-        assert_eq!(fs::read(&path).unwrap(), B_BYTES);
+        let terminal_label = if case.preflight_terminal() {
+            "REFRESH-TARGET-PREFLIGHT-TERMINAL"
+        } else {
+            "REFRESH-TARGET-POST-PREFLIGHT-TERMINAL"
+        };
+        assert_eq!(route, "oauth", "REFRESH-TARGET-USAGE-BLOCKED");
+        if let Some(expected_display) = case.expected_display() {
+            assert!(
+                matches!(
+                    outcome,
+                    ProviderFetchOutcome::Failure(ProviderFetchFailure::Terminal { display })
+                        if display == expected_display
+                ),
+                "{terminal_label}"
+            );
+        } else {
+            assert!(
+                matches!(outcome, ProviderFetchOutcome::Success { .. }),
+                "REFRESH-TARGET-PERSISTENCE-FAILSOFT"
+            );
+        }
+        assert_eq!(
+            observation.request.get(),
+            1,
+            "REFRESH-TARGET-CHECKPOINT-SEQUENCE"
+        );
+        assert_eq!(
+            observation.preflight.get(),
+            1,
+            "REFRESH-TARGET-CHECKPOINT-SEQUENCE"
+        );
+        assert_eq!(
+            observation.save.get(),
+            usize::from(!case.preflight_terminal()),
+            "REFRESH-TARGET-CHECKPOINT-SEQUENCE"
+        );
+        assert_eq!(
+            observation.writer.get(),
+            usize::from(case.continues()),
+            "REFRESH-TARGET-PERSISTENCE-FAILSOFT"
+        );
+        assert_eq!(observation.header.get(), 0, "REFRESH-TARGET-USAGE-BLOCKED");
+        assert_eq!(
+            observation.usage.get(),
+            usize::from(case.continues()),
+            "REFRESH-TARGET-USAGE-BLOCKED"
+        );
+        assert_eq!(
+            recording.resolve_count(),
+            1 + usize::from(case == ClaudeTargetCase::Success),
+            "REFRESH-TARGET-CHECKPOINT-SEQUENCE"
+        );
+        assert_eq!(
+            recording.transfers().len(),
+            usize::from(!case.preflight_terminal()),
+            "REFRESH-TARGET-CHECKPOINT-SEQUENCE"
+        );
+        let mut expected_checkpoints = vec![
+            RefreshCheckpoint::Reloaded,
+            RefreshCheckpoint::NetworkReturned,
+        ];
+        if !case.preflight_terminal() {
+            expected_checkpoints.extend([
+                RefreshCheckpoint::MetadataHandled,
+                RefreshCheckpoint::CredentialsPersisted,
+            ]);
+        }
+        assert_eq!(
+            *observation.checkpoints.borrow(),
+            expected_checkpoints,
+            "REFRESH-TARGET-CHECKPOINT-SEQUENCE"
+        );
+        if case.continues() {
+            assert!(
+                observation.token.get()
+                    && observation.scope.get()
+                    && observation.binding.get()
+                    && observation.gate_binding.get(),
+                "REFRESH-TARGET-PERSISTENCE-FAILSOFT"
+            );
+            if keychain {
+                assert!(observation.pin.get(), "REFRESH-TARGET-KEYCHAIN-PIN");
+            }
+        }
+        assert!(
+            (scope.metadata_bytes() == metadata_before) == case.preflight_terminal(),
+            "{terminal_label}"
+        );
+        let current = store.borrow().snapshot();
+        if case.expected_display().is_some() {
+            assert!(
+                current == *expected.borrow(),
+                "REFRESH-TARGET-DURABLE-PRESERVED"
+            );
+        } else if case == ClaudeTargetCase::Persistence {
+            assert!(current == initial, "REFRESH-TARGET-PERSISTENCE-FAILSOFT");
+        } else {
+            assert!(
+                store.borrow().success_preserved(),
+                "REFRESH-TARGET-SIBLING-PRESERVATION"
+            );
+        }
+        let lineage_marker: &[u8] = if case.preflight_terminal() {
+            b"claude-old-refresh"
+        } else {
+            b"claude-new-refresh"
+        };
+        assert!(
+            scope
+                .resolve_current(source, &location, lineage_marker)
+                .is_ok_and(|resolved| resolved == old_scope),
+            "{terminal_label}"
+        );
         scope.cleanup();
+    }
+
+    #[tokio::test]
+    async fn claude_file_refresh_target_matrix_blocks_stale_usage() {
+        for case in CLAUDE_TARGET_CASES {
+            run_claude_target_case(case, false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_keychain_refresh_target_matrix_blocks_stale_usage_without_real_keychain() {
+        for case in CLAUDE_TARGET_CASES
+            .into_iter()
+            .chain(CLAUDE_KEYCHAIN_ACCOUNT_CASES)
+        {
+            run_claude_target_case(case, true).await;
+        }
     }
 
     #[tokio::test]
@@ -9028,6 +9702,7 @@ mod tests {
             setup_claude_refresh("claude-file-sibling-race");
         let reload_path = path.clone();
         let request_path = path.clone();
+        let preflight_path = path.clone();
         let save_path = path.clone();
 
         let (refreshed, scope_outcome, cache_binding) = refresh_claude_credentials_with(
@@ -9050,6 +9725,7 @@ mod tests {
                     expires_in: 3_600,
                 })
             },
+            move |credentials| validate_claude_credentials_file(credentials, &preflight_path),
             move |credentials| save_claude_credentials_to_file(credentials, &save_path),
             checkpoint_at(None),
         )
@@ -9090,6 +9766,7 @@ mod tests {
             }))
             .unwrap();
             let reload_path = path.clone();
+            let preflight_path = path.clone();
             let save_path = path.clone();
             let (refreshed, scope_outcome, cache_binding) = refresh_claude_credentials_with(
                 &original,
@@ -9106,6 +9783,7 @@ mod tests {
                     assert_eq!(refresh_token, "claude-old-refresh");
                     Ok(response)
                 },
+                move |credentials| validate_claude_credentials_file(credentials, &preflight_path),
                 move |credentials| save_claude_credentials_to_file(credentials, &save_path),
                 checkpoint_at(None),
             )
@@ -9168,6 +9846,7 @@ mod tests {
                     expires_in: 3_600,
                 })
             },
+            |_| Ok(()),
             |_| {
                 save_calls.set(save_calls.get() + 1);
                 Ok(())
@@ -9265,6 +9944,7 @@ mod tests {
         let (scope, path, original, old_scope, _, location) =
             setup_claude_refresh("claude-save-fail");
         let reload_path = path.clone();
+        let preflight_path = path.clone();
         let (refreshed, scope_outcome, cache_binding) = refresh_claude_credentials_with(
             &original,
             &scope,
@@ -9277,7 +9957,8 @@ mod tests {
                 Ok(credentials)
             },
             claude_test_response,
-            |_| Err("injected save failure".to_string()),
+            move |credentials| validate_claude_credentials_file(credentials, &preflight_path),
+            |_| Err(RefreshTargetError::Persistence),
             checkpoint_at(None),
         )
         .await
@@ -9354,6 +10035,7 @@ mod tests {
                     )),
                 ))
             },
+            |_| Ok(()),
             |_| Ok(()),
             checkpoint_at(None),
         )

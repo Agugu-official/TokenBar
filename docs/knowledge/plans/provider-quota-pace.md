@@ -195,16 +195,26 @@ Installation-key 的 read／first-create／key-loss recovery與metadata的 load 
 
 #### Refresh transaction and recovery
 
-App-controlled refresh 的 cross-process lock 固定為 Application Support 的 `quota-auth-refresh-<provider>.lock`，以 owner-only mode 開啟。Lock ordering 只能是 refresh lock → metadata lock；不得在持有 metadata／v3 lock 時反向取得 refresh lock。流程固定依序：
+App-controlled refresh 的 cross-process lock 固定為 Application Support 的 `quota-auth-refresh-<provider>.lock`，以 owner-only mode 開啟。Lock ordering 只能是 refresh lock → metadata lock；不得在持有 metadata／v3 lock 時反向取得 refresh lock。Claude／Grok target-bound transaction 固定依序：
 
 1. 先在account-scope lock內讀取或recover installation-key file並釋放該lock，再取得provider refresh process／file lock；key error保留為typed unavailable，但不得阻止既有credential refresh本身。
-2. 取得 refresh lock 後重新載入 exact current auth record並計算 `F_old`。
-3. 持有 refresh lock 執行既有 refresh request，從回傳 credential 計算 `F_new`；此時不持有 metadata／v3 lock。
-4. 在 metadata transaction 內確認 `F_old` lineage 無 conflict，並把 `F_old`、`F_new` 綁到同一 lineage；persist 後立即釋放 metadata lock。
-5. 仍持有 refresh lock 時 persist provider credentials，完成後釋放 refresh lock。
-6. Quota fetch 成功後，才以已持久化 scope 寫 v3 history。
+2. 取得 refresh lock 後重新載入 exact current auth target A，發出 `RefreshCheckpoint::Reloaded`，計算 `F_old`並resolve A scope／binding。
+3. 持有 refresh lock 執行既有 refresh request，發出 `RefreshCheckpoint::NetworkReturned`，驗證response並計算 `F_new`；此時不持有 metadata／v3 lock。
+4. 在lineage transfer前重新讀取並preflight exact durable target。Missing、changed、malformed或無法可靠驗證皆terminal；不得進入metadata transfer或quota continuation。
+5. Preflight成功後，在 metadata transaction 內確認 `F_old` lineage無conflict，把 `F_old`、`F_new`綁到同一lineage，persist後立即釋放metadata lock，再發出 `RefreshCheckpoint::MetadataHandled`。
+6. 仍持有 refresh lock 時執行typed save：第二次重新讀取／比較exact target，從current root merge以保留siblings，compare成功後才嘗試encode／stage／write。Save closure回傳後一律發出 `RefreshCheckpoint::CredentialsPersisted`，再依typed result分支；這個checkpoint名稱不保證write成功。
+7. 只有success或genuine persistence fail-soft result可進入required quota continuation；success帶reusable binding，persistence failure帶fresh credential與transferred scope但`cache_binding=None`。Quota fetch成功且scope可信後，才寫v3 history。
 
-Crash before metadata save不會以 new credential寫 history；crash between metadata and credential save時 old／new fingerprints都能回到同 lineage；credential save後 crash則下一次仍可 resolve。Metadata write失敗可以讓 auth refresh繼續，但本 poll pace必須是 `unavailable(accountScope)`，不得寫 history。
+| Refresh result | Metadata／checkpoint state | Continuation policy |
+|---|---|---|
+| Preflight target-invalid | 相對已預建立A lineage的metadata baseline byte-identical；只有`Reloaded`、`NetworkReturned` | Terminal；不save、不usage |
+| Post-preflight target-invalid | Transfer已完成；save-attempt checkpoints包含`MetadataHandled`、`CredentialsPersisted`；external durable target不覆寫；new marker可留下inert A-lineage mapping | Terminal；不usage、不cache |
+| Genuine persistence failure | 第二次exact compare成功且transfer已完成；writer／encode persistence stage失敗；不rollback metadata | Fresh-but-uncacheable；exactly one required continuation；不提供reusable cache binding |
+| Success | Current siblings合併保存；persisted `F_new`重新resolve成binding | 繼續既有quota flow並可寫history |
+
+Claude File pinning以exact `claudeAiOauth` object為target；pure Keychain decision同時驗證captured account、current account與captured-account exact item，real write仍固定更新captured account。Mid-refresh mcpOAuth-only、`claudeAiOauth:null`與explicit logout都是`TargetMissing`，不套用top-level setup-token fallback。Grok只重讀captured `auth.x.ai::<client_id>` exact entry，foreign entries不作fallback並在成功merge時保留。Codex與Antigravity維持各自既有ordering／failure policy，不由本流程改寫。
+
+Compare-to-write期間仍可能有same-user external writer介入；filesystem atomic replace與Keychain `security -U`都不是CAS，credential store與lineage metadata也不是cross-resource atomic transaction。Crash after lineage transfer but before credential success可留下old／new fingerprints同lineage；該mapping在target-invalid時是inert，不授權usage。Metadata write失敗不得被當作target persistence failure，本poll pace維持`unavailable(accountScope)`且不得寫history。
 
 | Failure／restore | Required result |
 |---|---|
@@ -221,7 +231,7 @@ Crash before metadata save不會以 new credential寫 history；crash between me
 
 Retained v2 仍含 legacy raw Codex account key，因此分類為 legacy-sensitive migration data；「沒有 raw identifier」只適用新 metadata與 v3。這份 Plan保留 v2 bytes／mtime／path，不隱瞞或假稱已清除；v2 writer／evaluator 已退役，但 schema-2 檔案仍由 `agent_quota_history.rs` 的 importer 作 read-only migration input。
 
-Security fixtures必須覆蓋HMAC known vectors／domain separation、different-installation unlinkability、各credential source、refresh每一步crash injection、same-slot replacement、two-process create／transfer conflict、key exact-length／mode／symlink／non-regular／inode-replacement防護、key-loss orphan recovery、MAC／lock／atomic-write／quarantine failures、Antigravity stale active-email mismatch，以及metadata／v3 byte scan不含fixture raw values或其plain SHA-256。
+Security fixtures必須覆蓋HMAC known vectors／domain separation、different-installation unlinkability、各credential source、refresh每一步crash injection、Claude File／pure Keychain／Grok exact-entry的preflight與post-preflight四種target classification、genuine persistence fail-soft、required continuation count／binding／checkpoint／sibling preservation、same-slot replacement、two-process create／transfer conflict、key exact-length／mode／symlink／non-regular／inode-replacement防護、key-loss orphan recovery、MAC／lock／atomic-write／quarantine failures、Antigravity stale active-email mismatch，以及metadata／v3 byte scan不含fixture raw values或其plain SHA-256。
 
 現行release是ad-hoc signed，因此restrictive Keychain ACL沒有跨rebuild／update的stable code identity。未來只有在release chain採用穩定Developer ID signing後，才可另立migration plan評估升級回Keychain；migration必須匯入並驗證與現有file完全相同的32 bytes，成功前file維持source of truth，絕不能生成新key造成`accountScope`與history斷代。舊開發用Keychain item不屬於migration input。
 
