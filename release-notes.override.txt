@@ -1,10 +1,13 @@
 Note:
-- Pace history restarts once with this update. A card returns to "Learning history" and rebuilds unless its provider gives TokenBar a stable account identifier, which today means Codex with an account ID on its credential, and the Antigravity IDE. This is the cost of the identity fix below and it happens only once.
+- Amp, Cursor, OpenClaw, MiMoCode, and Mux rescan once after this update. Their cached data is rebuilt from scratch on the first refresh because the engine update advances their parser identity. Expect one slower scan for those clients; every other client keeps its cache.
 
 Fixes:
-- Pace history no longer restarts every time another app refreshes a shared login. Providers without a stable account identifier kept losing their learned usage curve whenever the Claude CLI or a sibling tool rotated the credential they share, so Historical pace could never accumulate.
-- A pace marker in deficit is now highlighted whether it came from the historical curve or the linear estimate. Previously only a historical result was coloured, so the warning appeared and disappeared as the fit requalified while the deficit itself never moved.
-- A clock disagreement no longer discards the whole quota history. A single forward jump of the system clock, from a time sync or a sleep and wake, could leave one window with a timestamp ahead of the next read, which quarantined every provider's history at once. It is now repaired in place, and only genuinely unverifiable data is dropped.
+- A Claude credential store that holds no login no longer blocks the setup-token fallback. A "Claude Code-credentials" Keychain item that exists but carries no claudeAiOauth key, such as one holding only MCP server OAuth data, was read as a damaged credential and failed closed, so the documented tokenbar-claude-oauth-token path was never tried and the card stayed on "Claude credentials could not be loaded." Such a store is now treated as absence, and genuinely malformed credentials still fail closed.
+- Manual refresh now retries a model report that failed. The Refresh button and Command-R refreshed the graph and any loaded Hourly or Agents report but stopped short of the model report, so a transient failure stayed on screen until the next 60-second poll even right after the user asked for fresh data.
+- Reopening the popover no longer shows the previous window's data. Closing it during a scan let the retiring view finish and write its result into the shared reopen cache after a newer view had already committed, so the next open rendered the older payload.
+- Sources with no usage are no longer offered for classification. Usage attribution listed a row for every observed source key, so a row reading 0 tokens and $0.00 asked which subscription had paid for nothing. A range whose sources are all empty now says so instead. A row with zero tokens but non-zero cost is kept.
 
-Improved:
-- Updater: the bundled Sparkle framework is now compiled from source as part of the build.
+Changes:
+- Three client names no longer claim a surface their data does not distinguish: Codex CLI becomes Codex, Copilot CLI becomes Copilot, and Cursor IDE becomes Cursor. Each card reads a source that covers several surfaces at once. Across 1,733 local Codex session files the actual CLI was roughly 4% of what the card labelled "Codex CLI".
+- Usage attribution now states which routes the engine merged before the page saw them. Vertex-hosted Claude folds into Anthropic, and Codex folds into OpenAI, before any report is built, so those rows cannot be separated later. The page previously implied they could.
+- Engine update: the shared usage engine advances to a reviewed revision carrying local-first graph pricing, embedded and partial cost provenance, message-only coverage, Trae pricing, and preservation of Kilo's provider-reported cost. The cache format, the FFI boundary, and result decoding are unchanged.
