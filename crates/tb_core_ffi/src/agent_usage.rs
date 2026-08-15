@@ -2564,6 +2564,14 @@ fn resolve_stored_claude_login(raw: &str, source: ClaudeCredentialSource) -> Cla
         Ok(root) => root,
         Err(_) => return ClaudeLoginResolution::Terminal,
     };
+    // A store with no `claudeAiOauth` at all carries no Claude login (e.g. an
+    // mcpOAuth-only Keychain item, issue #219). That is absence, not a malformed
+    // or unreadable credential, so it must not fail closed. `null` is folded in
+    // to match `ClaudeCredentialsRoot`'s own semantics, which cannot tell a null
+    // from a missing key.
+    if matches!(raw_root.get("claudeAiOauth"), None | Some(Value::Null)) {
+        return ClaudeLoginResolution::Absent;
+    }
     let explicitly_logged_out = raw_root
         .get("claudeAiOauth")
         .and_then(Value::as_object)
@@ -5442,6 +5450,95 @@ mod tests {
         assert_eq!(setup_loads.get(), 1);
         assert_eq!(setup_calls.get(), 1);
         scope.cleanup();
+    }
+
+    const MCP_OAUTH_ONLY_STORE: &str =
+        r#"{"mcpOAuth":{"some-server":{"accessToken":"mcp-a","refreshToken":"mcp-r"}}}"#;
+
+    #[test]
+    fn claude_stored_login_resolution_classifies_every_store_shape() {
+        for (raw, expected) in [
+            (MCP_OAUTH_ONLY_STORE, "absent"),
+            (r#"{"claudeAiOauth":null}"#, "absent"),
+            (r#"{"claudeAiOauth":{}}"#, "terminal"),
+            (r#"{"claudeAiOauth":{"accessToken":null}}"#, "terminal"),
+            (
+                r#"{"claudeAiOauth":{"refreshToken":"x"}}"#,
+                "explicit-logout",
+            ),
+            (
+                r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r"}}"#,
+                "ready",
+            ),
+        ] {
+            let actual = match resolve_stored_claude_login(raw, ClaudeCredentialSource::Keychain) {
+                ClaudeLoginResolution::Absent => "absent",
+                ClaudeLoginResolution::ExplicitLogout => "explicit-logout",
+                ClaudeLoginResolution::Ready(_) => "ready",
+                ClaudeLoginResolution::Terminal => "terminal",
+            };
+            assert_eq!(actual, expected, "unexpected resolution for {raw}");
+        }
+    }
+
+    /// A Keychain item that holds no Claude login must NOT fall through to
+    /// `~/.claude/.credentials.json`. Deliberate: it is unproven whether the
+    /// mcpOAuth-only shape is the post-logout shape, and if it is, falling
+    /// through would silently resume a stale file token (and write rotated
+    /// tokens back to it). Shadowing a valid file login is the intended
+    /// behavior here — do not "fix" this by adding fall-through.
+    #[test]
+    fn claude_keychain_without_claude_login_does_not_fall_through_to_file() {
+        let file_loads = std::cell::Cell::new(0);
+        let login = load_stored_claude_login_with(
+            || Ok(Some(MCP_OAUTH_ONLY_STORE.to_string())),
+            || {
+                file_loads.set(file_loads.get() + 1);
+                Ok(Some(
+                    r#"{"claudeAiOauth":{"accessToken":"file-access","refreshToken":"file-refresh"}}"#
+                        .to_string(),
+                ))
+            },
+        );
+        assert!(matches!(login, ClaudeLoginResolution::Absent));
+        assert_eq!(file_loads.get(), 0);
+    }
+
+    /// Issue #219: an mcpOAuth-only `Claude Code-credentials` item used to
+    /// resolve to `Terminal` and fail closed with a permanent red error. It is
+    /// absence, so the setup-token fallback must be reached.
+    #[tokio::test]
+    async fn issue_219_mcp_oauth_only_keychain_item_reaches_setup_token() {
+        let login = load_stored_claude_login_with(
+            || Ok(Some(MCP_OAUTH_ONLY_STORE.to_string())),
+            || Ok(None),
+        );
+        assert!(matches!(login, ClaudeLoginResolution::Absent));
+
+        let primary_calls = std::cell::Cell::new(0);
+        let setup_loads = std::cell::Cell::new(0);
+        let setup_calls = std::cell::Cell::new(0);
+        let (source, outcome) = fetch_claude_login_or_setup_with(
+            login,
+            |_| async {
+                primary_calls.set(primary_calls.get() + 1);
+                ("oauth", claude_test_success_outcome())
+            },
+            || {
+                setup_loads.set(setup_loads.get() + 1);
+                Ok(Some(claude_test_setup_token()))
+            },
+            |_| async {
+                setup_calls.set(setup_calls.get() + 1);
+                ("setup-token", claude_test_success_outcome())
+            },
+        )
+        .await;
+        assert_eq!(source, "setup-token");
+        assert!(matches!(outcome, ProviderFetchOutcome::Success { .. }));
+        assert_eq!(primary_calls.get(), 0);
+        assert_eq!(setup_loads.get(), 1);
+        assert_eq!(setup_calls.get(), 1);
     }
 
     fn timeout_diagnostic() -> SafeTransportDiagnostic {
