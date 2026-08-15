@@ -12,7 +12,7 @@
 
 - **Manual refresh now retries a model report that failed.** [#214](https://github.com/Nanako0129/TokenBar/pull/214)
 
-  The Refresh button and Command-R refreshed the graph and any loaded Hourly or Agents report, but stopped short of the model report. A transient failure therefore stayed on screen until the next 60-second poll, including immediately after the user had explicitly asked for fresh data. The retry cannot key on an empty report, because a failed request keeps the last good one visible while the graph moves on; it keys on the report being stale for the committed slice. Dashboards that never asked for a model report still perform no scan.
+  The Refresh button and Command-R refreshed the graph and any loaded Hourly or Agents report, but stopped short of the model report. A transient failure therefore stayed on screen until the next 60-second poll, including immediately after the user had explicitly asked for fresh data. A refresh that wanted a model report now retries it in the same pass, provided the graph itself refreshed successfully. Dashboards that never asked for one still perform no scan.
 
 - **Reopening the popover no longer shows the previous window's data.** [#213](https://github.com/Nanako0129/TokenBar/pull/213)
 
@@ -42,4 +42,6 @@
 
 - **Engine update.** [#217](https://github.com/Nanako0129/TokenBar/pull/217)
 
-  The shared usage engine advances to a reviewed revision carrying local-first graph pricing, embedded and partial cost provenance, message-only coverage, Trae pricing, and preservation of Kilo's provider-reported cost. This is a pin-only update: no change to the cache format, the FFI boundary, or how results are decoded.
+  The shared usage engine advances to a reviewed revision carrying local-first graph pricing, embedded and partial cost provenance, message-only cost coverage, and preservation of Kilo's provider-reported cost. This is a pin-only update: no change to the cache format, the FFI boundary, or how results are decoded.
+
+  One part of it is visible in your numbers. A Trae row whose payload carries no usable dollar amount was previously left unpriced; under the default best-effort pricing it is now estimated, so a Trae total can rise without your usage having changed. Provider-reported values remain authoritative, and local-only pricing still leaves such rows unpriced.
