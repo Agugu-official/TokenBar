@@ -1,5 +1,5 @@
 Note:
-- Amp, Cursor, OpenClaw, MiMoCode, and Mux rescan once after this update. Their cached data is rebuilt from scratch on the first refresh because the engine update advances their parser identity. Expect one slower scan for those clients; every other client keeps its cache.
+- Amp, Cursor, OpenClaw, MiMoCode, and Mux rescan once after this update. Their cached data is rebuilt from scratch on the first refresh because the engine update advances their parser identity. Expect one slower scan for those clients; other clients keep their cache.
 
 Fixes:
 - A Claude credential store that holds no login no longer blocks the setup-token fallback. A "Claude Code-credentials" Keychain item that exists but carries no claudeAiOauth key, such as one holding only MCP server OAuth data, was read as a damaged credential and failed closed, so the documented tokenbar-claude-oauth-token path was never tried and the card stayed on "Claude credentials could not be loaded." Such a store is now treated as absence, and genuinely malformed credentials still fail closed.
@@ -9,5 +9,5 @@ Fixes:
 
 Changes:
 - Three client names no longer claim a surface their data does not distinguish: Codex CLI becomes Codex, Copilot CLI becomes Copilot, and Cursor IDE becomes Cursor. Each card reads a source that covers several surfaces at once. Across 1,733 local Codex session files the actual CLI was roughly 4% of what the card labelled "Codex CLI".
-- Usage attribution now states which routes the engine merged before the page saw them. Vertex-hosted Claude folds into Anthropic, and Codex folds into OpenAI, before any report is built, so those rows cannot be separated later. The page previously implied they could.
+- Usage attribution now says that some clients merge related routes before the page sees them, with Vertex AI arriving as Anthropic and Codex as OpenAI. A row that arrived already merged cannot be split there, and whether a row is affected depends on the client that produced it. The page previously told only the exact-comparison half.
 - Engine update: the shared usage engine advances to a reviewed revision carrying local-first graph pricing, embedded and partial cost provenance, message-only coverage, Trae pricing, and preservation of Kilo's provider-reported cost. The cache format, the FFI boundary, and result decoding are unchanged.
