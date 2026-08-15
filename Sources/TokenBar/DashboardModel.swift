@@ -1035,16 +1035,23 @@ private struct DashboardSnapshot {
     /// quota poll — the whole point is that it does not wait on the network.
     func refreshWindowQuotaHalves() {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
-        let readCurve: (String, String, UInt64) -> QuotaCurve? = { [source] client, key, gen in
-            (try? source.quotaCurveSync(clientId: client, windowKey: key, generation: gen)) ?? nil
+        // Deliberately NOT `try?`: swallowing the error here is what let a
+        // transient generation expiry be reported to the user as "this window
+        // has no recorded quota history".
+        let readCurve: (String, String, UInt64) throws -> QuotaCurve? = { [source] c, key, gen in
+            try source.quotaCurveSync(clientId: c, windowKey: key, generation: gen)
         }
         if let payload = agentUsage {
             for agent in payload.agents where windowCardClients.contains(agent.clientId) {
                 for window in agent.uniqueCardWindows {
-                    windowCurves["\(agent.clientId)|\(window.cardId)"] =
-                        WindowCardLoader.curveSamples(
-                            payload: payload, clientId: agent.clientId, window: window,
-                            curve: readCurve, nowMs: now)
+                    // A failed read keeps whatever the row already had. Blanking
+                    // it would drop a drawn sparkline to a bar for one refresh
+                    // and put it back on the next — a flicker that says nothing.
+                    guard let samples = WindowCardLoader.curveSamples(
+                        payload: payload, clientId: agent.clientId, window: window,
+                        curve: readCurve, nowMs: now)
+                    else { continue }
+                    windowCurves["\(agent.clientId)|\(window.cardId)"] = samples
                 }
             }
         }

@@ -10760,6 +10760,37 @@ enum SelfTest {
         expect(noHistory,
                "L6a a window with no quota history is terminal, not perpetually loading")
 
+        // L6b. The other direction, and the one that shipped wrong: the engine
+        // fails the curve read CLOSED on a generation mismatch, and replaces its
+        // bindings on every publication — including the tray poller's, which the
+        // dashboard does not drive. A read issued against the generation this
+        // payload carries can therefore expire mid-flight. Reporting that as
+        // "this window has no recorded quota history" states a fact about the
+        // subscription on the strength of a failed read.
+        struct CurveReadFailed: Error {}
+        var transientIsLoading = false
+        if case .loading = WindowCardLoader.quotaHalf(
+            payload: wPayload, clientId: "codex", attempted: true,
+            curve: { _, _, _ in throw CurveReadFailed() }, nowMs: wNow * 1000)
+        { transientIsLoading = true }
+        expect(transientIsLoading,
+               "L6b a failed curve read is transient, never a claim of no history")
+
+        // And the two must stay distinguishable at the layer below, or the
+        // check above is one `try?` away from silently reverting.
+        expect(
+            WindowCardLoader.curveSamples(
+                payload: wPayload, clientId: "codex",
+                window: wPayload.agents[0].uniqueCardWindows[0],
+                curve: { _, _, _ in throw CurveReadFailed() }, nowMs: wNow * 1000) == nil,
+            "L6b a throwing read yields nil, meaning unknown")
+        expect(
+            WindowCardLoader.curveSamples(
+                payload: wPayload, clientId: "codex",
+                window: wPayload.agents[0].uniqueCardWindows[0],
+                curve: { _, _, _ in nil }, nowMs: wNow * 1000) == [],
+            "L6b a read that succeeds with no curve yields empty, meaning none")
+
         // L3a. The union starts at the earliest R - D across every client, so
         // one scan covers them all. Second client's window started earlier.
         let wIso2 = ISO8601DateFormatter().string(

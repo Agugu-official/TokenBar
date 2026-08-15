@@ -4,6 +4,12 @@ import TokenBarCore
 /// PROTOTYPE — throwaway. Resolves the real quota window, then reports what was
 /// spent inside it, attributed. Not part of the shipping app.
 enum WindowProbe {
+    private static func fmtDay(_ secs: Int64) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "MM-dd HH:mm"
+        return f.string(from: Date(timeIntervalSince1970: Double(secs)))
+    }
+
     static func run() -> Never {
         do {
             let payload = try TBCore.agentUsage()
@@ -12,7 +18,94 @@ enum WindowProbe {
             fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             let plain = ISO8601DateFormatter()
 
-            print("=== PERF（我加進 main actor 的兩件事）===")
+            print("=== HOURLY COST（同一個 process 內連續呼叫）===")
+            for i in 1...3 {
+                let t = Date()
+                let r = try TBCore.hourlyReport(year: nil, clients: nil)
+                print(String(format: "  第 %d 次  %8.0f ms  %d 筆", i,
+                             Date().timeIntervalSince(t) * 1000, r.entries.count))
+            }
+            var t2 = Date()
+            _ = try TBCore.hourlyReport(year: nil, clients: ["claude"])
+            print(String(format: "  換 client slice（claude）  %8.0f ms",
+                         Date().timeIntervalSince(t2) * 1000))
+            t2 = Date()
+            _ = try TBCore.hourlyReport(year: "2026", clients: nil)
+            print(String(format: "  換 year slice（2026）      %8.0f ms",
+                         Date().timeIntervalSince(t2) * 1000))
+            t2 = Date()
+            _ = try TBCore.graph(year: nil)
+            print(String(format: "  對照：graph(nil)           %8.0f ms",
+                         Date().timeIntervalSince(t2) * 1000))
+
+            print("\n=== HEATMAP（星期 x 時段，來自 hourly report 的完整歷史）===")
+            let hStart = Date()
+            let hourly = try TBCore.hourlyReport(year: nil, clients: nil)
+            print(String(format: "  hourlyReport 取得 %.0f ms，%d 個時段",
+                         Date().timeIntervalSince(hStart) * 1000, hourly.entries.count))
+
+            var grid = Array(repeating: Array(repeating: 0.0, count: 24), count: 7)
+            var days = Set<String>()
+            let df = DateFormatter()
+            df.dateFormat = "yyyy-MM-dd HH:mm"
+            var cal = Calendar(identifier: .gregorian)
+            cal.firstWeekday = 2
+            for e in hourly.entries {
+                guard let d = df.date(from: e.hour) else { continue }
+                let wd = (cal.component(.weekday, from: d) + 5) % 7   // 0 = 週一
+                let hr = cal.component(.hour, from: d)
+                grid[wd][hr] += e.cost
+                days.insert(String(e.hour.prefix(10)))
+            }
+            let flat = grid.flatMap { $0 }
+            let peak = flat.max() ?? 0
+            let filled = flat.filter { $0 > 0 }.count
+            print(String(format: "  涵蓋 %d 天、%d/168 格有資料（%.0f%%）、單格峰值 $%.2f",
+                         days.count, filled, Double(filled) / 168 * 100, peak))
+            let ramp = [" ", "·", "░", "▒", "▓", "█"]
+            print("        00  02  04  06  08  10  12  14  16  18  20  22")
+            let names = ["週一","週二","週三","週四","週五","週六","週日"]
+            for (i, row) in grid.enumerated() {
+                var line = "   \(names[i]) "
+                for h in stride(from: 0, to: 24, by: 1) {
+                    let v = peak > 0 ? row[h] / peak : 0
+                    let idx = v == 0 ? 0 : min(5, Int(v * 5) + 1)
+                    line += ramp[idx] + ramp[idx]
+                }
+                print(line)
+            }
+
+            print("\n=== CYCLE HISTORY（每個窗的歷史裡有幾個重置週期）===")
+            for agent in payload.agents {
+                for w in agent.uniqueCardWindows {
+                    guard let key = w.paceStatus.windowKey,
+                          let gen = payload.publicationGeneration,
+                          let curve = (try? TBCore.quotaCurve(
+                              clientId: agent.clientId, windowKey: key, generation: gen)) ?? nil,
+                          !curve.points.isEmpty
+                    else { continue }
+                    var byCycle: [Int64: [QuotaCurvePoint]] = [:]
+                    for pt in curve.points { byCycle[pt.resetAt, default: []].append(pt) }
+                    let cycles = byCycle.keys.sorted()
+                    let span = (curve.points.map(\.sampledAt).min() ?? 0,
+                                curve.points.map(\.sampledAt).max() ?? 0)
+                    print(String(format: "\n  %@ / %@  共 %d 點、%d 個週期、橫跨 %.1f 天",
+                                 agent.clientId as NSString, w.cardId as NSString,
+                                 curve.points.count, cycles.count,
+                                 Double(span.1 - span.0) / 86400))
+                    for r in cycles.suffix(6) {
+                        let pts = byCycle[r]!.sorted { $0.sampledAt < $1.sampledAt }
+                        let peak = pts.map(\.usedPercent).max() ?? 0
+                        let dur = pts[0].durationSeconds
+                        print(String(format:
+                            "      重置 %@  取樣 %3d  峰值用量 %5.1f%%  窗長 %.0f 分  觀測涵蓋 %.0f%%",
+                            fmtDay(r) as NSString, pts.count, peak, Double(dur) / 60,
+                            Double(pts.last!.sampledAt - pts[0].sampledAt) / Double(max(dur,1)) * 100))
+                    }
+                }
+            }
+
+            print("\n=== PERF（我加進 main actor 的兩件事）===")
             var perfT = Date()
             var curveMs: [(String, Double)] = []
             for agent in payload.agents {
@@ -22,7 +115,7 @@ enum WindowProbe {
                         payload: payload, clientId: agent.clientId, window: w,
                         curve: { c, k, g in
                             (try? TBCore.quotaCurve(clientId: c, windowKey: k, generation: g)) ?? nil
-                        }, nowMs: now)
+                        }, nowMs: now) ?? []
                     curveMs.append(("\(agent.clientId)|\(w.cardId)",
                                     Date().timeIntervalSince(t) * 1000))
                 }
@@ -48,7 +141,7 @@ enum WindowProbe {
                         payload: payload, clientId: agent.clientId, window: w,
                         curve: { c, k, g in
                             (try? TBCore.quotaCurve(clientId: c, windowKey: k, generation: g)) ?? nil
-                        }, nowMs: now)
+                        }, nowMs: now) ?? []
                     let res = WindowCardLoader.resolution(
                         window: w, nowMs: now, firstUsageAfterReset: nil)
                     let iv = WindowCardLoader.interval(res)
@@ -70,7 +163,7 @@ enum WindowProbe {
                         payload: payload, clientId: agent.clientId, window: w,
                         curve: { c, k, g in
                             (try? TBCore.quotaCurve(clientId: c, windowKey: k, generation: g)) ?? nil
-                        }, nowMs: now)
+                        }, nowMs: now) ?? []
                     guard let iv = AgentLimitsCard.sparklineInterval(
                         window: w, samples: samples, nowMs: now) else { continue }
                     let g = WindowCardGeometry.quotaGeometry(

@@ -102,7 +102,7 @@ enum WindowCardLoader {
     /// whole reason this half is instant.
     static func quotaHalf(
         payload: AgentUsagePayload?, clientId: String, attempted: Bool,
-        curve: (String, String, UInt64) -> QuotaCurve?, nowMs: Int64
+        curve: (String, String, UInt64) throws -> QuotaCurve?, nowMs: Int64
     ) -> WindowCardState {
         guard let payload else { return attempted ? .loading : .loading }
         guard let agent = payload.agents.first(where: { $0.clientId == clientId })
@@ -121,8 +121,19 @@ enum WindowCardLoader {
         }
         let cardId = "\(clientId)|\(window.cardId)"
 
-        let samples = curveSamples(
-            payload: payload, clientId: clientId, window: window, curve: curve, nowMs: nowMs)
+        // `nil` is "could not read", `[]` is "read fine, nothing in this
+        // window". Only the second is a fact about the subscription, and only
+        // the second may be stated. The engine fails the curve read closed on a
+        // generation mismatch, and its bindings are replaced on every
+        // publication — including ones the independent tray poller makes — so a
+        // read issued against the generation this payload carries can expire
+        // between the two. Rendering that as a terminal "no quota history" is
+        // the same mistake as the one this file's `noQuotaHistory` comment
+        // warns about, in the other direction.
+        guard let samples = curveSamples(
+            payload: payload, clientId: clientId, window: window,
+            curve: curve, nowMs: nowMs)
+        else { return .loading }
         guard !samples.isEmpty else {
             return .noQuotaHistory(
                 clientId: clientId, windowLabel: window.label,
@@ -215,14 +226,24 @@ enum WindowCardLoader {
     /// every window a client offers, not just the one the card selected. Same
     /// function so the two surfaces cannot disagree about which readings belong
     /// to a window.
+    /// Returns `nil` when the reading could not be obtained at all, and `[]`
+    /// when it was obtained and this window has none. Callers must not collapse
+    /// the two: only the second says anything about the subscription.
     static func curveSamples(
         payload: AgentUsagePayload, clientId: String, window: UsageWindow,
-        curve read: (String, String, UInt64) -> QuotaCurve?, nowMs: Int64
-    ) -> [QuotaSample] {
+        curve read: (String, String, UInt64) throws -> QuotaCurve?, nowMs: Int64
+    ) -> [QuotaSample]? {
+        // A window the payload cannot key, or a payload with no generation, is
+        // a settled "nothing to read" rather than a failed read.
         guard let key = window.paceStatus.windowKey,
-              let generation = payload.publicationGeneration,
-              let curve = read(clientId, key, generation)
+              let generation = payload.publicationGeneration
         else { return [] }
+        // The read itself is the part that can fail transiently. `try?` would
+        // flatten the throw and the legitimate nil into one value, which is
+        // precisely the conflation this function exists to undo.
+        let attempt: QuotaCurve?
+        do { attempt = try read(clientId, key, generation) } catch { return nil }
+        guard let curve = attempt else { return [] }
 
         // Bounded by the window the provider anchors, not by a resolution that
         // does not exist yet at stage 1.
