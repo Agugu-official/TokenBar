@@ -20,7 +20,9 @@
 
 - **Sources with no usage are no longer offered for classification.** [#211](https://github.com/Nanako0129/TokenBar/pull/211)
 
-  Usage attribution built a row for every observed source key, including keys with nothing behind them, so a row reading `0 tokens · $0.00` asked which subscription had paid for nothing. A range whose sources are all empty now reads as "No provider-split usage in this range." instead of presenting decisions that cannot matter. A row with zero tokens but non-zero cost is kept — that is spend, however it arrived.
+  Usage attribution built a row for every observed source key, including keys with nothing behind them, so a row reading `0 tokens · $0.00` asked which subscription had paid for nothing. An entry with no tokens and no cost is now dropped, and a range left with nothing reads as "No provider-split usage in this range." instead of presenting decisions that cannot matter.
+
+  The test runs per entry, before entries are folded into a source, matching where the breakdown card applies it. So an entry with zero tokens but non-zero cost is kept — that is spend, however it arrived — and a source whose entries cancel, `+5` and `-5` tokens at no cost, still appears: each entry is real, and the card can place them in different buckets.
 
 ## Changes
 
