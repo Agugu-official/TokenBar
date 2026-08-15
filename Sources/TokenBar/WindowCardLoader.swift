@@ -18,10 +18,6 @@ struct WindowCardData: Sendable {
     /// `cardId` is the stable identity; `label` is what the provider calls it.
     let candidates: [(cardId: String, label: String)]
     let cardId: String
-    /// Below the per-message scale bound: the line still draws (quota samples
-    /// are cheap regardless of window length) but the bars do not, because a
-    /// 31-day window is ~88k messages against a session window's ~1k.
-    let barsSuppressed: Bool
     let nowMs: Int64
     /// Set when no session window could be found but one is expected to come
     /// back — a provider whose fetch failed. Vanishing silently in that case is
@@ -37,11 +33,12 @@ enum WindowCardLoader {
     /// canonical selection, so the two cannot drift into different vocabularies.
     static let selectionKey = "tokenbar.window.card.selection"
 
-    /// Per-message scanning is for session-class windows only. Measured: a
-    /// 5-hour window is ~1k messages, the 31-day `chat.v1` is ~88k. The test is
-    /// a dot-component match rather than a substring so `weekly_scoped.fable.v1`
-    /// cannot slip through, and an unrecognised key fails closed — no scan, no
-    /// curve — which is the safe direction for a key we have not seen.
+    /// Only decides which window to show first when the user has not picked
+    /// one: a session window is the question the card was built to answer.
+    /// It no longer gates the scan — see the note in `load`.
+    ///
+    /// A dot-component match rather than a substring, so `weekly_scoped.fable.v1`
+    /// cannot pass for a session window.
     ///
     /// Observed keys (2026-08-14, live payload): `session.v1`, `main.session.v1`,
     /// `weekly.v1`, `main.weekly.v1`, `weekly_scoped.fable.v1`, `chat.v1`,
@@ -98,122 +95,157 @@ enum WindowCardLoader {
         return Int64(date.timeIntervalSince1970 * 1000)
     }
 
-    /// `nil` when nothing can be shown: no selection, or a window whose class
-    /// bars the per-message path.
-    /// Scoped to one agent: the card lives in that agent's tab, so only that
-    /// agent's windows are offered. The top-level overview gets a text summary
-    /// across subscriptions instead — a different question, not this card.
-    static func load(
-        source: UsageDataSource,
-        payload: AgentUsagePayload?,
-        clientId: String,
-        nowMs: Int64
-    ) async -> WindowCardData? {
-        guard let payload else { return nil }
+    // MARK: - Stage 1: quota half, no scan
+
+    /// Derives everything a scan is not needed for. Takes the payload as a
+    /// value that is already in memory — it never fetches one, which is the
+    /// whole reason this half is instant.
+    static func quotaHalf(
+        payload: AgentUsagePayload?, clientId: String, attempted: Bool,
+        curve: (String, String, UInt64) -> QuotaCurve?, nowMs: Int64
+    ) -> WindowCardState {
+        guard let payload else { return attempted ? .loading : .loading }
+        guard let agent = payload.agents.first(where: { $0.clientId == clientId })
+        else { return .loading }
+        if let error = agent.error {
+            return .blocked(clientId: clientId, reason: error)
+        }
         guard let selected = select(
             payload: payload, clientId: clientId,
             chosen: UserDefaults.standard.string(forKey: selectionKey))
-        else {
-            // No session window right now. Say why when a provider is failing;
-            // stay hidden when the user simply has no session-class plan.
-            guard let failing = payload.agents.first(where: {
-                $0.clientId == clientId && $0.error != nil
-            }) else { return nil }
-            return WindowCardData(
-                clientId: failing.clientId, windowLabel: "session",
-                resolution: .unavailable, samples: [],
-                mine: [], bars: [], hits: [], candidates: [], cardId: "",
-                barsSuppressed: false, nowMs: nowMs, blockedBy: failing.error)
-        }
+        else { return .loading }
 
         let window = selected.window
-        let sessionClass = isSessionClass(windowKey: window.paceStatus.windowKey)
-        // First pass without usage. Only ACTIVE and UNAVAILABLE are decidable
-        // here, which is the point: the usage probe is bounded by R1 and must
-        // not run against a stale reset.
-        var resolved = resolution(window: window, nowMs: nowMs, firstUsageAfterReset: nil)
+        let candidates = agent.uniqueCardWindows.map {
+            (cardId: "\(clientId)|\($0.cardId)", label: $0.label)
+        }
+        let cardId = "\(clientId)|\(window.cardId)"
 
-        if case .idle = resolved, let resetMs = window.resetsAt.flatMap(parseISO8601Ms) {
-            // `.idle` means R is past but within one window length, so `[R, now]`
-            // is bounded by D — the only state in which this probe is legal.
-            if let probe = try? await source.windowUsage(from: resetMs, until: nowMs) {
-                resolved = resolution(
-                    window: window, nowMs: nowMs,
-                    firstUsageAfterReset: WindowResolver.firstUsageAfterReset(
-                        messages: probe.messages, resetMs: resetMs))
-            }
+        let samples = curveSamples(
+            payload: payload, clientId: clientId, window: window, curve: curve, nowMs: nowMs)
+        guard !samples.isEmpty else {
+            return .noQuotaHistory(
+                clientId: clientId, windowLabel: window.label,
+                candidates: candidates, cardId: cardId)
         }
 
-        // The scan is the expensive half and it is what the class rule bounds:
-        // a session window is ~1k messages, a 31-day one ~88k. Skip it entirely
-        // rather than fetch and then decline to draw.
-        var messages: [WindowMessage] = []
-        if sessionClass {
-            switch resolved {
-            case let .active(start, end), let .inferred(start, end):
-                messages = (try? await source.windowUsage(
-                    from: start, until: min(end, nowMs)))?.messages ?? []
-            case .idle, .unavailable:
-                break
+        // No usage yet, so `.idle` here means "R is past and within one D" —
+        // the scan may still turn it into `.inferred`.
+        let resolved = resolution(window: window, nowMs: nowMs, firstUsageAfterReset: nil)
+        var pending = false
+        if case .idle = resolved { pending = true }
+
+        return .quotaOnly(WindowQuotaHalf(
+            clientId: clientId, cardId: cardId, windowLabel: window.label,
+            candidates: candidates, resolution: resolved, samples: samples,
+            resetMs: window.resetsAt.flatMap(parseISO8601Ms),
+            durationMs: window.durationSeconds.map { $0 * 1000 },
+            placementPending: pending, nowMs: nowMs))
+    }
+
+    /// The earliest interval start across every candidate window of every
+    /// displayed agent. See `UnionScan` for why this one bound covers all
+    /// three window states.
+    static func unionStart(
+        payload: AgentUsagePayload?, clients: [String], nowMs: Int64
+    ) -> Int64? {
+        guard let payload else { return nil }
+        var earliest: Int64?
+        for agent in payload.agents where agent.error == nil && clients.contains(agent.clientId) {
+            for window in agent.uniqueCardWindows {
+                guard let reset = window.resetsAt.flatMap(parseISO8601Ms),
+                      let duration = window.durationSeconds.map({ $0 * 1000 })
+                else { continue }
+                let start = reset - duration
+                if earliest == nil || start < earliest! { earliest = start }
             }
         }
+        return earliest
+    }
 
-        let samples = await quotaSamples(
-            source: source, payload: payload, clientId: selected.clientId,
-            window: window, resolution: resolved, nowMs: nowMs)
+    /// Stage 2, per client, from the one scan.
+    static func usageHalf(
+        quota: WindowQuotaHalf, scan: UnionScan, confirmed: [UsageAttribution.Record]
+    ) -> (WindowQuotaHalf, WindowUsageHalf)? {
+        // Refine `.idle` now that usage is known: the same resolver, this time
+        // with the first usage after the reset.
+        var resolved = quota.resolution
+        if quota.placementPending, let reset = quota.resetMs {
+            resolved = WindowResolver.resolve(
+                resetsAtMs: reset, durationMs: quota.durationMs, now: quota.nowMs,
+                firstUsageAfterReset: WindowResolver.firstUsageAfterReset(
+                    messages: scan.slice(from: reset, to: quota.nowMs), resetMs: reset))
+        }
+        let settled = WindowQuotaHalf(
+            clientId: quota.clientId, cardId: quota.cardId,
+            windowLabel: quota.windowLabel, candidates: quota.candidates,
+            resolution: resolved, samples: quota.samples,
+            resetMs: quota.resetMs, durationMs: quota.durationMs,
+            placementPending: false, nowMs: quota.nowMs)
 
-        let confirmed = UsageAttribution.confirmed().records
-        let mine = messages.filter {
+        guard let (start, end) = interval(resolved) else {
+            return (settled, WindowUsageHalf(mine: [], bars: [], hits: []))
+        }
+        // A scan that starts after this window did cannot answer for it.
+        guard scan.covers(start: start) else { return nil }
+
+        let mine = scan.slice(from: start, to: min(end, quota.nowMs)).filter {
             UsageAttribution.resolve(
                 client: $0.client, provider: $0.providerId, model: nil,
-                records: confirmed) == .assigned(selected.clientId)
+                records: confirmed) == .assigned(quota.clientId)
         }
-        var bars: [BarRect] = [], hits: [HitZone] = []
-        if case let .active(start, end) = resolved {
-            (bars, hits) = WindowCardGeometry.usageGeometry(
-                windowStartMs: start, windowEndMs: end, nowMs: min(nowMs, end),
-                samples: samples, messages: mine)
-        } else if case let .inferred(start, end) = resolved {
-            (bars, hits) = WindowCardGeometry.usageGeometry(
-                windowStartMs: start, windowEndMs: end, nowMs: min(nowMs, end),
-                samples: samples, messages: mine)
-        }
+        let geo = WindowCardGeometry.usageGeometry(
+            windowStartMs: start, windowEndMs: end, nowMs: min(quota.nowMs, end),
+            samples: quota.samples, messages: mine)
+        return (settled, WindowUsageHalf(mine: mine, bars: geo.bars, hits: geo.hits))
+    }
 
-        let candidates = payload.agents
-            .first { $0.clientId == selected.clientId }?
-            .uniqueCardWindows
-            .map { (cardId: "\(selected.clientId)|\($0.cardId)", label: $0.label) } ?? []
-        return WindowCardData(
-            clientId: selected.clientId, windowLabel: window.label,
-            resolution: resolved, samples: samples,
-            mine: mine, bars: sessionClass ? bars : [], hits: hits,
-            candidates: candidates, cardId: "\(selected.clientId)|\(window.cardId)",
-            barsSuppressed: !sessionClass, nowMs: nowMs)
+    static func interval(_ s: WindowResolution) -> (start: Int64, end: Int64)? {
+        switch s {
+        case let .active(start, end), let .inferred(start, end): return (start, end)
+        case .idle, .unavailable: return nil
+        }
     }
 
     /// Quota readings inside the resolved interval. `sampledAt` is in SECONDS —
     /// the decoder subtracts `durationSeconds` from `resetAt` directly — while
     /// every window bound here is milliseconds. Comparing the two units gives
     /// an empty series that looks exactly like a missing data path.
-    private static func quotaSamples(
-        source: UsageDataSource, payload: AgentUsagePayload, clientId: String,
-        window: UsageWindow, resolution: WindowResolution, nowMs: Int64
-    ) async -> [QuotaSample] {
+    private static func curveSamples(
+        payload: AgentUsagePayload, clientId: String, window: UsageWindow,
+        curve read: (String, String, UInt64) -> QuotaCurve?, nowMs: Int64
+    ) -> [QuotaSample] {
         guard let key = window.paceStatus.windowKey,
               let generation = payload.publicationGeneration,
-              // `try?` on an optional-returning throwing call double-wraps;
-              // flatten so a thrown error and a null series both mean "none".
-              let curve = (try? await source.quotaCurve(
-                  clientId: clientId, windowKey: key, generation: generation)) ?? nil
+              let curve = read(clientId, key, generation)
         else { return [] }
 
-        let bounds: (Int64, Int64)
-        switch resolution {
-        case let .active(start, _): bounds = (start, nowMs)
-        case let .inferred(start, _): bounds = (start, nowMs)
-        case .idle, .unavailable: return []
-        }
-        let lo = bounds.0 / 1000, hi = bounds.1 / 1000
+        // Bounded by the window the provider anchors, not by a resolution that
+        // does not exist yet at stage 1.
+        guard let reset = window.resetsAt.flatMap(parseISO8601Ms),
+              let duration = window.durationSeconds.map({ $0 * 1000 })
+        else { return [] }
+        let lo = (reset - duration) / 1000, hi = nowMs / 1000
+        // NOT filtered by reset cycle, deliberately.
+        //
+        // A foreign-cycle sample would let the interpolation draw a fall to
+        // zero and back — a refill that never happened — so a guard looks
+        // obviously right. Measured 2026-08-16, it is not:
+        //
+        //   * No window admits two cycles. Under usage-triggered windows
+        //     `R - D = t0` and the previous cycle ends at or before `t0`, so
+        //     the time range already separates them. All four live series
+        //     returned exactly one cycle.
+        //   * Both attempts at a guard broke working cards. Comparing against
+        //     the parsed `resetsAt` fails because the engine quantises
+        //     `resetAt` to the minute (codex differed by 62s, grok by 19s);
+        //     comparing against `activeResetAt` fails too — it does not mean
+        //     the cycle these points belong to. Each version silently filtered
+        //     every sample and the card fell to "no quota history".
+        //
+        // No guard for an unobserved case, twice implemented wrongly, each
+        // time causing the failure that IS observed. If a mixed-cycle window
+        // ever appears, the fix belongs where the cycle is known: the engine.
         return curve.points
             .filter { $0.sampledAt >= lo && $0.sampledAt <= hi }
             .sorted { $0.sampledAt < $1.sampledAt }

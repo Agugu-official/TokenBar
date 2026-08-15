@@ -10,38 +10,40 @@ import TokenBarCore
 /// bars recede and light one at a time under the cursor while the line stays in
 /// front (`V-5`).
 struct WindowUsageCard: View {
-    let clientId: String
-    let windowLabel: String
-    let resolution: WindowResolution
-    /// Quota readings inside the window, in time order.
-    let samples: [QuotaSample]
-    /// Already attributed to this subscription, and already turned into bars
-    /// and hit zones by the loader. Doing either here would redo O(messages)
-    /// work on every hover event.
-    let mine: [WindowMessage]
-    let bars: [BarRect]
-    let hits: [HitZone]
-    /// "<clientId>|<cardId>" for every window that can be shown, and which one
-    /// is showing. Buttons rather than a menu: there are a handful of windows
-    /// and the point is to compare them, which a menu hides behind a click.
-    let candidates: [(cardId: String, label: String)]
-    let cardId: String
-    /// The window is longer than the per-message path covers, so the bars are
-    /// deliberately absent. Said out loud rather than drawn as an empty chart.
-    let barsSuppressed: Bool
-    let nowMs: Int64
-    /// Why no window could be resolved, when the reason is a failing provider
-    /// rather than an absent subscription.
-    var blockedBy: String?
+    let state: WindowCardState
+
+    /// Set alongside the geometry so the tooltip can slice the same messages
+    /// the bars were built from.
+    private var hoverMessages: [WindowMessage] { state.usageHalf?.mine ?? [] }
+    private var hoverSubtitle: String {
+        guard let q = state.quotaHalf else { return "" }
+        return "\(ClientRegistry.style(q.clientId).displayName) · \(q.windowLabel)"
+    }
 
     @AppStorage("tokenbar.limits.asUsed") private var asUsed = false
     @AppStorage(WindowCardLoader.selectionKey) private var selection = ""
+    /// The whole card's frame, not the chart's. The tooltip is clamped to this
+    /// so it stays inside the card: escaping it means the next card's glass
+    /// chrome and content paint over the tooltip, which is what a "border in
+    /// the foreground" actually is.
+    @State private var cardFrame: CGRect = .zero
+    /// The hovered zone and its anchor, both kept so the tooltip can live at
+    /// card level. Third attempt at this: the tooltip must be laid out in the
+    /// same coordinate space it is clamped to, or the offset the placement
+    /// helper returns is measured from one origin and applied to another.
+    @State private var hoverZone: HitZone?
+    @State private var hoverAnchorInCard: CGPoint = .zero
     @State private var hover: Int?
     @State private var hoverPoint: CGPoint = .zero
     @State private var tooltipSize: CGSize = .zero
     @Environment(\.popoverScrollViewport) private var viewport
 
+    /// Stage-1 placeholders and stage-2 content read the SAME constants, so
+    /// the card cannot change height when the scan lands. That is structural:
+    /// there is no second number to keep in step.
     private static let chartHeight: CGFloat = 96
+    private static let legendHeight: CGFloat = 13
+    private static let footerHeight: CGFloat = 15
     /// The bar band is a third of the height. The line uses the whole box, so
     /// the two overlap by design — see the type comment.
     private static let barBand: CGFloat = 32
@@ -49,84 +51,124 @@ struct WindowUsageCard: View {
 
     private var metric: QuotaMetric { asUsed ? .used : .remaining }
 
-    private var interval: (start: Int64, end: Int64)? {
-        switch resolution {
-        case let .active(start, end), let .inferred(start, end): return (start, end)
-        case .idle, .unavailable: return nil
+
+    var body: some View {
+        switch state {
+        case .loading:
+            DashCard("Session window", subtitle: "Loading") {
+                placeholder("Waiting for quota…")
+            }
+        case let .blocked(clientId, reason):
+            DashCard("%@ window".localized(ClientRegistry.style(clientId).displayName),
+                     subtitle: "Waiting for quota") {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        case let .noQuotaHistory(_, label, candidates, cardId):
+            DashCard("%@ window".localized(label), subtitle: "No quota history") {
+                windowButtons(candidates: candidates, cardId: cardId)
+                Text("This window has no recorded quota history, so there is no line to draw.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        case let .quotaOnly(quota):
+            card(quota, usage: nil)
+        case let .ready(quota, usage):
+            card(quota, usage: usage)
         }
     }
 
-    var body: some View {
-        DashCard("%@ window".localized(windowLabel), subtitle: stateLine) {
+    /// One layout for both stages. `usage == nil` swaps content for
+    /// placeholders of the same declared height; nothing else differs.
+    @ViewBuilder
+    private func card(_ quota: WindowQuotaHalf, usage: WindowUsageHalf?) -> some View {
+        DashCard("%@ window".localized(quota.windowLabel), subtitle: stateLine(quota)) {
             SegmentedPicker(
                 selection: Binding(get: { asUsed }, set: { asUsed = $0 }),
                 options: [(value: false, label: "Remaining"), (value: true, label: "Used")])
         } content: {
-            if candidates.count > 1 {
-                // The selection is written straight to the same key the loader
-                // reads, so the next poll rebuilds against it — no second copy
-                // of "which window" to keep in step.
-                SegmentedPicker(
-                    selection: Binding(get: { selection.isEmpty ? cardId : selection },
-                                       set: { selection = $0 }),
-                    options: candidates.map { (value: $0.cardId, label: $0.label) })
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            if let interval {
-                // Only the quota half is recomputed per body: it is O(samples)
-                // — a few dozen points — while bars and hit zones arrived
-                // precomputed and cannot change with the metric anyway.
-                let quota = WindowCardGeometry.quotaGeometry(
+            windowButtons(candidates: quota.candidates, cardId: quota.cardId)
+            if quota.placementPending {
+                placeholder("Placing the window…")
+            } else if let interval = WindowCardLoader.interval(quota.resolution) {
+                let q = WindowCardGeometry.quotaGeometry(
                     windowStartMs: interval.start, windowEndMs: interval.end,
-                    nowMs: min(nowMs, interval.end), samples: samples, metric: metric)
+                    nowMs: min(quota.nowMs, interval.end),
+                    samples: quota.samples, metric: metric)
                 let geo = ChartGeometry(
-                    nowX: quota.nowX, firstSampleX: quota.firstSampleX,
-                    bars: bars, hits: hits,
-                    samplePoints: quota.samplePoints, curve: quota.curve)
+                    nowX: q.nowX, firstSampleX: q.firstSampleX,
+                    bars: usage?.bars ?? [], hits: usage?.hits ?? [],
+                    samplePoints: q.samplePoints, curve: q.curve)
                 headline(geo)
-                // Above the legend and the equivalence row, which are later
-                // siblings in this VStack and would otherwise paint straight
-                // through the tooltip. The card-level zIndex handles the
-                // neighbouring cards; this one handles its own rows.
                 chart(geo).zIndex(1)
-                legend(geo)
-                if barsSuppressed {
-                    Text("Usage bars need a per-message scan, which is bounded to session windows — this one covers far more history.")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    equivalenceRow
+                legend(geo).frame(height: Self.legendHeight)
+                Group {
+                    if let usage {
+                        equivalenceRow(quota: quota, mine: usage.mine)
+                    } else {
+                        LoadingLine(title: "Reading local usage…")
+                    }
                 }
+                .frame(height: Self.footerHeight, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                Text(emptyText)
+                Text(emptyText(quota))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        // Without this the sibling cards below paint over the tooltip; the
-        // usage chart lifts its whole card the same way.
+        .overlay(alignment: .topLeading) { tooltipLayer }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+            cardFrame = $0
+        }
         .zIndex(hover == nil ? 0 : 1)
+    }
+
+    /// The chart's slot, held open at its real height so the card does not
+    /// grow when content arrives.
+    private func placeholder(_ title: String) -> some View {
+        LoadingLine(title: title)
+            .frame(height: Self.chartHeight + Self.legendHeight + Self.footerHeight,
+                   alignment: .topLeading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func windowButtons(
+        candidates: [(cardId: String, label: String)], cardId: String
+    ) -> some View {
+        if candidates.count > 1 {
+            SegmentedPicker(
+                selection: Binding(get: { selection.isEmpty ? cardId : selection },
+                                   set: { selection = $0 }),
+                options: candidates.map { (value: $0.cardId, label: $0.label) })
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     // MARK: - Header
 
-    private var stateLine: String {
-        if blockedBy != nil { return "Waiting for quota" }
-        switch resolution {
+    private func stateLine(_ quota: WindowQuotaHalf) -> String {
+        if quota.placementPending { return "Placing the window" }
+        switch quota.resolution {
         case let .active(_, end):
-            return "Resets in %@".localized(Format.duration(ms: end - nowMs))
+            return "Resets in %@".localized(Format.duration(ms: end - quota.nowMs))
         case let .inferred(_, end):
-            return "Inferred window · resets in %@".localized(Format.duration(ms: end - nowMs))
+            return "Inferred window · resets in %@".localized(
+                Format.duration(ms: end - quota.nowMs))
         case .idle: return "No window running"
         case .unavailable: return "Window unavailable"
         }
     }
 
-    private var emptyText: String {
-        if let blockedBy { return blockedBy }
-        switch resolution {
+    private func emptyText(_ quota: WindowQuotaHalf) -> String {
+        switch quota.resolution {
         case .idle:
             return "The last window ended and nothing has been used since — no window is running."
         case .unavailable:
@@ -163,8 +205,7 @@ struct WindowUsageCard: View {
                 Canvas { ctx, _ in draw(ctx, geo: geo, w: w, h: h) }
                     .frame(width: w, height: h)
                 if let hover, geo.hits.indices.contains(hover) {
-                    overlay(geo, index: hover, w: w, h: h,
-                            container: proxy.frame(in: .global))
+                    overlay(geo, index: hover, w: w, h: h)
                 }
             }
             .contentShape(Rectangle())
@@ -176,9 +217,24 @@ struct WindowUsageCard: View {
                     // and rejects the future in one step: past nowX nothing
                     // contains the point.
                     let x = p.x / max(w, 1)
-                    hover = geo.hits.firstIndex { x >= $0.x && x < $0.x + $0.width }
+                    let index = geo.hits.firstIndex { x >= $0.x && x < $0.x + $0.width }
+                    let zone = index.map { geo.hits[$0] }
+                    hover = index
+                    hoverZone = zone
+                    let chart = proxy.frame(in: .global)
+                    // Anchor X pins to the zone edge, Y follows the cursor, and
+                    // both are translated into the card's space here — the one
+                    // place that knows both frames. Read the local `zone`, not
+                    // the @State we just wrote: within one closure run that
+                    // still holds the previous value, and the anchor would lag
+                    // a zone behind the cursor.
+                    let anchorX = zone.map { ($0.x + $0.width) * w } ?? p.x
+                    hoverAnchorInCard = CGPoint(
+                        x: anchorX + chart.minX - cardFrame.minX,
+                        y: p.y + chart.minY - cardFrame.minY)
                 case .ended:
                     hover = nil
+                    hoverZone = nil
                 }
             }
         }
@@ -248,9 +304,9 @@ struct WindowUsageCard: View {
     // MARK: - Hover
 
     @ViewBuilder
-    private func overlay(
-        _ geo: ChartGeometry, index: Int, w: CGFloat, h: CGFloat, container: CGRect
-    ) -> some View {
+    private func overlay(_ geo: ChartGeometry, index: Int, w: CGFloat, h: CGFloat)
+        -> some View
+    {
         let zone = geo.hits[index]
         let anchorX = (zone.x + zone.width) * w
         Path { p in
@@ -267,16 +323,24 @@ struct WindowUsageCard: View {
                           y: y(metric.value(fromUsedPercent: sample.usedPercent), h: h))
                 .allowsHitTesting(false)
         }
-        WindowHoverTooltip(
-            zone: zone, metric: metric,
-            messages: mine.filter { $0.timestamp > zone.loMs && $0.timestamp <= zone.hiMs },
-            subtitle: "\(ClientRegistry.style(clientId).displayName) · \(windowLabel)",
-            measuredSize: $tooltipSize)
-        // X pins to the zone edge, Y follows the cursor so the helper can flip
-        // the tooltip above or below and keep it off the pointer.
-        .offset(placement(anchor: CGPoint(x: anchorX, y: hoverPoint.y),
-                          container: container))
-        .allowsHitTesting(false)
+    }
+
+    /// Card-level, so the placement helper clamps and offsets within one
+    /// coordinate space. Living inside the chart meant the offset was measured
+    /// from the card's origin and applied from the chart's.
+    @ViewBuilder
+    private var tooltipLayer: some View {
+        if let zone = hoverZone, cardFrame != .zero {
+            WindowHoverTooltip(
+                zone: zone, metric: metric,
+                messages: hoverMessages.filter {
+                    $0.timestamp > zone.loMs && $0.timestamp <= zone.hiMs
+                },
+                subtitle: hoverSubtitle,
+                measuredSize: $tooltipSize)
+                .offset(placement(anchor: hoverAnchorInCard, container: cardFrame))
+                .allowsHitTesting(false)
+        }
     }
 
     private func placement(anchor: CGPoint, container: CGRect) -> CGSize {
@@ -311,8 +375,10 @@ struct WindowUsageCard: View {
         .foregroundStyle(.secondary)
     }
 
-    private var equivalenceRow: some View {
-        let row = WindowEquivalence.row(samples: samples, messages: mine)
+    private func equivalenceRow(
+        quota: WindowQuotaHalf, mine: [WindowMessage]
+    ) -> some View {
+        let row = WindowEquivalence.row(samples: quota.samples, messages: mine)
         let plain: Bool = { if case .ratio = row { return false }; return true }()
         return Text(WindowEquivalence.text(
             row, tokens: Format.compactTokens, money: Format.usd))
@@ -363,6 +429,17 @@ private struct WindowHoverTooltip: View {
             } ?? "No quota reading in this interval".localized)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+            // What this interval actually cost, signed the way the card is
+            // currently read: counting up it rises, counting down it falls.
+            // Absent rather than zero when an end has no reading — an interval
+            // nobody measured is not an interval that consumed nothing.
+            if let delta = zone.consumed(metric) {
+                Text("%@%@%% this interval".localized(
+                    delta > 0 ? "+" : "", String(format: "%g", delta)))
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(delta == 0 ? AnyShapeStyle(.tertiary)
+                                                : AnyShapeStyle(.primary))
+            }
             HStack {
                 Text("%@ tokens".localized(Format.compactTokens(total)))
                 Spacer()

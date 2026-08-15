@@ -223,13 +223,13 @@ struct PopoverView: View {
         // ≤10s). The loop fetches first, then sleeps.
         .task(id: hiddenRaw) { await pollTokensPerMin() }
         .task { await model.pollAgentUsage() }
-        // Same derivation as the body's: a client tab is open only when the
-        // active tab is not the overview and that client is still displayed.
+        // The card's own trigger, deliberately not inside the quota poll. The
+        // union range must cover every displayed client, not just the open tab,
+        // so one scan can serve a later switch without rescanning.
         .task(id: "\(windowSelectionRaw)|\(activeTab)|\(hiddenRaw)") {
-            model.windowCardClient =
-                (activeTab != ClientTray.overviewTab
-                    && displayClients.contains(activeTab)) ? activeTab : nil
-            await model.refreshWindowCard()
+            model.windowCardClients = displayClients
+            model.refreshWindowQuotaHalves()   // synchronous: lands this frame
+            await model.refreshWindowUsage()
         }
         .task { await model.pollTrace() }
         .task { await model.pollGraph() }
@@ -554,7 +554,7 @@ struct PopoverView: View {
                     usageAttempted: model.agentUsageAttempted,
                     singleClient: singleClient, year: model.year,
                     hidden: ClientRegistry.parseIdSet(hiddenRaw),
-                    windowCard: model.windowCard)
+                    windowCard: singleClient.flatMap { model.windowCards[$0] })
             case .models:
                 ModelsView(
                     report: model.modelReport, clientIds: clientIds, colors: model.colors,

@@ -24,6 +24,12 @@ protocol UsageDataSource: Sendable {
     func quotaCurve(
         clientId: String, windowKey: String, generation: UInt64
     ) async throws -> QuotaCurve?
+    /// Synchronous because it is a ~2ms read of an already-persisted file, and
+    /// because the card's first stage must complete without a task hop — an
+    /// await here would put the "instant" half behind the scheduler.
+    func quotaCurveSync(
+        clientId: String, windowKey: String, generation: UInt64
+    ) throws -> QuotaCurve?
 }
 
 extension UsageDataSource {
@@ -38,6 +44,10 @@ extension UsageDataSource {
     func quotaCurve(
         clientId: String, windowKey: String, generation: UInt64
     ) async throws -> QuotaCurve? { nil }
+
+    func quotaCurveSync(
+        clientId: String, windowKey: String, generation: UInt64
+    ) throws -> QuotaCurve? { nil }
 }
 
 /// The only normal-runtime owner of usage calls into `TBCore`.
@@ -57,6 +67,13 @@ struct LiveUsageDataSource: UsageDataSource {
             try TBCore.quotaCurve(
                 clientId: clientId, windowKey: windowKey, generation: generation)
         }.value
+    }
+
+    func quotaCurveSync(
+        clientId: String, windowKey: String, generation: UInt64
+    ) throws -> QuotaCurve? {
+        try TBCore.quotaCurve(
+            clientId: clientId, windowKey: windowKey, generation: generation)
     }
 
     func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {

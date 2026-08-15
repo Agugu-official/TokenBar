@@ -25,9 +25,9 @@ struct OverviewView: View {
     /// (PopoverView) so the dependency is explicit rather than an imperative
     /// `ClientRegistry.hiddenClients()` read in this body.
     var hidden: Set<String> = []
-    /// The selected quota window, resolved by the model. Nil until the first
-    /// quota payload lands, or when the selected window is not session-class.
-    var windowCard: WindowCardData?
+    /// The selected quota window's card state. Nil only when this is not a
+    /// single-client tab — the card itself is never absent for one.
+    var windowCard: WindowCardState?
 
 
     /// Master switch: off hides the Agent-limits card everywhere.
@@ -44,13 +44,10 @@ struct OverviewView: View {
             if let singleClient {
                 let name = ClientRegistry.style(singleClient).displayName
                 if let windowCard {
-                    WindowUsageCard(
-                        clientId: windowCard.clientId, windowLabel: windowCard.windowLabel,
-                        resolution: windowCard.resolution, samples: windowCard.samples,
-                        mine: windowCard.mine, bars: windowCard.bars,
-                        hits: windowCard.hits, candidates: windowCard.candidates,
-                        cardId: windowCard.cardId, barsSuppressed: windowCard.barsSuppressed,
-                        nowMs: windowCard.nowMs, blockedBy: windowCard.blockedBy)
+                    // Above the cards below it. A zIndex set inside the card's
+                    // own body orders its children, not the card among its
+                    // siblings here — so the tooltip needs this one too.
+                    WindowUsageCard(state: windowCard).zIndex(1)
                 }
 
                 if limitsEnabled && !hiddenLimits.contains(singleClient) {

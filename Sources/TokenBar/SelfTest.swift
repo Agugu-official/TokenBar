@@ -10518,6 +10518,12 @@ enum SelfTest {
             geoUsed.hits.map(\.loMs) == [0, 1_000, 5_000, 9_000]
                 && geoUsed.hits.compactMap { $0.closingSample?.usedPercent } == [12, 12, 30],
             "only the zones that end on a sample carry one; the trailing zone does not")
+        // The consumption figure flips sign with the metric — it must read the
+        // way the line moves, or the tooltip and the chart disagree on screen.
+        expect(
+            geoUsed.hits.map { $0.consumed(.used) } == [nil, 0, 18, nil]
+                && geoUsed.hits.map { $0.consumed(.remaining) } == [nil, 0, -18, nil],
+            "an interval's consumption is signed by the metric and absent at either open end")
 
         // A one-millisecond bucket: far below any plausible minimum width.
         let narrow = WindowCardGeometry.zones(
@@ -10622,6 +10628,133 @@ enum SelfTest {
                           QuotaSample(atMs: 2_000, usedPercent: 56)],
                 messages: []) == .unaccounted(deltaPercent: 56),
             "V15 quota moving with no local usage is reported, never shown as zero")
+        // MARK: window card loading (W-3: L1a, L2a, L3a, L6a)
+
+        func windowPayload(
+            _ agents: [(client: String, windows: [(card: String, key: String,
+                                                   resetsAt: String, durationSecs: Int64)])],
+            generation: UInt64 = 7
+        ) -> AgentUsagePayload {
+            let body = agents.map { agent in
+                let windows = agent.windows.map { w in
+                    """
+                    {"cardId":"\(w.card)","label":"\(w.card)","usedPercent":10,
+                     "remainingPercent":90,"resetsAt":"\(w.resetsAt)",
+                     "durationSeconds":\(w.durationSecs),
+                     "windowMinutes":\(w.durationSecs / 60),
+                     "paceStatus":{"state":"learningHistory","windowKey":"\(w.key)",
+                                   "durationSeconds":\(w.durationSecs),
+                                   "durationSource":"provider","completeCycles":1}}
+                    """
+                }.joined(separator: ",")
+                return """
+                {"clientId":"\(agent.client)","source":"oauth","updatedAt":"t",
+                 "windows":[\(windows)]}
+                """
+            }.joined(separator: ",")
+            let json = """
+            {"generatedAt":"t","publicationGeneration":\(generation),"agents":[\(body)]}
+            """
+            return try! JSONDecoder().decode(AgentUsagePayload.self, from: Data(json.utf8))
+        }
+
+        func windowCurve(resetAtSecs: Int64, durationSecs: Int64,
+                         at: [(Int64, Double)]) -> QuotaCurve {
+            let points = at.map { t, pct in
+                """
+                {"sampledAt":\(t),"usedPercent":\(pct),"resetAt":\(resetAtSecs),
+                 "durationSeconds":\(durationSecs),"durationSource":"provider",
+                 "origin":"liveV3"}
+                """
+            }.joined(separator: ",")
+            let json = """
+            {"points":[\(points)],
+             "coverage":{"oldestSampledAt":\(at.first?.0 ?? 0),
+                         "newestSampledAt":\(at.last?.0 ?? 0),"sampleCount":\(at.count)},
+             "activeResetAt":\(resetAtSecs),"generation":7}
+            """
+            return try! JSONDecoder().decode(QuotaCurve.self, from: Data(json.utf8))
+        }
+
+        // A window whose reset is 1h away with a 5h duration: started 4h ago.
+        let wNow = Int64(Date().timeIntervalSince1970)
+        let wReset = wNow + 3_600
+        let wIso = ISO8601DateFormatter().string(
+            from: Date(timeIntervalSince1970: Double(wReset)))
+        let wPayload = windowPayload([
+            (client: "codex", windows: [(card: "session.v1", key: "session.v1",
+                                         resetsAt: wIso, durationSecs: 18_000)]),
+        ])
+        let wCurve = windowCurve(
+            resetAtSecs: wReset, durationSecs: 18_000,
+            at: [(wNow - 3_000, 4), (wNow - 600, 9)])
+
+        // L1a. `quotaHalf` takes no UsageDataSource at all, so the network is
+        // unreachable by signature rather than by discipline — the assertion
+        // below is that it produces a placed window from memory alone.
+        let stage1 = WindowCardLoader.quotaHalf(
+            payload: wPayload, clientId: "codex", attempted: true,
+            curve: { _, _, _ in wCurve }, nowMs: wNow * 1000)
+        var stage1Placed = false
+        if case let .quotaOnly(q) = stage1 {
+            if case .active = q.resolution { stage1Placed = q.samples.count == 2 }
+        }
+        expect(stage1Placed,
+               "L1a stage one places the window and carries its samples without a source")
+
+        // L6a (i). No payload yet — loading, never absent, never unavailable.
+        var isLoading = false
+        if case .loading = WindowCardLoader.quotaHalf(
+            payload: nil, clientId: "codex", attempted: false,
+            curve: { _, _, _ in wCurve }, nowMs: wNow * 1000) { isLoading = true }
+        expect(isLoading, "L6a a payload that has not arrived yet is loading")
+
+        // L6a (ii). Payload in, but this window has no recorded history: a
+        // terminal answer. Mapping it to loading spins forever — copilot's
+        // chat.v1 is exactly this case on real data.
+        var noHistory = false
+        if case .noQuotaHistory = WindowCardLoader.quotaHalf(
+            payload: wPayload, clientId: "codex", attempted: true,
+            curve: { _, _, _ in nil }, nowMs: wNow * 1000) { noHistory = true }
+        expect(noHistory,
+               "L6a a window with no quota history is terminal, not perpetually loading")
+
+        // L3a. The union starts at the earliest R - D across every client, so
+        // one scan covers them all. Second client's window started earlier.
+        let wIso2 = ISO8601DateFormatter().string(
+            from: Date(timeIntervalSince1970: Double(wNow + 600)))
+        let twoClients = windowPayload([
+            (client: "codex", windows: [(card: "session.v1", key: "session.v1",
+                                         resetsAt: wIso, durationSecs: 18_000)]),
+            (client: "claude", windows: [(card: "weekly.v1", key: "weekly.v1",
+                                          resetsAt: wIso2, durationSecs: 604_800)]),
+        ])
+        let union = WindowCardLoader.unionStart(
+            payload: twoClients, clients: ["codex", "claude"], nowMs: wNow * 1000)
+        expect(union == (wNow + 600 - 604_800) * 1000,
+               "L3a the union starts at the earliest window start, not the selected one")
+        expect(
+            WindowCardLoader.unionStart(
+                payload: twoClients, clients: ["codex"], nowMs: wNow * 1000)
+                == (wReset - 18_000) * 1000,
+            "L3a a narrower client set gives a narrower union, so the bound is real")
+
+        // L2a. `usageHalf` consumes a scan rather than issuing one: the single
+        // scan is structural. It must also refuse a scan that starts too late,
+        // because filtering from it would silently under-count.
+        let late = UnionScan(fromMs: wNow * 1000, untilMs: wNow * 1000,
+                             capturedAt: Date(), messages: [])
+        if case let .quotaOnly(q) = stage1 {
+            expect(WindowCardLoader.usageHalf(quota: q, scan: late, confirmed: []) == nil,
+                   "L2a a scan that begins after the window did cannot answer for it")
+            let covering = UnionScan(
+                fromMs: (wReset - 18_000) * 1000, untilMs: wNow * 1000,
+                capturedAt: Date(), messages: [])
+            expect(
+                WindowCardLoader.usageHalf(quota: q, scan: covering, confirmed: []) != nil,
+                "L2a a covering scan answers, so the previous check is not vacuous")
+        }
+
         expect(
             WindowEquivalence.minimumDelta == 5,
             "V15 the threshold follows from the tolerance, not from a chosen number")

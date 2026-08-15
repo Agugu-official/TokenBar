@@ -60,6 +60,19 @@ public struct HitZone: Equatable, Sendable {
     /// Absent for the region before the first sample and after the last one:
     /// usage happened, but no quota reading closes the interval.
     public let closingSample: QuotaSample?
+    /// The reading the interval opened on. Present with `closingSample` it
+    /// gives the quota this interval actually consumed — the number the bars
+    /// are supposed to explain.
+    public let openingSample: QuotaSample?
+
+    /// How much quota this interval consumed, in the direction the card is
+    /// currently read: positive when counting up, negative when counting down.
+    /// Nil when either end has no reading, because then nothing was measured.
+    public func consumed(_ metric: QuotaMetric) -> Double? {
+        guard let a = openingSample, let b = closingSample else { return nil }
+        return metric.value(fromUsedPercent: b.usedPercent)
+            - metric.value(fromUsedPercent: a.usedPercent)
+    }
 }
 
 public struct ChartGeometry: Equatable, Sendable {
@@ -125,7 +138,8 @@ public enum WindowCardGeometry {
                 index: i, loMs: lo, hiMs: hi,
                 x: Double(lo - windowStartMs) / span,
                 width: Double(hi - lo) / span,
-                closingSample: samples.first { $0.atMs == hi }))
+                closingSample: samples.first { $0.atMs == hi },
+                openingSample: samples.first { $0.atMs == lo }))
         }
         return out
     }

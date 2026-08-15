@@ -175,6 +175,15 @@ private struct DashboardSnapshot {
     /// may write it: an older instance can outlive its view while an FFI scan
     /// finishes, and must not roll back the next popover's fresher snapshot.
     private static var lastSnapshot: DashboardSnapshot?
+
+    /// The union scan, held across popover reopens like `lastSnapshot` is.
+    /// `@State` on PopoverView does not survive the view being rebuilt, so an
+    /// instance property here would make every reopen pay the full scan again
+    /// — which is exactly what the staging was meant to stop being visible.
+    ///
+    /// In memory only, never on disk: it holds local usage rows, and the disk
+    /// envelope structurally refuses that class of data.
+    private static var lastUnionScan: UnionScan?
     private static var lastSnapshotOwner: ObjectIdentifier?
     /// Reopen cache for the expensive hourly fold. Multiple slices coexist so
     /// Daily/Monthly's Codex+Claude report cannot evict Hourly's all-client one.
@@ -993,24 +1002,70 @@ private struct DashboardSnapshot {
         }
     }
 
-    /// The selected quota window's card data, or nil when nothing can be shown
-    /// (no selection yet, or a window whose class bars the per-message scan).
-    var windowCard: WindowCardData?
+    /// Card state per client. Never absent while an agent tab is open — the
+    /// loading case is a state, not a nil.
+    var windowCards: [String: WindowCardState] = [:]
 
-    /// Which agent's tab is open. Nil on the all-agent overview, where this
-    /// card does not belong — that surface answers a cross-subscription
-    /// question and gets its own summary.
-    var windowCardClient: String?
+    /// The one scan that serves every card, restored from the shared cache so
+    /// a reopen renders bars immediately instead of spinning.
+    private var unionScan: UnionScan? {
+        get { Self.lastUnionScan }
+        set { Self.lastUnionScan = newValue }
+    }
 
-    /// Rebuilt whenever the quota payload changes or the tab moves.
-    func refreshWindowCard() async {
-        guard let clientId = windowCardClient else {
-            windowCard = nil
+    /// How long a scan is served before being refreshed. Matched to the
+    /// engine's own oneshot age so the two layers do not disagree about what
+    /// counts as fresh.
+    private static let unionScanMaxAge: TimeInterval = 30
+
+    /// Which agent tabs may need a card. Drives the union range.
+    var windowCardClients: [String] = []
+
+    /// Stage 1. Synchronous and local: reads the in-memory payload and the
+    /// persisted quota curve. Deliberately NOT async and NOT driven from the
+    /// quota poll — the whole point is that it does not wait on the network.
+    func refreshWindowQuotaHalves() {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        for clientId in windowCardClients {
+            let state = WindowCardLoader.quotaHalf(
+                payload: agentUsage, clientId: clientId,
+                attempted: agentUsageAttempted,
+                curve: { [source] client, key, generation in
+                    (try? source.quotaCurveSync(
+                        clientId: client, windowKey: key, generation: generation)) ?? nil
+                },
+                nowMs: now)
+            // Fold in a usage half we already hold, so a stage-1 refresh does
+            // not throw away a completed scan and blink back to loading.
+            if case let .quotaOnly(q) = state, let scan = unionScan,
+               let (settled, usage) = WindowCardLoader.usageHalf(
+                   quota: q, scan: scan, confirmed: UsageAttribution.confirmed().records) {
+                windowCards[clientId] = .ready(settled, usage)
+            } else {
+                windowCards[clientId] = state
+            }
+        }
+    }
+
+    /// Stage 2. One scan for every displayed client, then each card filters
+    /// from it in memory.
+    func refreshWindowUsage() async {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        guard let from = WindowCardLoader.unionStart(
+            payload: agentUsage, clients: windowCardClients, nowMs: now)
+        else { return }
+        // Serve the cached scan while it still covers the range and is fresh.
+        // Rescanning on every reopen was the whole complaint: the staging made
+        // the wait visible, it did not make it rare.
+        if let cached = unionScan, cached.covers(start: from),
+           Date().timeIntervalSince(cached.capturedAt) < Self.unionScanMaxAge {
             return
         }
-        windowCard = await WindowCardLoader.load(
-            source: source, payload: agentUsage, clientId: clientId,
-            nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+        guard let usage = try? await source.windowUsage(from: from, until: now)
+        else { return }
+        unionScan = UnionScan(
+            fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages)
+        refreshWindowQuotaHalves()
     }
 
     private func reconcileQuotaRemaining(with payload: AgentUsagePayload) {
@@ -1037,7 +1092,11 @@ private struct DashboardSnapshot {
                 agentUsage = resolved
                 reconcileQuotaRemaining(with: resolved)
                 refreshSnapshotLiveData() // keep the reopen cache's quota cards current
-                await refreshWindowCard()
+                // Stage 1 is synchronous and lands with the payload; stage 2
+                // is kicked off without being awaited, so the poll loop never
+                // holds the card behind a scan.
+                refreshWindowQuotaHalves()
+                Task { await refreshWindowUsage() }
             }
             // Set on failure too: `agentUsage == nil` alone cannot distinguish
             // "the first attempt is still in flight" from "the attempt finished

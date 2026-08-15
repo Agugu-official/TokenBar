@@ -74,9 +74,163 @@ enum WindowProbe {
 
             // Now the number, for every window that resolved to a real interval.
             let confirmed = UsageAttribution.confirmed().records
+            print("=== ADMITTED（出貨的 curveSamples 實際收到幾點）===")
+            for agent in payload.agents { for w in agent.windows {
+                guard let k = w.paceStatus.windowKey,
+                      let rMs = w.resetsAt.flatMap({ t -> Int64? in
+                          let f = ISO8601DateFormatter()
+                          f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                          return (f.date(from: t) ?? ISO8601DateFormatter().date(from: t))
+                              .map { Int64($0.timeIntervalSince1970 * 1000) }
+                      }),
+                      let dS = w.durationSeconds,
+                      let c = (try? TBCore.quotaCurve(
+                          clientId: agent.clientId, windowKey: k,
+                          generation: payload.publicationGeneration ?? 0)) ?? nil
+                else { continue }
+                let lo = (rMs - dS * 1000) / 1000, hi = now / 1000
+                let admitted = c.points.filter { $0.sampledAt >= lo && $0.sampledAt <= hi }
+                let timeOnly = c.points.filter { $0.sampledAt >= lo && $0.sampledAt <= hi }
+                print(String(format: "  %-10@ %-20@ 收到 %3d 點（僅時間範圍 %3d）%@",
+                             agent.clientId as NSString, w.cardId as NSString,
+                             admitted.count, timeOnly.count,
+                             (admitted.isEmpty && !timeOnly.isEmpty
+                                ? "  ⚠️ 守衛把全部濾光了" : "") as NSString))
+            } }
+
+            print("\n=== CYCLE MATCH（我的守衛比對的兩個值）===")
+            for agent in payload.agents { for w in agent.windows {
+                guard let k = w.paceStatus.windowKey,
+                      let rMs = w.resetsAt.flatMap({ t -> Int64? in
+                          let f = ISO8601DateFormatter()
+                          f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                          return (f.date(from: t) ?? ISO8601DateFormatter().date(from: t))
+                              .map { Int64($0.timeIntervalSince1970 * 1000) }
+                      }),
+                      let c = (try? TBCore.quotaCurve(
+                          clientId: agent.clientId, windowKey: k,
+                          generation: payload.publicationGeneration ?? 0)) ?? nil,
+                      let last = c.points.last
+                else { continue }
+                print(String(format: "  %-10@ %-20@ resetsAt→%ld  curve.resetAt=%ld  差 %ld 秒  相符=%@",
+                             agent.clientId as NSString, w.cardId as NSString,
+                             rMs / 1000, last.resetAt, (rMs / 1000) - last.resetAt,
+                             ((rMs / 1000) == last.resetAt ? "yes" : "NO") as NSString))
+            } }
+
+            print("\n=== MIXED CYCLE（卡片實際會取到的樣本裡混了幾個週期）===")
+            for agent in payload.agents { for w in agent.windows {
+                guard let k = w.paceStatus.windowKey,
+                      let r = w.resetsAt.flatMap({ t -> Int64? in
+                          let f = ISO8601DateFormatter()
+                          f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                          return (f.date(from: t) ?? ISO8601DateFormatter().date(from: t))
+                              .map { Int64($0.timeIntervalSince1970) }
+                      }),
+                      let d = w.durationSeconds,
+                      let c = (try? TBCore.quotaCurve(
+                          clientId: agent.clientId, windowKey: k,
+                          generation: payload.publicationGeneration ?? 0)) ?? nil
+                else { continue }
+                // Exactly what curveSamples does today: time range only.
+                let inRange = c.points.filter {
+                    $0.sampledAt >= r - d && $0.sampledAt <= now / 1000
+                }
+                let cycles = Set(inRange.map(\.resetAt))
+                print(String(format: "  %-10@ %-20@ 取到 %3d 點，來自 %d 個週期%@",
+                             agent.clientId as NSString, w.cardId as NSString,
+                             inRange.count, cycles.count,
+                             (cycles.count > 1 ? "  ⚠️ 會畫出假的補額" : "") as NSString))
+            } }
+
+            print("\n=== GAP DIST（整條序列的取樣間隔，分鐘）===")
+            for agent in payload.agents { for w in agent.windows {
+                guard let k = w.paceStatus.windowKey,
+                      let c = (try? TBCore.quotaCurve(
+                          clientId: agent.clientId, windowKey: k,
+                          generation: payload.publicationGeneration ?? 0)) ?? nil,
+                      c.points.count > 3 else { continue }
+                let pts = c.points.sorted { $0.sampledAt < $1.sampledAt }
+                var gaps: [Int64] = [], crossReset = 0
+                for (a, b) in zip(pts, pts.dropFirst()) {
+                    gaps.append((b.sampledAt - a.sampledAt) / 60)
+                    if a.resetAt != b.resetAt { crossReset += 1 }
+                }
+                // Same-cycle only: a cross-reset gap is a different thing.
+                var inCycle: [Int64] = []
+                for (a, b) in zip(pts, pts.dropFirst()) where a.resetAt == b.resetAt {
+                    inCycle.append((b.sampledAt - a.sampledAt) / 60)
+                }
+                let ic = inCycle.sorted()
+                let icMed = ic.isEmpty ? 0 : ic[ic.count / 2]
+                print(String(format: "     └ 同週期內：n=%3d 中位 %4ld 分 最大 %5ld 分 (%.0fx)",
+                             ic.count, icMed, ic.last ?? 0,
+                             Double(ic.last ?? 0) / Double(max(icMed, 1))))
+                let sorted = gaps.sorted()
+                let med = sorted[sorted.count / 2]
+                let mx = sorted.last ?? 0
+                print(String(format: "  %-10@ %-20@ n=%3d  中位 %4ld 分  最大 %6ld 分 (%.0fx)  跨 reset %d 段",
+                             agent.clientId as NSString, w.cardId as NSString, pts.count,
+                             med, mx, Double(mx) / Double(max(med, 1)), crossReset))
+            } }
+
+            print("\n=== CURVE COST（額度線，讀持久化的取樣）===")
+            for agent in payload.agents { for w in agent.windows {
+                guard let k = w.paceStatus.windowKey else { continue }
+                let t = Date()
+                let c = (try? TBCore.quotaCurve(clientId: agent.clientId, windowKey: k,
+                                                generation: payload.publicationGeneration ?? 0)) ?? nil
+                let ms = Date().timeIntervalSince(t) * 1000
+                print(String(format: "  %-10@ %-22@ %5.1f ms  %d 點  resetAt/dur 齊全=%@",
+                             agent.clientId as NSString, w.cardId as NSString, ms,
+                             c?.points.count ?? 0,
+                             ((c?.points.first.map { $0.resetAt > 0 && $0.durationSeconds > 0 }) ?? false)
+                                ? "yes" : "no"))
+            } }
+
+            // One scan over the widest window, then filter per card in memory.
+            print("=== UNION SCAN（掃一次最寬範圍，各卡自行過濾）===")
+            var widest = now
+            for (_, _, st) in resolved { if let (a, _) = interval(st) { widest = min(widest, a) } }
+            var t0 = Date()
+            let all = try TBCore.windowUsage(from: widest, until: now)
+            let unionMs = Date().timeIntervalSince(t0) * 1000
+            print(String(format: "  一次掃描 %.0f 分鐘範圍：%ld 筆，%.0f ms",
+                         Double(now - widest) / 60000, all.messages.count, unionMs))
+            var filterTotal = 0.0
+            for (cl, cd, st) in resolved {
+                guard let (a, b) = interval(st) else { continue }
+                t0 = Date()
+                let sub = all.messages.filter { $0.timestamp > a && $0.timestamp <= min(b, now) }
+                let ms = Date().timeIntervalSince(t0) * 1000
+                filterTotal += ms
+                print(String(format: "    %-10@ %-22@ 過濾出 %6ld 筆  %.1f ms",
+                             cl as NSString, cd as NSString, sub.count, ms))
+            }
+            print(String(format: "  合計：%.0f ms（vs 逐窗各掃一次）", unionMs + filterTotal))
+
+            print("\n=== SCAN COST（每次載入一次，非每次 hover）===")
             for (client, card, state) in resolved {
                 guard let (start, end) = interval(state) else { continue }
+                var t0 = Date()
                 let usage = try TBCore.windowUsage(from: start, until: min(end, now))
+                let scanMs = Date().timeIntervalSince(t0) * 1000
+                let conf = UsageAttribution.confirmed().records
+                t0 = Date()
+                let mineHere = usage.messages.filter {
+                    UsageAttribution.resolve(client: $0.client, provider: $0.providerId,
+                                             model: nil, records: conf) == .assigned(client)
+                }
+                let foldMs = Date().timeIntervalSince(t0) * 1000
+                t0 = Date()
+                let g = WindowCardGeometry.usageGeometry(
+                    windowStartMs: start, windowEndMs: end, nowMs: min(end, now),
+                    samples: [], messages: mineHere)
+                let geoMs = Date().timeIntervalSince(t0) * 1000
+                print(String(format: "  %-10@ %-24@ %6ld 筆  掃描 %7.1f ms  歸屬 %6.1f ms  幾何 %5.1f ms  → 本訂閱 %ld 筆",
+                             client as NSString, card as NSString, usage.messages.count,
+                             scanMs, foldMs, geoMs, mineHere.count))
+                _ = g
                 let (assigned, excluded, unassigned) = usage.totals(confirmed: confirmed)
                 print("\n--- \(client) / \(card)  \(usage.messages.count) 筆"
                       + (usage.undatedCount == 0 ? ""
