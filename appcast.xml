@@ -3,6 +3,34 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>1.13.3</title>
+            <pubDate>Sat, 15 Aug 2026 20:43:47 +0000</pubDate>
+            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.13.3</link>
+            <sparkle:version>707</sparkle:version>
+            <sparkle:shortVersionString>1.13.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>Note:</b>
+<ul>
+<li>Amp, Cursor, OpenClaw, MiMoCode, and Mux rescan once after this update. Their cached data is rebuilt from scratch on the first refresh because the engine update advances their parser identity. Expect one slower scan for those clients; other clients keep their cache.</li>
+</ul>
+<b>Fixes:</b>
+<ul>
+<li>A Claude credential store that holds no login no longer blocks the setup-token fallback. A "Claude Code-credentials" Keychain item that exists but carries no claudeAiOauth key, such as one holding only MCP server OAuth data, was read as a damaged credential and failed closed, so the documented tokenbar-claude-oauth-token path was never tried and the card stayed on "Claude credentials could not be loaded." Such a store is now treated as absence, while a credential whose claudeAiOauth is present but unusable still fails closed.</li>
+<li>Manual refresh now retries a model report that failed. The Refresh button and Command-R refreshed the graph and any loaded Hourly or Agents report but stopped short of the model report, so a transient failure stayed on screen until the next 60-second poll even right after the user asked for fresh data. A refresh that wanted a model report now retries it in the same pass, provided the graph itself refreshed successfully.</li>
+<li>Reopening the popover no longer shows the previous window's data. Closing it during a scan let the retiring view finish and write its result into the shared reopen cache after a newer view had already committed, so the next open rendered the older payload.</li>
+<li>Entries with no usage are no longer offered for classification. Usage attribution listed a row for every observed source key, so a row reading 0 tokens and $0.00 asked which subscription had paid for nothing. An entry with no tokens and no cost is now dropped, per entry and before entries are folded into a source, and a range left with nothing says so instead. An entry with zero tokens but non-zero cost is kept, and a source whose entries cancel out still appears, because each of those entries is real.</li>
+</ul>
+<b>Changes:</b>
+<ul>
+<li>Three client names no longer claim a surface their data does not distinguish: Codex CLI becomes Codex, Copilot CLI becomes Copilot, and Cursor IDE becomes Cursor. Each card reads a source that covers several surfaces at once. Across 1,733 local Codex session files the actual CLI was roughly 4% of what the card labelled "Codex CLI".</li>
+<li>Usage attribution now says that some clients merge related routes before the page sees them, with Vertex AI arriving as Anthropic and Codex as OpenAI. A row that arrived already merged cannot be split there, and whether a row is affected depends on the client that produced it. The page previously told only the exact-comparison half.</li>
+<li>Engine update: the shared usage engine advances to a reviewed revision carrying local-first graph pricing, embedded and partial cost provenance, message-only cost coverage, and preservation of Kilo's provider-reported cost. The cache format, the FFI boundary, and result decoding are unchanged. One part is visible in your numbers: a Trae row whose payload carries no usable dollar amount was previously left unpriced and is now estimated under the default best-effort pricing, so a Trae total can rise without your usage having changed. Provider-reported values remain authoritative.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.13.3/TokenBar.app.tar.gz" length="9139447" type="application/octet-stream" sparkle:edSignature="UkmKzZ2FWjT8k0e3aw4O5UlBZ5+jJOzDwmfmK+ULeN+Wha1MFHBteKf/BpmN9OWr29Q6T6RbtmoXrvUIpfXHDA=="/>
+        </item>
+        <item>
             <title>1.13.2</title>
             <pubDate>Sun, 09 Aug 2026 17:36:03 +0000</pubDate>
             <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.13.2</link>
@@ -97,25 +125,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.12.0/TokenBar.app.tar.gz" length="8421268" type="application/octet-stream" sparkle:edSignature="EavTOPbF+lu7JBSWFaGL0K2f9OljoqYmc5POwLU/eOg0MWi0+sXUmmMvNHj8NKsiRbkmq3ygimTA1YgUBZ1RAg=="/>
-        </item>
-        <item>
-            <title>1.11.0</title>
-            <pubDate>Mon, 03 Aug 2026 18:10:16 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.11.0</link>
-            <sparkle:version>473</sparkle:version>
-            <sparkle:shortVersionString>1.11.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>New:</b>
-<ul>
-<li>Daily and Monthly usage now show Codex and Claude turn counts alongside message totals, making human interactions easier to distinguish from agent and tool-loop activity.</li>
-</ul>
-<b>Fixes:</b>
-<ul>
-<li>Message-only activity remains visible in Daily and Monthly history, drill-downs, active-day counts, streaks, and year visibility without distorting token or cost charts.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.11.0/TokenBar.app.tar.gz" length="8326011" type="application/octet-stream" sparkle:edSignature="FpmXhLgz1Pv7rKx9butUTLM2g97D7/djuJC2imvb4nyA1NxTk950CUuB7GMo6k/72IDFT81fobDn77a+LaZ5Cg=="/>
         </item>
         <item>
             <title>1.1.1</title>
