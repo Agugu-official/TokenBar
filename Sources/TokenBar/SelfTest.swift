@@ -11127,6 +11127,21 @@ enum SelfTest {
                 paceMode: .linear, now: burnNow)?.burning == nil,
             "QS7 a window running under its schedule produces no burn warning")
 
+        // Pace off means the card hides its marker, so the summary must not
+        // keep naming a fastest burner beside it. Shipped wrong once: the call
+        // site omitted `paceMode` and took the fold's default, projecting
+        // Historically whatever the user had chosen.
+        expect(
+            QuotaSummaryFold.build(
+                payload: burnPayload([(client: "codex", used: 80, elapsedFraction: 0.5)]),
+                paceMode: .off, now: burnNow)?.burning == nil,
+            "QS9 pace turned off suppresses the burn line, matching the card")
+        expect(
+            QuotaSummaryFold.build(
+                payload: burnPayload([(client: "codex", used: 80, elapsedFraction: 0.5)]),
+                paceMode: .off, now: burnNow)?.tightestClient == "codex",
+            "QS9 and the tightest line survives, because it is not a projection")
+
         // MARK: limits layout (LL)
         //
         // The sparkline shipped inside `full` first, which changed the card for

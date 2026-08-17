@@ -55,6 +55,9 @@ struct PopoverView: View {
     // body dependency; the reactive overload does the parsing.
     @AppStorage(ClientRegistry.tabHiddenKey) private var hiddenRaw = ""
     @AppStorage(ClientRegistry.tabOrderKey) private var orderRaw = ""
+    /// Observed so the Overview summary's projection follows the same setting
+    /// the Agent-limits card obeys, live rather than on the next reopen.
+    @AppStorage("tokenbar.limits.paceMode") private var paceModeRaw = PaceMode.historical.rawValue
 
     private var activeView: Binding<AppView> {
         Binding(
@@ -568,9 +571,16 @@ struct PopoverView: View {
                     trace: model.trace,
                     singleClient: singleClient, year: model.year,
                     hidden: ClientRegistry.parseIdSet(hiddenRaw),
+                    // The user's own pace mode, not the fold's default. Leaving
+                    // it out meant the summary always projected Historically
+                    // while the card beside it obeyed the setting — and with
+                    // pace off, the card hid its marker while the summary kept
+                    // naming a fastest burner. `compute` returns nil for `.off`,
+                    // so passing the real mode suppresses the line too.
                     quotaSummary: QuotaSummaryFold.build(
                         payload: model.agentUsage,
-                        excluding: ClientRegistry.parseIdSet(hiddenRaw)),
+                        excluding: ClientRegistry.parseIdSet(hiddenRaw),
+                        paceMode: PaceMode(rawValue: paceModeRaw) ?? .historical),
                     usageAttempted: model.agentUsageAttempted)
             case .quota:
                 QuotaView(
