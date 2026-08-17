@@ -11332,6 +11332,66 @@ enum SelfTest {
                 && WindowEquivalence.row(samples: [], messages: eqMessages) == .unavailable,
             "V15 fewer than two samples yields no delta at all")
 
+        // MARK: quota window recent-trend indicator
+
+        // Window 0...100_000ms (100s), now at 80_000 (80% elapsed). Trailing
+        // 25% span = last 25_000ms back from the newest sample. Two samples
+        // at 60_000 and 80_000 (both inside that span): Δused=10 over
+        // Δt=20_000ms -> elapsedFraction = 0.2 -> recentSlope = 10/(0.2*100)
+        // = 0.5. remainingElapsedFraction = 1-0.8 = 0.2, so
+        // projected = 50 + 0.5*0.2*100 = 60.
+        let trendHand = QuotaTrendFold.trend(
+            usedPercent: 50, windowStartMs: 0, windowEndMs: 100_000, nowMs: 80_000,
+            samples: [QuotaSample(atMs: 60_000, usedPercent: 40),
+                      QuotaSample(atMs: 80_000, usedPercent: 50)])
+        expect(
+            trendHand.map { abs($0.projectedUsedPercent - 60) < 1e-9 } == true,
+                "quota trend: hand-computed projection 50 + 0.5*0.2*100 = 60")
+        expect(trendHand?.direction == .rising, "quota trend: a positive recent slope is rising")
+
+        // The grok case that motivates the whole design: lifetime-average
+        // ratio is the highest of the measured windows, but the recent slope
+        // is flat because usage stopped days ago. A flat recent slope must
+        // read as "not moving", never as a burn — regardless of the average.
+        let dayMs: Int64 = 7 * 24 * 3_600_000
+        let grokNow = Int64(Double(dayMs) * 0.88)
+        let grokTrend = QuotaTrendFold.trend(
+            usedPercent: 63, windowStartMs: 0, windowEndMs: dayMs, nowMs: grokNow,
+            samples: [QuotaSample(atMs: grokNow - Int64(Double(dayMs) * 0.20), usedPercent: 63),
+                      QuotaSample(atMs: grokNow, usedPercent: 63)])
+        expect(
+            grokTrend?.direction == .flat
+                && grokTrend.map { abs($0.projectedUsedPercent - 63) < 1e-9 } == true,
+            "quota trend: a flat recent slope reads as not-moving and projects flat, even at a high lifetime average (grok)")
+
+        expect(
+            QuotaTrendFold.trend(
+                usedPercent: 50, windowStartMs: 0, windowEndMs: 100_000, nowMs: 80_000,
+                samples: [QuotaSample(atMs: 80_000, usedPercent: 50)]) == nil,
+            "quota trend: a single sample in the window yields no indicator, not a fabricated zero")
+        expect(
+            QuotaTrendFold.trend(
+                usedPercent: 50, windowStartMs: 0, windowEndMs: 100_000, nowMs: 80_000,
+                samples: [QuotaSample(atMs: 1_000, usedPercent: 5),
+                          QuotaSample(atMs: 80_000, usedPercent: 50)]) == nil,
+            "quota trend: only one of two on-file samples falls inside the trailing 25% span, so still no indicator")
+
+        // slope = (90-70)/(0.2*100) = 1.0; projected = 90 + 1.0*0.2*100 = 110.
+        let overTrend = QuotaTrendFold.trend(
+            usedPercent: 90, windowStartMs: 0, windowEndMs: 100_000, nowMs: 80_000,
+            samples: [QuotaSample(atMs: 60_000, usedPercent: 70),
+                      QuotaSample(atMs: 80_000, usedPercent: 90)])
+        expect(
+            overTrend.map { $0.projectedUsedPercent > 100 } == true,
+            "quota trend: a fast recent burn projects past 100% used at reset — reachable, not clamped")
+
+        expect(
+            QuotaTrendFold.trend(
+                usedPercent: 50, windowStartMs: 0, windowEndMs: 0, nowMs: 80_000,
+                samples: [QuotaSample(atMs: 60_000, usedPercent: 40),
+                          QuotaSample(atMs: 80_000, usedPercent: 50)]) == nil,
+            "quota trend: a window with no duration yields no indicator")
+
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
             exit(1)

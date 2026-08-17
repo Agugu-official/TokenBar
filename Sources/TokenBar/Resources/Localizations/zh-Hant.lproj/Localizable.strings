@@ -423,3 +423,6 @@
 "Reading daily usage…" = "正在讀取每日用量…";
 "Unclassified" = "未分類";
 "Cost" = "花費";
+/* ===== 時間窗趨勢 ===== */
+"%lld%%" = "%lld%%";
+"Recent trend, projected %lld%% by reset" = "近期趨勢，預估重置時達 %lld%%";

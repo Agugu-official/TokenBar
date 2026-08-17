@@ -116,6 +116,19 @@ struct AgentLimitsCard: View {
         return inside.count >= 2 ? interval : nil
     }
 
+    /// The recent-trend fold, resolved against this window's own bounds. Nil
+    /// for exactly the reasons `sparklineInterval` is nil (no duration, no
+    /// parseable reset, no curve) plus `QuotaTrendFold`'s own data-sufficiency
+    /// gate — never a fabricated zero.
+    static func trend(window: UsageWindow, samples: [QuotaSample], nowMs: Int64) -> QuotaTrend? {
+        guard let interval = WindowCardLoader.interval(
+            WindowCardLoader.resolution(window: window, nowMs: nowMs, firstUsageAfterReset: nil))
+        else { return nil }
+        return QuotaTrendFold.trend(
+            usedPercent: window.usedPercent, windowStartMs: interval.start,
+            windowEndMs: interval.end, nowMs: nowMs, samples: samples)
+    }
+
     /// Pure state presentation shared by every AgentLimitsCard consumer.
     enum PacePresentation {
         static var learningHistoryText: String { "Learning history · Linear estimate".localized }
@@ -537,6 +550,12 @@ struct AgentLimitsCard: View {
         let resetText = window.resetsAt.flatMap { UsagePace.resetText(for: $0) }
             ?? window.resetText
         let gauge = gaugeColor(remaining: remaining, brand: brand)
+        // Fetched regardless of layout — the trend indicator is information,
+        // not a density option, and must appear in every layout even though
+        // only `chart` also draws the line these samples feed.
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let samples = curves["\(clientId)|\(window.cardId)"] ?? []
+        let trend = Self.trend(window: window, samples: samples, nowMs: nowMs)
 
         if classic {
             VStack(alignment: .leading, spacing: 3) {
@@ -545,6 +564,7 @@ struct AgentLimitsCard: View {
                     // so QuotaResolver's legacy-selection matching still works.
                     Text(window.label.localized)
                         .font(.caption2.weight(.medium))
+                    trendIndicator(trend)
                     Spacer()
                     Text(resetText ?? leftLabel)
                         .font(.caption2)
@@ -564,6 +584,7 @@ struct AgentLimitsCard: View {
                     // so QuotaResolver's legacy-selection matching still works.
                     Text(window.label.localized)
                         .font(.caption2.weight(.medium))
+                    trendIndicator(trend)
                     Spacer()
                     if let reset = resetText {
                         Text(reset)
@@ -575,13 +596,11 @@ struct AgentLimitsCard: View {
                 // it has something to draw. A single-client tab passes no
                 // curves, so it keeps the bar and does not repeat the full card
                 // sitting directly above it.
-                let samples = layout == .chart
-                    ? (curves["\(clientId)|\(window.cardId)"] ?? []) : []
+                let chartSamples = layout == .chart ? samples : []
                 if let interval = Self.sparklineInterval(
-                    window: window, samples: samples,
-                    nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+                    window: window, samples: chartSamples, nowMs: nowMs)
                 {
-                    sparkline(samples: samples, interval: interval, color: gauge, pace: pace)
+                    sparkline(samples: chartSamples, interval: interval, color: gauge, pace: pace)
                 } else {
                     bar(
                         fillPercent: fill, color: gauge,
@@ -645,6 +664,43 @@ struct AgentLimitsCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+        }
+    }
+
+    /// Recent-slope direction glyph plus the projected end-of-window figure.
+    /// Reads on the same axis the row already shows (`metric`): flipping to
+    /// remaining flips both the arrow and the number, the same way `fill`
+    /// does below. `> 100%` used at reset is the one actionable state here —
+    /// it stays keyed to the used-space figure regardless of which axis is
+    /// on screen, since "runs out early" is a fact about the window, not
+    /// about which way the bar currently fills.
+    @ViewBuilder private func trendIndicator(_ trend: QuotaTrend?) -> some View {
+        if let trend {
+            let runsOutEarly = trend.projectedUsedPercent > 100
+            let displayed = metric.value(fromUsedPercent: trend.projectedUsedPercent)
+            let direction: QuotaTrend.Direction = asUsed ? trend.direction : {
+                switch trend.direction {
+                case .rising: return .falling
+                case .falling: return .rising
+                case .flat: return .flat
+                }
+            }()
+            let symbol: String = switch direction {
+            case .rising: "arrow.up.right"
+            case .falling: "arrow.down.right"
+            case .flat: "arrow.right"
+            }
+            HStack(spacing: 1) {
+                Image(systemName: symbol)
+                Text("%lld%%".localized(Int(displayed.rounded())))
+            }
+            .font(.caption2)
+            .foregroundStyle(
+                runsOutEarly ? AnyShapeStyle(.red)
+                    : direction == .flat ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
+            .help(
+                "Recent trend, projected %lld%% by reset".localized(
+                    Int(trend.projectedUsedPercent.rounded())))
         }
     }
 

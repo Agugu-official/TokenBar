@@ -94,3 +94,6 @@
 "Unclassified" = "Unclassified";
 "Cost" = "Cost";
 "Tokens" = "Tokens";
+/* ===== quota window trend ===== */
+"%lld%%" = "%lld%%";
+"Recent trend, projected %lld%% by reset" = "Recent trend, projected %lld%% by reset";
