@@ -1076,6 +1076,36 @@ private struct DashboardSnapshot {
             }
         }
 
+        // Strip summaries cover every displayed client. They read curves only,
+        // so the cost is `windowCardClients.count` file reads, not a scan.
+        if let payload = agentUsage {
+            var collected: [(clientId: String, cardId: String, label: String,
+                             cycles: [QuotaCycle])] = []
+            for agent in payload.agents where windowCardClients.contains(agent.clientId) {
+                for window in agent.uniqueCardWindows {
+                    guard let key = window.paceStatus.windowKey,
+                          let generation = payload.publicationGeneration,
+                          let curve = ((try? readCurve(agent.clientId, key, generation)) ?? nil)
+                    else { continue }
+                    let points = curve.points
+                    collected.append((
+                        clientId: agent.clientId, cardId: window.cardId,
+                        label: window.label,
+                        cycles: QuotaHistoryFold.cycles(points: points)))
+                }
+            }
+            quotaWindowSummaries = QuotaOverviewFold.summaries(windows: collected)
+            qualifyingCycles = Dictionary(
+                uniqueKeysWithValues: collected.compactMap { window in
+                    let admitted = window.cycles.filter {
+                        $0.usedPercent >= WindowEquivalence.minimumDelta
+                            && $0.observedFraction >= WindowEquivalence.minimumObservedFraction
+                    }
+                    guard admitted.count >= WindowEquivalence.minimumCycles else { return nil }
+                    return ("\(window.clientId)|\(window.cardId)", admitted)
+                })
+        }
+
         // Cycles follow the scan's client, not every displayed one: the history
         // is a per-subscription list and only the open tab shows it.
         if let client = windowUsageClient,
@@ -1092,6 +1122,42 @@ private struct DashboardSnapshot {
 
     /// Joins the cycles to the scan, whenever either changes. Cheap enough to
     /// redo rather than track: the fold is one sorted pass over the scan.
+    /// Joins each qualifying window's admitted cycles to the scan.
+    ///
+    /// Numerators come from each cycle's OBSERVED span, not its whole window:
+    /// the delta only describes the interval between two readings, and counting
+    /// usage from a stretch nobody sampled against movement nobody saw is the
+    /// misalignment that cost 8 points of spread on live data.
+    private func rebuildQuotaEquivalences() {
+        guard let scan = unionScan else { return }
+        var built: [String: WindowEquivalence.Row] = [:]
+        let confirmed = UsageAttribution.confirmed().records
+        for (key, cycles) in qualifyingCycles {
+            guard let client = key.split(separator: "|").first.map(String.init),
+                  let oldest = cycles.last, scan.covers(start: oldest.startMs)
+            else { continue }
+            built[key] = WindowEquivalence.aggregate(cycles: cycles.map { cycle in
+                var tokens: Int64 = 0
+                var cost = 0.0
+                for message in scan.messages
+                where message.timestamp > cycle.firstSampleMs
+                    && message.timestamp <= cycle.lastSampleMs
+                {
+                    guard case let .assigned(target) = UsageAttribution.resolve(
+                        client: message.client, provider: message.providerId,
+                        model: nil, records: confirmed), target == client
+                    else { continue }
+                    tokens += message.tokens - message.cacheRead
+                    cost += message.cost
+                }
+                return WindowEquivalence.Cycle(
+                    deltaPercent: cycle.usedPercent, spanTokens: tokens, spanCost: cost,
+                    observedFraction: cycle.observedFraction)
+            })
+        }
+        quotaEquivalences = built
+    }
+
     private func rebuildQuotaHistory() {
         guard let client = windowUsageClient, let scan = unionScan,
               let oldest = quotaCycles.last, scan.covers(start: oldest.startMs)
@@ -1130,12 +1196,43 @@ private struct DashboardSnapshot {
     /// because the quota half is honest on its own and waiting for the usage
     /// half would hide it for seconds.
     private(set) var quotaHistory: [QuotaHistoryRow] = []
+    /// Recorded-cycle summaries for EVERY displayed client's windows, for the
+    /// all-agent lens. Curve reads only, so unlike `quotaHistory` this needs no
+    /// message scan and is safe on the landing view.
+    private(set) var quotaWindowSummaries: [QuotaWindowSummary] = []
+    /// Per-window quota equivalence, keyed `"<clientId>|<cardId>"`. Only windows
+    /// with enough admitted cycles appear. Empty until the scan lands — the
+    /// strips above it are free and must not wait for this.
+    private(set) var quotaEquivalences: [String: WindowEquivalence.Row] = [:]
+    /// Set when the Quota lens is open on the all-agent tab. Gates a scan that
+    /// serves one line about one window, measured at 6.3 days and 8.1s, so it
+    /// runs only when that line is actually on screen.
+    var quotaLensAllAgents = false
+    /// Cycles per qualifying window, kept from stage 1 so the scan can be
+    /// scoped to exactly what an estimate needs and no further.
+    @ObservationIgnored private var qualifyingCycles: [String: [QuotaCycle]] = [:]
 
     /// Stage 2. One scan for the open agent tab, which every card for that
     /// client then filters from in memory.
     func refreshWindowUsage() async {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
-        guard let client = windowUsageClient else { return }
+        // Two callers, two scopes. An open agent tab needs its own window and
+        // its history; the all-agent Quota lens needs only the windows that can
+        // actually produce an estimate, which on live data is one of six.
+        let equivalenceStart = quotaLensAllAgents
+            ? qualifyingCycles.values.compactMap { $0.last?.startMs }.min() : nil
+        guard let client = windowUsageClient else {
+            guard let from = equivalenceStart else { return }
+            if let cached = unionScan, cached.covers(start: from),
+               Date().timeIntervalSince(cached.capturedAt) < Self.unionScanMaxAge
+            { rebuildQuotaEquivalences(); return }
+            guard let usage = try? await source.windowUsage(from: from, until: now)
+            else { return }
+            unionScan = UnionScan(
+                fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages)
+            rebuildQuotaEquivalences()
+            return
+        }
         guard let windowStart = WindowCardLoader.unionStart(
             payload: agentUsage, clients: [client], nowMs: now)
         else { return }
@@ -1157,6 +1254,7 @@ private struct DashboardSnapshot {
             fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages)
         refreshWindowQuotaHalves()
         rebuildQuotaHistory()
+        rebuildQuotaEquivalences()
     }
 
     private func reconcileQuotaRemaining(with payload: AgentUsagePayload) {

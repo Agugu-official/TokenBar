@@ -11157,61 +11157,151 @@ enum SelfTest {
         expect((demoBurn?.burning?.aheadPercent).map { abs($0 - 37) < 0.5 } == true,
                "QS10 and it reports +37 ahead, the fixture's actual 72 minus 35")
 
+        // MARK: recorded-cycle strips (QO)
+
+        func qoCycle(_ resetAt: Int64, _ used: Double) -> QuotaCycle {
+            QuotaCycle(
+                resetAtMs: resetAt * 1000, startMs: (resetAt - 18_000) * 1000,
+                usedPercent: used, sampleCount: 40, observedFraction: 0.9)
+        }
+        // `QuotaHistoryFold.cycles` hands back newest first; a strip is read in
+        // time order, so the fold has to reverse it. 30 is the newest here.
+        let qoSummaries = QuotaOverviewFold.summaries(windows: [
+            (clientId: "claude", cardId: "session.v1", label: "Session",
+             cycles: [qoCycle(500, 30), qoCycle(400, 58), qoCycle(300, 10)]),
+            (clientId: "grok", cardId: "billing.v1", label: "Weekly",
+             cycles: [qoCycle(500, 99)]),
+            (clientId: "copilot", cardId: "chat.v1", label: "Chat", cycles: []),
+        ])
+
+        expect(qoSummaries.map(\.clientId) == ["grok", "claude"],
+               "QO1 windows with no recorded cycle are omitted, and the heaviest leads")
+        expect(qoSummaries.last?.recent == [10, 58, 30],
+               "QO2 the strip runs oldest to newest, reversing the fold's order")
+        expect(qoSummaries.last?.peakPercent == 58 && qoSummaries.last?.neverExhausted == true,
+               "QO3 a peak below the ceiling is reported as never having run out")
+        expect(qoSummaries.first?.neverExhausted == false,
+               "QO3 and 99 counts as exhausted, because providers stop updating once spent")
+        expect(qoSummaries.last?.cycleCount == 3,
+               "QO4 the count is every recorded cycle, not just the ones on the strip")
+
+        // The strip is capped, the peak is not. With more cycles than the strip
+        // holds and the heaviest one falling off its old end, a peak taken from
+        // the drawn bars alone would understate — and "never ran out" is
+        // derived from that peak, so understating it turns into a false
+        // reassurance. The fixture above cannot reach this: three cycles all
+        // fit, so the two readings coincide.
+        let qoLong = QuotaOverviewFold.summaries(windows: [(
+            clientId: "claude", cardId: "session.v1", label: "Session",
+            // Newest first, so the 99 is the OLDEST of twenty and falls off a
+            // sixteen-bar strip.
+            cycles: (0..<19).map { qoCycle(Int64(1000 - $0 * 10), 5) }
+                + [qoCycle(500, 99)])])
+        expect(qoLong.first?.recent.count == QuotaOverviewFold.stripLength,
+               "QO5 the strip is capped at its length")
+        expect(qoLong.first?.peakPercent == 99 && qoLong.first?.neverExhausted == false,
+               "QO5 but the peak sees every cycle, including one older than the strip")
+
         // MARK: aggregate quota equivalence (AE)
         //
-        // A single window's ratio is dominated by the 1-point reading
-        // quantisation — two windows of the same kind measured 6.4x apart.
-        // Accumulating cycles is the fix, and the error term has to follow the
-        // SAME derivation as the single-window one rather than being a second
-        // rule invented for the aggregate.
+        // The estimate is pooled — sum the deltas, sum the spend, divide once —
+        // because quantisation is an absolute half-point on each delta, so a
+        // cycle's relative noise runs as 1/delta and pooling weights each cycle
+        // by the evidence it carries. Averaging per-cycle ratios gives a
+        // 5-point cycle the same say as a 98-point one.
+        //
+        // Measured 2026-08-17 on 14 live cycles: per-cycle ratios spread 2.7x
+        // (38% half-range) while the pooled estimate agreed to 1% between
+        // independent halves and carries a 5% jackknife error. An earlier
+        // version reported the per-cycle spread as the estimate's error and so
+        // rejected its own usable answer.
 
-        // 18 cycles accumulating 251 points against 1.0B cache-read-excluded
-        // tokens and $500. Expectations computed by hand, not from the code.
-        if case let .ratio(tokens, cost, error) = WindowEquivalence.aggregate(
-            sumDeltaPercent: 251, cycleCount: 18, tokens: 1_000_000_000, cost: 500)
-        {
-            expect(tokens == 39_840_637,
-                   "AE1 a tenth of the allowance is tokens / sumDelta * 10")
-            expect(abs(cost - 19.920) < 0.001,
-                   "AE1 and the same division carries the cost")
-            expect(error == 4,
-                   "AE1 error is 0.5 * cycles / sumDelta, so 18 cycles over 251 points is 4%")
-        } else {
-            expect(false, "AE1 251 points across 18 cycles clears the gate")
+        func aeCycle(_ delta: Double, _ tokens: Int64, _ cost: Double,
+                     observed: Double = 1) -> WindowEquivalence.Cycle {
+            WindowEquivalence.Cycle(
+                deltaPercent: delta, spanTokens: tokens, spanCost: cost,
+                observedFraction: observed)
         }
 
-        // The gate generalises `delta >= 5`, it does not replace it. One cycle
-        // must behave exactly as `row(samples:messages:)` does.
-        expect(
-            WindowEquivalence.aggregate(
-                sumDeltaPercent: 5, cycleCount: 1, tokens: 100, cost: 1).isRatio,
-            "AE2 one cycle at exactly the minimum delta is admitted, as before")
+        // Four identical cycles: 80 points of movement carrying $40 and 800
+        // tokens. A tenth of the allowance is therefore $5.00 and 100 tokens.
+        // Identical cycles leave the jackknife with nothing to disagree about,
+        // so the error floors at 1% rather than claiming zero.
+        if case let .ratio(tokens, cost, error) = WindowEquivalence.aggregate(
+            cycles: Array(repeating: aeCycle(20, 200, 10), count: 4))
+        {
+            expect(tokens == 100, "AE1 a tenth is the POOLED token sum over the pooled delta")
+            expect(abs(cost - 5.0) < 0.001, "AE1 and the pooled spend over the same delta")
+            expect(error == 1, "AE1 cycles that agree perfectly still state a floor, not 0%")
+        } else {
+            expect(false, "AE1 four agreeing cycles produce an estimate")
+        }
+
+        // Unequal deltas — the case that separates pooling from averaging, and
+        // the only one that can. Three cycles of 50 points carrying $50 each
+        // and one of 5 points carrying $10: pooled is 160/155 = 1.032 per
+        // point, so $10.32 a tenth. Averaging the four per-cycle ratios
+        // (1, 1, 1, 2) would give 1.25 and hence $12.50, letting the smallest
+        // cycle drag the answer 21% by carrying a thirtieth of the evidence.
+        //
+        // Every other fixture here uses equal deltas, where the two agree.
+        // Without this one the distinction is unreachable and a mutation
+        // swapping pooling for averaging survives the whole suite.
+        if case let .ratio(_, cost, _) = WindowEquivalence.aggregate(cycles: [
+            aeCycle(50, 500, 50), aeCycle(50, 500, 50),
+            aeCycle(50, 500, 50), aeCycle(5, 100, 10),
+        ]) {
+            expect(abs(cost - 10.3226) < 0.001,
+                   "AE1 unequal cycles are weighted by their delta, not counted equally")
+        } else {
+            expect(false, "AE1 unequal cycles that agree closely still produce an estimate")
+        }
+
+        // Same deltas, spend rising 5/10/15/20. Hand-computed jackknife: the
+        // four leave-one-out ratios are 0.750, 0.667, 0.583 and 0.500 per
+        // point, mean 0.625, standard error 0.161 — 25.8% relative, past the
+        // 10% tolerance, so no single figure is claimed.
+        let aeDivergent = WindowEquivalence.aggregate(cycles: [
+            aeCycle(20, 200, 5), aeCycle(20, 200, 10),
+            aeCycle(20, 200, 15), aeCycle(20, 200, 20),
+        ])
+        expect(!aeDivergent.isRatio,
+               "AE2 cycles whose leave-one-out estimates disagree give no single figure")
+        if case let .spread(_, _, lowCost, highCost) = aeDivergent {
+            expect(abs(lowCost - 2.5) < 0.001 && abs(highCost - 10.0) < 0.001,
+                   "AE2 the span reported is the per-cycle extremes per tenth")
+        } else {
+            expect(false, "AE2 divergent cycles report a span")
+        }
+
+        // Admission. Each gate excludes on its own, and falling under the cycle
+        // floor is reported as insufficient rather than as a wrong number.
         expect(
             !WindowEquivalence.aggregate(
-                sumDeltaPercent: 4.9, cycleCount: 1, tokens: 100, cost: 1).isRatio,
-            "AE2 and just under it is not")
-        // 20 cycles need 100 points between them, not 5.
+                cycles: Array(repeating: aeCycle(4.9, 200, 10), count: 6)).isRatio,
+            "AE3 cycles under the minimum delta are not evidence, however many there are")
         expect(
             !WindowEquivalence.aggregate(
-                sumDeltaPercent: 99, cycleCount: 20, tokens: 100, cost: 1).isRatio,
-            "AE3 more cycles carry more quantisation, so the bar rises with them")
+                cycles: Array(repeating: aeCycle(20, 200, 10, observed: 0.4), count: 6)).isRatio,
+            "AE3 a window the app mostly missed is excluded, whatever its delta says")
         expect(
             WindowEquivalence.aggregate(
-                sumDeltaPercent: 100, cycleCount: 20, tokens: 100, cost: 1).isRatio,
-            "AE3 and clearing it at 5 points per cycle admits the estimate")
+                cycles: Array(repeating: aeCycle(20, 200, 10, observed: 0.6), count: 6)).isRatio,
+            "AE3 control: the same cycles above the observation floor ARE admitted")
+        expect(
+            !WindowEquivalence.aggregate(
+                cycles: Array(repeating: aeCycle(20, 200, 10), count: 2)).isRatio,
+            "AE3 two cycles cannot support a leave-one-out spread, so no figure is given")
 
         expect(
-            WindowEquivalence.aggregate(
-                sumDeltaPercent: 0, cycleCount: 3, tokens: 100, cost: 1) == .notMoved,
+            WindowEquivalence.aggregate(cycles: [aeCycle(0, 0, 0)]) == .notMoved,
             "AE4 quota that never moved is its own answer, not a division by zero")
         expect(
-            WindowEquivalence.aggregate(
-                sumDeltaPercent: 60, cycleCount: 3, tokens: 0, cost: 0)
+            WindowEquivalence.aggregate(cycles: [aeCycle(60, 0, 0)])
                 == .unaccounted(deltaPercent: 60),
             "AE4 quota moved with nothing recorded locally is not `1% is free`")
         expect(
-            WindowEquivalence.aggregate(
-                sumDeltaPercent: 60, cycleCount: 0, tokens: 10, cost: 1) == .unavailable,
+            WindowEquivalence.aggregate(cycles: []) == .unavailable,
             "AE4 no cycles means no estimate at all")
 
         // MARK: daily trend by subscription (ST)

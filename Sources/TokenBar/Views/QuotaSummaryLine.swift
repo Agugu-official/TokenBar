@@ -25,7 +25,21 @@ struct QuotaSummaryLine: View {
         VStack(alignment: .leading, spacing: 7) {
             if let summary {
                 tightestRow(summary)
-                if let burning = summary.burning { burnRow(burning) }
+                // A slot that is empty whenever nothing is wrong teaches the
+                // user to ignore it, and on this data it is empty nearly
+                // always — every window measured runs 3.5 to 68 points under
+                // its expected line. Inverting it costs nothing and turns the
+                // most reliable fact here into something worth reading.
+                if let burning = summary.burning {
+                    burnRow(burning)
+                } else if summary.otherWindows > 0 {
+                    row(label: "Pace", tint: .secondary) {
+                        Text("Every window is running under its expected pace")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 if let today {
                     row(label: "Today", tint: .secondary) {
                         Text(verbatim: "\(Format.compactTokens(today.tokens)) tokens · "

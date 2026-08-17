@@ -426,3 +426,14 @@
 /* ===== 時間窗趨勢 ===== */
 "%lld%%" = "%lld%%";
 "Recent trend, projected %lld%% by reset" = "近期趨勢，預估重置時達 %lld%%";
+
+/* ===== 過去的時間窗 ===== */
+"Past windows" = "過去的時間窗";
+"never exhausted" = "從未用完";
+"No completed windows recorded yet. They accumulate as TokenBar runs." = "尚未記錄到完整的時間窗。TokenBar 執行期間會逐步累積。";
+"Reading quota history…" = "正在讀取額度歷史…";
+"Heaviest %@%% · never ran out" = "最多用到 %@%%，從未用完";
+"Heaviest %@%% · ran out at least once" = "最多用到 %@%%，至少用完過一次";
+"Pace" = "步調";
+"Every window is running under its expected pace" = "所有時間窗都低於預期進度";
+"10%% of quota ~ %@-%@ · %@-%@ API-equivalent" = "額度 10%% ≈ %@〜%@ token · %@〜%@（API 等值）";

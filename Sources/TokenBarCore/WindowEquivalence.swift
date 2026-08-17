@@ -29,6 +29,17 @@ public enum WindowEquivalence {
         case unaccounted(deltaPercent: Double)
         /// Fewer than two samples inside the window, so no Δ exists at all.
         case unavailable
+        /// The cycles disagree by more than the tolerance, so there is no
+        /// single figure to give — only the span they cover.
+        ///
+        /// This is not a softer `insufficient`. That one means the readings are
+        /// too coarse to measure; this means they were measured fine and the
+        /// underlying rate genuinely moved. A plan change does exactly that,
+        /// and the store keys its series on `(provider, account, window)` with
+        /// no plan recorded, so a Plus-to-Pro upgrade lands in one series with
+        /// the ratio changing partway and nothing marking where.
+        case spread(lowPerTenth: Int64, highPerTenth: Int64,
+                    lowCostPerTenth: Double, highCostPerTenth: Double)
 
         /// Whether an estimate was actually produced. Named so assertions can
         /// state the admission rule without re-deriving it from a pattern match.
@@ -59,6 +70,9 @@ public enum WindowEquivalence {
                 .localizedWindowRow(String(Int(delta.rounded())))
         case .unavailable:
             return "Not enough quota readings yet".localizedWindowRow()
+        case let .spread(low, high, lowCost, highCost):
+            return "10%% of quota ~ %@-%@ · %@-%@ API-equivalent".localizedWindowRow(
+                tokens(low), tokens(high), money(lowCost), money(highCost))
         }
     }
 
@@ -93,45 +107,119 @@ public enum WindowEquivalence {
             errorPercent: error)
     }
 
-    /// The same ratio taken across several completed cycles instead of one.
-    ///
-    /// A single window's ratio is unstable — measured on live data, two windows
-    /// of the same kind on the same subscription differed 6.4x — because a
-    /// 1-point quantisation on a small delta dominates. Summing cycles grows
-    /// the denominator and shrinks that: 18 recorded sessions accumulated 251
-    /// points, against which half a point is noise.
-    ///
-    /// The error term is the SAME derivation, not a second one. Each cycle's
-    /// delta carries the quantisation half-step, so N cycles carry `0.5 * N`,
-    /// summed linearly rather than in quadrature. Linear overstates the error
-    /// when the roundings are independent, which they almost certainly are —
-    /// and overstating it is the safe direction for a figure a user might plan
-    /// against.
-    ///
-    /// The admission gate follows from that and nothing else: requiring the
-    /// error to stay inside `tolerance` gives `sumDelta >= minimumDelta * N`,
-    /// which for one cycle is exactly the existing `delta >= 5`.
-    ///
-    /// `tokens` must already exclude cache reads and be attributed to this
-    /// subscription, matching `row(samples:messages:)`. `cycleCount` is the
-    /// number of cycles whose deltas were summed, not the number of samples.
-    public static func aggregate(
-        sumDeltaPercent: Double, cycleCount: Int, tokens: Int64, cost: Double
-    ) -> Row {
-        guard cycleCount > 0 else { return .unavailable }
-        guard sumDeltaPercent > 0 else { return .notMoved }
+    /// A cycle's contribution to the pooled estimate.
+    public struct Cycle: Equatable, Sendable {
+        public let deltaPercent: Double
+        /// Restricted to the cycle's observed sample span — the only interval
+        /// the delta describes.
+        public let spanTokens: Int64
+        public let spanCost: Double
+        public let observedFraction: Double
 
-        let error = Int(
-            (quantisationHalfStep * Double(cycleCount) / sumDeltaPercent * 100).rounded())
-        guard tokens > 0 else { return .unaccounted(deltaPercent: sumDeltaPercent) }
-        guard sumDeltaPercent >= minimumDelta * Double(cycleCount) else {
-            return .insufficient(deltaPercent: sumDeltaPercent, errorPercent: error)
+        public init(
+            deltaPercent: Double, spanTokens: Int64, spanCost: Double,
+            observedFraction: Double
+        ) {
+            self.deltaPercent = deltaPercent
+            self.spanTokens = spanTokens
+            self.spanCost = spanCost
+            self.observedFraction = observedFraction
+        }
+    }
+
+    /// Below this the cycle was barely witnessed, so its delta describes a
+    /// stretch the app mostly missed. `QuotaCycle` already carried the fraction
+    /// and said so in its own comment; nothing was gating on it.
+    public static let minimumObservedFraction = 0.5
+    /// Fewer than this and the leave-one-out spread is not computable in any
+    /// meaningful way.
+    public static let minimumCycles = 3
+
+    /// One estimate pooled over several cycles.
+    ///
+    /// Sum the deltas, sum the spend, divide ONCE. Not the average of per-cycle
+    /// ratios: quantisation is an absolute ±0.5 on each delta, so a cycle's
+    /// relative noise runs as 1/delta, and pooling weights each cycle by the
+    /// evidence it carries while averaging gives a 5-point cycle the same say
+    /// as a 98-point one.
+    ///
+    /// That distinction is the whole feature. Measured 2026-08-17 on 14 live
+    /// cycles: the per-cycle ratios spread 2.7x (38% half-range), while the
+    /// pooled estimate agreed to 1% between independent halves and carries a
+    /// jackknife standard error of 5%. Reporting the per-cycle spread as the
+    /// estimate's error — which this function used to do — overstated it by
+    /// most of an order of magnitude and made a usable number look unusable.
+    ///
+    /// Denominated in money. Tokens are also returned, but cost is the steadier
+    /// of the two here (5% against 7%), which is consistent with providers
+    /// metering on something closer to cost than to a token count.
+    public static func aggregate(cycles: [Cycle]) -> Row {
+        let admitted = cycles.filter {
+            $0.deltaPercent >= minimumDelta
+                && $0.observedFraction >= minimumObservedFraction
+                && $0.spanCost > 0
+        }
+        guard !admitted.isEmpty else {
+            let anyMovement = cycles.reduce(0.0) { $0 + $1.deltaPercent }
+            if cycles.isEmpty { return .unavailable }
+            if anyMovement <= 0 { return .notMoved }
+            if cycles.allSatisfy({ $0.spanCost <= 0 }) {
+                return .unaccounted(deltaPercent: anyMovement)
+            }
+            return .insufficient(
+                deltaPercent: anyMovement,
+                errorPercent: Int((quantisationHalfStep * Double(cycles.count)
+                    / anyMovement * 100).rounded()))
+        }
+        guard admitted.count >= minimumCycles else {
+            let delta = admitted.reduce(0.0) { $0 + $1.deltaPercent }
+            return .insufficient(
+                deltaPercent: delta,
+                errorPercent: Int((quantisationHalfStep * Double(admitted.count)
+                    / delta * 100).rounded()))
+        }
+
+        func pooled(_ set: [Cycle], _ pick: (Cycle) -> Double) -> Double {
+            let delta = set.reduce(0.0) { $0 + $1.deltaPercent }
+            return delta > 0 ? set.reduce(0.0) { $0 + pick($1) } / delta : 0
+        }
+        let costRatio = pooled(admitted) { $0.spanCost }
+        let tokenRatio = pooled(admitted) { Double($0.spanTokens) }
+
+        // Jackknife: recompute the pooled estimate with each cycle left out and
+        // take the spread of those. It measures the ESTIMATE's stability rather
+        // than the observations' scatter, and it needs nothing beyond what is
+        // already stored. A regime change — a plan switch, a provider
+        // reweighting — makes it widen on its own, which is the behaviour we
+        // want from an error bar we cannot otherwise defend.
+        let n = Double(admitted.count)
+        var leaveOneOut: [Double] = []
+        for index in admitted.indices {
+            var rest = admitted
+            rest.remove(at: index)
+            leaveOneOut.append(pooled(rest) { $0.spanCost })
+        }
+        let mean = leaveOneOut.reduce(0, +) / n
+        let variance = (n - 1) / n
+            * leaveOneOut.reduce(0.0) { $0 + ($1 - mean) * ($1 - mean) }
+        let standardError = variance.squareRoot()
+        let relativeError = costRatio > 0 ? standardError / costRatio : .infinity
+
+        guard relativeError <= tolerance else {
+            let ratios = admitted.map { $0.spanCost / $0.deltaPercent * 10 }
+            let tokens = admitted.map { Double($0.spanTokens) / $0.deltaPercent * 10 }
+            return .spread(
+                lowPerTenth: Int64((tokens.min() ?? 0).rounded()),
+                highPerTenth: Int64((tokens.max() ?? 0).rounded()),
+                lowCostPerTenth: ratios.min() ?? 0,
+                highCostPerTenth: ratios.max() ?? 0)
         }
         return .ratio(
-            tokensPerTenth: Int64((Double(tokens) / sumDeltaPercent * 10).rounded()),
-            costPerTenth: cost / sumDeltaPercent * 10,
-            errorPercent: error)
+            tokensPerTenth: Int64((tokenRatio * 10).rounded()),
+            costPerTenth: costRatio * 10,
+            errorPercent: max(1, Int((relativeError * 100).rounded())))
     }
+
 }
 
 

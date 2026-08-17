@@ -29,6 +29,9 @@ struct QuotaView: View {
     var colors: ModelColorMap = ModelColorMap(entries: [])
     /// Daily spend stacked by declared subscription, for the all-agent view.
     /// Nil until the graph payload has been folded.
+    /// Recorded-cycle strips for every displayed window.
+    var windowSummaries: [QuotaWindowSummary] = []
+    var equivalences: [String: WindowEquivalence.Row] = [:]
     var trend: SubscriptionTrend?
 
     @AppStorage("tokenbar.limits.enabled") private var limitsEnabled = true
@@ -57,6 +60,9 @@ struct QuotaView: View {
                 // Trend first: it answers "where is my spend going" across
                 // subscriptions, which the window-by-window card below cannot.
                 SubscriptionTrendCard(trend: trend, attempted: usageAttempted)
+                QuotaHistoryStripCard(
+                    summaries: windowSummaries, equivalences: equivalences,
+                    attempted: usageAttempted)
                 if limitsEnabled {
                     AgentLimitsCard(
                     clients: clientIds, trace: trace, agentUsage: agentUsage,

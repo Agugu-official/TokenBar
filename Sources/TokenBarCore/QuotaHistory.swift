@@ -30,12 +30,37 @@ public struct QuotaCycle: Equatable, Sendable {
     /// witnessed a window it may have joined late.
     public let usedPercent: Double
     public let sampleCount: Int
+    /// The instants of the first and last reading in this cycle.
+    ///
+    /// Carried because a ratio is only meaningful when its numerator and
+    /// denominator cover the same interval, and the denominator is a span
+    /// between two readings — not the whole window. Usage from a stretch the
+    /// app was not running for would otherwise be counted against quota
+    /// movement nobody observed. `WindowEquivalence.row` already had this
+    /// right; the aggregate over cycles did not, and it cost 8 points of
+    /// spread on live data (46% to 38%).
+    public let firstSampleMs: Int64
+    public let lastSampleMs: Int64
     /// Fraction of the window the samples actually cover, 0...1. A cycle
     /// observed for eight minutes of five hours is not evidence about that
     /// cycle, and the UI has to be able to say so.
     public let observedFraction: Double
 
     public var durationMs: Int64 { resetAtMs - startMs }
+
+    public init(
+        resetAtMs: Int64, startMs: Int64, usedPercent: Double,
+        sampleCount: Int, observedFraction: Double,
+        firstSampleMs: Int64 = 0, lastSampleMs: Int64 = 0
+    ) {
+        self.resetAtMs = resetAtMs
+        self.startMs = startMs
+        self.usedPercent = usedPercent
+        self.sampleCount = sampleCount
+        self.observedFraction = observedFraction
+        self.firstSampleMs = firstSampleMs
+        self.lastSampleMs = lastSampleMs
+    }
 }
 
 /// A cycle plus what was spent inside it, split by whether it counted against
@@ -50,6 +75,12 @@ public struct QuotaHistoryRow: Equatable, Sendable, Identifiable {
     /// as the single-window figure rather than quietly using a fuller total.
     public let mineTokensExCacheRead: Int64
     public let mineCost: Double
+    /// The same two quantities restricted to the cycle's OBSERVED span, which
+    /// is the only interval the quota delta describes. The whole-window figures
+    /// above are what the row displays — "this window cost me X" is a question
+    /// about the window — while these are the only ones a ratio may divide.
+    public let spanTokensExCacheRead: Int64
+    public let spanCost: Double
     /// Everything else recorded in the same interval, summed. Not noise: it is
     /// the answer to "the window barely moved, so where did the work go".
     public let otherTokens: Int64
@@ -111,7 +142,9 @@ public enum QuotaHistoryFold {
                 usedPercent: (used.max() ?? 0) - (used.min() ?? 0),
                 sampleCount: sorted.count,
                 observedFraction: min(1, max(0, Double(last.sampledAt - first.sampledAt)
-                    / Double(last.durationSeconds))))
+                    / Double(last.durationSeconds))),
+                firstSampleMs: first.sampledAt * 1000,
+                lastSampleMs: last.sampledAt * 1000)
         }
         .sorted { $0.resetAtMs > $1.resetAtMs }
     }
@@ -143,6 +176,7 @@ public enum QuotaHistoryFold {
             let lo = lowerBound(stamps, cycle.startMs)
             let hi = lowerBound(stamps, cycle.resetAtMs)
             var mine = (tokens: Int64(0), exCacheRead: Int64(0), cost: 0.0)
+            var span = (exCacheRead: Int64(0), cost: 0.0)
             var other = (tokens: Int64(0), cost: 0.0)
             var byModel: [ModelKey: (tokens: Int64, cost: Double)] = [:]
 
@@ -154,6 +188,12 @@ public enum QuotaHistoryFold {
                     mine.tokens += message.tokens
                     mine.exCacheRead += message.tokens - message.cacheRead
                     mine.cost += message.cost
+                    if message.timestamp > cycle.firstSampleMs,
+                       message.timestamp <= cycle.lastSampleMs
+                    {
+                        span.exCacheRead += message.tokens - message.cacheRead
+                        span.cost += message.cost
+                    }
                     let key = ModelKey(
                         providerId: message.providerId, modelId: message.modelId)
                     let current = byModel[key] ?? (0, 0)
@@ -169,6 +209,7 @@ public enum QuotaHistoryFold {
                 cycle: cycle,
                 mineTokens: mine.tokens, mineTokensExCacheRead: mine.exCacheRead,
                 mineCost: mine.cost,
+                spanTokensExCacheRead: span.exCacheRead, spanCost: span.cost,
                 otherTokens: other.tokens, otherCost: other.cost,
                 models: byModel
                     .map {

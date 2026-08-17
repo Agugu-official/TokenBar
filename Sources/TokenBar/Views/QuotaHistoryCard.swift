@@ -235,10 +235,12 @@ struct QuotaHistoryCard: View {
         if !counted.isEmpty {
             Text(WindowEquivalence.text(
                 WindowEquivalence.aggregate(
-                    sumDeltaPercent: counted.reduce(0) { $0 + $1.cycle.usedPercent },
-                    cycleCount: counted.count,
-                    tokens: counted.reduce(0) { $0 + $1.mineTokensExCacheRead },
-                    cost: counted.reduce(0) { $0 + $1.mineCost }),
+                    cycles: counted.map {
+                        WindowEquivalence.Cycle(
+                            deltaPercent: $0.cycle.usedPercent,
+                            spanTokens: $0.spanTokensExCacheRead, spanCost: $0.spanCost,
+                            observedFraction: $0.cycle.observedFraction)
+                    }),
                 tokens: Format.compactTokens, money: Format.usd))
                 .font(.caption2)
                 .foregroundStyle(.secondary)

@@ -261,6 +261,10 @@ struct PopoverView: View {
             model.windowUsageClient =
                 (effectiveView == .quota && activeTab != ClientTray.overviewTab
                     && displayClients.contains(activeTab)) ? activeTab : nil
+            // The all-agent Quota lens is the only surface that wants the
+            // equivalence scan, and only while it is on screen.
+            model.quotaLensAllAgents =
+                effectiveView == .quota && activeTab == ClientTray.overviewTab
             model.refreshWindowQuotaHalves()   // synchronous: lands this frame
             await model.refreshWindowUsage()
         }
@@ -622,6 +626,8 @@ struct PopoverView: View {
                     // payload: that model refuses to publish day buckets built
                     // under a timezone it cannot vouch for, and calling the
                     // fold directly would silently skip that check.
+                    windowSummaries: model.quotaWindowSummaries,
+                    equivalences: model.quotaEquivalences,
                     trend: series.points.map {
                         SubscriptionTrendFold.build(
                             points: $0, today: Format.todayKey(),

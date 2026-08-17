@@ -97,3 +97,14 @@
 /* ===== quota window trend ===== */
 "%lld%%" = "%lld%%";
 "Recent trend, projected %lld%% by reset" = "Recent trend, projected %lld%% by reset";
+
+/* ===== past windows ===== */
+"Past windows" = "Past windows";
+"never exhausted" = "never exhausted";
+"No completed windows recorded yet. They accumulate as TokenBar runs." = "No completed windows recorded yet. They accumulate as TokenBar runs.";
+"Reading quota history…" = "Reading quota history…";
+"Heaviest %@%% · never ran out" = "Heaviest %@%% · never ran out";
+"Heaviest %@%% · ran out at least once" = "Heaviest %@%% · ran out at least once";
+"Pace" = "Pace";
+"Every window is running under its expected pace" = "Every window is running under its expected pace";
+"10%% of quota ~ %@-%@ · %@-%@ API-equivalent" = "10%% of quota ~ %@-%@ · %@-%@ API-equivalent";
