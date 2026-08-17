@@ -11127,6 +11127,19 @@ enum SelfTest {
                 paceMode: .linear, now: burnNow)?.burning == nil,
             "QS7 a window running under its schedule produces no burn warning")
 
+        // MARK: limits layout (LL)
+        //
+        // The sparkline shipped inside `full` first, which changed the card for
+        // everyone who had not asked for it. It is a choice now, and the
+        // default is the one users already had — a silent default change here
+        // would redraw every existing install's most-looked-at card.
+        expect(LimitsLayout(rawValue: "full") == .full && LimitsLayout.full.rawValue == "full",
+               "LL1 the stored default id is `full`, the bar layout")
+        expect(LimitsLayout(rawValue: "nonsense") == nil,
+               "LL1 an unknown stored value does not decode, so callers fall back explicitly")
+        expect(Set(LimitsLayout.allCases.map(\.rawValue)) == ["full", "classic", "chart"],
+               "LL2 three layouts are offered, and Settings enumerates allCases")
+
         expect(
             WindowEquivalence.minimumDelta == 5,
             "V15 the threshold follows from the tolerance, not from a chosen number")

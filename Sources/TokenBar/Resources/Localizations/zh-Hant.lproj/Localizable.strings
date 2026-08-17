@@ -304,7 +304,6 @@
 "Keep the main TokenBar item. Optional client items show each client's selected quota window; Auto chooses the tightest healthy window for that client." = "主 TokenBar 項目會保留。可選的個別用戶端項目會顯示各自選定的額度時間窗；自動會在該用戶端內選擇最吃緊且健康的時間窗。";
 "Off hides the Agent-limits quota card everywhere — the Overview summary, every client's own tab, and this preview. Cost/token data is unaffected." = "關閉後會在所有位置隱藏 Agent 額度卡片 —— 包含總覽摘要、各用戶端分頁與此預覽。費用與 token 資料不受影響。";
 "On, bars count up as quota is used; off, they count down to what's left. The color always warns as quota runs low." = "開啟時長條隨用量往上累加，關閉時則往下遞減顯示剩餘。無論何者，額度偏低時顏色都會提出警示。";
-"Full is the wide card with the pace line; Classic is the original compact layout without pace." = "完整版是含步調線的寬版卡片，經典版則是不含步調的原始精簡版面。";
 "The deficit/reserve marker. Historical learns each quota window's usage pattern; during learning, the Linear estimate is labeled; Linear uses the exact reset duration; Off hides the marker." = "超前／保留量的標記。歷史模式會學習每個額度時間窗的使用模式，學習期間會標示為線性估算；線性模式使用確切的重置週期；關閉則隱藏標記。";
 "Hides only that client's quota card here and on its own tab — the tab and its cost/token data stay visible. Useful for accounts with no OAuth quota (e.g. Claude Console). Grayed out when the tab itself is hidden below, since a hidden tab always hides its quota card too." = "只隱藏該用戶端在此處與自身分頁的額度卡片 —— 分頁本身與費用／token 資料仍會顯示。適合沒有 OAuth 額度的帳號（例如 Claude Console）。當下方把該分頁整個隱藏時，這裡會變成灰色，因為隱藏分頁一定連帶隱藏它的額度卡片。";
 "Off removes a tab from the popover's tab row. Cost/token data is unaffected." = "關閉會將該分頁從彈出視窗的分頁列移除。費用與 token 資料不受影響。";

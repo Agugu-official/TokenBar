@@ -389,7 +389,7 @@ struct SettingsPanel: View {
                 radioGroup(
                     selection: $layoutRaw,
                     options: LimitsLayout.allCases.map { ($0.rawValue, "Layout: \($0.rawValue.capitalized)") })
-                hint("Full is the wide card with the pace line; Classic is the original compact layout without pace.")
+                hint("Full is the wide card with the pace bar; Classic is the original compact layout without pace; Chart draws each window's quota over time, with the pace estimate as a second line. Chart needs recorded quota history and falls back to a bar for windows that have none.")
                 if LimitsLayout(rawValue: layoutRaw) != .classic {
                     radioGroup(
                         selection: $paceModeRaw,

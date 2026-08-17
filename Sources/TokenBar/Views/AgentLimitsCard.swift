@@ -2,10 +2,16 @@ import AppKit
 import SwiftUI
 import TokenBarCore
 
-/// Card density: 'full' (with pace line) or 'classic' (compact), mirroring
-/// LimitsLayout in settings.ts.
+/// Card density. `full` and `classic` mirror LimitsLayout in settings.ts;
+/// `chart` is native-only.
+///
+/// `chart` is a choice rather than an upgrade. It shows the same quota on a
+/// time axis instead of a fill bar, which carries a rate the bar cannot — but
+/// a bar is read at a glance and a curve is not, and the bar is what everyone
+/// arrived with. Adding the sparkline to `full` took that away from anyone who
+/// had not asked for it, so it gets its own case and `full` is restored.
 enum LimitsLayout: String, CaseIterable {
-    case full, classic
+    case full, classic, chart
 }
 
 /// OAuth quota cards per agent: usage-window bars with gauge colors, reset
@@ -57,7 +63,8 @@ struct AgentLimitsCard: View {
     @State private var cardFrames: [String: CGRect] = [:]
 
     private var paceMode: PaceMode { PaceMode(rawValue: paceModeRaw) ?? .historical }
-    private var classic: Bool { LimitsLayout(rawValue: layoutRaw) ?? .full == .classic }
+    private var layout: LimitsLayout { LimitsLayout(rawValue: layoutRaw) ?? .full }
+    private var classic: Bool { layout == .classic }
     private var metric: QuotaMetric { asUsed ? .used : .remaining }
 
     /// Sparkline dimensions. Named because these are the numbers that get tuned
@@ -564,11 +571,12 @@ struct AgentLimitsCard: View {
                             .foregroundStyle(.tertiary)
                     }
                 }
-                // The line replaces the bar only where it has something to draw
-                // and somewhere to draw it. A single-client tab passes no
+                // The line replaces the bar only when the user asked for it AND
+                // it has something to draw. A single-client tab passes no
                 // curves, so it keeps the bar and does not repeat the full card
                 // sitting directly above it.
-                let samples = curves["\(clientId)|\(window.cardId)"] ?? []
+                let samples = layout == .chart
+                    ? (curves["\(clientId)|\(window.cardId)"] ?? []) : []
                 if let interval = Self.sparklineInterval(
                     window: window, samples: samples,
                     nowMs: Int64(Date().timeIntervalSince1970 * 1000))
