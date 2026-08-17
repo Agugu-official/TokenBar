@@ -234,12 +234,14 @@ struct PopoverView: View {
         // the card permanently absent until you switched tabs. Same trap the
         // `.onChange` below documents for `presentClients`.
         .task(id: "\(windowSelectionRaw)|\(activeTab)|\(hiddenRaw)|"
-              + displayClients.joined(separator: ",")) {
+              + "\(effectiveView.rawValue)|" + displayClients.joined(separator: ",")) {
             model.windowCardClients = displayClients
             // The scan follows what is on screen; the curves do not. See
             // `windowUsageClient`.
+            // Gated on the lens too: the window card and its history live only
+            // here now, so no other lens can make the app pay for a scan.
             model.windowUsageClient =
-                (activeTab != ClientTray.overviewTab
+                (effectiveView == .quota && activeTab != ClientTray.overviewTab
                     && displayClients.contains(activeTab)) ? activeTab : nil
             model.refreshWindowQuotaHalves()   // synchronous: lands this frame
             await model.refreshWindowUsage()
@@ -563,18 +565,25 @@ struct PopoverView: View {
                     payload: payload, clientIds: clientIds, stats: activeStats,
                     modelReport: model.modelReport, modelLoading: model.modelLoading,
                     colors: model.colors,
-                    trace: model.trace, agentUsage: model.agentUsage,
-                    usageAttempted: model.agentUsageAttempted,
+                    trace: model.trace,
                     singleClient: singleClient, year: model.year,
                     hidden: ClientRegistry.parseIdSet(hiddenRaw),
+                    quotaSummary: QuotaSummaryFold.build(
+                        payload: model.agentUsage,
+                        excluding: ClientRegistry.parseIdSet(hiddenRaw)),
+                    usageAttempted: model.agentUsageAttempted)
+            case .quota:
+                QuotaView(
+                    singleClient: singleClient, clientIds: clientIds,
+                    trace: model.trace, agentUsage: model.agentUsage,
+                    usageAttempted: model.agentUsageAttempted,
+                    // `@Observable` tracks per property, so reading this on a
+                    // lens that draws no sparkline would make every
+                    // `refreshWindowQuotaHalves()` write invalidate this body
+                    // for nothing.
+                    windowCurves: singleClient == nil ? model.windowCurves : [:],
                     windowCard: singleClient.flatMap { model.windowCards[$0] },
-                    // Only the multi-agent overview draws sparklines, and
-                    // `@Observable` tracks per property: reading this
-                    // unconditionally made every `refreshWindowQuotaHalves()`
-                    // write invalidate the whole body even on tabs that never
-                    // draw one. The ternary keeps that dependency where the
-                    // data is actually used.
-                    windowCurves: singleClient == nil ? model.windowCurves : [:])
+                    quotaCycles: model.quotaCycles, quotaHistory: model.quotaHistory)
             case .models:
                 ModelsView(
                     report: model.modelReport, clientIds: clientIds, colors: model.colors,

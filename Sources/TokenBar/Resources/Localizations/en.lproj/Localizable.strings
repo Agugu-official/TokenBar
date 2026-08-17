@@ -57,3 +57,28 @@
 "Quota has not moved yet" = "Quota has not moved yet";
 "Quota moved %@%%, none of it recorded on this machine" = "Quota moved %@%%, none of it recorded on this machine";
 "Not enough quota readings yet" = "Not enough quota readings yet";
+"The Agent limits card is turned off in Settings." = "The Agent limits card is turned off in Settings.";
+
+/* ===== window history ===== */
+"Window history" = "Window history";
+"%@ windows" = "%@ windows";
+"No earlier windows recorded yet. They accumulate as TokenBar runs." = "No earlier windows recorded yet. They accumulate as TokenBar runs.";
+"TokenBar observed %@%% of this window, so its usage figure is a floor." = "TokenBar observed %@%% of this window, so its usage figure is a floor.";
+"Nothing in this window was charged to this subscription." = "Nothing in this window was charged to this subscription.";
+"Other subscriptions in the same hours: %@ · %@" = "Other subscriptions in the same hours: %@ · %@";
+"Amounts are API list-price equivalents for usage you declared as %@ — not what the subscription charged." = "Amounts are API list-price equivalents for usage you declared as %@ — not what the subscription charged.";
+
+/* ===== cross-subscription summary ===== */
+"Tightest right now: " = "Tightest right now: ";
+" at %lld%% left" = " at %lld%% left";
+"%lld other windows, all above %lld%%" = "%lld other windows, all above %lld%%";
+"%lld of %lld other windows are below %lld%%" = "%lld of %lld other windows are below %lld%%";
+"No subscription is reporting a usage window right now." = "No subscription is reporting a usage window right now.";
+"Burning fastest: " = "Burning fastest: ";
+" · %lld%% ahead of pace" = " · %lld%% ahead of pace";
+"Today: %@ tokens · %@" = "Today: %@ tokens · %@";
+"Tightest" = "Tightest";
+"Burning fastest" = "Burning fastest";
+"Today" = "Today";
+"%lld%% ahead of pace" = "%lld%% ahead of pace";
+"Layout: Chart" = "Layout: Chart";

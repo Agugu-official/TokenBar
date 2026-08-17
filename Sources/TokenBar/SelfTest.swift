@@ -6360,13 +6360,13 @@ enum SelfTest {
 
         // Tab order (plan 2026-07-16): Monthly leads Daily in the tab row.
         expect(AppView.allCases.map(\.rawValue) ==
-            ["overview", "models", "monthly", "daily", "hourly", "stats", "agents"],
-            "tab row leads with Monthly, ahead of Daily")
+            ["overview", "quota", "models", "monthly", "daily", "hourly", "stats", "agents"],
+            "tab row leads with Monthly, ahead of Daily, and Quota follows Overview")
 
         // View-tabs visibility (plan 2026-07-16, generalized): any of the
         // five toggleable lenses can be hidden independently; Overview and
         // Models are fixed anchors, never in AppView.toggleable.
-        expect(AppView.toggleable == [.monthly, .daily, .hourly, .stats, .agents],
+        expect(AppView.toggleable == [.quota, .monthly, .daily, .hourly, .stats, .agents],
             "toggleable lenses are fixed order, excluding Overview and Models")
         expect(AppView.visible(hiddenRaw: "") == AppView.allCases,
             "no hidden lenses shows every lens")
@@ -10906,6 +10906,226 @@ enum SelfTest {
                "SC1 no agent tab open issues no message scan")
         expect((scanCounts?.open ?? 0) >= 1,
                "SC1 an open agent tab does scan, so the bound above is not vacuous")
+
+        // MARK: quota history (QH)
+
+        func curvePoint(_ sampledAt: Int64, _ used: Double, resetAt: Int64,
+                        duration: Int64 = 18_000) -> QuotaCurvePoint {
+            try! JSONDecoder().decode(QuotaCurvePoint.self, from: Data("""
+            {"sampledAt":\(sampledAt),"usedPercent":\(used),"resetAt":\(resetAt),
+             "durationSeconds":\(duration),"durationSource":"provider","origin":"liveV3"}
+            """.utf8))
+        }
+        func attributedMessage(at t: Int64, client: String, provider: String,
+                               model: String, tokens: Int64, cost: Double) -> WindowMessage {
+            try! JSONDecoder().decode(WindowMessage.self, from: Data("""
+            {"timestamp":\(t),"client":"\(client)","providerId":"\(provider)",
+             "modelId":"\(model)","input":\(tokens),"output":0,"cacheRead":0,
+             "cacheWrite":0,"reasoning":0,"cost":\(cost),"isTurnStart":true}
+            """.utf8))
+        }
+
+        // Two cycles. The older one is first observed at 40% used, which is the
+        // case the span rule exists for: the app was not running when it began.
+        let qhCycles = QuotaHistoryFold.cycles(points: [
+            curvePoint(100_000, 40, resetAt: 118_000),
+            curvePoint(110_000, 55, resetAt: 118_000),
+            curvePoint(120_000, 1, resetAt: 136_000),
+            curvePoint(130_000, 12, resetAt: 136_000),
+        ])
+        expect(qhCycles.count == 2, "QH1 points group into one cycle per reset instant")
+        expect(qhCycles[0].resetAtMs == 136_000_000,
+               "QH1 cycles come back newest first, so the list reads like history")
+        expect(qhCycles[1].usedPercent == 15,
+               "QH2 a cycle consumed the SPAN of its readings, not its highest reading")
+        expect(qhCycles[1].startMs == (118_000 - 18_000) * 1000,
+               "QH2 the window starts one duration before its reset")
+        expect(
+            abs(qhCycles[1].observedFraction - (10_000.0 / 18_000.0)) < 0.001,
+            "QH3 observed fraction is sample span over window length, not sample count")
+
+        // Attribution: `codex` is declared to the codex subscription, `claude`
+        // to claude. A message the user has not classified must not silently
+        // become this subscription's.
+        let qhConfirmed = [
+            UsageAttribution.Record(client: "claude", provider: "anthropic",
+                                    state: .assigned("claude")),
+            UsageAttribution.Record(client: "codex", provider: "openai",
+                                    state: .assigned("codex")),
+        ]
+        // Boundaries: 100_000_000 is the older cycle's start, 118_000_000 its
+        // reset and simultaneously nothing else's start. One message sits on
+        // each, and neither may be counted twice.
+        let qhRows = QuotaHistoryFold.rows(
+            cycles: qhCycles,
+            messages: [
+                attributedMessage(at: 100_000_000, client: "claude", provider: "anthropic",
+                                  model: "opus", tokens: 10, cost: 1),
+                attributedMessage(at: 110_000_000, client: "codex", provider: "openai",
+                                  model: "sol", tokens: 500, cost: 90),
+                attributedMessage(at: 118_000_000, client: "claude", provider: "anthropic",
+                                  model: "opus", tokens: 7, cost: 2),
+                attributedMessage(at: 125_000_000, client: "unknown", provider: "nowhere",
+                                  model: "x", tokens: 3, cost: 5),
+            ],
+            subscription: "claude", confirmed: qhConfirmed)
+
+        let older = qhRows[1]
+        expect(older.mineTokens == 10 && older.mineCost == 1,
+               "QH4 a message exactly on the window start belongs to that window")
+        expect(older.otherTokens == 500 && older.otherCost == 90,
+               "QH4 usage charged elsewhere is kept, because it explains a flat quota bar")
+        expect(qhRows[0].otherTokens == 3,
+               "QH5 unclassified usage counts as other, never as this subscription's")
+        expect(qhRows[0].mineTokens == 7,
+               "QH5 a message exactly on a reset joins the cycle that reset OPENS")
+        expect(qhRows.reduce(0) { $0 + $1.mineTokens + $1.otherTokens } == 520,
+               "QH6 every message lands in exactly one cycle, so nothing double counts")
+        expect(older.models.map(\.modelId) == ["opus"],
+               "QH7 the model breakdown covers this subscription only")
+
+        expect(QuotaHistoryFold.lowerBound([10, 20, 20, 30], 20) == 1,
+               "QH8 lower bound finds the FIRST equal element, not any of them")
+        expect(QuotaHistoryFold.lowerBound([10, 20], 99) == 2,
+               "QH8 a value past the end returns the count rather than trapping")
+
+        // MARK: cross-subscription summary (QS)
+
+        func summaryPayload(
+            _ agents: [(client: String, windows: [(card: String, label: String, left: Double)])],
+            errorOn: String? = nil
+        ) -> AgentUsagePayload {
+            let body = agents.map { agent in
+                let windows = agent.windows.map { w in
+                    """
+                    {"cardId":"\(w.card)","label":"\(w.label)",
+                     "usedPercent":\(100 - w.left),"remainingPercent":\(w.left),
+                     "paceStatus":{"state":"learningDuration","windowKey":"\(w.card)","completeCycles":0}}
+                    """
+                }.joined(separator: ",")
+                let err = agent.client == errorOn ? #""error":"boom","# : ""
+                return """
+                {"clientId":"\(agent.client)","source":"oauth","updatedAt":"t",
+                 \(err)"windows":[\(windows)]}
+                """
+            }.joined(separator: ",")
+            return try! JSONDecoder().decode(
+                AgentUsagePayload.self,
+                from: Data("""
+                {"generatedAt":"t","publicationGeneration":1,"agents":[\(body)]}
+                """.utf8))
+        }
+
+        let qsPayload = summaryPayload([
+            (client: "claude", windows: [(card: "session.v1", label: "Session", left: 18),
+                                         (card: "weekly.v1", label: "Weekly", left: 61)]),
+            // Same LABEL as claude's second window, different client. Counting
+            // by label instead of by (client, cardId) would lose one of them.
+            (client: "codex", windows: [(card: "main.weekly.v1", label: "Weekly", left: 74)]),
+            (client: "grok", windows: [(card: "billing.v1", label: "Weekly", left: 88)]),
+        ])
+        let qs = QuotaSummaryFold.build(payload: qsPayload)
+        expect(qs?.tightestClient == "claude" && qs?.remainingPercent == 18,
+               "QS1 the tightest window is the lowest remaining across every subscription")
+        expect(qs?.otherWindows == 3,
+               "QS2 the tightest is not also counted among the others")
+        expect(qs?.othersComfortable == 3 && qs?.allOthersComfortable == true,
+               "QS2 three windows at 61, 74 and 88 all clear the comfortable line")
+
+        // Hiding the tightest client must move the headline, not merely drop a
+        // row: a summary that keeps naming a hidden subscription is reporting
+        // something the user asked not to see.
+        let qsHidden = QuotaSummaryFold.build(payload: qsPayload, excluding: ["claude"])
+        expect(qsHidden?.tightestClient == "codex" && qsHidden?.otherWindows == 1,
+               "QS3 excluding a client removes both its headline and its windows")
+
+        // An agent that reported an error is not evidence about anything.
+        let qsErrored = QuotaSummaryFold.build(
+            payload: summaryPayload([
+                (client: "claude", windows: [(card: "s", label: "Session", left: 5)]),
+                (client: "codex", windows: [(card: "w", label: "Weekly", left: 70)]),
+            ], errorOn: "claude"))
+        expect(qsErrored?.tightestClient == "codex",
+               "QS4 a client that failed to report is skipped, not treated as tightest")
+        // `QuotaResolver` already skips errored agents when picking the
+        // tightest, so the line above passes with or without this fold's own
+        // filter. Only the tally reaches it: codex's window is the headline, so
+        // a correct fold has NO others, while counting the errored client's 5%
+        // window would report one — and would put a number on screen sourced
+        // from a subscription that just told us it could not answer.
+        expect(qsErrored?.otherWindows == 0,
+               "QS4 an errored client's windows are absent from the tally too")
+
+        expect(QuotaSummaryFold.build(payload: nil) == nil,
+               "QS5 no payload yields no summary, so the view can say it is still asking")
+
+        // A rate-limited endpoint sets `error` on an agent that still carries
+        // its last-good windows. `select` must refuse it — showing a stale
+        // window as the one running now is uncorrectable — while the history
+        // must not, because those cycles are on disk and a failed fetch does
+        // not unwrite them. Reported once as "no earlier windows recorded" for
+        // a subscription holding weeks of them.
+        let ratedLimited = summaryPayload([
+            (client: "claude", windows: [(card: "session.v1", label: "Session", left: 71)]),
+        ], errorOn: "claude")
+        expect(
+            WindowCardLoader.select(payload: ratedLimited, clientId: "claude") == nil,
+            "QS8 a client whose fetch failed cannot supply the CURRENT window")
+        expect(
+            WindowCardLoader.pickForHistory(
+                payload: ratedLimited, clientId: "claude")?.window.cardId == "session.v1",
+            "QS8 but it can still identify which window the recorded history belongs to")
+
+        // Burn warning. Linear mode so the expectation is arithmetic rather
+        // than a fitted history: a window exactly half elapsed expects 50% used.
+        let burnNow = Date()
+        func burnPayload(
+            _ agents: [(client: String, used: Double, elapsedFraction: Double)]
+        ) -> AgentUsagePayload {
+            let duration: Int64 = 18_000
+            let body = agents.map { agent in
+                let reset = burnNow.addingTimeInterval(
+                    Double(duration) * (1 - agent.elapsedFraction))
+                let iso = ISO8601DateFormatter().string(from: reset)
+                return """
+                {"clientId":"\(agent.client)","source":"oauth","updatedAt":"t","windows":[
+                 {"cardId":"w","label":"Session","usedPercent":\(agent.used),
+                  "remainingPercent":\(100 - agent.used),"resetsAt":"\(iso)",
+                  "durationSeconds":\(duration),"windowMinutes":\(duration / 60),
+                  "paceStatus":{"state":"learningHistory","windowKey":"session.v1",
+                                "durationSeconds":\(duration),"durationSource":"provider",
+                                "completeCycles":1}}]}
+                """
+            }.joined(separator: ",")
+            return try! JSONDecoder().decode(
+                AgentUsagePayload.self,
+                from: Data("""
+                {"generatedAt":"t","publicationGeneration":1,"agents":[\(body)]}
+                """.utf8))
+        }
+
+        // codex is 30 points past its line, claude only 10. The larger deficit
+        // wins even though claude has less left in absolute terms — which is
+        // the whole reason this line exists next to "tightest".
+        let burn = QuotaSummaryFold.build(
+            payload: burnPayload([
+                (client: "claude", used: 60, elapsedFraction: 0.5),
+                (client: "codex", used: 80, elapsedFraction: 0.5),
+            ]),
+            paceMode: .linear, now: burnNow)
+        expect(burn?.tightestClient == "codex",
+               "QS6 control: codex has less remaining, so it is also the tightest here")
+        expect(burn?.burning?.clientId == "codex",
+               "QS6 the largest deficit wins, and the tightest window is not skipped")
+        expect((burn?.burning?.aheadPercent).map { abs($0 - 30) < 0.5 } == true,
+               "QS6 ahead-of-pace is actual minus expected, not actual alone")
+
+        // Under the line is not a warning.
+        expect(
+            QuotaSummaryFold.build(
+                payload: burnPayload([(client: "claude", used: 20, elapsedFraction: 0.5)]),
+                paceMode: .linear, now: burnNow)?.burning == nil,
+            "QS7 a window running under its schedule produces no burn warning")
 
         expect(
             WindowEquivalence.minimumDelta == 5,

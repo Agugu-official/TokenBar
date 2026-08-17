@@ -95,6 +95,21 @@ extension Format {
 
     /// Wall-clock span of a hovered interval. POSIX locale so the string is
     /// stable under test, but the user's own time zone and calendar.
+    /// One instant, always the same width.
+    ///
+    /// `clockRange` drops the date when both ends share a day, which reads well
+    /// in a tooltip about one interval and badly in a list of them: a five-hour
+    /// window crosses midnight often enough that half the rows carried dates
+    /// and half did not, and the two-date form ran to 23 characters and
+    /// truncated. Every cycle of a window is the same length, so the end is
+    /// derivable and the start alone identifies the row.
+    static func windowStamp(ms: Int64) -> String {
+        let stamp = DateFormatter()
+        stamp.locale = Locale(identifier: "en_US_POSIX")
+        stamp.dateFormat = "MM-dd HH:mm"
+        return stamp.string(from: Date(timeIntervalSince1970: Double(ms) / 1000))
+    }
+
     static func clockRange(fromMs: Int64, toMs: Int64) -> String {
         let from = Date(timeIntervalSince1970: Double(fromMs) / 1000)
         let to = Date(timeIntervalSince1970: Double(toMs) / 1000)

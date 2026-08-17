@@ -1,9 +1,12 @@
 import SwiftUI
 import TokenBarCore
 
-/// The classic TokenBar dashboard stack. The all-agent overview leads with
-/// the usage chart, lists every agent's limits and carries the live-session
-/// trace; a single-client tab leads with that client's limits instead.
+/// The usage stack. Leads with the chart, then the live-session trace and the
+/// model breakdown.
+///
+/// Quota lives in its own lens as of 2026-08-17 — the window card and the
+/// Agent-limits card answer one question at two scales, and keeping them here
+/// while the window history sat elsewhere split one subject across two places.
 struct OverviewView: View {
     let payload: UsagePayload
     /// The active tab's client slice (all present clients on Overview).
@@ -14,9 +17,6 @@ struct OverviewView: View {
     var modelLoading = false
     let colors: ModelColorMap
     let trace: [TraceBucket]
-    let agentUsage: AgentUsagePayload?
-    /// Forwarded to AgentLimitsCard; see its `usageAttempted` doc.
-    var usageAttempted = true
     /// Set when this view shows a single client's slice.
     var singleClient: String?
     /// Dashboard year filter (nil = all time), forwarded to the chart card.
@@ -25,55 +25,34 @@ struct OverviewView: View {
     /// (PopoverView) so the dependency is explicit rather than an imperative
     /// `ClientRegistry.hiddenClients()` read in this body.
     var hidden: Set<String> = []
-    /// The selected quota window's card state. Nil only when this is not a
-    /// single-client tab — the card itself is never absent for one.
-    var windowCard: WindowCardState?
-    /// Quota readings per `"<clientId>|<cardId>"`, for the Agent-limits
-    /// sparkline. Empty is a valid state, not an error: it just means every row
-    /// draws the bar instead.
-    var windowCurves: [String: [QuotaSample]] = [:]
-
-
-    /// Master switch: off hides the Agent-limits card everywhere.
-    @AppStorage("tokenbar.limits.enabled") private var limitsEnabled = true
-    /// Per-client Agent-limits visibility, independent of tab visibility.
-    @AppStorage(ClientRegistry.limitsHiddenKey) private var limitsHiddenRaw = ""
-
-    private var hiddenLimits: Set<String> {
-        ClientRegistry.parseIdSet(limitsHiddenRaw)
-    }
+    /// Cross-subscription quota position, folded by the model. Nil means no
+    /// subscription reported a usable window.
+    var quotaSummary: QuotaSummary?
+    /// Whether the first quota fetch has settled, so a nil summary can read as
+    /// "nothing to report" rather than "still asking".
+    var usageAttempted = true
 
     var body: some View {
         VStack(spacing: 12) {
+            // Quota cards moved to the Quota lens (2026-08-17): the window card
+            // and the Agent-limits card answer the same question at two scales,
+            // and having them here while the window history lived elsewhere
+            // split one subject across two lenses. Overview keeps usage.
             if let singleClient {
                 let name = ClientRegistry.style(singleClient).displayName
-                if let windowCard {
-                    // Above the cards below it. A zIndex set inside the card's
-                    // own body orders its children, not the card among its
-                    // siblings here — so the tooltip needs this one too.
-                    WindowUsageCard(state: windowCard).zIndex(1)
-                }
-
-                if limitsEnabled && !hiddenLimits.contains(singleClient) {
-                    AgentLimitsCard(
-                        clients: [singleClient], trace: trace, agentUsage: agentUsage,
-                        usageAttempted: usageAttempted,
-                        title: "%@ limits".localized(name),
-                        note: "Session / weekly / model limits",
-                        restrict: true)
-                }
                 chart
                 ModelBreakdownCard(
                     report: modelReport, clientIds: clientIds, colors: colors,
                     title: "%@ models".localized(name), loading: modelLoading)
             } else {
+                // Leads the all-agent tab: the cross-subscription question the
+                // per-client cards structurally cannot answer, stated once.
+                QuotaSummaryLine(
+                    summary: quotaSummary, attempted: usageAttempted,
+                    today: stats.perDayMap[Format.todayKey()].map {
+                        (tokens: $0.tokens, cost: $0.cost)
+                    })
                 chart
-                if limitsEnabled {
-                    AgentLimitsCard(
-                        clients: clientIds, trace: trace, agentUsage: agentUsage,
-                        usageAttempted: usageAttempted,
-                        reorderable: true, curves: windowCurves)
-                }
                 UsageTraceCard(buckets: trace, windowSecs: 600, hidden: hidden)
                 ModelBreakdownCard(
                     report: modelReport, clientIds: clientIds, colors: colors,

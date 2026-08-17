@@ -388,3 +388,29 @@
 /* ===== 視窗 ===== */
 "TokenBar Settings" = "TokenBar 設定";
 "Sponsor" = "贊助";
+"The Agent limits card is turned off in Settings." = "Agent 額度卡片已在設定中關閉。";
+
+/* ===== 額度歷史 ===== */
+"Window history" = "時間窗歷史";
+"%@ windows" = "%@ 個窗";
+"No earlier windows recorded yet. They accumulate as TokenBar runs." = "尚未記錄到更早的時間窗。TokenBar 執行期間會逐步累積。";
+"TokenBar observed %@%% of this window, so its usage figure is a floor." = "TokenBar 只觀測到這個時間窗的 %@%%，因此用量是下限而非實際值。";
+"Nothing in this window was charged to this subscription." = "這個時間窗內沒有用量記在這個訂閱上。";
+"Other subscriptions in the same hours: %@ · %@" = "同一時段的其他訂閱：%@ · %@";
+"Amounts are API list-price equivalents for usage you declared as %@ — not what the subscription charged." = "金額是你歸類為 %@ 的用量按 API 定價換算的等值，不是訂閱實際收取的費用。";
+
+/* ===== 跨訂閱摘要 ===== */
+"Tightest right now: " = "目前最吃緊：";
+" at %lld%% left" = "，剩餘 %lld%%";
+"%lld other windows, all above %lld%%" = "另外 %1$lld 個時間窗，全部高於 %2$lld%%";
+"%lld of %lld other windows are below %lld%%" = "另外 %2$lld 個時間窗裡有 %1$lld 個低於 %3$lld%%";
+"No subscription is reporting a usage window right now." = "目前沒有任何訂閱回報使用時間窗。";
+"Burning fastest: " = "燒最快：";
+" · %lld%% ahead of pace" = " · 超前步調 %lld%%";
+"Today: %@ tokens · %@" = "今天：%@ tokens · %@";
+"Tightest" = "最吃緊";
+"Burning fastest" = "燒最快";
+"Today" = "今天";
+"%lld%% ahead of pace" = "超前步調 %lld%%";
+"Layout: Chart" = "版面：曲線";
+"Full is the wide card with the pace bar; Classic is the original compact layout without pace; Chart draws each window's quota over time, with the pace estimate as a second line. Chart needs recorded quota history and falls back to a bar for windows that have none." = "Full 是含步調長條的寬版卡片；Classic 是原本不含步調的精簡版面；Chart 把每個時間窗的額度畫成隨時間變化的曲線，步調估計是第二條線。Chart 需要已記錄的額度歷史，沒有歷史的時間窗會退回長條。";

@@ -6,7 +6,12 @@ import TokenBarCore
 /// (Overview/Claude/Codex…, later phase) filters *which* data; this picks
 /// *how* it is broken down. The two compose.
 enum AppView: String, CaseIterable {
-    case overview, models, monthly, daily, hourly, stats, agents
+    /// `quota` sits second because it answers the question `overview` raises:
+    /// the summary says which subscription is tightest, this lens is where that
+    /// subscription's window and its past windows live. Position is product
+    /// order, not an implementation detail — the tab row renders declaration
+    /// order, and `SelfTest` pins it.
+    case overview, quota, models, monthly, daily, hourly, stats, agents
 
     /// Title-cased id, then looked up: the English label doubles as the
     /// translation key, while `rawValue` stays the persisted id.
@@ -1070,6 +1075,38 @@ private struct DashboardSnapshot {
                 windowCards[clientId] = state
             }
         }
+
+        // Cycles follow the scan's client, not every displayed one: the history
+        // is a per-subscription list and only the open tab shows it.
+        if let client = windowUsageClient,
+           let cycles = WindowCardLoader.cycles(
+               payload: agentUsage, clientId: client, curve: readCurve)
+        {
+            quotaCycles = cycles
+            rebuildQuotaHistory()
+        } else if windowUsageClient == nil {
+            quotaCycles = []
+            quotaHistory = []
+        }
+    }
+
+    /// Joins the cycles to the scan, whenever either changes. Cheap enough to
+    /// redo rather than track: the fold is one sorted pass over the scan.
+    private func rebuildQuotaHistory() {
+        guard let client = windowUsageClient, let scan = unionScan,
+              let oldest = quotaCycles.last, scan.covers(start: oldest.startMs)
+        else {
+            quotaHistory = []
+            return
+        }
+        quotaHistory = QuotaHistoryFold.rows(
+            cycles: quotaCycles, messages: scan.messages,
+            // The attribution target for a subscription's own quota is that
+            // subscription's client id: the window came from the provider that
+            // bills it. A row whose usage was declared elsewhere is exactly
+            // what the "other" column exists to show.
+            subscription: client,
+            confirmed: UsageAttribution.confirmed().records)
     }
 
     /// Whose usage bars are actually on screen, or nil on the all-agent
@@ -1085,14 +1122,28 @@ private struct DashboardSnapshot {
     /// this restores that bound without giving up the shared scan.
     var windowUsageClient: String?
 
+    /// Recorded reset cycles of `windowUsageClient`'s selected window, newest
+    /// first. Derived from the persisted curve alone, so it lands with stage 1.
+    private(set) var quotaCycles: [QuotaCycle] = []
+    /// Those cycles joined to what was spent in them. Empty until the scan
+    /// lands; the card shows the cycles with a loading row in the meantime,
+    /// because the quota half is honest on its own and waiting for the usage
+    /// half would hide it for seconds.
+    private(set) var quotaHistory: [QuotaHistoryRow] = []
+
     /// Stage 2. One scan for the open agent tab, which every card for that
     /// client then filters from in memory.
     func refreshWindowUsage() async {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         guard let client = windowUsageClient else { return }
-        guard let from = WindowCardLoader.unionStart(
+        guard let windowStart = WindowCardLoader.unionStart(
             payload: agentUsage, clients: [client], nowMs: now)
         else { return }
+        // The history's oldest cycle CONTAINS the active window, so this widens
+        // one scan rather than issuing a second. Measured 2026-08-16 on live
+        // data: 5.4 days, 45,844 messages, 4.6s — an order of magnitude below
+        // the 14.93-day union this replaced, and paid only on the Quota lens.
+        let from = min(windowStart, quotaCycles.last?.startMs ?? windowStart)
         // Serve the cached scan while it still covers the range and is fresh.
         // Rescanning on every reopen was the whole complaint: the staging made
         // the wait visible, it did not make it rare.
@@ -1105,6 +1156,7 @@ private struct DashboardSnapshot {
         unionScan = UnionScan(
             fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages)
         refreshWindowQuotaHalves()
+        rebuildQuotaHistory()
     }
 
     private func reconcileQuotaRemaining(with payload: AgentUsagePayload) {

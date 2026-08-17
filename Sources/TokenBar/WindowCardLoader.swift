@@ -57,7 +57,28 @@ enum WindowCardLoader {
         guard let agent = payload.agents.first(where: { $0.clientId == clientId }),
               agent.error == nil
         else { return nil }
-        let windows = agent.uniqueCardWindows
+        return pick(windows: agent.uniqueCardWindows, clientId: clientId, chosen: explicit)
+    }
+
+    /// The same choice without the error guard.
+    ///
+    /// `select` refuses a client whose fetch failed, and must: presenting a
+    /// stale window as the one running now is the misreading a user cannot
+    /// correct. History is the opposite case. Those cycles are on disk, a
+    /// rate-limited endpoint does not unwrite them, and the identity of the
+    /// window they belong to is not time-sensitive — so refusing here reported
+    /// "no earlier windows recorded" about a subscription with weeks of them.
+    static func pickForHistory(
+        payload: AgentUsagePayload, clientId: String, chosen explicit: String? = nil
+    ) -> (clientId: String, window: UsageWindow)? {
+        guard let agent = payload.agents.first(where: { $0.clientId == clientId })
+        else { return nil }
+        return pick(windows: agent.uniqueCardWindows, clientId: clientId, chosen: explicit)
+    }
+
+    private static func pick(
+        windows: [UsageWindow], clientId: String, chosen explicit: String?
+    ) -> (clientId: String, window: UsageWindow)? {
         // A selection stored for a different agent is not stale state to clear,
         // it just does not apply here — each tab answers for its own client.
         if let explicit, let sep = explicit.firstIndex(of: "|"),
@@ -222,6 +243,31 @@ enum WindowCardLoader {
     /// the decoder subtracts `durationSeconds` from `resetAt` directly — while
     /// every window bound here is milliseconds. Comparing the two units gives
     /// an empty series that looks exactly like a missing data path.
+    /// Every recorded reset cycle of the window this client currently shows,
+    /// newest first. Reads the RAW curve rather than `curveSamples`, which
+    /// bounds itself to the active window and would therefore return exactly
+    /// the one cycle the history is not about.
+    ///
+    /// Returns nil when the reading could not be obtained, `[]` when it was
+    /// obtained and there is no history — the same distinction, for the same
+    /// reason, as `curveSamples`.
+    static func cycles(
+        payload: AgentUsagePayload?, clientId: String,
+        curve read: (String, String, UInt64) throws -> QuotaCurve?
+    ) -> [QuotaCycle]? {
+        guard let payload,
+              let selected = pickForHistory(
+                  payload: payload, clientId: clientId,
+                  chosen: UserDefaults.standard.string(forKey: selectionKey)),
+              let key = selected.window.paceStatus.windowKey,
+              let generation = payload.publicationGeneration
+        else { return [] }
+        let attempt: QuotaCurve?
+        do { attempt = try read(clientId, key, generation) } catch { return nil }
+        guard let curve = attempt else { return [] }
+        return QuotaHistoryFold.cycles(points: curve.points)
+    }
+
     /// Not private: `AgentLimitsCard`'s sparkline needs the same series for
     /// every window a client offers, not just the one the card selected. Same
     /// function so the two surfaces cannot disagree about which readings belong

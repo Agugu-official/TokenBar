@@ -1,0 +1,126 @@
+import SwiftUI
+import TokenBarCore
+
+/// The all-agent Overview's opening statement: which subscription is closest to
+/// running out, and whether anything else needs looking at.
+///
+/// Prose rather than another card. The quota cards live in the Quota lens now,
+/// and duplicating a smaller one here would put the same question in two places
+/// — which is the arrangement that made this summary necessary in the first
+/// place. A sentence states the position and points at where the detail is.
+struct QuotaSummaryLine: View {
+    let summary: QuotaSummary?
+    /// False while the first quota fetch is outstanding. `summary == nil` alone
+    /// cannot tell "still asking" from "asked and nothing reported a window",
+    /// and only the second may be stated.
+    var attempted = true
+    /// Today's totals, or nil on a day with no recorded usage yet.
+    var today: (tokens: Int64, cost: Double)?
+
+    /// Label column width. Fixed so the three rows align, and wide enough for
+    /// the longest label in both shipped languages.
+    private static let labelWidth: CGFloat = 62
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            if let summary {
+                tightestRow(summary)
+                if let burning = summary.burning { burnRow(burning) }
+                if let today {
+                    row(label: "Today", tint: .secondary) {
+                        Text(verbatim: "\(Format.compactTokens(today.tokens)) tokens · "
+                             + Format.usd(today.cost))
+                            .font(.caption)
+                    }
+                }
+            } else if attempted {
+                Text("No subscription is reporting a usage window right now.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                LoadingLine(title: "Checking agent limits…")
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .glassCard()
+    }
+
+    /// A label and its value, stacked rather than run together in one sentence.
+    ///
+    /// The flowing version wrapped mid-unit — "3 小時 23" then "分 後重置" — and
+    /// there is no way to forbid that for a paragraph on a narrow popover:
+    /// Chinese breaks between any two characters. Splitting each statement into
+    /// short fragments keeps every one of them under a line, which is a layout
+    /// the width cannot break rather than a plea that it will not.
+    @ViewBuilder
+    private func row(
+        label: String, tint: HierarchicalShapeStyle, @ViewBuilder value: () -> some View
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label.localized)
+                .font(.caption2)
+                .foregroundStyle(tint)
+                .frame(width: Self.labelWidth, alignment: .leading)
+                .fixedSize()
+            VStack(alignment: .leading, spacing: 1) { value() }
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func tightestRow(_ summary: QuotaSummary) -> some View {
+        let name = ClientRegistry.style(summary.tightestClient).displayName
+        // Reset text comes from the same helper the quota cards use, so the
+        // countdown here cannot drift from the one shown next to the bar.
+        let reset = summary.resetsAt.flatMap { UsagePace.resetText(for: $0) }
+        return row(label: "Tightest", tint: .secondary) {
+            Text(verbatim: "\(name) · \(summary.tightestLabel.localized)")
+                .font(.system(size: 13, weight: .semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            Text(verbatim: [
+                "%lld%% left".localized(Int(summary.remainingPercent.rounded())),
+                reset,
+            ].compactMap(\.self).joined(separator: " · "))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if summary.otherWindows > 0 {
+                Text(othersText(summary))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    /// The rate line. Amber rather than red: being ahead of schedule is worth
+    /// naming, but it is a projection, and `AgentLimitsCard` owns the actual
+    /// warning thresholds.
+    private func burnRow(_ burning: BurnWarning) -> some View {
+        let name = ClientRegistry.style(burning.clientId).displayName
+        let tail = [burning.riskText, burning.etaText].compactMap(\.self).first
+        return row(label: "Burning fastest", tint: .secondary) {
+            Text(verbatim: "\(name) · \(burning.label.localized)")
+                .font(.caption.weight(.medium))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            Text(verbatim: [
+                "%lld%% ahead of pace".localized(Int(burning.aheadPercent.rounded())),
+                tail,
+            ].compactMap(\.self).joined(separator: " · "))
+                .font(.caption2)
+                .foregroundStyle(.orange)
+        }
+    }
+
+    private func othersText(_ summary: QuotaSummary) -> String {
+        if summary.allOthersComfortable {
+            return "%lld other windows, all above %lld%%".localized(
+                summary.otherWindows, Int(QuotaSummaryFold.comfortablePercent))
+        }
+        return "%lld of %lld other windows are below %lld%%".localized(
+            summary.otherWindows - summary.othersComfortable,
+            summary.otherWindows,
+            Int(QuotaSummaryFold.comfortablePercent))
+    }
+}
