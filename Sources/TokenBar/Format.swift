@@ -37,6 +37,18 @@ enum Format {
         return formatter.string(from: now)
     }
 
+    /// `todayKey` shifted back whole days, in the same `yyyy-MM-dd` shape the
+    /// contributions are keyed and ordered by.
+    ///
+    /// Counted in calendar days through `Calendar`, not by subtracting
+    /// `86_400 * n` seconds: a DST transition makes one of those days 23 or 25
+    /// hours long, and the arithmetic version silently lands on the wrong date
+    /// twice a year.
+    static func dayKey(daysAgo: Int, now: Date = Date()) -> String {
+        let shifted = Calendar.current.date(byAdding: .day, value: -daysAgo, to: now) ?? now
+        return todayKey(now: shifted)
+    }
+
     private static let monthsShort = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun",
         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",

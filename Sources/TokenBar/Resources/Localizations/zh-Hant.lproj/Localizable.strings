@@ -413,3 +413,13 @@
 "%lld%% ahead of pace" = "超前步調 %lld%%";
 "Layout: Chart" = "版面：曲線";
 "Full is the wide card with the pace bar; Classic is the original compact layout without pace; Chart draws each window's quota over time, with the pace estimate as a second line. Chart needs recorded quota history and falls back to a bar for windows that have none." = "Full 是含步調長條的寬版卡片；Classic 是原本不含步調的精簡版面；Chart 把每個時間窗的額度畫成隨時間變化的曲線，步調估計是第二條線。Chart 需要已記錄的額度歷史，沒有歷史的時間窗會退回長條。";
+
+/* ===== 逐訂閱用量 ===== */
+
+/* ===== 逐訂閱每日趨勢 ===== */
+"Daily by subscription" = "每日・依訂閱";
+"since %@" = "自 %@";
+"No usage recorded in this range." = "這個範圍內沒有記錄到用量。";
+"Reading daily usage…" = "正在讀取每日用量…";
+"Unclassified" = "未分類";
+"Cost" = "花費";

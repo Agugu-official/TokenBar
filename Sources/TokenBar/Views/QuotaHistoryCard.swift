@@ -18,6 +18,9 @@ struct QuotaHistoryCard: View {
     /// its quota and a placeholder where the numbers will land, rather than the
     /// whole card waiting.
     let rows: [QuotaHistoryRow]
+    /// The app-wide model palette. Shared so a model is the same colour here as
+    /// in the model breakdown and the usage chart.
+    var colors: ModelColorMap = ModelColorMap(entries: [])
 
     @State private var expanded: Int64?
 
@@ -25,8 +28,9 @@ struct QuotaHistoryCard: View {
     /// not evidence about the window — the app simply was not running for most
     /// of it. Shown, but marked.
     private static let thinObservation = 0.5
-    private static let barWidth: CGFloat = 54
-    private static let barHeight: CGFloat = 5
+    private static let barWidth: CGFloat = 62
+    private static let barHeight: CGFloat = 4
+    private static let barGap: CGFloat = 2
     /// Enough to read a trend without turning the lens into a scroll marathon.
     /// The engine retains 128 cycles, so this is a display choice, not a
     /// storage one — and one worth revisiting if anyone asks for more.
@@ -46,6 +50,7 @@ struct QuotaHistoryCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 let joined = byCycle
+                equivalence
                 VStack(spacing: 0) {
                     ForEach(cycles.prefix(Self.visibleRows), id: \.resetAtMs) { cycle in
                         row(cycle, row: joined[cycle.resetAtMs])
@@ -78,7 +83,7 @@ struct QuotaHistoryCard: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .fixedSize()
-                quotaBar(cycle)
+                bars(cycle, row: row)
                 Text(verbatim: "\(Int(cycle.usedPercent.rounded()))%")
                     .font(.caption2.monospacedDigit())
                     .frame(width: 30, alignment: .trailing)
@@ -104,16 +109,61 @@ struct QuotaHistoryCard: View {
         .padding(.vertical, 5)
     }
 
-    /// Fixed 0...100, matching the window card: the whole point of a history is
-    /// comparing cycles to each other and to the ceiling, and a bar rescaled to
-    /// the largest row would make a 3% window and a 58% one look alike.
-    private func quotaBar(_ cycle: QuotaCycle) -> some View {
+    /// Two bars, stacked and deliberately NOT sharing a scale.
+    ///
+    /// Quota and tokens are not proportional. Measured on live data, one window
+    /// moved 1% of the allowance while carrying 18.0M attributed tokens and
+    /// another moved 9% carrying 22.8M — a 5x difference in tokens per point.
+    /// Putting them on one bar, or on one axis, would draw a relationship that
+    /// is not there. Adjacent and separately scaled, the mismatch between the
+    /// two lengths is legible instead of hidden, and that mismatch is the thing
+    /// this card exists to expose.
+    private func bars(_ cycle: QuotaCycle, row: QuotaHistoryRow?) -> some View {
+        VStack(alignment: .leading, spacing: Self.barGap) {
+            // Fixed 0...100, matching the window card: the point of a history is
+            // comparing cycles to each other and to the ceiling, and rescaling
+            // to the largest row would make a 3% window and a 58% one look
+            // alike.
+            ZStack(alignment: .leading) {
+                Capsule().fill(.quaternary.opacity(0.6))
+                Capsule()
+                    .fill(Color.accentColor.opacity(
+                        cycle.observedFraction < Self.thinObservation ? 0.35 : 0.85))
+                    .frame(width: Self.barWidth * min(1, cycle.usedPercent / 100))
+            }
+            .frame(width: Self.barWidth, height: Self.barHeight)
+
+            // Relative to the heaviest window on screen, segmented by model in
+            // the app's shared palette. An empty strip is a real answer: this
+            // window consumed allowance but nothing was declared as this
+            // subscription's.
+            usageBar(row)
+        }
+    }
+
+    /// The largest attributed token count among the visible rows, and therefore
+    /// the usage bar's full width. Nil when nothing has been scanned yet.
+    private var usageScale: Int64? {
+        let peak = rows.map(\.mineTokens).max() ?? 0
+        return peak > 0 ? peak : nil
+    }
+
+    @ViewBuilder
+    private func usageBar(_ row: QuotaHistoryRow?) -> some View {
         ZStack(alignment: .leading) {
-            Capsule().fill(.quaternary.opacity(0.6))
-            Capsule()
-                .fill(Color.accentColor.opacity(
-                    cycle.observedFraction < Self.thinObservation ? 0.35 : 0.85))
-                .frame(width: Self.barWidth * min(1, cycle.usedPercent / 100))
+            Capsule().fill(.quaternary.opacity(0.35))
+            if let row, let scale = usageScale, row.mineTokens > 0 {
+                let full = Self.barWidth * min(1, Double(row.mineTokens) / Double(scale))
+                HStack(spacing: 0) {
+                    ForEach(row.models) { model in
+                        Rectangle()
+                            .fill(Color(hex: colors.color(model.providerId, model.modelId)))
+                            .frame(width: full * Double(model.tokens) / Double(row.mineTokens))
+                    }
+                }
+                .frame(width: full, alignment: .leading)
+                .clipShape(Capsule())
+            }
         }
         .frame(width: Self.barWidth, height: Self.barHeight)
     }
@@ -170,6 +220,32 @@ struct QuotaHistoryCard: View {
         .padding(.leading, 16)
         .padding(.top, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// What a tenth of this window's allowance has been worth, taken across
+    /// every cycle on screen rather than one.
+    ///
+    /// Placed above the rows because it is the summary of them: a single row's
+    /// ratio is dominated by the 1-point reading quantisation, and the whole
+    /// reason to accumulate is that the individual figures cannot be trusted.
+    @ViewBuilder
+    private var equivalence: some View {
+        let shown = Set(cycles.prefix(Self.visibleRows).map(\.resetAtMs))
+        let counted = rows.filter { shown.contains($0.id) }
+        if !counted.isEmpty {
+            Text(WindowEquivalence.text(
+                WindowEquivalence.aggregate(
+                    sumDeltaPercent: counted.reduce(0) { $0 + $1.cycle.usedPercent },
+                    cycleCount: counted.count,
+                    tokens: counted.reduce(0) { $0 + $1.mineTokensExCacheRead },
+                    cost: counted.reduce(0) { $0 + $1.mineCost }),
+                tokens: Format.compactTokens, money: Format.usd))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 2)
+        }
     }
 
     private var footnote: some View {

@@ -29,6 +29,13 @@ public enum WindowEquivalence {
         case unaccounted(deltaPercent: Double)
         /// Fewer than two samples inside the window, so no Δ exists at all.
         case unavailable
+
+        /// Whether an estimate was actually produced. Named so assertions can
+        /// state the admission rule without re-deriving it from a pattern match.
+        public var isRatio: Bool {
+            if case .ratio = self { return true }
+            return false
+        }
     }
 
     /// The row as displayed. A pure function because the alternative — format
@@ -83,6 +90,46 @@ public enum WindowEquivalence {
         return .ratio(
             tokensPerTenth: Int64((Double(tokens) / delta * 10).rounded()),
             costPerTenth: cost / delta * 10,
+            errorPercent: error)
+    }
+
+    /// The same ratio taken across several completed cycles instead of one.
+    ///
+    /// A single window's ratio is unstable — measured on live data, two windows
+    /// of the same kind on the same subscription differed 6.4x — because a
+    /// 1-point quantisation on a small delta dominates. Summing cycles grows
+    /// the denominator and shrinks that: 18 recorded sessions accumulated 251
+    /// points, against which half a point is noise.
+    ///
+    /// The error term is the SAME derivation, not a second one. Each cycle's
+    /// delta carries the quantisation half-step, so N cycles carry `0.5 * N`,
+    /// summed linearly rather than in quadrature. Linear overstates the error
+    /// when the roundings are independent, which they almost certainly are —
+    /// and overstating it is the safe direction for a figure a user might plan
+    /// against.
+    ///
+    /// The admission gate follows from that and nothing else: requiring the
+    /// error to stay inside `tolerance` gives `sumDelta >= minimumDelta * N`,
+    /// which for one cycle is exactly the existing `delta >= 5`.
+    ///
+    /// `tokens` must already exclude cache reads and be attributed to this
+    /// subscription, matching `row(samples:messages:)`. `cycleCount` is the
+    /// number of cycles whose deltas were summed, not the number of samples.
+    public static func aggregate(
+        sumDeltaPercent: Double, cycleCount: Int, tokens: Int64, cost: Double
+    ) -> Row {
+        guard cycleCount > 0 else { return .unavailable }
+        guard sumDeltaPercent > 0 else { return .notMoved }
+
+        let error = Int(
+            (quantisationHalfStep * Double(cycleCount) / sumDeltaPercent * 100).rounded())
+        guard tokens > 0 else { return .unaccounted(deltaPercent: sumDeltaPercent) }
+        guard sumDeltaPercent >= minimumDelta * Double(cycleCount) else {
+            return .insufficient(deltaPercent: sumDeltaPercent, errorPercent: error)
+        }
+        return .ratio(
+            tokensPerTenth: Int64((Double(tokens) / sumDeltaPercent * 10).rounded()),
+            costPerTenth: cost / sumDeltaPercent * 10,
             errorPercent: error)
     }
 }

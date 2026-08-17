@@ -10981,8 +10981,9 @@ enum SelfTest {
                "QH5 a message exactly on a reset joins the cycle that reset OPENS")
         expect(qhRows.reduce(0) { $0 + $1.mineTokens + $1.otherTokens } == 520,
                "QH6 every message lands in exactly one cycle, so nothing double counts")
-        expect(older.models.map(\.modelId) == ["opus"],
-               "QH7 the model breakdown covers this subscription only")
+        expect(older.models.map(\.modelId) == ["opus"]
+                   && older.models.map(\.providerId) == ["anthropic"],
+               "QH7 the model breakdown covers this subscription only, provider included")
 
         expect(QuotaHistoryFold.lowerBound([10, 20, 20, 30], 20) == 1,
                "QH8 lower bound finds the FIRST equal element, not any of them")
@@ -11141,6 +11142,133 @@ enum SelfTest {
                 payload: burnPayload([(client: "codex", used: 80, elapsedFraction: 0.5)]),
                 paceMode: .off, now: burnNow)?.tightestClient == "codex",
             "QS9 and the tightest line survives, because it is not a projection")
+
+        // The burn line correctly never fires on this machine's live data —
+        // measured, every window runs under its expected line. That makes
+        // "works" and "broken" the same picture for anyone looking at the app,
+        // so it has to be observable somewhere. `--demo` is that somewhere:
+        // the shipped fixture carries a session window at 72% used against a
+        // historical expectation of 35%. If this check ever fails, demo mode
+        // has stopped being able to show the feature at all.
+        let demoBurn = QuotaSummaryFold.build(
+            payload: DemoData.agentUsage, paceMode: .historical)
+        expect(demoBurn?.burning != nil,
+               "QS10 the demo payload fires the burn line, so the feature is observable")
+        expect((demoBurn?.burning?.aheadPercent).map { abs($0 - 37) < 0.5 } == true,
+               "QS10 and it reports +37 ahead, the fixture's actual 72 minus 35")
+
+        // MARK: aggregate quota equivalence (AE)
+        //
+        // A single window's ratio is dominated by the 1-point reading
+        // quantisation — two windows of the same kind measured 6.4x apart.
+        // Accumulating cycles is the fix, and the error term has to follow the
+        // SAME derivation as the single-window one rather than being a second
+        // rule invented for the aggregate.
+
+        // 18 cycles accumulating 251 points against 1.0B cache-read-excluded
+        // tokens and $500. Expectations computed by hand, not from the code.
+        if case let .ratio(tokens, cost, error) = WindowEquivalence.aggregate(
+            sumDeltaPercent: 251, cycleCount: 18, tokens: 1_000_000_000, cost: 500)
+        {
+            expect(tokens == 39_840_637,
+                   "AE1 a tenth of the allowance is tokens / sumDelta * 10")
+            expect(abs(cost - 19.920) < 0.001,
+                   "AE1 and the same division carries the cost")
+            expect(error == 4,
+                   "AE1 error is 0.5 * cycles / sumDelta, so 18 cycles over 251 points is 4%")
+        } else {
+            expect(false, "AE1 251 points across 18 cycles clears the gate")
+        }
+
+        // The gate generalises `delta >= 5`, it does not replace it. One cycle
+        // must behave exactly as `row(samples:messages:)` does.
+        expect(
+            WindowEquivalence.aggregate(
+                sumDeltaPercent: 5, cycleCount: 1, tokens: 100, cost: 1).isRatio,
+            "AE2 one cycle at exactly the minimum delta is admitted, as before")
+        expect(
+            !WindowEquivalence.aggregate(
+                sumDeltaPercent: 4.9, cycleCount: 1, tokens: 100, cost: 1).isRatio,
+            "AE2 and just under it is not")
+        // 20 cycles need 100 points between them, not 5.
+        expect(
+            !WindowEquivalence.aggregate(
+                sumDeltaPercent: 99, cycleCount: 20, tokens: 100, cost: 1).isRatio,
+            "AE3 more cycles carry more quantisation, so the bar rises with them")
+        expect(
+            WindowEquivalence.aggregate(
+                sumDeltaPercent: 100, cycleCount: 20, tokens: 100, cost: 1).isRatio,
+            "AE3 and clearing it at 5 points per cycle admits the estimate")
+
+        expect(
+            WindowEquivalence.aggregate(
+                sumDeltaPercent: 0, cycleCount: 3, tokens: 100, cost: 1) == .notMoved,
+            "AE4 quota that never moved is its own answer, not a division by zero")
+        expect(
+            WindowEquivalence.aggregate(
+                sumDeltaPercent: 60, cycleCount: 3, tokens: 0, cost: 0)
+                == .unaccounted(deltaPercent: 60),
+            "AE4 quota moved with nothing recorded locally is not `1% is free`")
+        expect(
+            WindowEquivalence.aggregate(
+                sumDeltaPercent: 60, cycleCount: 0, tokens: 10, cost: 1) == .unavailable,
+            "AE4 no cycles means no estimate at all")
+
+        // MARK: daily trend by subscription (ST)
+
+        func seriesPoint(_ date: String, _ state: UsageAttribution.State,
+                         _ model: String, _ tokens: Int64, _ cost: Double)
+            -> AttributedDailySeries.Point
+        {
+            AttributedDailySeries.Point(
+                date: date, state: state, model: model, tokens: tokens, cost: cost)
+        }
+
+        let stTrend = SubscriptionTrendFold.build(
+            points: [
+                seriesPoint("2026-08-14", .assigned("codex"), "sol", 900, 90),
+                seriesPoint("2026-08-14", .assigned("claude"), "opus", 100, 10),
+                // 08-15 is deliberately absent: an idle day.
+                seriesPoint("2026-08-16", .assigned("claude"), "opus", 300, 30),
+                seriesPoint("2026-08-16", .unassigned, "mystery", 50, 5),
+                seriesPoint("2026-08-16", .excluded, "bench", 999, 999),
+                seriesPoint("2026-08-01", .assigned("codex"), "sol", 700, 70),
+            ],
+            today: "2026-08-16", days: 3)
+
+        expect(stTrend.days.map(\.date) == ["2026-08-14", "2026-08-15", "2026-08-16"],
+               "ST1 idle days are present as empty columns, so the axis does not compress time")
+        expect(stTrend.days[1].isEmpty,
+               "ST1 and the day with no rows is empty rather than absent")
+        expect(stTrend.days[0].byTarget["codex"]?.cost == 90,
+               "ST2 each day keeps its own per-subscription split")
+        expect(stTrend.days[2].byTarget[SubscriptionTrendFold.unassignedTarget]?.tokens == 50,
+               "ST3 unclassified usage is its own band, never dropped or merged")
+        expect(stTrend.days[2].byTarget["bench"] == nil && stTrend.days[2].totalCost == 35,
+               "ST3 declared-excluded usage IS dropped, which is what declaring it meant")
+        expect(stTrend.days.allSatisfy { $0.date >= "2026-08-14" },
+               "ST4 a point older than the range is outside it, so 08-01 is not counted")
+        expect(stTrend.targets == ["codex", "claude", SubscriptionTrendFold.unassignedTarget],
+               "ST5 stacking order is by total cost, so the biggest payer is the base")
+        expect(stTrend.peakCost == 100,
+               "ST6 the peak is a DAY total, not the range total")
+
+        // A DST-safe walk, checked against a transition the arithmetic version
+        // gets wrong: 2026-11-01 is the US fall-back day.
+        expect(SubscriptionTrendFold.calendarRange(endingAt: "2026-11-02", count: 3)
+                == ["2026-10-31", "2026-11-01", "2026-11-02"],
+               "ST7 the range walks calendar days, so a 25-hour day is still one day")
+
+        // MARK: day keys (SU5)
+
+        // Calendar days, not 86_400-second multiples — the arithmetic version
+        // lands on the wrong date across a DST transition.
+        expect(Format.dayKey(daysAgo: 0) == Format.todayKey(),
+               "SU5 zero days ago is today")
+        expect(Format.dayKey(
+            daysAgo: 1,
+            now: Date(timeIntervalSince1970: 1_775_000_000)) == "2026-03-31",
+               "SU5 one day back from 2026-04-01 07:33 local is 2026-03-31")
 
         // MARK: limits layout (LL)
         //

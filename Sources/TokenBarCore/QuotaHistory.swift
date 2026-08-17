@@ -44,6 +44,11 @@ public struct QuotaHistoryRow: Equatable, Sendable, Identifiable {
     public let cycle: QuotaCycle
     /// Attributed to THIS subscription — the number the quota bar is about.
     public let mineTokens: Int64
+    /// The same total with cache reads removed, which is what the quota
+    /// equivalence divides by. `WindowEquivalence.row` already excludes them;
+    /// carrying it here keeps the aggregate over many cycles on the same basis
+    /// as the single-window figure rather than quietly using a fuller total.
+    public let mineTokensExCacheRead: Int64
     public let mineCost: Double
     /// Everything else recorded in the same interval, summed. Not noise: it is
     /// the answer to "the window barely moved, so where did the work go".
@@ -57,14 +62,32 @@ public struct QuotaHistoryRow: Equatable, Sendable, Identifiable {
 }
 
 public struct QuotaHistoryModel: Equatable, Sendable, Identifiable {
+    /// Carried alongside the model because `ModelColorMap.color` keys on the
+    /// pair. Without it the segments here would be coloured by a different rule
+    /// than the same models in the model breakdown and the usage chart, and one
+    /// model would be two colours depending on which card you were looking at.
+    public let providerId: String
     public let modelId: String
     public let tokens: Int64
     public let cost: Double
 
-    public var id: String { modelId }
+    public var id: String { "\(providerId)|\(modelId)" }
 }
 
 public enum QuotaHistoryFold {
+    /// Grouping key for the model breakdown. The pair, not the model alone:
+    /// the same model id reached through two providers is two rows everywhere
+    /// else in this app, and collapsing them here would make this card the one
+    /// place that disagrees.
+    public struct ModelKey: Hashable {
+        public let providerId: String
+        public let modelId: String
+        public init(providerId: String, modelId: String) {
+            self.providerId = providerId
+            self.modelId = modelId
+        }
+    }
+
     /// Groups curve points into cycles, newest first.
     ///
     /// `durationSeconds` is per point rather than per cycle, so the cycle's
@@ -119,9 +142,9 @@ public enum QuotaHistoryFold {
             // misfiling.
             let lo = lowerBound(stamps, cycle.startMs)
             let hi = lowerBound(stamps, cycle.resetAtMs)
-            var mine = (tokens: Int64(0), cost: 0.0)
+            var mine = (tokens: Int64(0), exCacheRead: Int64(0), cost: 0.0)
             var other = (tokens: Int64(0), cost: 0.0)
-            var byModel: [String: (tokens: Int64, cost: Double)] = [:]
+            var byModel: [ModelKey: (tokens: Int64, cost: Double)] = [:]
 
             for message in sorted[lo..<max(lo, hi)] {
                 let state = UsageAttribution.resolve(
@@ -129,9 +152,12 @@ public enum QuotaHistoryFold {
                     model: nil, records: confirmed)
                 if case let .assigned(target) = state, target == subscription {
                     mine.tokens += message.tokens
+                    mine.exCacheRead += message.tokens - message.cacheRead
                     mine.cost += message.cost
-                    let current = byModel[message.modelId] ?? (0, 0)
-                    byModel[message.modelId] = (
+                    let key = ModelKey(
+                        providerId: message.providerId, modelId: message.modelId)
+                    let current = byModel[key] ?? (0, 0)
+                    byModel[key] = (
                         current.tokens + message.tokens, current.cost + message.cost)
                 } else {
                     other.tokens += message.tokens
@@ -141,11 +167,15 @@ public enum QuotaHistoryFold {
 
             return QuotaHistoryRow(
                 cycle: cycle,
-                mineTokens: mine.tokens, mineCost: mine.cost,
+                mineTokens: mine.tokens, mineTokensExCacheRead: mine.exCacheRead,
+                mineCost: mine.cost,
                 otherTokens: other.tokens, otherCost: other.cost,
                 models: byModel
-                    .map { QuotaHistoryModel(modelId: $0.key, tokens: $0.value.tokens,
-                                             cost: $0.value.cost) }
+                    .map {
+                        QuotaHistoryModel(
+                            providerId: $0.key.providerId, modelId: $0.key.modelId,
+                            tokens: $0.value.tokens, cost: $0.value.cost)
+                    }
                     .sorted { $0.tokens > $1.tokens })
         }
     }

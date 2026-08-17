@@ -58,6 +58,21 @@ struct PopoverView: View {
     /// Observed so the Overview summary's projection follows the same setting
     /// the Agent-limits card obeys, live rather than on the next reopen.
     @AppStorage("tokenbar.limits.paceMode") private var paceModeRaw = PaceMode.historical.rawValue
+    /// Observed, not read: a computed `UserDefaults` read is not a view
+    /// dependency, so saving a classification in Settings would leave this
+    /// split stale until something unrelated rebuilt the body. Same reasoning
+    /// as `UsageAttributionBreakdownCard`, which learned it the hard way.
+    @AppStorage(UsageAttribution.confirmedKey) private var attributionRaw = ""
+
+    /// Owns the attributed daily series. Mounted here for the reason its own
+    /// doc comment gives: its timezone provenance is process-scoped, and the
+    /// model expects to be `@State` on this view.
+    @State private var series = AttributedSeriesModel()
+
+    /// How many calendar days the trend covers. Two weeks reads as a rhythm
+    /// without turning each column into a sliver at popover width.
+    private static let trendDays = 14
+
 
     private var activeView: Binding<AppView> {
         Binding(
@@ -251,6 +266,14 @@ struct PopoverView: View {
         }
         .task { await model.pollTrace() }
         .task { await model.pollGraph() }
+        // Keyed on the declarations too: re-splitting the stack is the whole
+        // point of the card, and a classification saved in Settings has to
+        // reach it without waiting for a poll.
+        .task(id: attributionRaw) {
+            await series.load(
+                source: UsageDataSources.current,
+                confirmed: UsageAttribution.parseRaw(attributionRaw).records)
+        }
         .onAppear {
             installKeyMonitors()
             // `--tab=` must win even after activeTab is persisted (@AppStorage
@@ -593,7 +616,17 @@ struct PopoverView: View {
                     // for nothing.
                     windowCurves: singleClient == nil ? model.windowCurves : [:],
                     windowCard: singleClient.flatMap { model.windowCards[$0] },
-                    quotaCycles: model.quotaCycles, quotaHistory: model.quotaHistory)
+                    quotaCycles: model.quotaCycles, quotaHistory: model.quotaHistory,
+                    colors: model.colors,
+                    // Folded from the series model rather than from the raw
+                    // payload: that model refuses to publish day buckets built
+                    // under a timezone it cannot vouch for, and calling the
+                    // fold directly would silently skip that check.
+                    trend: series.points.map {
+                        SubscriptionTrendFold.build(
+                            points: $0, today: Format.todayKey(),
+                            days: Self.trendDays)
+                    })
             case .models:
                 ModelsView(
                     report: model.modelReport, clientIds: clientIds, colors: model.colors,

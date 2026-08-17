@@ -25,6 +25,11 @@ struct QuotaView: View {
     var quotaCycles: [QuotaCycle] = []
     /// Those cycles joined to local usage; empty while the scan is out.
     var quotaHistory: [QuotaHistoryRow] = []
+    /// Shared model palette, so a model keeps one colour across the app.
+    var colors: ModelColorMap = ModelColorMap(entries: [])
+    /// Daily spend stacked by declared subscription, for the all-agent view.
+    /// Nil until the graph payload has been folded.
+    var trend: SubscriptionTrend?
 
     @AppStorage("tokenbar.limits.enabled") private var limitsEnabled = true
 
@@ -46,17 +51,18 @@ struct QuotaView: View {
                         restrict: true)
                 }
                 QuotaHistoryCard(
-                    clientId: singleClient, cycles: quotaCycles, rows: quotaHistory)
-            } else if limitsEnabled {
-                AgentLimitsCard(
-                    clients: clientIds, trace: trace, agentUsage: agentUsage,
-                    usageAttempted: usageAttempted,
-                    reorderable: true, curves: windowCurves)
+                    clientId: singleClient, cycles: quotaCycles,
+                    rows: quotaHistory, colors: colors)
             } else {
-                Text("The Agent limits card is turned off in Settings.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                // Trend first: it answers "where is my spend going" across
+                // subscriptions, which the window-by-window card below cannot.
+                SubscriptionTrendCard(trend: trend, attempted: usageAttempted)
+                if limitsEnabled {
+                    AgentLimitsCard(
+                    clients: clientIds, trace: trace, agentUsage: agentUsage,
+                        usageAttempted: usageAttempted,
+                        reorderable: true, curves: windowCurves)
+                }
             }
         }
     }

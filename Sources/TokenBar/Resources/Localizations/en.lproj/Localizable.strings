@@ -82,3 +82,15 @@
 "Today" = "Today";
 "%lld%% ahead of pace" = "%lld%% ahead of pace";
 "Layout: Chart" = "Layout: Chart";
+
+/* ===== per-subscription usage ===== */
+"Loading usage…" = "Loading usage…";
+
+/* ===== daily trend by subscription ===== */
+"Daily by subscription" = "Daily by subscription";
+"since %@" = "since %@";
+"No usage recorded in this range." = "No usage recorded in this range.";
+"Reading daily usage…" = "Reading daily usage…";
+"Unclassified" = "Unclassified";
+"Cost" = "Cost";
+"Tokens" = "Tokens";
