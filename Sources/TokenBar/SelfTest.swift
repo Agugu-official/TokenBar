@@ -11438,6 +11438,30 @@ enum SelfTest {
             now: Date(timeIntervalSince1970: 1_775_000_000)) == "2026-03-31",
                "SU5 one day back from 2026-04-01 07:33 local is 2026-03-31")
 
+        // MARK: Overview composition (OC)
+        //
+        // The Agent-limits card was moved off Overview and back, which is the
+        // behaviour these pin: what a fresh install sees must not change
+        // because someone reorganised a lens, and the anchor must survive a
+        // hand-edited preference for the same reason `AppView`'s does.
+        expect(OverviewCard.allCases.map(\.rawValue)
+                == ["quotaSummary", "chart", "limits", "trace", "models", "streaks"],
+               "OC1 the usage chart precedes the limits card, as it did before the move")
+        expect(OverviewCard.visible(hiddenRaw: "") == OverviewCard.allCases,
+               "OC2 the default shows every card, so an upgrade changes nothing")
+        expect(OverviewCard.visible(hiddenRaw: "limits,trace")
+                == OverviewCard.allCases.filter { $0 != .limits && $0 != .trace },
+               "OC2 hiding two removes exactly those two, order otherwise unchanged")
+        expect(!OverviewCard.toggleable.contains(.chart),
+               "OC3 the usage chart is an anchor, matching AppView's rule for Overview")
+        expect(OverviewCard.visible(hiddenRaw: "chart").contains(.chart),
+               "OC3 and a tampered preference cannot empty the lens everything falls back to")
+        expect(OverviewCard.visible(
+                hiddenRaw: OverviewCard.allCases.map(\.rawValue).joined(separator: ",")
+               ) == [.chart],
+               "OC3 hiding literally everything still leaves the anchor")
+        expect(OverviewCard.hiddenKey == "tokenbar.overview.hidden",
+               "OC4 the key is declared once, on the type that owns it")
 
         // MARK: limits layout (LL)
         //
@@ -11517,6 +11541,13 @@ enum SelfTest {
             trendHand.map { abs($0.projectedUsedPercent - 60) < 1e-9 } == true,
                 "quota trend: hand-computed projection 50 + 0.5*0.2*100 = 60")
         expect(trendHand?.direction == .rising, "quota trend: a positive recent slope is rising")
+        // The row prints this, not the projection: what the current slope still
+        // costs between now and reset. It must be the projection minus the
+        // reading it was projected from, or the number on screen and the number
+        // in the tooltip describe different windows.
+        expect(
+            trendHand.map { abs($0.projectedDeltaPercent - 10) < 1e-9 } == true,
+            "quota trend: the printed delta is the projection minus the current reading")
 
         // The grok case that motivates the whole design: lifetime-average
         // ratio is the highest of the measured windows, but the recent slope

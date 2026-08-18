@@ -23,6 +23,15 @@ struct QuotaHistoryStripCard: View {
     /// the same as one that was never recorded, and a bar rounding to zero
     /// height would make them identical.
     private static let minimumInk: CGFloat = 1
+    private static let tooltipWidth: CGFloat = 168
+
+    @State private var cardFrame: CGRect = .zero
+    /// Which window and which bar in it. Kept together so a stale window id can
+    /// never pair with a live bar index.
+    @State private var hover: (window: String, index: Int)?
+    @State private var hoverAnchorInCard: CGPoint = .zero
+    @State private var tooltipSize: CGSize = .zero
+    @Environment(\.popoverScrollViewport) private var viewport
 
     var body: some View {
         DashCard("Past windows", subtitle: subtitle) {
@@ -41,6 +50,51 @@ struct QuotaHistoryStripCard: View {
             } else {
                 LoadingLine(title: "Reading quota history…")
             }
+        }
+        .overlay(alignment: .topLeading) { tooltipLayer }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { cardFrame = $0 }
+        .zIndex(hover == nil ? 0 : 1)
+    }
+
+    @ViewBuilder
+    private var tooltipLayer: some View {
+        if let hover, cardFrame != .zero,
+           let summary = summaries.first(where: { $0.id == hover.window }),
+           summary.recent.indices.contains(hover.index)
+        {
+            let value = summary.recent[hover.index]
+            // The strip is oldest-to-newest, so counting back from the end is
+            // what turns a bar into "how many windows ago".
+            let ago = summary.recent.count - 1 - hover.index
+            VStack(alignment: .leading, spacing: 3) {
+                Text(verbatim: "\(ClientRegistry.style(summary.clientId).displayName) · "
+                     + summary.windowLabel.localized)
+                    .font(.caption2.weight(.semibold))
+                Text(ago == 0 ? "Most recent window".localized
+                              : "%@ windows ago".localized(String(ago)))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                Text("Consumed %@%% of the allowance".localized(
+                    String(Int(value.rounded()))))
+                    .font(.caption2)
+                if value >= QuotaOverviewFold.exhaustedPercent {
+                    Text("Ran out")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.orange)
+                }
+            }
+            .padding(8)
+            .frame(width: Self.tooltipWidth, alignment: .leading)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { tooltipSize = $0 }
+            .offset(
+                PopoverTooltipPlacement.offset(
+                    anchor: hoverAnchorInCard,
+                    tooltipSize: tooltipSize == .zero
+                        ? CGSize(width: Self.tooltipWidth, height: 72) : tooltipSize,
+                    containerFrame: cardFrame, viewport: viewport) ?? .zero)
+            .allowsHitTesting(false)
         }
     }
 
@@ -98,6 +152,7 @@ struct QuotaHistoryStripCard: View {
                     let height = max(
                         Self.minimumInk, size.height * CGFloat(min(1, value / 100)))
                     let isLatest = index == summary.recent.count - 1
+                    let isHovered = hover?.window == summary.id && hover?.index == index
                     context.fill(
                         Path(CGRect(
                             x: CGFloat(index) * (barWidth + Self.barGap),
@@ -105,7 +160,24 @@ struct QuotaHistoryStripCard: View {
                             width: barWidth, height: height)),
                         // The newest cycle is the one being asked about; the
                         // rest are context, so they recede.
-                        with: .color(.accentColor.opacity(isLatest ? 0.9 : 0.35)))
+                        with: .color(.accentColor.opacity(
+                            isHovered ? 0.95 : (isLatest ? 0.86 : 0.32))))
+                }
+            }
+            .contentShape(Rectangle())
+            .onContinuousHover { phase in
+                switch phase {
+                case let .active(point):
+                    let pitch = barWidth + Self.barGap
+                    let index = pitch > 0 ? Int(point.x / pitch) : 0
+                    guard summary.recent.indices.contains(index) else { hover = nil; break }
+                    hover = (summary.id, index)
+                    let strip = proxy.frame(in: .global)
+                    hoverAnchorInCard = CGPoint(
+                        x: CGFloat(index) * pitch + barWidth + strip.minX - cardFrame.minX,
+                        y: point.y + strip.minY - cardFrame.minY)
+                case .ended:
+                    hover = nil
                 }
             }
         }

@@ -92,7 +92,6 @@
 "No usage recorded in this range." = "No usage recorded in this range.";
 "Reading daily usage…" = "Reading daily usage…";
 "Unclassified" = "Unclassified";
-"Cost" = "Cost";
 "Tokens" = "Tokens";
 /* ===== quota window trend ===== */
 "%lld%%" = "%lld%%";
@@ -108,3 +107,27 @@
 "Pace" = "Pace";
 "Every window is running under its expected pace" = "Every window is running under its expected pace";
 "10%% of quota ~ %@-%@ · %@-%@ API-equivalent" = "10%% of quota ~ %@-%@ · %@-%@ API-equivalent";
+
+/* ===== overview composition ===== */
+"Overview cards" = "Overview cards";
+"Quota summary" = "Quota summary";
+"Limits" = "Limits";
+"Chart" = "Chart";
+"Trace" = "Trace";
+"Streaks" = "Streaks";
+"Which cards the Overview lens shows, in this order. The usage chart cannot be hidden — Overview is where every hidden lens falls back to, so it has to keep something. Cost and token data are unaffected." = "Which cards the Overview lens shows, in this order. The usage chart cannot be hidden — Overview is where every hidden lens falls back to, so it has to keep something. Cost and token data are unaffected.";
+"by reset %lld%%" = "by reset %lld%%";
+"No usage this day" = "No usage this day";
+"Most recent window" = "Most recent window";
+"%@ windows ago" = "%@ windows ago";
+"Consumed %@%% of the allowance" = "Consumed %@%% of the allowance";
+"Ran out" = "Ran out";
+"Consuming now · at this rate it runs out before reset (projected %lld%% used)" = "Consuming now · at this rate it runs out before reset (projected %lld%% used)";
+"Consuming now · at this rate it reaches %lld%% used by reset" = "Consuming now · at this rate it reaches %lld%% used by reset";
+"Recent consumption" = "Recent consumption";
+"At this rate it runs out before reset · projected %lld%% used" = "At this rate it runs out before reset · projected %lld%% used";
+"At this rate it reaches %lld%% used by reset" = "At this rate it reaches %lld%% used by reset";
+"The pace line beside it compares you with your usual pattern instead." = "The pace line beside it compares you with your usual pattern instead.";
+"%@ used" = "%@ used";
+"%@ less left" = "%@ less left";
+"%@ more left" = "%@ more left";

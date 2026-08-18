@@ -72,6 +72,7 @@ struct SettingsPanel: View {
     @State private var autostartMutationCommitted = false
     @AppStorage("tokenbar.limits.enabled") private var limitsEnabled = true
     @AppStorage("tokenbar.views.hidden") private var hiddenViewsRaw = ""
+    @AppStorage(OverviewCard.hiddenKey) private var overviewHiddenRaw = ""
     @AppStorage("tokenbar.limits.asUsed") private var limitsAsUsed = false
     @AppStorage("tokenbar.limits.paceMode") private var paceModeRaw = PaceMode.historical.rawValue
     @AppStorage("tokenbar.limits.layout") private var layoutRaw = LimitsLayout.full.rawValue
@@ -440,6 +441,35 @@ struct SettingsPanel: View {
                     hint("Hides only that client's quota card here and on its own tab — the tab and its cost/token data stay visible. Useful for accounts with no OAuth quota (e.g. Claude Console). Grayed out when the tab itself is hidden below, since a hidden tab always hides its quota card too.")
                 }
             }
+        }
+
+        section("Overview cards") {
+            let hiddenCards = ClientRegistry.parseIdSet(overviewHiddenRaw)
+            VStack(spacing: 1) {
+                ForEach(OverviewCard.toggleable, id: \.self) { card in
+                    HStack {
+                        Text(card.label.localized)
+                            .font(.caption)
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { !hiddenCards.contains(card.rawValue) },
+                            set: { show in
+                                var hidden = hiddenCards
+                                if show { hidden.remove(card.rawValue) }
+                                else { hidden.insert(card.rawValue) }
+                                overviewHiddenRaw = hidden.sorted().joined(separator: ",")
+                            }
+                        ))
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .labelsHidden()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                }
+            }
+            .glassCard(cornerRadius: 8)
+            hint("Which cards the Overview lens shows, in this order. The usage chart cannot be hidden — Overview is where every hidden lens falls back to, so it has to keep something. Cost and token data are unaffected.")
         }
 
         section("View tabs") {

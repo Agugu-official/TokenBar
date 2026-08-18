@@ -23,6 +23,17 @@ public struct QuotaTrend: Equatable, Sendable {
     /// "burning fastest" regardless of actual behavior. May exceed 100 — that
     /// is the one actionable state here (on course to run out early).
     public let projectedUsedPercent: Double
+    /// Percentage points of the allowance the recent rate will consume between
+    /// now and reset — `projectedUsedPercent` minus the reading it was
+    /// projected from. This is the figure the row prints, and it is a different
+    /// quantity from the pace delta beside it: pace compares the level against
+    /// the window's usual pattern *so far*, this says what the current slope
+    /// costs *from here on*. On live data the two disagreed on 3 of 7 windows
+    /// with both correct, so they must not be printed as if interchangeable.
+    ///
+    /// Not a %/hour rate, for the reason given above. This is normalised by the
+    /// window's own remaining time, so a 5h and a 31d window compare directly.
+    public let projectedDeltaPercent: Double
 }
 
 public enum QuotaTrendFold {
@@ -95,11 +106,14 @@ public enum QuotaTrendFold {
 
         let windowElapsedFraction = min(1, max(0, Double(nowMs - windowStartMs) / Double(durationMs)))
         let remainingElapsedFraction = 1 - windowElapsedFraction
-        let projected = usedPercent + recentSlope * remainingElapsedFraction * 100
+        let delta = recentSlope * remainingElapsedFraction * 100
+        let projected = usedPercent + delta
 
         let direction: QuotaTrend.Direction = abs(recentSlope) <= flatThreshold
             ? .flat : (recentSlope > 0 ? .rising : .falling)
 
-        return QuotaTrend(direction: direction, projectedUsedPercent: projected)
+        return QuotaTrend(
+            direction: direction, projectedUsedPercent: projected,
+            projectedDeltaPercent: delta)
     }
 }

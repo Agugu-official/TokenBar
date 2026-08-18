@@ -608,7 +608,9 @@ struct PopoverView: View {
                         payload: model.agentUsage,
                         excluding: ClientRegistry.parseIdSet(hiddenRaw),
                         paceMode: PaceMode(rawValue: paceModeRaw) ?? .historical),
-                    usageAttempted: model.agentUsageAttempted)
+                    usageAttempted: model.agentUsageAttempted,
+                    windowCurves: singleClient == nil ? model.windowCurves : [:],
+                    agentUsage: model.agentUsage)
             case .quota:
                 QuotaView(
                     singleClient: singleClient, clientIds: clientIds,

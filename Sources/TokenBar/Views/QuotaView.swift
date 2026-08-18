@@ -59,7 +59,7 @@ struct QuotaView: View {
             } else {
                 // Trend first: it answers "where is my spend going" across
                 // subscriptions, which the window-by-window card below cannot.
-                SubscriptionTrendCard(trend: trend, attempted: usageAttempted)
+                SubscriptionTrendCard(trend: trend)
                 QuotaHistoryStripCard(
                     summaries: windowSummaries, equivalences: equivalences,
                     attempted: usageAttempted)

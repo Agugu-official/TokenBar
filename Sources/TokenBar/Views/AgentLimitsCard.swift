@@ -58,6 +58,25 @@ struct AgentLimitsCard: View {
     /// Per-client Agent-limits visibility, independent of tab visibility.
     @AppStorage(ClientRegistry.limitsHiddenKey) private var limitsHiddenRaw = ""
 
+    /// The hovered trend indicator and where it sits inside this card. Uses
+    /// the app's own tooltip rather than `.help()`: the system tooltip is a
+    /// different shape, a different delay and a different material from every
+    /// other hover surface here, so one row explaining itself looked like it
+    /// belonged to another program.
+    @State private var hoverTrend: (id: String, trend: QuotaTrend)?
+    @State private var trendCardFrame: CGRect = .zero
+    /// Every indicator's frame, recorded unconditionally.
+    ///
+    /// The first version computed the anchor inside `onGeometryChange` and only
+    /// when that row was already hovered — but geometry does not change when a
+    /// cursor arrives, so the callback never fired and the anchor stayed at its
+    /// initial value. The tooltip was placed, correctly, at nowhere.
+    @State private var trendFrames: [String: CGRect] = [:]
+    @State private var trendTooltipSize: CGSize = .zero
+    @Environment(\.popoverScrollViewport) private var trendViewport
+
+    private static let trendTooltipWidth: CGFloat = 184
+
     @State private var dragId: String?
     @State private var overId: String?
     @State private var cardFrames: [String: CGRect] = [:]
@@ -320,6 +339,54 @@ struct AgentLimitsCard: View {
                 .onPreferenceChange(CardFramesKey.self) { cardFrames = $0 }
             }
         }
+        .overlay(alignment: .topLeading) { trendTooltipLayer }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+            trendCardFrame = $0
+        }
+        .zIndex(hoverTrend == nil ? 0 : 1)
+    }
+
+    /// Card-level so the placement helper clamps and lays out in one space —
+    /// the same rule the window card needed three attempts to get right.
+    @ViewBuilder private var trendTooltipLayer: some View {
+        if let hoverTrend, trendCardFrame != .zero,
+           let frame = trendFrames[hoverTrend.id] {
+            let anchor = CGPoint(
+                x: frame.maxX - trendCardFrame.minX,
+                y: frame.midY - trendCardFrame.minY)
+            let projected = Int(hoverTrend.trend.projectedUsedPercent.rounded())
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Recent consumption")
+                    .font(.caption.weight(.semibold))
+                // Two indicators, two questions. Measured 2026-08-17, pace and
+                // this trend disagreed on 3 of 7 live windows and both were
+                // right: pace compares the LEVEL against the usual pattern,
+                // this reads the current SLOPE. Saying so here is cheaper than
+                // making the row carry two numbers nobody can reconcile.
+                Text(hoverTrend.trend.projectedUsedPercent > 100
+                     ? "At this rate it runs out before reset · projected %lld%% used"
+                        .localized(projected)
+                     : "At this rate it reaches %lld%% used by reset".localized(projected))
+                    .font(.caption2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("The pace line beside it compares you with your usual pattern instead.")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(8)
+            .frame(width: Self.trendTooltipWidth, alignment: .leading)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { trendTooltipSize = $0 }
+            .offset(
+                PopoverTooltipPlacement.offset(
+                    anchor: anchor,
+                    tooltipSize: trendTooltipSize == .zero
+                        ? CGSize(width: Self.trendTooltipWidth, height: 84) : trendTooltipSize,
+                    containerFrame: trendCardFrame, viewport: trendViewport) ?? .zero)
+            .allowsHitTesting(false)
+        }
     }
 
     private var noteLabel: some View {
@@ -564,7 +631,7 @@ struct AgentLimitsCard: View {
                     // so QuotaResolver's legacy-selection matching still works.
                     Text(window.label.localized)
                         .font(.caption2.weight(.medium))
-                    trendIndicator(trend)
+                    trendIndicator(trend, id: "\(clientId)|\(window.cardId)")
                     Spacer()
                     Text(resetText ?? leftLabel)
                         .font(.caption2)
@@ -584,7 +651,7 @@ struct AgentLimitsCard: View {
                     // so QuotaResolver's legacy-selection matching still works.
                     Text(window.label.localized)
                         .font(.caption2.weight(.medium))
-                    trendIndicator(trend)
+                    trendIndicator(trend, id: "\(clientId)|\(window.cardId)")
                     Spacer()
                     if let reset = resetText {
                         Text(reset)
@@ -667,17 +734,41 @@ struct AgentLimitsCard: View {
         }
     }
 
-    /// Recent-slope direction glyph plus the projected end-of-window figure.
-    /// Reads on the same axis the row already shows (`metric`): flipping to
-    /// remaining flips both the arrow and the number, the same way `fill`
-    /// does below. `> 100%` used at reset is the one actionable state here —
-    /// it stays keyed to the used-space figure regardless of which axis is
-    /// on screen, since "runs out early" is a fact about the window, not
-    /// about which way the bar currently fills.
-    @ViewBuilder private func trendIndicator(_ trend: QuotaTrend?) -> some View {
+    /// Recent-slope arrow plus what that slope still costs: the percentage
+    /// points it will consume between now and reset.
+    ///
+    /// A signed delta rather than a word or the projected level. "now" carried
+    /// no magnitude, so a barely-moving window and a fast one looked identical;
+    /// the projected level was tried first and read as a competing claim
+    /// against the pace figure beside it, because both were then a bare
+    /// percentage of the same allowance. A delta is visibly a different kind of
+    /// number, and pace states its own as prose ("12% in deficit"), so the two
+    /// no longer invite comparison. What they mean is in the tooltip.
+    ///
+    /// Both arrow and sign read on the axis the row already shows (`metric`):
+    /// on the remaining axis, consuming 18 more points is −18. `> 100%` used at
+    /// reset stays keyed to the used-space figure regardless, since "runs out
+    /// early" is a fact about the window, not about which way the bar fills.
+    ///
+    /// Flat, or a delta that rounds to zero, prints the arrow alone — `+0%` is
+    /// noise, and `flatThreshold` exists precisely so a stalled window does not
+    /// claim to be moving.
+    ///
+    /// The axis noun is repeated on the delta rather than left to the arrow. A
+    /// signed percentage on its own does not say which quantity it moves, and
+    /// this card can be showing either — the user has now asked twice which one
+    /// a figure refers to. The phrasing follows `leftLabel`'s, so the row reads
+    /// as one sentence: "50% used" now, "+18% used" by reset.
+    ///
+    /// The remaining axis words the direction instead of signing it ("18% less
+    /// left", not "-18% left"). Attached to the word "left", a minus sign reads
+    /// as a negative remainder, which is not a thing — the sign belongs to a
+    /// delta, but the noun beside it names a level, and the level is what wins
+    /// the reading. Used-space keeps the sign because a used figure genuinely
+    /// can go both ways: a mid-window refill lowers the meter.
+    @ViewBuilder private func trendIndicator(_ trend: QuotaTrend?, id: String) -> some View {
         if let trend {
             let runsOutEarly = trend.projectedUsedPercent > 100
-            let displayed = metric.value(fromUsedPercent: trend.projectedUsedPercent)
             let direction: QuotaTrend.Direction = asUsed ? trend.direction : {
                 switch trend.direction {
                 case .rising: return .falling
@@ -690,17 +781,37 @@ struct AgentLimitsCard: View {
             case .falling: "arrow.down.right"
             case .flat: "arrow.right"
             }
+            let axisDelta = asUsed
+                ? trend.projectedDeltaPercent : -trend.projectedDeltaPercent
+            let rounded = Int(axisDelta.rounded())
             HStack(spacing: 1) {
                 Image(systemName: symbol)
-                Text("%lld%%".localized(Int(displayed.rounded())))
+                if direction != .flat, rounded != 0 {
+                    let magnitude = "\(abs(rounded))%"
+                    Text(asUsed
+                         ? "%@ used".localized(
+                             "\(rounded > 0 ? "+" : "−")\(magnitude)")
+                         : (rounded < 0 ? "%@ less left" : "%@ more left")
+                             .localized(magnitude))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                }
             }
             .font(.caption2)
             .foregroundStyle(
                 runsOutEarly ? AnyShapeStyle(.red)
                     : direction == .flat ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
-            .help(
-                "Recent trend, projected %lld%% by reset".localized(
-                    Int(trend.projectedUsedPercent.rounded())))
+            .contentShape(Rectangle())
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+                trendFrames[id] = $0
+            }
+            .onHover { inside in
+                if inside {
+                    hoverTrend = (id, trend)
+                } else if hoverTrend?.id == id {
+                    hoverTrend = nil
+                }
+            }
         }
     }
 

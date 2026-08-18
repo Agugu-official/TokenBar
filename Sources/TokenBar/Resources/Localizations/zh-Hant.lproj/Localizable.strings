@@ -136,6 +136,9 @@
 "Extra usage" = "額外用量";
 "%lld%% left" = "剩餘 %lld%%";
 "%lld%% used" = "已用 %lld%%";
+"%@ used" = "已用 %@";
+"%@ less left" = "剩餘少 %@";
+"%@ more left" = "剩餘多 %@";
 "Expected %lld%% used by now" = "依進度目前應已使用 %lld%%";
 "Set up" = "待設定";
 "Error" = "錯誤";
@@ -422,7 +425,6 @@
 "No usage recorded in this range." = "這個範圍內沒有記錄到用量。";
 "Reading daily usage…" = "正在讀取每日用量…";
 "Unclassified" = "未分類";
-"Cost" = "花費";
 /* ===== 時間窗趨勢 ===== */
 "%lld%%" = "%lld%%";
 "Recent trend, projected %lld%% by reset" = "近期趨勢，預估重置時達 %lld%%";
@@ -437,3 +439,23 @@
 "Pace" = "步調";
 "Every window is running under its expected pace" = "所有時間窗都低於預期進度";
 "10%% of quota ~ %@-%@ · %@-%@ API-equivalent" = "額度 10%% ≈ %@〜%@ token · %@〜%@（API 等值）";
+
+/* ===== 總覽卡片組裝 ===== */
+"Overview cards" = "總覽卡片";
+"Quota summary" = "額度摘要";
+"Limits" = "Agent 額度";
+"Chart" = "用量圖";
+"Trace" = "即時追蹤";
+"Which cards the Overview lens shows, in this order. The usage chart cannot be hidden — Overview is where every hidden lens falls back to, so it has to keep something. Cost and token data are unaffected." = "決定「總覽」分頁顯示哪些卡片，順序如上。用量圖無法隱藏——每個被隱藏的分頁都會退回總覽，所以它必須留下東西。花費與 token 資料不受影響。";
+"by reset %lld%%" = "重置時 %lld%%";
+"No usage this day" = "這天沒有用量";
+"Most recent window" = "最近一個時間窗";
+"%@ windows ago" = "%@ 個窗以前";
+"Consumed %@%% of the allowance" = "用掉了額度的 %@%%";
+"Ran out" = "已用完";
+"Consuming now · at this rate it runs out before reset (projected %lld%% used)" = "現在正在消耗・照這個速度會在重置前用完（預計已用 %lld%%）";
+"Consuming now · at this rate it reaches %lld%% used by reset" = "現在正在消耗・照這個速度重置時約已用 %lld%%";
+"Recent consumption" = "最近的消耗";
+"At this rate it runs out before reset · projected %lld%% used" = "照這個速度會在重置前用完・預計已用 %lld%%";
+"At this rate it reaches %lld%% used by reset" = "照這個速度，重置時約已用 %lld%%";
+"The pace line beside it compares you with your usual pattern instead." = "旁邊那行步調比的是「跟你平常相比」，兩者回答不同問題。";

@@ -4,10 +4,12 @@ import TokenBarCore
 /// The all-agent Overview's opening statement: which subscription is closest to
 /// running out, and whether anything else needs looking at.
 ///
-/// Prose rather than another card. The quota cards live in the Quota lens now,
-/// and duplicating a smaller one here would put the same question in two places
-/// — which is the arrangement that made this summary necessary in the first
-/// place. A sentence states the position and points at where the detail is.
+/// Prose rather than another card. Since 2026-08-17 the limits card sits in
+/// this lens again, directly below, so this line and that card do overlap on
+/// "which subscription is tightest" — deliberately: one sentence is faster to
+/// read than ten bars are to scan, and the reader who wants the bars has them
+/// immediately underneath. Both are individually hideable from Overview, which
+/// is what makes the overlap the user's call rather than ours.
 struct QuotaSummaryLine: View {
     let summary: QuotaSummary?
     /// False while the first quota fetch is outstanding. `summary == nil` alone

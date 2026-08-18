@@ -31,6 +31,13 @@ struct OverviewView: View {
     /// Whether the first quota fetch has settled, so a nil summary can read as
     /// "nothing to report" rather than "still asking".
     var usageAttempted = true
+    /// Quota readings per `"<clientId>|<cardId>"`, for the Agent-limits
+    /// sparkline on the all-agent tab.
+    var windowCurves: [String: [QuotaSample]] = [:]
+    var agentUsage: AgentUsagePayload?
+
+    @AppStorage(OverviewCard.hiddenKey) private var hiddenCardsRaw = ""
+    @AppStorage("tokenbar.limits.enabled") private var limitsEnabled = true
 
     var body: some View {
         VStack(spacing: 12) {
@@ -38,26 +45,58 @@ struct OverviewView: View {
             // and the Agent-limits card answer the same question at two scales,
             // and having them here while the window history lived elsewhere
             // split one subject across two lenses. Overview keeps usage.
-            if let singleClient {
-                let name = ClientRegistry.style(singleClient).displayName
-                chart
-                ModelBreakdownCard(
-                    report: modelReport, clientIds: clientIds, colors: colors,
-                    title: "%@ models".localized(name), loading: modelLoading)
-            } else {
-                // Leads the all-agent tab: the cross-subscription question the
-                // per-client cards structurally cannot answer, stated once.
+            ForEach(OverviewCard.visible(hiddenRaw: hiddenCardsRaw), id: \.self) { card in
+                self.card(card)
+            }
+        }
+    }
+
+    /// One card, or nothing when it does not apply to this tab. A card absent
+    /// because the surface has no use for it is not the same as one the user
+    /// hid, and neither needs a placeholder.
+    @ViewBuilder
+    private func card(_ card: OverviewCard) -> some View {
+        switch card {
+        case .quotaSummary:
+            if singleClient == nil {
                 QuotaSummaryLine(
                     summary: quotaSummary, attempted: usageAttempted,
                     today: stats.perDayMap[Format.todayKey()].map {
                         (tokens: $0.tokens, cost: $0.cost)
                     })
-                chart
-                UsageTraceCard(buckets: trace, windowSecs: 600, hidden: hidden)
-                ModelBreakdownCard(
-                    report: modelReport, clientIds: clientIds, colors: colors,
-                    loading: modelLoading)
             }
+        case .limits:
+            // Back on Overview as of 2026-08-17. Moving it to the Quota lens
+            // took the most-looked-at card off the landing tab for everyone
+            // rather than for anyone who asked; it belongs in both, as a glance
+            // here and in full there. Hiding it is now the user's call.
+            if limitsEnabled {
+                AgentLimitsCard(
+                    clients: clientIds, trace: trace, agentUsage: agentUsage,
+                    usageAttempted: usageAttempted,
+                    title: singleClient.map {
+                        "%@ limits".localized(ClientRegistry.style($0).displayName)
+                    } ?? "Agent limits",
+                    note: singleClient == nil
+                        ? "OAuth quota" : "Session / weekly / model limits",
+                    restrict: singleClient != nil,
+                    reorderable: singleClient == nil,
+                    curves: singleClient == nil ? windowCurves : [:])
+            }
+        case .chart:
+            chart
+        case .trace:
+            if singleClient == nil {
+                UsageTraceCard(buckets: trace, windowSecs: 600, hidden: hidden)
+            }
+        case .models:
+            ModelBreakdownCard(
+                report: modelReport, clientIds: clientIds, colors: colors,
+                title: singleClient.map {
+                    "%@ models".localized(ClientRegistry.style($0).displayName)
+                } ?? "Models by cost",
+                loading: modelLoading)
+        case .streaks:
             StreaksCard(streaks: stats.streaks)
         }
     }

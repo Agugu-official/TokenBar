@@ -9,28 +9,64 @@ import TokenBarCore
 /// `claude` $682. So this is not a restyled copy of that chart, it answers a
 /// question no existing view answers.
 struct SubscriptionTrendCard: View {
+    /// Nil means the attributed daily series has not been published yet, which
+    /// is NOT the same as an empty range. Basing the empty copy on the quota
+    /// fetch instead — a different subsystem with a different lifecycle — made
+    /// the card announce "no usage recorded" while its own data was still on
+    /// the way and the header spinner was still turning.
     let trend: SubscriptionTrend?
-    var attempted = true
 
     /// Cost or tokens. Cost leads because the API-equivalent figure is what the
     /// rest of this lens is denominated in; tokens are one tap away because a
     /// subscription question is really a token question with a price attached.
     @AppStorage("tokenbar.trend.metric") private var metricRaw = Metric.cost.rawValue
 
+    /// The card's frame, and the hovered day's anchor translated into it. The
+    /// tooltip is clamped to this frame and laid out in it — two different
+    /// coordinate spaces there is the bug the window card took three attempts
+    /// to fix.
+    @State private var cardFrame: CGRect = .zero
+    @State private var hoverIndex: Int?
+    @State private var hoverAnchorInCard: CGPoint = .zero
+    @State private var tooltipSize: CGSize = .zero
+    @Environment(\.popoverScrollViewport) private var viewport
+
+    private static let tooltipWidth: CGFloat = 176
+
     enum Metric: String, CaseIterable {
         case cost, tokens
 
-        var label: String { self == .cost ? "Cost" : "Tokens" }
+        /// "Price", matching `UsageChartCard`'s toggle. Two cards in the same
+        /// scroll calling one concept by two names is a name the reader has to
+        /// reconcile.
+        var label: String { self == .cost ? "Price" : "Tokens" }
     }
 
     private var metric: Metric { Metric(rawValue: metricRaw) ?? .cost }
 
     private static let chartHeight: CGFloat = 78
-    private static let columnGap: CGFloat = 1.5
+    /// Wider than a hairline: whitespace between columns is what stops
+    /// fourteen filled bars reading as one mass.
+    private static let columnGap: CGFloat = 4
     /// A day with usage always draws at least this, so a quiet-but-worked day
     /// stays distinguishable from an idle one. Below it the column vanishes and
     /// the chart claims nothing happened.
     private static let minimumInk: CGFloat = 1.5
+    /// Resting fill for every band. See `barHoverOpacity` for why this value.
+    private static let barOpacity: Double = 0.50
+    /// Hover lifts the whole column to the strip card's own 0.95, so "the one
+    /// you point at comes forward" is the same gesture with the same number.
+    ///
+    /// Flat, not a gradient: every other fill in the app is flat, and a
+    /// gradient here was actively misleading. Its start and end points are each
+    /// segment's own top and bottom, so a multi-subscription column fades
+    /// within every band and jumps back at each boundary — a vertical intensity
+    /// the data does not have. The resting value sits below the usage chart's
+    /// 0.86 because these columns are ~23pt wide and that alpha over this area
+    /// is a solid block, and above the strip's 0.32 because hue is data here:
+    /// each band IS a subscription, and low alpha collapses brand hues into
+    /// each other over the popover material.
+    private static let barHoverOpacity: Double = 0.95
 
     var body: some View {
         DashCard("Daily by subscription", subtitle: subtitle) {
@@ -42,7 +78,7 @@ struct SubscriptionTrendCard: View {
                 chart(trend)
                 axis(trend)
                 legend(trend)
-            } else if attempted {
+            } else if trend != nil {
                 placeholder(Text("No usage recorded in this range.".localized)
                     .font(.caption)
                     .foregroundStyle(.secondary))
@@ -50,6 +86,9 @@ struct SubscriptionTrendCard: View {
                 placeholder(LoadingLine(title: "Reading daily usage…"))
             }
         }
+        .overlay(alignment: .topLeading) { tooltipLayer }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { cardFrame = $0 }
+        .zIndex(hoverIndex == nil ? 0 : 1)
     }
 
     private var peak: Double {
@@ -86,9 +125,21 @@ struct SubscriptionTrendCard: View {
                 1, (width - CGFloat(trend.days.count - 1) * Self.columnGap)
                     / CGFloat(max(trend.days.count, 1)))
             Canvas { context, size in
+                // Kept even though the hovered column now lights up: a day
+                // with no usage draws no column, and this band is then the only
+                // thing that says which day the tooltip is describing.
+                if let hoverIndex, trend.days.indices.contains(hoverIndex) {
+                    let x = CGFloat(hoverIndex) * (columnWidth + Self.columnGap)
+                    context.fill(
+                        Path(CGRect(x: x - Self.columnGap / 2, y: 0,
+                                    width: columnWidth + Self.columnGap, height: size.height)),
+                        with: .color(.primary.opacity(0.07)))
+                }
                 for (index, day) in trend.days.enumerated() {
                     let dayTotal = total(day)
                     guard dayTotal > 0 else { continue }
+                    let alpha = hoverIndex == index
+                        ? Self.barHoverOpacity : Self.barOpacity
                     let x = CGFloat(index) * (columnWidth + Self.columnGap)
                     let fullHeight = max(
                         Self.minimumInk, size.height * CGFloat(dayTotal / peak))
@@ -100,13 +151,95 @@ struct SubscriptionTrendCard: View {
                         guard segment > 0 else { continue }
                         cursor -= segment
                         context.fill(
-                            Path(CGRect(x: x, y: cursor, width: columnWidth, height: segment)),
-                            with: .color(color(target)))
+                            // Rounded like `UsageChartCard`'s segments. Square
+                            // blocks read as pasted-on next to the rest of the
+                            // app's charts, whatever their opacity.
+                            Path(roundedRect: CGRect(
+                                    x: x, y: cursor, width: columnWidth, height: segment),
+                                 cornerRadius: min(2, segment / 2)),
+                            with: .color(color(target).opacity(alpha)))
                     }
+                }
+            }
+            .contentShape(Rectangle())
+            .onContinuousHover { phase in
+                switch phase {
+                case let .active(point):
+                    let pitch = columnWidth + Self.columnGap
+                    let index = pitch > 0 ? Int(point.x / pitch) : 0
+                    guard trend.days.indices.contains(index) else { hoverIndex = nil; break }
+                    hoverIndex = index
+                    let chart = proxy.frame(in: .global)
+                    hoverAnchorInCard = CGPoint(
+                        x: CGFloat(index) * pitch + columnWidth + chart.minX - cardFrame.minX,
+                        y: point.y + chart.minY - cardFrame.minY)
+                case .ended:
+                    hoverIndex = nil
                 }
             }
         }
         .frame(height: Self.chartHeight)
+    }
+
+    @ViewBuilder
+    private var tooltipLayer: some View {
+        if let hoverIndex, let trend, trend.days.indices.contains(hoverIndex),
+           cardFrame != .zero
+        {
+            let day = trend.days[hoverIndex]
+            VStack(alignment: .leading, spacing: 4) {
+                Text(Format.monthDay(day.date))
+                    .font(.caption.weight(.semibold))
+                if day.isEmpty {
+                    Text("No usage this day")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    // Largest first, matching the legend and `UsageChartCard`'s
+                    // tooltip. Note the stack itself is largest-at-the-bottom,
+                    // so this list is the reverse of the column's top-to-bottom
+                    // order — consistency across tooltips wins over matching the
+                    // one column being pointed at.
+                    ForEach(trend.targets, id: \.self) { target in
+                        if let bucket = day.byTarget[target] {
+                            HStack(spacing: 4) {
+                                RoundedRectangle(cornerRadius: 1.5)
+                                    .fill(color(target))
+                                    .frame(width: 6, height: 6)
+                                Text(name(target))
+                                Spacer(minLength: 6)
+                                Text(verbatim: metric == .cost
+                                     ? Format.usd(bucket.cost)
+                                     : Format.compactTokens(bucket.tokens))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .font(.caption2)
+                        }
+                    }
+                    Divider().opacity(0.4)
+                    HStack {
+                        Text("Total")
+                        Spacer()
+                        Text(verbatim: metric == .cost
+                             ? Format.usd(day.totalCost)
+                             : Format.compactTokens(day.totalTokens))
+                    }
+                    .font(.caption2.weight(.medium))
+                }
+            }
+            .padding(8)
+            .frame(width: Self.tooltipWidth, alignment: .leading)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { tooltipSize = $0 }
+            .offset(
+                PopoverTooltipPlacement.offset(
+                    anchor: hoverAnchorInCard,
+                    tooltipSize: tooltipSize == .zero
+                        ? CGSize(width: Self.tooltipWidth, height: 110) : tooltipSize,
+                    containerFrame: cardFrame, viewport: viewport) ?? .zero)
+            .allowsHitTesting(false)
+        }
     }
 
     /// Ends only. At this width a label per column is unreadable, and the shape
@@ -117,7 +250,7 @@ struct SubscriptionTrendCard: View {
             Spacer()
             Text(verbatim: trend.days.last.map { Format.monthDay($0.date) } ?? "")
         }
-        .font(.system(size: 9))
+        .font(.caption2)
         .foregroundStyle(.tertiary)
     }
 
@@ -131,6 +264,12 @@ struct SubscriptionTrendCard: View {
                     Text(name(target))
                 }
             }
+            // Same overflow marker as `UsageChartCard`: without it a fifth
+            // subscription draws a band no legend entry accounts for.
+            if trend.targets.count > 4 {
+                Text(verbatim: "+\(trend.targets.count - 4)")
+                    .foregroundStyle(.tertiary)
+            }
             Spacer()
         }
         .font(.caption2)
@@ -143,8 +282,13 @@ struct SubscriptionTrendCard: View {
     /// given a brand: it does not belong to anyone yet, and colouring it like a
     /// subscription would assert what the user has not declared.
     private func color(_ target: String) -> Color {
+        // Solid grey, not `.secondary.opacity(0.45)`: that alpha multiplied
+        // with the bar's own and put unclassified spend at an effective 0.22,
+        // invisible at hover too, while the legend swatch drew at full 0.45 and
+        // matched nothing on the chart. The fold deliberately keeps this band
+        // so the totals agree; hiding it by alpha undoes that.
         target == SubscriptionTrendFold.unassignedTarget
-            ? Color.secondary.opacity(0.45)
+            ? Color(hex: "#8e8e93")
             : Color(hex: ClientRegistry.style(target).color)
     }
 
