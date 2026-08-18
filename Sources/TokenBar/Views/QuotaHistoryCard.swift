@@ -21,6 +21,12 @@ struct QuotaHistoryCard: View {
     /// The app-wide model palette. Shared so a model is the same colour here as
     /// in the model breakdown and the usage chart.
     var colors: ModelColorMap = ModelColorMap(entries: [])
+    /// Whether the first quota fetch has settled. `cycles` derives from the
+    /// live payload, and the quota payload is never persisted, so on every cold
+    /// start an empty array here means "still asking" — not "nothing recorded".
+    /// Without this the card announced no history while the window card
+    /// directly above it was still showing its own spinner.
+    var attempted = true
 
     @State private var expanded: Int64?
 
@@ -42,7 +48,9 @@ struct QuotaHistoryCard: View {
 
     var body: some View {
         DashCard("Window history", subtitle: subtitle) {
-            if cycles.isEmpty {
+            if cycles.isEmpty, !attempted {
+                LoadingLine(title: "Reading quota history…")
+            } else if cycles.isEmpty {
                 Text("No earlier windows recorded yet. They accumulate as TokenBar runs.")
                     .font(.caption)
                     .foregroundStyle(.secondary)

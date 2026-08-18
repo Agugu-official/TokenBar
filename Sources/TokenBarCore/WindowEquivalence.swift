@@ -135,6 +135,13 @@ public enum WindowEquivalence {
     /// meaningful way.
     public static let minimumCycles = 3
 
+    // Both gates above also exclude a one-sample cycle, and they do it
+    // structurally rather than by where the numbers are set: such a cycle's
+    // delta is `max - min` over a single reading and its observed fraction is
+    // the span between first and last sample, so BOTH are exactly zero
+    // (`QuotaHistory.swift:142,144`). Lowering either constant therefore does
+    // not start admitting them — worth knowing before anyone assumes it does.
+
     /// One estimate pooled over several cycles.
     ///
     /// Sum the deltas, sum the spend, divide ONCE. Not the average of per-cycle
@@ -189,9 +196,23 @@ public enum WindowEquivalence {
         // Jackknife: recompute the pooled estimate with each cycle left out and
         // take the spread of those. It measures the ESTIMATE's stability rather
         // than the observations' scatter, and it needs nothing beyond what is
-        // already stored. A regime change — a plan switch, a provider
-        // reweighting — makes it widen on its own, which is the behaviour we
-        // want from an error bar we cannot otherwise defend.
+        // already stored.
+        //
+        // It does NOT catch a plan change, and this comment used to claim it
+        // did. The user's own history contains a Pro-to-Plus downgrade and the
+        // jackknife still reported 5%. That is structural, not bad luck: this
+        // statistic reads how much the cycles disagree with each other, while a
+        // plan change alters the UNIT each cycle's `deltaPercent` is denominated
+        // in — 3% of a Pro allowance and 3% of a Plus one are different absolute
+        // quantities. The unit moves, the dispersion does not, and an error bar
+        // built on dispersion cannot see it.
+        //
+        // So do not build anything else on the assumption that a widening error
+        // bar will flag a regime change. The fix is to record the plan on each
+        // sample and refuse to pool across two of them; that field is landing
+        // with the account-scope schema bump, and `Cycle` gains a `planKey` to
+        // partition on. Until it does, an estimate spanning a plan change is
+        // silently wrong and nothing here can tell.
         let n = Double(admitted.count)
         var leaveOneOut: [Double] = []
         for index in admitted.indices {

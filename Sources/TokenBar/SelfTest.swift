@@ -448,15 +448,23 @@ private final class AttributedSeriesTestSource: UsageDataSource, @unchecked Send
         self.refreshPayload = refreshPayload
     }
 
+    /// Lets a case stand in for a reopened popover whose acquisition has not
+    /// come back yet (or fails): the model must still have something to draw.
+    var failGraph = false
+    var failRefresh = false
+    struct GraphUnavailable: Error {}
+
     func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
         _ = priority
         graphYears.append(year)
+        if failGraph { throw GraphUnavailable() }
         return graphPayload
     }
 
     func refreshGraph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
         _ = priority
         refreshYears.append(year)
+        if failRefresh { throw GraphUnavailable() }
         return refreshPayload
     }
 
@@ -2283,6 +2291,61 @@ enum SelfTest {
             remountSource.refreshYears == [nil]
                 && remountPoints??.map(\.date) == ["2024-03-02"],
             "attributed series still refreshes when a remounted model sees a new timezone")
+
+        // The popover is torn down and rebuilt on every open, so a model that
+        // keeps its rows only per-instance leaves the subscription card on its
+        // spinner for a whole acquisition each time — which is what the user
+        // saw. Rows survive the remount under unchanged provenance.
+        let reopenSource = AttributedSeriesTestSource(
+            graphPayload: payloadFixture([
+                contributionJSON(
+                    date: "2024-03-01",
+                    clients: [("claude", "timezone-model", "openai", 1, 0.1)],
+                    totalsTokens: 1,
+                    totalsCost: 0.1),
+            ]),
+            refreshPayload: payloadFixture([]))
+        let reopenPoints = awaitMainActorValue { () -> [AttributedDailySeries.Point]? in
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/A")
+            await AttributedSeriesModel().load(
+                source: reopenSource, confirmed: [], timeZone: "Zone/A")
+            // Reopened, and this time nothing comes back at all.
+            reopenSource.failGraph = true
+            let reopened = AttributedSeriesModel()
+            await reopened.load(source: reopenSource, confirmed: [], timeZone: "Zone/A")
+            return reopened.points
+        }
+        expect(
+            reopenPoints??.map(\.date) == ["2024-03-01"],
+            "attributed series draws the previous open's rows instead of respinning")
+
+        // But only under provenance it can vouch for: a transition since that
+        // load means those day keys may be misdated, and nothing may be shown.
+        let staleReopenPoints = awaitMainActorValue { () -> [AttributedDailySeries.Point]? in
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/A")
+            let priming = AttributedSeriesTestSource(
+                graphPayload: payloadFixture([
+                    contributionJSON(
+                        date: "2024-03-01",
+                        clients: [("claude", "timezone-model", "openai", 1, 0.1)],
+                        totalsTokens: 1,
+                        totalsCost: 0.1),
+                ]),
+                refreshPayload: payloadFixture([]))
+            await AttributedSeriesModel().load(
+                source: priming, confirmed: [], timeZone: "Zone/A")
+            AttributedSeriesModel.invalidateTimeZoneProvenance()
+            priming.failGraph = true
+            priming.failRefresh = true
+            let reopened = AttributedSeriesModel()
+            await reopened.load(source: priming, confirmed: [], timeZone: "Zone/A")
+            return reopened.points
+        }
+        expect(
+            staleReopenPoints ?? nil == nil,
+            "attributed series does not reuse rows across a timezone transition")
 
         // AppDelegate's title-refresh loop warms the all-time graph cache from
         // launch, so the very first QD-1 load can be the first one to see a
@@ -10791,6 +10854,21 @@ enum SelfTest {
                 curve: { _, _, _ in nil }, nowMs: wNow * 1000) == [],
             "L6b a read that succeeds with no curve yields empty, meaning none")
 
+        // Same contract, same reason, one layer over: the history card reads
+        // `cycles`, and folding "no payload yet" into `[]` is what let it state
+        // "no earlier windows recorded" during the very first fetch. The quota
+        // payload is never persisted, so that is every cold start.
+        expect(
+            WindowCardLoader.cycles(
+                payload: nil, clientId: "codex",
+                curve: { _, _, _ in nil }) == nil,
+            "L6c no payload yet is unknown, not an empty history")
+        expect(
+            WindowCardLoader.cycles(
+                payload: wPayload, clientId: "codex",
+                curve: { _, _, _ in nil }) == [],
+            "L6c a payload whose curve holds nothing is an empty history")
+
         // L3a. The union starts at the earliest R - D across every client, so
         // one scan covers them all. Second client's window started earlier.
         let wIso2 = ISO8601DateFormatter().string(
@@ -11359,6 +11437,7 @@ enum SelfTest {
             daysAgo: 1,
             now: Date(timeIntervalSince1970: 1_775_000_000)) == "2026-03-31",
                "SU5 one day back from 2026-04-01 07:33 local is 2026-03-31")
+
 
         // MARK: limits layout (LL)
         //

@@ -55,7 +55,7 @@ struct QuotaView: View {
                 }
                 QuotaHistoryCard(
                     clientId: singleClient, cycles: quotaCycles,
-                    rows: quotaHistory, colors: colors)
+                    rows: quotaHistory, colors: colors, attempted: usageAttempted)
             } else {
                 // Trend first: it answers "where is my spend going" across
                 // subscriptions, which the window-by-window card below cannot.

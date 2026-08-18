@@ -64,6 +64,7 @@ import TokenBarCore
     /// depending on when NotificationCenter chooses to deliver.
     static func invalidateTimeZoneProvenance() {
         acquiredTimeZone = nil
+        lastRows = nil
         timeZoneGeneration &+= 1
         cacheTrustLost = true
     }
@@ -92,11 +93,26 @@ import TokenBarCore
         timeZoneGeneration = 0
         didCaptureLaunch = false
         cacheTrustLost = false
+        lastRows = nil
     }
 
     /// Retained so a failed fetch can re-derive with current declarations
     /// instead of publishing the classification the user just changed away from.
     @ObservationIgnored private var contributions: [Contribution]?
+
+    /// The last rows any instance published under verified provenance.
+    ///
+    /// Process-scoped for the reason `acquiredTimeZone` is: this model is
+    /// rebuilt on every popover open, so an instance-scoped copy is nil again
+    /// each time and the card sits on its spinner for the length of a full
+    /// acquisition — every open, with nothing on screen, while the graph cache
+    /// upstairs already holds the answer.
+    ///
+    /// Rows, not points: the split depends on declarations the user can change
+    /// while the popover is closed, and re-folding them is one pass. Caching
+    /// the finished points would republish a classification they moved away
+    /// from.
+    @ObservationIgnored private static var lastRows: [Contribution]?
 
     /// Identifies the newest load this model has started.
     ///
@@ -123,6 +139,16 @@ import TokenBarCore
         // that forces one.
         let generation = Self.timeZoneGeneration
         let shouldRefresh = Self.cacheTrustLost || Self.acquiredTimeZone != timeZone
+
+        // Publish the previous open's rows first, folded against the CURRENT
+        // declarations, so the card draws this frame instead of after the scan.
+        // Gated on provenance: same zone, no transition pending, or the day
+        // keys are not known to be datable and nothing may be shown.
+        if points == nil, !shouldRefresh, let rows = Self.lastRows {
+            contributions = rows
+            points = AttributedDailySeries.points(
+                contributions: rows, confirmed: confirmed)
+        }
         let payload: UsagePayload
         do {
             payload = try await (shouldRefresh
@@ -142,6 +168,7 @@ import TokenBarCore
             guard !shouldRefresh, Self.timeZoneGeneration == generation else {
                 points = nil
                 contributions = nil
+                Self.lastRows = nil
                 return
             }
             points = contributions.map {
@@ -162,6 +189,7 @@ import TokenBarCore
         guard Self.timeZoneGeneration == generation else {
             points = nil
             contributions = nil
+            Self.lastRows = nil
             return
         }
 
@@ -169,6 +197,7 @@ import TokenBarCore
         points = AttributedDailySeries.points(
             contributions: payload.contributions,
             confirmed: confirmed)
+        Self.lastRows = payload.contributions
         Self.acquiredTimeZone = timeZone
     }
 }

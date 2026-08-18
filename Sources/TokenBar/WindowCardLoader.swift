@@ -255,8 +255,12 @@ enum WindowCardLoader {
         payload: AgentUsagePayload?, clientId: String,
         curve read: (String, String, UInt64) throws -> QuotaCurve?
     ) -> [QuotaCycle]? {
-        guard let payload,
-              let selected = pickForHistory(
+        // Split, not one guard: no payload is "could not be obtained" and must
+        // be nil, while a payload that simply offers no history is `[]`. Folding
+        // both into `[]` is what let the history card state "no earlier windows"
+        // before the first fetch had returned.
+        guard let payload else { return nil }
+        guard let selected = pickForHistory(
                   payload: payload, clientId: clientId,
                   chosen: UserDefaults.standard.string(forKey: selectionKey)),
               let key = selected.window.paceStatus.windowKey,
