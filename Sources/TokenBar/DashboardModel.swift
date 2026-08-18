@@ -1078,7 +1078,16 @@ private struct DashboardSnapshot {
 
         // Strip summaries cover every displayed client. They read curves only,
         // so the cost is `windowCardClients.count` file reads, not a scan.
-        if let payload = agentUsage {
+        //
+        // Skipped entirely when no client is on screen, for the same reason the
+        // curve loop above keeps what a failed read already had: `collected`
+        // would be empty because there was nothing to collect FROM, and
+        // publishing that empty as the answer makes the strip card state "no
+        // completed windows recorded yet". `windowCardClients` is assigned from
+        // `displayClients`, which arrives with graph data, so it is briefly
+        // empty whenever the top-level view changes — which is exactly when the
+        // card was seen blanking and coming back.
+        if let payload = agentUsage, !windowCardClients.isEmpty {
             var collected: [(clientId: String, cardId: String, label: String,
                              cycles: [QuotaCycle])] = []
             for agent in payload.agents where windowCardClients.contains(agent.clientId) {

@@ -402,8 +402,15 @@ private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendab
     private let inner = DashboardModelTestSource(failingGraphYear: "")
     private let payload: AgentUsagePayload
     var scans = 0
+    /// Served for every window, so a case about the strip summaries has
+    /// something to summarise. Nil keeps the pre-existing behaviour.
+    var curve: QuotaCurve?
 
     init(payload: AgentUsagePayload) { self.payload = payload }
+
+    func quotaCurveSync(
+        clientId: String, windowKey: String, generation: UInt64
+    ) throws -> QuotaCurve? { curve }
 
     var allowsQuotaCachePersistence: Bool { false }
     func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
@@ -10984,6 +10991,37 @@ enum SelfTest {
                "SC1 no agent tab open issues no message scan")
         expect((scanCounts?.open ?? 0) >= 1,
                "SC1 an open agent tab does scan, so the bound above is not vacuous")
+
+        // SS1. `windowCardClients` is assigned from `displayClients`, which
+        // arrives with graph data, so it is briefly empty on every top-level
+        // view change. Recomputing the strip summaries from an empty client set
+        // and publishing the empty result made the card announce "no completed
+        // windows recorded yet" mid-switch and then come back.
+        let stripSummaries: (present: Int, afterEmpty: Int)? = awaitMainActorValue {
+            let src = WindowScanCountingSource(payload: wPayload)
+            src.curve = windowCurve(
+                resetAtSecs: wReset, durationSecs: 18_000,
+                at: [(wNow - 3_000, 4), (wNow - 600, 9)])
+            let m = DashboardModel(source: src, initialYear: nil)
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while m.agentUsage == nil, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            poll.cancel()
+            _ = await poll.value
+            m.windowCardClients = ["codex"]
+            m.refreshWindowQuotaHalves()
+            let present = m.quotaWindowSummaries.count
+            m.windowCardClients = []
+            m.refreshWindowQuotaHalves()
+            return (present: present, afterEmpty: m.quotaWindowSummaries.count)
+        }
+        expect((stripSummaries?.present ?? 0) >= 1,
+               "SS1 the fixture does produce a summary, so the check below is not vacuous")
+        expect(stripSummaries != nil && stripSummaries?.afterEmpty == stripSummaries?.present,
+               "SS1 an empty client set leaves the strip summaries alone")
 
         // MARK: quota history (QH)
 
