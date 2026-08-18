@@ -459,3 +459,22 @@
 "At this rate it runs out before reset · projected %lld%% used" = "照這個速度會在重置前用完・預計已用 %lld%%";
 "At this rate it reaches %lld%% used by reset" = "照這個速度，重置時約已用 %lld%%";
 "The pace line beside it compares you with your usual pattern instead." = "旁邊那行步調比的是「跟你平常相比」，兩者回答不同問題。";
+
+// Quota heatmap
+"When the allowance goes" = "額度花在什麼時候";
+"%@ days observed" = "觀察到 %@ 天";
+"No allowance movement recorded yet. It accumulates as TokenBar runs." = "還沒有記錄到額度變動。TokenBar 執行期間會逐步累積。";
+"%@%% consumed between readings too far apart to place" = "有 %@%% 落在間隔過長的兩次讀數之間，無法定位到時段";
+"No allowance consumed in this slot" = "這個時段沒有消耗額度";
+"%@%% of the allowance" = "額度的 %@%%";
+"~ %@ API-equivalent, ±%@%%" = "≈ %@（API 等值，誤差 ±%@%%）";
+"Not enough history to convert this window to a figure" = "這個窗的歷史還不足以換算成金額";
+"Mon" = "一";
+"Tue" = "二";
+"Wed" = "三";
+"Thu" = "四";
+"Fri" = "五";
+"Sat" = "六";
+"Sun" = "日";
+"Classify your usage in Settings to see what this window is worth" = "到設定裡分類用量，才能知道這個窗值多少";
+"Nothing is classified yet. Settings › Usage attribution splits this by subscription." = "還沒有分類過任何用量。設定 › 用量歸屬可以把這張圖拆成各個訂閱。";

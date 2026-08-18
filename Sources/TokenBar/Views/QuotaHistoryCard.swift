@@ -28,6 +28,14 @@ struct QuotaHistoryCard: View {
     /// directly above it was still showing its own spinner.
     var attempted = true
 
+    /// Observed, not read once: `span` above is accumulated only for messages
+    /// assigned to THIS subscription, so with nothing declared every cycle
+    /// arrives at zero and the fold would call that "none of it recorded on
+    /// this machine". Reading `UserDefaults` in a computed property would not
+    /// be a view dependency, so a classification saved in Settings would leave
+    /// this line stale until something unrelated rebuilt the body.
+    @AppStorage(UsageAttribution.confirmedKey) private var attributionRaw = ""
+
     @State private var expanded: Int64?
 
     /// Below this the cycle was barely witnessed and its consumption figure is
@@ -243,6 +251,7 @@ struct QuotaHistoryCard: View {
         if !counted.isEmpty {
             Text(WindowEquivalence.text(
                 WindowEquivalence.aggregate(
+                    declared: !UsageAttribution.parseRaw(attributionRaw).records.isEmpty,
                     cycles: counted.map {
                         WindowEquivalence.Cycle(
                             deltaPercent: $0.cycle.usedPercent,

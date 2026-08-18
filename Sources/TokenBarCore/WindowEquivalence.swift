@@ -29,6 +29,16 @@ public enum WindowEquivalence {
         case unaccounted(deltaPercent: Double)
         /// Fewer than two samples inside the window, so no Δ exists at all.
         case unavailable
+        /// Nothing has been declared, so no usage can be charged to this
+        /// subscription and the ratio has no numerator.
+        ///
+        /// Kept apart from `unaccounted`, which it would otherwise be
+        /// indistinguishable from: that one says the quota moved and this
+        /// machine recorded nothing, which for an undeclared user is false and
+        /// alarming. The machine recorded plenty; the app has not been told
+        /// whose it is. Most users never open that Settings page, so this is
+        /// the common case, not an edge one.
+        case undeclared
         /// The cycles disagree by more than the tolerance, so there is no
         /// single figure to give — only the span they cover.
         ///
@@ -70,6 +80,9 @@ public enum WindowEquivalence {
                 .localizedWindowRow(String(Int(delta.rounded())))
         case .unavailable:
             return "Not enough quota readings yet".localizedWindowRow()
+        case .undeclared:
+            return "Classify your usage in Settings to see what this window is worth"
+                .localizedWindowRow()
         case let .spread(low, high, lowCost, highCost):
             return "10%% of quota ~ %@-%@ · %@-%@ API-equivalent".localizedWindowRow(
                 tokens(low), tokens(high), money(lowCost), money(highCost))
@@ -160,7 +173,15 @@ public enum WindowEquivalence {
     /// Denominated in money. Tokens are also returned, but cost is the steadier
     /// of the two here (5% against 7%), which is consistent with providers
     /// metering on something closer to cost than to a token count.
-    public static func aggregate(cycles: [Cycle]) -> Row {
+    /// `declared` is whether the user has classified ANY source. It belongs
+    /// here rather than at the call site because the distinction it makes is
+    /// this type's own: with nothing declared every message resolves to
+    /// unassigned, so every cycle arrives carrying zero spend, and the rules
+    /// below would report that as "the quota moved and none of it was recorded
+    /// on this machine". That sentence describes a data failure. The actual
+    /// state is a missing declaration, and it is the state most users are in.
+    public static func aggregate(declared: Bool = true, cycles: [Cycle]) -> Row {
+        guard declared else { return .undeclared }
         let admitted = cycles.filter {
             $0.deltaPercent >= minimumDelta
                 && $0.observedFraction >= minimumObservedFraction

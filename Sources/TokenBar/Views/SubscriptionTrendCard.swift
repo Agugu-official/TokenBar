@@ -78,6 +78,7 @@ struct SubscriptionTrendCard: View {
                 chart(trend)
                 axis(trend)
                 legend(trend)
+                undeclaredHint(trend)
             } else if trend != nil {
                 placeholder(Text("No usage recorded in this range.".localized)
                     .font(.caption)
@@ -275,6 +276,24 @@ struct SubscriptionTrendCard: View {
         .font(.caption2)
         .foregroundStyle(.secondary)
         .lineLimit(1)
+    }
+
+    /// Shown when every band is the unclassified one.
+    ///
+    /// The chart is not wrong in that state — the totals are real — but it is
+    /// answering "how much did you spend" with a single grey block while
+    /// claiming to answer "on which subscription". Most users have never opened
+    /// that Settings page, so without this the card silently presents its least
+    /// useful form as its normal one.
+    @ViewBuilder
+    private func undeclaredHint(_ trend: SubscriptionTrend) -> some View {
+        if trend.targets == [SubscriptionTrendFold.unassignedTarget] {
+            Text("Nothing is classified yet. Settings › Usage attribution splits this by subscription.")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     /// Subscription brand colours, so a band here matches that subscription

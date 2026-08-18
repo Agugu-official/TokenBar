@@ -31,6 +31,8 @@ struct QuotaView: View {
     /// Nil until the graph payload has been folded.
     /// Recorded-cycle strips for every displayed window.
     var windowSummaries: [QuotaWindowSummary] = []
+    /// Weekday-by-hour consumption per window, keyed as the summary's id.
+    var heatmaps: [String: QuotaHeatmap] = [:]
     var equivalences: [String: WindowEquivalence.Row] = [:]
     var trend: SubscriptionTrend?
 
@@ -63,6 +65,12 @@ struct QuotaView: View {
                 QuotaHistoryStripCard(
                     summaries: windowSummaries, equivalences: equivalences,
                     attempted: usageAttempted)
+                // After the strip, not before: the strip says how much each
+                // window consumed, and this says when. "When" is only a
+                // question once "how much" has an answer.
+                QuotaHeatmapCard(
+                    summaries: windowSummaries, heatmaps: heatmaps,
+                    equivalences: equivalences, attempted: usageAttempted)
                 if limitsEnabled {
                     AgentLimitsCard(
                     clients: clientIds, trace: trace, agentUsage: agentUsage,

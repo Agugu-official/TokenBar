@@ -629,6 +629,7 @@ struct PopoverView: View {
                     // under a timezone it cannot vouch for, and calling the
                     // fold directly would silently skip that check.
                     windowSummaries: model.quotaWindowSummaries,
+                    heatmaps: model.quotaHeatmaps,
                     equivalences: model.quotaEquivalences,
                     trend: series.points.map {
                         SubscriptionTrendFold.build(

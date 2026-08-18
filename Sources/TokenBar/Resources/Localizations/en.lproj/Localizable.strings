@@ -131,3 +131,22 @@
 "%@ used" = "%@ used";
 "%@ less left" = "%@ less left";
 "%@ more left" = "%@ more left";
+
+// Quota heatmap
+"When the allowance goes" = "When the allowance goes";
+"%@ days observed" = "%@ days observed";
+"No allowance movement recorded yet. It accumulates as TokenBar runs." = "No allowance movement recorded yet. It accumulates as TokenBar runs.";
+"%@%% consumed between readings too far apart to place" = "%@%% consumed between readings too far apart to place";
+"No allowance consumed in this slot" = "No allowance consumed in this slot";
+"%@%% of the allowance" = "%@%% of the allowance";
+"~ %@ API-equivalent, ±%@%%" = "~ %@ API-equivalent, ±%@%%";
+"Not enough history to convert this window to a figure" = "Not enough history to convert this window to a figure";
+"Mon" = "Mon";
+"Tue" = "Tue";
+"Wed" = "Wed";
+"Thu" = "Thu";
+"Fri" = "Fri";
+"Sat" = "Sat";
+"Sun" = "Sun";
+"Classify your usage in Settings to see what this window is worth" = "Classify your usage in Settings to see what this window is worth";
+"Nothing is classified yet. Settings › Usage attribution splits this by subscription." = "Nothing is classified yet. Settings › Usage attribution splits this by subscription.";

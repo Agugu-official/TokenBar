@@ -1090,6 +1090,7 @@ private struct DashboardSnapshot {
         if let payload = agentUsage, !windowCardClients.isEmpty {
             var collected: [(clientId: String, cardId: String, label: String,
                              cycles: [QuotaCycle])] = []
+            var heatmaps: [String: QuotaHeatmap] = [:]
             for agent in payload.agents where windowCardClients.contains(agent.clientId) {
                 for window in agent.uniqueCardWindows {
                     guard let key = window.paceStatus.windowKey,
@@ -1097,6 +1098,8 @@ private struct DashboardSnapshot {
                           let curve = ((try? readCurve(agent.clientId, key, generation)) ?? nil)
                     else { continue }
                     let points = curve.points
+                    heatmaps["\(agent.clientId)|\(window.cardId)"] =
+                        QuotaHeatmapFold.build(points: points)
                     collected.append((
                         clientId: agent.clientId, cardId: window.cardId,
                         label: window.label,
@@ -1104,6 +1107,7 @@ private struct DashboardSnapshot {
                 }
             }
             quotaWindowSummaries = QuotaOverviewFold.summaries(windows: collected)
+            quotaHeatmaps = heatmaps
             qualifyingCycles = Dictionary(
                 uniqueKeysWithValues: collected.compactMap { window in
                     let admitted = window.cycles.filter {
@@ -1145,7 +1149,11 @@ private struct DashboardSnapshot {
             guard let client = key.split(separator: "|").first.map(String.init),
                   let oldest = cycles.last, scan.covers(start: oldest.startMs)
             else { continue }
-            built[key] = WindowEquivalence.aggregate(cycles: cycles.map { cycle in
+            // `declared` carries the empty-declaration case into the fold,
+            // which is where the difference between "nothing recorded" and
+            // "nothing classified" is defined.
+            built[key] = WindowEquivalence.aggregate(
+                declared: !confirmed.isEmpty, cycles: cycles.map { cycle in
                 var tokens: Int64 = 0
                 var cost = 0.0
                 for message in scan.messages
@@ -1209,6 +1217,10 @@ private struct DashboardSnapshot {
     /// all-agent lens. Curve reads only, so unlike `quotaHistory` this needs no
     /// message scan and is safe on the landing view.
     private(set) var quotaWindowSummaries: [QuotaWindowSummary] = []
+    /// One weekday-by-hour grid per window, keyed as `QuotaWindowSummary.id`.
+    /// Written in the same guarded block as the summaries, so it cannot be
+    /// blanked by a refresh that saw no clients either.
+    private(set) var quotaHeatmaps: [String: QuotaHeatmap] = [:]
     /// Per-window quota equivalence, keyed `"<clientId>|<cardId>"`. Only windows
     /// with enough admitted cycles appear. Empty until the scan lands — the
     /// strips above it are free and must not wait for this.

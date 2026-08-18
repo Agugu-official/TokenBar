@@ -11023,6 +11023,74 @@ enum SelfTest {
         expect(stripSummaries != nil && stripSummaries?.afterEmpty == stripSummaries?.present,
                "SS1 an empty client set leaves the strip summaries alone")
 
+        // MARK: quota heatmap (QM)
+        //
+        // Fixed to UTC and to a known Monday (2026-01-05) so the expected slots
+        // are arithmetic rather than whatever the runner's calendar says.
+        func heatPoint(_ at: Int64, _ used: Double, reset: Int64) -> QuotaCurvePoint {
+            try! JSONDecoder().decode(QuotaCurvePoint.self, from: Data("""
+            {"sampledAt":\(at),"usedPercent":\(used),"resetAt":\(reset),
+             "durationSeconds":604800,"durationSource":"provider","origin":"liveV3"}
+            """.utf8))
+        }
+        let utc = TimeZone(identifier: "UTC")!
+        // Each reset must bracket its own points: the decoder refuses a sample
+        // outside `[reset - duration, reset]`, which is the store's own rule.
+        let monReset: Int64 = 1_767_700_000
+        let otherReset: Int64 = 1_767_800_000
+        let sunReset: Int64 = 1_768_200_000
+
+        // QM1. A delta is spread across the hours its interval covers, weighted
+        // by time in each. 09:30 -> 11:30 carrying 4 points lands 1 / 2 / 1 on
+        // hours 9, 10, 11 — not 4 on the hour that observed it.
+        let spread = QuotaHeatmapFold.build(
+            points: [heatPoint(1_767_605_400, 10, reset: monReset),
+                     heatPoint(1_767_612_600, 14, reset: monReset)],
+            timeZone: utc)
+        expect(abs(spread.cells[0][9] - 1) < 1e-9
+                && abs(spread.cells[0][10] - 2) < 1e-9
+                && abs(spread.cells[0][11] - 1) < 1e-9,
+               "QM1 a two-hour delta is spread 1/2/1 across the hours it covers")
+        expect(abs(spread.total - 4) < 1e-9 && abs(spread.peak - 2) < 1e-9,
+               "QM1 the grid accounts for the whole delta, and the peak is the fullest hour")
+
+        // QM2. Deltas never cross a reset. The third reading is a NEW cycle
+        // sitting HIGHER than the old one's last, so a fold that sorted by time
+        // and ignored `resetAt` would add 26 points of imaginary consumption.
+        let crossing = QuotaHeatmapFold.build(
+            points: [heatPoint(1_767_605_400, 10, reset: monReset),
+                     heatPoint(1_767_612_600, 14, reset: monReset),
+                     heatPoint(1_767_616_200, 40, reset: otherReset)],
+            timeZone: utc)
+        expect(abs(crossing.total - 4) < 1e-9,
+               "QM2 a higher reading in the next cycle is not consumption")
+
+        // QM3. Readings too far apart to place are reported, not folded in and
+        // not dropped: 7h exceeds the 6h bound.
+        let sparse = QuotaHeatmapFold.build(
+            points: [heatPoint(1_767_661_200, 20, reset: monReset),
+                     heatPoint(1_767_686_400, 29, reset: monReset)],
+            timeZone: utc)
+        expect(sparse.total == 0 && abs(sparse.unplacedPercent - 9) < 1e-9,
+               "QM3 consumption between readings 7h apart is unplaced, not spread")
+
+        // QM4. Sunday is the last row, not the first: weekday 0 is Monday.
+        let sunday = QuotaHeatmapFold.build(
+            points: [heatPoint(1_768_140_000, 5, reset: sunReset),
+                     heatPoint(1_768_143_600, 8, reset: sunReset)],
+            timeZone: utc)
+        expect(abs(sunday.cells[6][14] - 3) < 1e-9,
+               "QM4 a Sunday reading lands on the last row, so the weekend stays a block")
+
+        // QM5. A reading that goes backwards inside one cycle is a refill or a
+        // provider correction, not negative consumption.
+        let refill = QuotaHeatmapFold.build(
+            points: [heatPoint(1_767_605_400, 30, reset: monReset),
+                     heatPoint(1_767_612_600, 12, reset: monReset)],
+            timeZone: utc)
+        expect(refill.total == 0 && refill.unplacedPercent == 0,
+               "QM5 a backwards reading contributes nothing rather than a negative slot")
+
         // MARK: quota history (QH)
 
         func curvePoint(_ sampledAt: Int64, _ used: Double, resetAt: Int64,
@@ -11417,6 +11485,15 @@ enum SelfTest {
                 == .unaccounted(deltaPercent: 60),
             "AE4 quota moved with nothing recorded locally is not `1% is free`")
         expect(
+            WindowEquivalence.aggregate(declared: false, cycles: [aeCycle(60, 0, 0)])
+                == .undeclared,
+            "V15 with nothing declared the fold says so, rather than reporting the "
+                + "same cycles as unrecorded usage")
+        expect(
+            WindowEquivalence.aggregate(declared: true, cycles: [aeCycle(60, 0, 0)])
+                != .undeclared,
+            "V15 and the flag is what decides it, not the empty spend those cycles carry")
+        expect(
             WindowEquivalence.aggregate(cycles: []) == .unavailable,
             "AE4 no cycles means no estimate at all")
 
@@ -11538,6 +11615,16 @@ enum SelfTest {
             rowText(.unaccounted(deltaPercent: 56))
                 == "Quota moved 56%, none of it recorded on this machine",
             "V15 the unaccounted row renders its percent sign")
+        // The two must stay distinguishable in copy as well as in the type:
+        // most users have declared nothing, and telling them their machine
+        // recorded no usage is both false and alarming.
+        expect(
+            rowText(.undeclared)
+                == "Classify your usage in Settings to see what this window is worth",
+            "V15 an undeclared window says so instead of claiming nothing was recorded")
+        expect(
+            rowText(.undeclared) != rowText(.unaccounted(deltaPercent: 56)),
+            "V15 undeclared and unaccounted are two different statements")
         expect(
             rowText(.notMoved) == "Quota has not moved yet"
                 && rowText(.unavailable) == "Not enough quota readings yet",
