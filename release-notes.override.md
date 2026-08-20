@@ -1,33 +1,47 @@
 ## Before you update
 
-**Pace history restarts once.** Affected quota cards show "Learning history · Linear estimate" again and rebuild their curve — a short window within hours, a weekly one over a few days. Nothing is broken; this is the one-time cost of the identity fix below, and it does not repeat.
-
-Which cards depends on whether the provider gives TokenBar a stable account identifier, not on the provider's name:
-
-| Keeps its history | Starts over |
-|---|---|
-| Codex, when its stored credential carries an account ID | Claude, on every login route |
-| The Antigravity IDE | Grok, Copilot, and Antigravity's remote login |
-| | Codex, if its credential has no account ID |
+**Five clients rescan once.** Amp, Cursor, OpenClaw, MiMoCode, and Mux advance to a new parser identity in this engine update, so their cached shards are rebuilt cold on the first refresh after installing. Expect one slower scan for those clients and nothing else; other clients keep their cache.
 
 ## Fixes
 
-- **Pace history no longer restarts every time another app refreshes a shared login.** [#204](https://github.com/Nanako0129/TokenBar/pull/204)
+- **A Claude credential store that holds no login no longer blocks the setup-token fallback.** [#221](https://github.com/Nanako0129/TokenBar/pull/221)
 
-  Providers without a stable account identifier keyed their history on a fingerprint of the OAuth refresh token. When a sibling application rotated that token — the Claude CLI refreshing its own Keychain item, for instance — TokenBar saw a credential it did not recognise and began learning from zero. On one machine this had produced 17 separate series holding 1,007 unreachable samples for a single Claude account, and Historical pace could never accumulate.
+  The Claude card could sit permanently on "Claude credentials could not be loaded." while the documented `tokenbar-claude-oauth-token` Keychain path was never even read, so following the in-app instructions changed nothing. The cause was a `Claude Code-credentials` Keychain item that existed but carried no `claudeAiOauth` key — on the reporting machine it held only `mcpOAuth`, an MCP server's OAuth data written into the same item. TokenBar read that as a credential it could not parse and failed closed, which by design skips the setup-token fallback.
 
-  Durable history now has its own identity, separate from the one used for caching. Where a provider exposes a stable account ID it is still used, so Codex and the Antigravity IDE keep their per-account separation. Where none exists, history is now keyed per installation, which means two accounts on one machine share one curve on those providers. That is deliberate: the curve describes how a person consumes a window, which belongs to the operator rather than to the billing account.
+  A store with no `claudeAiOauth` key is now treated as absence rather than damage, so the setup-token route is tried and, with no token stored, the card shows the setup prompt instead of an error. A credential whose `claudeAiOauth` is present but unusable still fails closed, and a Keychain item holding no login still does not fall through to `~/.claude/.credentials.json` — that fall-through was written and then dropped, because if the shape turns out to be what Claude Code leaves behind after a logout, falling through would silently resume a stale token and keep refreshing it. Reported by [@coshsh1991](https://github.com/coshsh1991) with the failing resolution traced to the exact line, which is what made it a direct fix rather than a hunt. [#219](https://github.com/Nanako0129/TokenBar/issues/219)
 
-- **A pace marker in deficit is highlighted whichever estimator produced it.** [#205](https://github.com/Nanako0129/TokenBar/pull/205)
+- **Manual refresh now retries a model report that failed.** [#214](https://github.com/Nanako0129/TokenBar/pull/214)
 
-  Only a historical result was coloured before, so a linear estimate sitting in deficit looked identical to one on track. Because the historical fit is re-evaluated on every refresh, the warning appeared and vanished while the deficit underneath never moved. The colour now follows the gap; the status text still says which estimator drew the line.
+  The Refresh button and Command-R refreshed the graph and any loaded Hourly or Agents report, but stopped short of the model report. A transient failure therefore stayed on screen until the next 60-second poll, including immediately after the user had explicitly asked for fresh data. A refresh that wanted a model report now retries it in the same pass, provided the graph itself refreshed successfully. Dashboards that never asked for one still perform no scan.
 
-- **A clock disagreement no longer discards the whole quota history.** [#206](https://github.com/Nanako0129/TokenBar/pull/206)
+- **Reopening the popover no longer shows the previous window's data.** [#213](https://github.com/Nanako0129/TokenBar/pull/213)
 
-  A single forward jump of the system clock — a time sync, or a sleep and wake — was latched permanently into a window's timestamps. Once the clock settled back, every later read saw a value from the future and quarantined the entire store, taking every provider's history with it. One report lost 585 samples and three weeks of evidence this way, with every other invariant intact.
+  Closing the popover during a scan left the retiring view able to finish and write its result into the shared reopen cache — after the next popover had already committed something newer. The next open then rendered the older payload. The newest view now owns that cache, and both the snapshot and live-data paths check ownership before writing. A retiring view still completes and updates its own state, so switching lenses is unaffected.
 
-  Such a store is now repaired in place instead of being discarded, and only a window whose own recorded observations cannot be verified is dropped. Structurally damaged files are still quarantined exactly as before. Reported by [@starburst3190](https://github.com/starburst3190) with the quarantined file's timestamps isolated to the single failing invariant, which is what made the cause findable. [#144](https://github.com/Nanako0129/TokenBar/issues/144)
+- **Sources with no usage are no longer offered for classification.** [#211](https://github.com/Nanako0129/TokenBar/pull/211)
+
+  Usage attribution built a row for every observed source key, including keys with nothing behind them, so a row reading `0 tokens · $0.00` asked which subscription had paid for nothing. An entry with no tokens and no cost is now dropped, and a range left with nothing reads as "No provider-split usage in this range." instead of presenting decisions that cannot matter.
+
+  The test runs per entry, before entries are folded into a source, matching where the breakdown card applies it. So an entry with zero tokens but non-zero cost is kept — that is spend, however it arrived — and a source whose entries cancel, `+5` and `-5` tokens at no cost, still appears: each entry is real, and the card can place them in different buckets.
 
 ## Changes
 
-- Updater: the bundled Sparkle framework is now compiled from source as part of the build. [#208](https://github.com/Nanako0129/TokenBar/pull/208)
+- **Three client names no longer claim a surface their data does not distinguish.** [#210](https://github.com/Nanako0129/TokenBar/pull/210)
+
+  | Was | Now |
+  |---|---|
+  | Codex CLI | Codex |
+  | Copilot CLI | Copilot |
+  | Cursor IDE | Cursor |
+
+  Each name promised a scope the underlying source cannot support. The `codex` card reads `~/.codex/sessions`, which every Codex surface writes to: across 1,733 local session files, the actual CLI accounted for roughly 4% of what the card was labelling "Codex CLI", behind Codex Desktop at 1,218 files. The `copilot` card merges two parsers covering the CLI, VS Code Copilot Chat, and the macOS desktop app. The `cursor` card is not a session parser at all — it reads an account usage export in which IDE, `cursor-agent`, and cloud-agent spend arrive in one undifferentiated ledger. Names that are genuinely surface-scoped were left alone.
+
+- **Usage attribution now says that some clients merge related routes before the page sees them.** [#211](https://github.com/Nanako0129/TokenBar/pull/211)
+
+  The page explained that provider IDs are compared exactly as the source emitted them, so related-looking routes may appear as separate rows and be classified independently. That is true, and it was the only half being told. Some clients merge those routes before reporting — Vertex AI arriving as Anthropic, Codex as OpenAI — and a row that arrived already merged cannot be split here, however it is classified. Whether a given row is affected depends on the client that produced it, not on the provider's name. The hint now carries both halves.
+
+- **Engine update.** [#217](https://github.com/Nanako0129/TokenBar/pull/217)
+
+  The shared usage engine advances to a reviewed revision carrying local-first graph pricing, embedded and partial cost provenance, message-only cost coverage, and preservation of Kilo's provider-reported cost. This is a pin-only update: no change to the cache format, the FFI boundary, or how results are decoded.
+
+  One part of it is visible in your numbers. A Trae row whose payload carries no usable dollar amount was previously left unpriced; under the default best-effort pricing it is now estimated, so a Trae total can rise without your usage having changed. Provider-reported values remain authoritative, and local-only pricing still leaves such rows unpriced.
