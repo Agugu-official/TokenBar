@@ -24,6 +24,20 @@ public struct WindowMessage: Decodable, Sendable {
     /// not write; a corrupt row summing past `Int64.max` would trap, and a
     /// malformed line in someone's transcript must not be able to terminate
     /// the UI.
+    /// Everything except cache reads, summed from the components rather than
+    /// subtracted from the saturated total.
+    ///
+    /// `tokens - cacheRead` is wrong twice over on a corrupt row: when both
+    /// saturate it reports zero non-cache tokens although the input alone was
+    /// enormous, and an overflowing subtraction can wrap negative, which then
+    /// flows into a ratio as a negative numerator. Neither is a crash, which is
+    /// what makes them worse than one.
+    public var tokensExCacheRead: Int64 {
+        [output, cacheWrite, reasoning].reduce(input) {
+            $0.addingReportingOverflow($1).overflow ? Int64.max : $0 + $1
+        }
+    }
+
     public var tokens: Int64 {
         [output, cacheRead, cacheWrite, reasoning].reduce(input) {
             $0.addingReportingOverflow($1).overflow ? Int64.max : $0 + $1

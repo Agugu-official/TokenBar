@@ -69,7 +69,10 @@ public enum SubscriptionTrendFold {
             }
             var day = byDate[point.date] ?? [:]
             var bucket = day[target] ?? SubscriptionTrend.Bucket()
-            bucket.tokens += point.tokens
+            // Saturating for the reason `AttributedDailySeries` already
+            // saturates the buckets this regroups: the counters originate in
+            // local transcripts this app does not write.
+            bucket.tokens = bucket.tokens.saturatingAdding(point.tokens)
             bucket.cost += point.cost
             day[target] = bucket
             byDate[point.date] = day
@@ -80,7 +83,7 @@ public enum SubscriptionTrendFold {
             let buckets = byDate[date] ?? [:]
             return SubscriptionTrend.Day(
                 date: date, byTarget: buckets,
-                totalTokens: buckets.values.reduce(0) { $0 + $1.tokens },
+                totalTokens: buckets.values.reduce(0) { $0.saturatingAdding($1.tokens) },
                 totalCost: buckets.values.reduce(0) { $0 + $1.cost })
         }
 

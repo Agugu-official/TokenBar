@@ -214,7 +214,7 @@ public enum QuotaHistoryFold {
                     // counters. Saturating per message is not enough: two rows
                     // that each saturate still trap when added together, and
                     // the accumulator is where a corrupt transcript would land.
-                    let exCacheRead = message.tokens - message.cacheRead
+                    let exCacheRead = message.tokensExCacheRead
                     mine.tokens = mine.tokens.saturatingAdding(message.tokens)
                     mine.exCacheRead = mine.exCacheRead.saturatingAdding(exCacheRead)
                     mine.cost += message.cost

@@ -177,7 +177,7 @@ public enum WindowCardGeometry {
                     ? m.timestamp >= zone.loMs : m.timestamp > zone.loMs
                 return insideStart && m.timestamp <= zone.hiMs
             }) else { continue }
-            weights[i] = weights[i].saturatingAdding(m.tokens - m.cacheRead)
+            weights[i] = weights[i].saturatingAdding(m.tokensExCacheRead)
         }
         let tallest = max(weights.max() ?? 0, 1)
         let bars = zip(hits, weights).map { zone, w in

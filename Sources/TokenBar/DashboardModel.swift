@@ -1183,9 +1183,7 @@ private struct DashboardSnapshot {
                         client: message.client, provider: message.providerId,
                         model: message.modelId, records: confirmed), target == client
                     else { continue }
-                    tokens = tokens.saturatingAdding(
-                        message.tokens.subtractingReportingOverflow(
-                            message.cacheRead).partialValue)
+                    tokens = tokens.saturatingAdding(message.tokensExCacheRead)
                     cost += message.cost
                 }
                 return WindowEquivalence.Cycle(

@@ -275,12 +275,19 @@ struct AgentLimitsCard: View {
         var base = (clients.filter(known) + (agentUsage?.agents.map(\.clientId) ?? []))
             .filter { seen.insert($0).inserted }
 
-        // Apply the same hide logic as Client tabs, plus the independent
-        // per-client Agent-limits toggle: either one keeps a client out of
-        // the multi-agent limits card.
+        // The per-client Agent-limits toggle applies on every surface, not
+        // only the multi-agent one. Settings promises it "hides only that
+        // client's quota card here and on its own tab"; gating it on
+        // `reorderable` honoured the first half and silently broke the second,
+        // so the card the user switched off reappeared as soon as they opened
+        // that client.
+        let limitsHidden = ClientRegistry.parseIdSet(limitsHiddenRaw)
+        base = base.filter { !limitsHidden.contains($0) }
+        // Tab visibility is a multi-agent concern only: a hidden tab cannot be
+        // the tab you are on, and filtering by it in the restricted path would
+        // depend on a state that path can never be in.
         if reorderable {
-            let limitsHidden = ClientRegistry.parseIdSet(limitsHiddenRaw)
-            let hidden = ClientRegistry.hiddenClients().union(limitsHidden)
+            let hidden = ClientRegistry.hiddenClients()
             base = base.filter { !hidden.contains($0) }
         }
         return base
@@ -297,6 +304,19 @@ struct AgentLimitsCard: View {
     // (OverviewView, SettingsWindowView) rather than inside `body`, so an
     // "off" card leaves no structural gap in its parent VStack.
     var body: some View {
+        // A restricted card with nothing left to show is not a card. On a
+        // client tab the only reason the list can be empty once the fetch has
+        // settled is that the user switched this client's quota card off, and
+        // answering that with an empty shell saying "no supported agents" is a
+        // worse reply than the silence they asked for.
+        if restrict, visibleClients.isEmpty, usageAttempted {
+            EmptyView()
+        } else {
+            card
+        }
+    }
+
+    private var card: some View {
         DashCard(title, trailing: { noteLabel }) {
             if opencodeView {
                 integrationLine("↔ Routes through opencode")

@@ -10543,6 +10543,31 @@ enum SelfTest {
             ).totals(confirmed: [crRecords[0]]).assigned.map(\.target) == ["wide"],
             "CR3 and the provider-wide one still applies when no override exists")
 
+        // CR5. The non-cache subtotal is summed from components, not
+        // subtracted from the saturated total. With input and cacheRead both at
+        // the ceiling, `tokens - cacheRead` reports zero non-cache work for a
+        // row whose input alone was enormous — a wrong number rather than a
+        // crash, which is the worse of the two.
+        let crBoth = try! JSONDecoder().decode(
+            WindowMessage.self,
+            from: Data("""
+            {"timestamp":1,"client":"t","providerId":"t","modelId":"t",
+             "input":9223372036854775807,"output":0,
+             "cacheRead":9223372036854775807,"cacheWrite":0,"reasoning":0,
+             "cost":0,"isTurnStart":true}
+            """.utf8))
+        expect(crBoth.tokensExCacheRead == Int64.max,
+               "CR5 the ex-cache subtotal keeps the input it is made of")
+        expect(crBoth.tokens - crBoth.cacheRead == 0,
+               "CR5 and the subtraction it replaces really does report zero, so this is not theoretical")
+
+        // CR6. A ratio of a saturated token count over a small delta leaves
+        // Int64's range entirely; the plain initializer traps on it.
+        expect(WindowEquivalence.clamped(1e30) == Int64.max
+                && WindowEquivalence.clamped(-1e30) == Int64.min
+                && WindowEquivalence.clamped(.nan) == 0,
+               "CR6 a Double outside Int64's range clamps instead of trapping")
+
         // CR2. Token components come from session files this app does not
         // write. A corrupt row must not be able to trap the process.
         let crHuge = try! JSONDecoder().decode(

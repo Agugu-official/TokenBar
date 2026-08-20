@@ -101,6 +101,19 @@ public enum WindowEquivalence {
         }
     }
 
+    /// A `Double` back to `Int64` without trapping.
+    ///
+    /// `Int64(_:)` traps on a value outside its range and on NaN, and the
+    /// values here are ratios: a saturated token count over a small quota delta
+    /// scales past Int64 long before it means anything. The clamping integer
+    /// initializer only accepts integers, so the bound is done here.
+    public static func clamped(_ value: Double) -> Int64 {
+        guard value.isFinite else { return 0 }
+        if value >= Double(Int64.max) { return .max }
+        if value <= Double(Int64.min) { return .min }
+        return Int64(value)
+    }
+
     /// `messages` must already be filtered to this subscription's attributed
     /// usage. `samples` must be the ones inside the window, in time order.
     public static func row(
@@ -118,12 +131,7 @@ public enum WindowEquivalence {
         let inSpan = messages.filter {
             $0.timestamp > first.atMs && $0.timestamp <= last.atMs
         }
-        // Saturating, and subtracting inside the message rather than across
-        // the running total: `tokens - cacheRead` can itself trap on a corrupt
-        // row where cacheRead exceeds the saturated total.
-        let tokens = inSpan.reduce(Int64(0)) {
-            $0.saturatingAdding($1.tokens.subtractingReportingOverflow($1.cacheRead).partialValue)
-        }
+        let tokens = inSpan.reduce(Int64(0)) { $0.saturatingAdding($1.tokensExCacheRead) }
         let cost = inSpan.reduce(0.0) { $0 + $1.cost }
         let error = Int((quantisationHalfStep / delta * 100).rounded())
 
@@ -132,7 +140,10 @@ public enum WindowEquivalence {
             return .insufficient(deltaPercent: delta, errorPercent: error)
         }
         return .ratio(
-            tokensPerTenth: Int64((Double(tokens) / delta * 10).rounded()),
+            // Clamping, not truncating: a saturated token count over a small
+            // delta scales past `Int64`, and the plain initializer traps on a
+            // Double outside the range.
+            tokensPerTenth: clamped((Double(tokens) / delta * 10).rounded()),
             costPerTenth: cost / delta * 10,
             errorPercent: error)
     }
@@ -268,13 +279,13 @@ public enum WindowEquivalence {
             let ratios = admitted.map { $0.spanCost / $0.deltaPercent * 10 }
             let tokens = admitted.map { Double($0.spanTokens) / $0.deltaPercent * 10 }
             return .spread(
-                lowPerTenth: Int64((tokens.min() ?? 0).rounded()),
-                highPerTenth: Int64((tokens.max() ?? 0).rounded()),
+                lowPerTenth: clamped((tokens.min() ?? 0).rounded()),
+                highPerTenth: clamped((tokens.max() ?? 0).rounded()),
                 lowCostPerTenth: ratios.min() ?? 0,
                 highCostPerTenth: ratios.max() ?? 0)
         }
         return .ratio(
-            tokensPerTenth: Int64((tokenRatio * 10).rounded()),
+            tokensPerTenth: clamped((tokenRatio * 10).rounded()),
             costPerTenth: costRatio * 10,
             errorPercent: max(1, Int((relativeError * 100).rounded())))
     }
