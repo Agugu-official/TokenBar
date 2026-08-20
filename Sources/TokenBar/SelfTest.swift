@@ -405,6 +405,10 @@ private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendab
     /// Served for every window, so a case about the strip summaries has
     /// something to summarise. Nil keeps the pre-existing behaviour.
     var curve: QuotaCurve?
+    /// Makes the quota fetch fail, so a case can drive the poll's failure path
+    /// rather than reason about it.
+    var failAgentUsage = false
+    struct QuotaUnavailable: Error {}
 
     init(payload: AgentUsagePayload) { self.payload = payload }
 
@@ -432,7 +436,10 @@ private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendab
     ) async throws -> AgentsReport {
         try await inner.agentsReport(year: year, clients: clients, priority: priority)
     }
-    func agentUsage() async throws -> AgentUsagePayload { payload }
+    func agentUsage() async throws -> AgentUsagePayload {
+        if failAgentUsage { throw QuotaUnavailable() }
+        return payload
+    }
     func usageTrace(windowSecs: Int64) async throws -> [TraceBucket] {
         try await inner.usageTrace(windowSecs: windowSecs)
     }
@@ -11003,6 +11010,39 @@ enum SelfTest {
                 payload: emptyWindows, clientId: "codex", attempted: false,
                 curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d and is still a wait before it has")
+        expect(
+            stateIsLoading(WindowCardLoader.quotaHalf(
+                payload: wPayload, clientId: "not-in-payload", attempted: false,
+                curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
+            "L6d a client missing from an unsettled payload is still a wait")
+
+        // L6e. Teaching `quotaHalf` to answer is not the same as the answer
+        // reaching the card. `refreshWindowQuotaHalves` is the only writer of
+        // `windowCards`, and it was called from the poll's success branch
+        // alone, so a run of failures left the card holding the `.loading` it
+        // was built with. Driven through the real poll rather than reasoned
+        // about, because the pure function was already green while this was
+        // broken.
+        let blockedOnFailure: Bool? = awaitMainActorValue {
+            let src = WindowScanCountingSource(payload: wPayload)
+            src.failAgentUsage = true
+            let m = DashboardModel(source: src, initialYear: nil)
+            // Set before the poll settles: this is what the lens task supplies
+            // in the app, and the recompute writes one entry per client.
+            m.windowCardClients = ["codex"]
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while !m.agentUsageAttempted, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            poll.cancel()
+            _ = await poll.value
+            guard let state = m.windowCards["codex"] else { return false }
+            return stateIsBlocked(state)
+        }
+        expect(blockedOnFailure == true,
+               "L6e a settled quota failure reaches the card, not just the function")
 
         // And the two must stay distinguishable at the layer below, or the
         // check above is one `try?` away from silently reverting.
