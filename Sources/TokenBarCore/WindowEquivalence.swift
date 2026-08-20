@@ -241,7 +241,14 @@ public enum WindowEquivalence {
             let anyMovement = cycles.reduce(0.0) { $0 + $1.deltaPercent }
             if cycles.isEmpty { return .unavailable }
             if anyMovement <= 0 { return .notMoved }
-            if cycles.allSatisfy({ $0.spanCost <= 0 }) {
+            // Both kinds of evidence, like the admission gate above. This
+            // classifier kept the old cost-only predicate, so cycles carrying
+            // real tokens from unpriced models — none of them large enough to
+            // be admitted — were still called usage nobody recorded. Reachable:
+            // `QuotaHistoryCard` calls `aggregate` with no prefilter, so that
+            // card could print "none of it recorded on this machine" above rows
+            // listing the tokens it recorded.
+            if cycles.allSatisfy({ $0.spanCost <= 0 && $0.spanTokens <= 0 }) {
                 return .unaccounted(deltaPercent: anyMovement)
             }
             return .insufficient(

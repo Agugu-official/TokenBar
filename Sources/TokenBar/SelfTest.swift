@@ -11903,6 +11903,31 @@ enum SelfTest {
                           QuotaSample(atMs: 2_000, usedPercent: 20)],
                 messages: []) == .unaccounted(deltaPercent: 19),
             "V17 and an empty span still is not, so the check above is not vacuous")
+        // V18. The fallback classifier had to learn the same rule. Small
+        // unpriced cycles are not admitted, and calling them unrecorded is the
+        // third copy of the sentence this branch keeps deleting.
+        let aeSmallUnpriced = [aeCycle(2, 500, 0), aeCycle(2, 500, 0)]
+        expect(
+            WindowEquivalence.aggregate(cycles: aeSmallUnpriced)
+                != .unaccounted(deltaPercent: 4),
+            "V18 small unpriced cycles are too little to estimate, not usage nobody recorded")
+        expect(
+            WindowEquivalence.aggregate(cycles: [aeCycle(2, 0, 0), aeCycle(2, 0, 0)])
+                == .unaccounted(deltaPercent: 4),
+            "V18 and cycles with neither tokens nor cost still are, so the check is not vacuous")
+
+        // The tokens-only error bar must be computed, not decorative: cycles
+        // that disagree produce a non-zero jackknife. A homogeneous fixture
+        // makes that path unreachable, which is how it was covered in
+        // appearance only.
+        if case let .tokensOnly(_, error) = WindowEquivalence.aggregate(cycles: [
+            aeCycle(50, 1_000, 0), aeCycle(50, 4_000, 0), aeCycle(50, 9_000, 0),
+        ]) {
+            expect(error > 1, "V18 disagreeing unpriced cycles carry a real error bar")
+        } else {
+            expect(false, "V18 disagreeing unpriced cycles still produce a tokens-only row")
+        }
+
         expect(
             WindowEquivalence.aggregate(cycles: []) == .unavailable,
             "AE4 no cycles means no estimate at all")
