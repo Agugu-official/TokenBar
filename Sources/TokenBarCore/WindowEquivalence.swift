@@ -29,6 +29,15 @@ public enum WindowEquivalence {
         case unaccounted(deltaPercent: Double)
         /// Fewer than two samples inside the window, so no Δ exists at all.
         case unavailable
+        /// The cycles are fine; there are not enough of them yet.
+        ///
+        /// Distinct from `insufficient`, which it was folded into and which
+        /// says the readings are too coarse to measure. On live data two cycles
+        /// of 35% and 97% rendered as "quota moved only 132% — too little to
+        /// estimate (+/-1%)": every clause false, and the one number the reader
+        /// could check contradicted the sentence around it. Nothing about that
+        /// window is too small. There are two of it.
+        case tooFewCycles(count: Int, needed: Int)
         /// Nothing has been declared, so no usage can be charged to this
         /// subscription and the ratio has no numerator.
         ///
@@ -80,6 +89,9 @@ public enum WindowEquivalence {
                 .localizedWindowRow(String(Int(delta.rounded())))
         case .unavailable:
             return "Not enough quota readings yet".localizedWindowRow()
+        case let .tooFewCycles(count, needed):
+            return "%@ of %@ windows recorded — the estimate needs one more"
+                .localizedWindowRow(String(count), String(needed))
         case .undeclared:
             return "Classify your usage in Settings to see what this window is worth"
                 .localizedWindowRow()
@@ -199,12 +211,12 @@ public enum WindowEquivalence {
                 errorPercent: Int((quantisationHalfStep * Double(cycles.count)
                     / anyMovement * 100).rounded()))
         }
+        // Count, not size: these cycles each cleared `minimumDelta` on their
+        // own, so saying the quota "moved only" their sum is false, and the
+        // error term computed from that sum is small precisely because the
+        // movement was large. What is missing is cycles to compare.
         guard admitted.count >= minimumCycles else {
-            let delta = admitted.reduce(0.0) { $0 + $1.deltaPercent }
-            return .insufficient(
-                deltaPercent: delta,
-                errorPercent: Int((quantisationHalfStep * Double(admitted.count)
-                    / delta * 100).rounded()))
+            return .tooFewCycles(count: admitted.count, needed: minimumCycles)
         }
 
         func pooled(_ set: [Cycle], _ pick: (Cycle) -> Double) -> Double {

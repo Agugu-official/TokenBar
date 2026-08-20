@@ -150,3 +150,4 @@
 "Sun" = "Sun";
 "Classify your usage in Settings to see what this window is worth" = "Classify your usage in Settings to see what this window is worth";
 "Nothing is classified yet. Settings › Usage attribution splits this by subscription." = "Nothing is classified yet. Settings › Usage attribution splits this by subscription.";
+"%@ of %@ windows recorded — the estimate needs one more" = "%@ of %@ windows recorded — the estimate needs one more";

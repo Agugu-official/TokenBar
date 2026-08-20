@@ -97,11 +97,17 @@ struct QuotaHeatmapCard: View {
                 Text(verbatim: selected.map(label) ?? "")
                     .lineLimit(1)
                 Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 7))
+                    .font(.system(size: 6))
             }
-            .font(.caption2)
+            // Below the subtitle's `.caption` and well below the 13pt title:
+            // this is a control label, not content. Weight matters as much as
+            // size here — dropping it to secondary is what stops it reading as
+            // a second heading beside the real one.
+            .font(.system(size: 8))
+            .foregroundStyle(.secondary)
         }
         .menuStyle(.borderlessButton)
+        .controlSize(.mini)
         .fixedSize()
     }
 

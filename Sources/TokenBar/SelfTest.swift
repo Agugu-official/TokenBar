@@ -11485,6 +11485,20 @@ enum SelfTest {
                 == .unaccounted(deltaPercent: 60),
             "AE4 quota moved with nothing recorded locally is not `1% is free`")
         expect(
+            // The live case that exposed the old copy: two cycles, 35% and
+            // 97%, both individually admissible. Reporting that as "moved only
+            // 132%" with a +/-1% error was three false claims in one line.
+            WindowEquivalence.aggregate(cycles: [
+                aeCycle(35, 1_000, 10), aeCycle(97, 3_000, 30),
+            ]) == .tooFewCycles(count: 2, needed: WindowEquivalence.minimumCycles),
+            "V15 two large cycles are too FEW, not too small")
+        expect(
+            WindowEquivalence.text(
+                .tooFewCycles(count: 2, needed: 3),
+                tokens: Format.compactTokens, money: Format.usd)
+                == "2 of 3 windows recorded — the estimate needs one more",
+            "V15 and it says so, without quoting a movement figure that contradicts it")
+        expect(
             WindowEquivalence.aggregate(declared: false, cycles: [aeCycle(60, 0, 0)])
                 == .undeclared,
             "V15 with nothing declared the fold says so, rather than reporting the "
