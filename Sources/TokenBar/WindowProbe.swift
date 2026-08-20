@@ -388,7 +388,7 @@ enum WindowProbe {
                 t0 = Date()
                 let mineHere = usage.messages.filter {
                     UsageAttribution.resolve(client: $0.client, provider: $0.providerId,
-                                             model: nil, records: conf) == .assigned(client)
+                                             model: $0.modelId, records: conf) == .assigned(client)
                 }
                 let foldMs = Date().timeIntervalSince(t0) * 1000
                 t0 = Date()
@@ -426,7 +426,7 @@ enum WindowProbe {
                     var t0 = Date()
                     let mineNow = usage.messages.filter {
                         UsageAttribution.resolve(
-                            client: $0.client, provider: $0.providerId, model: nil,
+                            client: $0.client, provider: $0.providerId, model: $0.modelId,
                             records: confirmed3) == .assigned(client)
                     }
                     let attrMs = Date().timeIntervalSince(t0) * 1000
@@ -485,7 +485,7 @@ enum WindowProbe {
                         .filter { m in
                             UsageAttribution.resolve(
                                 client: m.client, provider: m.providerId,
-                                model: nil, records: confirmed) == .assigned(client)
+                                model: m.modelId, records: confirmed) == .assigned(client)
                         }
                     // Everything except cache read: measured to separate moved
                     // from still buckets 4.5x, vs 1.2x for input+output+reasoning.
@@ -517,7 +517,7 @@ enum WindowProbe {
                             where m.timestamp > l && m.timestamp <= h
                             && UsageAttribution.resolve(
                                 client: m.client, provider: m.providerId,
-                                model: nil, records: confirmed) == .assigned(client) {
+                                model: m.modelId, records: confirmed) == .assigned(client) {
                             fA += m.input + m.output + m.reasoning
                             fB += m.input + m.output + m.reasoning + m.cacheWrite
                             fC += m.tokens
@@ -545,7 +545,7 @@ enum WindowProbe {
                             where m.timestamp > l && m.timestamp <= h
                             && UsageAttribution.resolve(
                                 client: m.client, provider: m.providerId,
-                                model: nil, records: confirmed) == .assigned(client) {
+                                model: m.modelId, records: confirmed) == .assigned(client) {
                             v[0] += Double(m.input + m.output + m.reasoning)
                             v[1] += Double(m.input + m.output + m.reasoning + m.cacheWrite)
                             v[2] += Double(m.tokens)
@@ -579,7 +579,7 @@ enum WindowProbe {
                             .filter { m in
                                 UsageAttribution.resolve(
                                     client: m.client, provider: m.providerId,
-                                    model: nil, records: confirmed) == .assigned(client)
+                                    model: m.modelId, records: confirmed) == .assigned(client)
                             }
                         gaps.append(Int((h - l) / 60000))
                         freshes.append(ms.map { $0.tokens - $0.cacheRead }.reduce(0, +))
@@ -604,7 +604,7 @@ enum WindowProbe {
                             .filter { m in
                                 UsageAttribution.resolve(
                                     client: m.client, provider: m.providerId,
-                                    model: nil, records: confirmed) == .assigned(client)
+                                    model: m.modelId, records: confirmed) == .assigned(client)
                             }
                         // Split it: cache reads dwarf everything by volume but
                         // cost a fraction of the quota, so a bar sized by total

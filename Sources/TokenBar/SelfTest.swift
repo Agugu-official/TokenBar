@@ -10483,6 +10483,55 @@ enum SelfTest {
             ]
             """.utf8)
         )
+        // CR1. `[from, to)`, matching the FFI's interval and the history fold.
+        // It used to be `(from, to]`, and an inferred window's start IS the
+        // timestamp of its first message, so that message — the one that
+        // established the window — was the one it dropped.
+        let crScan = UnionScan(
+            fromMs: 0, untilMs: 10_000, capturedAt: Date(), messages: windowMessages)
+        expect(
+            crScan.slice(from: 2_000, to: 3_000).map(\.timestamp) == [2_000],
+            "CR1 the message at the start of the interval is inside it")
+        expect(
+            crScan.slice(from: 2_000, to: 3_000).count == 1,
+            "CR1 and the message at the end is not, so two adjacent windows cannot both claim it")
+
+        // CR3. A model-specific declaration outranks the provider-wide one,
+        // and the window folds must see it. They passed `model: nil`, which
+        // makes the resolver skip every override — so a user who classified one
+        // model separately got that usage charged to the provider-wide target
+        // in the quota cards while the daily chart, which does pass the model,
+        // showed it correctly. Two answers, same declarations.
+        let crRecords = [
+            UsageAttribution.Record(
+                client: "test", provider: "test", state: .assigned("wide")),
+            UsageAttribution.Record(
+                client: "test", provider: "test", model: "test", state: .assigned("narrow")),
+        ]
+        let crTotals = WindowUsage(
+            messages: windowMessages, undatedCount: 0, processingTimeMs: 0
+        ).totals(confirmed: crRecords)
+        expect(
+            crTotals.assigned.map(\.target) == ["narrow"],
+            "CR3 the model-specific declaration wins in a window fold, as it does in the daily series")
+        expect(
+            WindowUsage(
+                messages: windowMessages, undatedCount: 0, processingTimeMs: 0
+            ).totals(confirmed: [crRecords[0]]).assigned.map(\.target) == ["wide"],
+            "CR3 and the provider-wide one still applies when no override exists")
+
+        // CR2. Token components come from session files this app does not
+        // write. A corrupt row must not be able to trap the process.
+        let crHuge = try! JSONDecoder().decode(
+            WindowMessage.self,
+            from: Data("""
+            {"timestamp":1,"client":"t","providerId":"t","modelId":"t",
+             "input":9223372036854775807,"output":9223372036854775807,
+             "cacheRead":0,"cacheWrite":0,"reasoning":0,"cost":0,"isTurnStart":true}
+            """.utf8))
+        expect(crHuge.tokens == Int64.max,
+               "CR2 an overflowing token sum saturates instead of trapping")
+
         expect(
             WindowResolver.resolve(
                 resetsAtMs: nil, durationMs: 5_000, now: 2_000,

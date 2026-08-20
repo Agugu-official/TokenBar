@@ -223,7 +223,7 @@ enum WindowCardLoader {
 
         let mine = scan.slice(from: start, to: min(end, quota.nowMs)).filter {
             UsageAttribution.resolve(
-                client: $0.client, provider: $0.providerId, model: nil,
+                client: $0.client, provider: $0.providerId, model: $0.modelId,
                 records: confirmed) == .assigned(quota.clientId)
         }
         let geo = WindowCardGeometry.usageGeometry(

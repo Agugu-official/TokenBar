@@ -86,7 +86,15 @@ struct UnionScan: Sendable {
     /// worse than not answering.
     func covers(start: Int64) -> Bool { start >= fromMs }
 
+    /// Half-open `[from, to)`, matching the FFI's own interval and
+    /// `QuotaHistoryFold.rows`.
+    ///
+    /// It used to be `(from, to]`, which is wrong at both ends for what it is
+    /// asked. An inferred window's `start` IS the timestamp of the first usage
+    /// after the reset, so an exclusive start dropped the very message that
+    /// established the window; and an inclusive end claimed a message landing
+    /// exactly on a reset for the cycle it ends rather than the one it opens.
     func slice(from: Int64, to: Int64) -> [WindowMessage] {
-        messages.filter { $0.timestamp > from && $0.timestamp <= to }
+        messages.filter { $0.timestamp >= from && $0.timestamp < to }
     }
 }

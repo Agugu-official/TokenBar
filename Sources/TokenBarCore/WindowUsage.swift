@@ -19,7 +19,16 @@ public struct WindowMessage: Decodable, Sendable {
     public let cost: Double
     public let isTurnStart: Bool
 
-    public var tokens: Int64 { input + output + cacheRead + cacheWrite + reasoning }
+    /// Saturating, like the graph and report totals that fold the same
+    /// untrusted counters. These come from local session files this app does
+    /// not write; a corrupt row summing past `Int64.max` would trap, and a
+    /// malformed line in someone's transcript must not be able to terminate
+    /// the UI.
+    public var tokens: Int64 {
+        [output, cacheRead, cacheWrite, reasoning].reduce(input) {
+            $0.addingReportingOverflow($1).overflow ? Int64.max : $0 + $1
+        }
+    }
 }
 
 public struct WindowUsage: Decodable, Sendable {
@@ -57,7 +66,8 @@ public extension WindowUsage {
 
         for m in messages {
             let state = UsageAttribution.resolve(
-                client: m.client, provider: m.providerId, model: nil, records: confirmed)
+                client: m.client, provider: m.providerId, model: m.modelId,
+                records: confirmed)
             switch state {
             case let .assigned(target):
                 let cur = byTarget[target] ?? (0, 0)

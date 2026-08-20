@@ -251,7 +251,12 @@ struct PopoverView: View {
         // the task never runs again: opening straight onto an agent tab left
         // the card permanently absent until you switched tabs. Same trap the
         // `.onChange` below documents for `presentClients`.
-        .task(id: "\(windowSelectionRaw)|\(activeTab)|\(hiddenRaw)|"
+        // Keyed on `attributionRaw` too: the window card, the history rows and
+        // the equivalence are all folded through the declaration set, and a
+        // classification saved in Settings would otherwise reach the daily
+        // chart at once (its own task IS keyed on it) while these three kept
+        // reporting the previous split until the next minute poll.
+        .task(id: "\(windowSelectionRaw)|\(activeTab)|\(hiddenRaw)|\(attributionRaw)|"
               + "\(effectiveView.rawValue)|" + displayClients.joined(separator: ",")) {
             model.windowCardClients = displayClients
             // The scan follows what is on screen; the curves do not. See

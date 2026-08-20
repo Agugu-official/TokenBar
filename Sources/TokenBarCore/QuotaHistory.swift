@@ -183,7 +183,7 @@ public enum QuotaHistoryFold {
             for message in sorted[lo..<max(lo, hi)] {
                 let state = UsageAttribution.resolve(
                     client: message.client, provider: message.providerId,
-                    model: nil, records: confirmed)
+                    model: message.modelId, records: confirmed)
                 if case let .assigned(target) = state, target == subscription {
                     mine.tokens += message.tokens
                     mine.exCacheRead += message.tokens - message.cacheRead
