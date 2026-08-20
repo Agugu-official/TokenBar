@@ -122,7 +122,12 @@ import TokenBarCore
     /// and overwrites it with an older payload and the `confirmed` set it
     /// captured. Cancellation does not prevent this: `LiveUsageDataSource` hands
     /// the blocking FFI call to a detached task, so its result arrives regardless.
-    @ObservationIgnored private var loadToken = 0
+    /// Static for the same reason `lastRows` is: two popover instances can
+    /// overlap, and an instance-local counter gives each of them a token of 1,
+    /// so both pass their own check and the older one's result can overwrite
+    /// the newer rows in the shared cache. The next reopen then publishes those
+    /// stale rows immediately.
+    @ObservationIgnored private static var loadToken = 0
 
     func load(
         source: any UsageDataSource,
@@ -130,8 +135,8 @@ import TokenBarCore
         timeZone: String = TimeZone.current.identifier
     ) async {
         Self.installTimeZoneObserver()
-        loadToken &+= 1
-        let token = loadToken
+        Self.loadToken &+= 1
+        let token = Self.loadToken
         // A timezone change invalidates every day key, and the graph cache will
         // not notice: past its 30s window an unchanged source token makes it
         // re-stamp and serve the same entry indefinitely (tb_core_ffi/src/lib.rs
@@ -155,7 +160,7 @@ import TokenBarCore
                 ? source.refreshGraph(year: nil, priority: .userInitiated)
                 : source.graph(year: nil, priority: .userInitiated))
         } catch {
-            guard loadToken == token else { return }
+            guard Self.loadToken == token else { return }
             // Never keep publishing a series built from inputs that have moved
             // on. Classification can always be brought current from rows we
             // already hold; day keys cannot, so a failed recompute after a
@@ -177,7 +182,7 @@ import TokenBarCore
             return
         }
 
-        guard loadToken == token else { return }
+        guard Self.loadToken == token else { return }
 
         // A transition landed while this acquisition was suspended, so nothing
         // it returned is known to have been built under the current zone.

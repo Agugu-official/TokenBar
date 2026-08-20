@@ -109,7 +109,8 @@ struct WindowUsageCard: View {
                 legend(geo).frame(height: Self.legendHeight)
                 Group {
                     if let usage {
-                        equivalenceRow(quota: quota, mine: usage.mine)
+                        equivalenceRow(
+                            quota: quota, mine: usage.mine, interval: interval)
                     } else {
                         LoadingLine(title: "Reading local usage…")
                     }
@@ -382,9 +383,19 @@ struct WindowUsageCard: View {
     }
 
     private func equivalenceRow(
-        quota: WindowQuotaHalf, mine: [WindowMessage]
+        quota: WindowQuotaHalf, mine: [WindowMessage],
+        interval: (start: Int64, end: Int64)
     ) -> some View {
-        let row = WindowEquivalence.row(samples: quota.samples, messages: mine)
+        // Restricted to the SETTLED interval, like the chart above it. Once the
+        // scan refines `.idle` into `.inferred`, `quota.samples` still carries
+        // readings chosen against the previous provider-anchored window, and
+        // handing those to the fold let this line report the earlier cycle's
+        // movement while the chart on the same card said there was no reading
+        // in the window at all.
+        let inWindow = quota.samples.filter {
+            $0.atMs >= interval.start && $0.atMs <= interval.end
+        }
+        let row = WindowEquivalence.row(samples: inWindow, messages: mine)
         let plain: Bool = { if case .ratio = row { return false }; return true }()
         return Text(WindowEquivalence.text(
             row, tokens: Format.compactTokens, money: Format.usd))
@@ -403,15 +414,18 @@ private struct WindowHoverTooltip: View {
     let subtitle: String
     @Binding var measuredSize: CGSize
 
-    private var total: Int64 { messages.reduce(0) { $0 + $1.tokens } }
+    // Saturating, like every production fold over these counters: the tooltip
+    // reads the same untrusted transcript rows, and a hover must not be able to
+    // do what the chart underneath it no longer can.
+    private var total: Int64 { messages.reduce(0) { $0.saturatingAdding($1.tokens) } }
 
     private var kinds: [(label: String, color: String, value: Int64)] {
         let sums: [Int64] = [
-            messages.reduce(0) { $0 + $1.input },
-            messages.reduce(0) { $0 + $1.output },
-            messages.reduce(0) { $0 + $1.cacheRead },
-            messages.reduce(0) { $0 + $1.cacheWrite },
-            messages.reduce(0) { $0 + $1.reasoning },
+            messages.reduce(0) { $0.saturatingAdding($1.input) },
+            messages.reduce(0) { $0.saturatingAdding($1.output) },
+            messages.reduce(0) { $0.saturatingAdding($1.cacheRead) },
+            messages.reduce(0) { $0.saturatingAdding($1.cacheWrite) },
+            messages.reduce(0) { $0.saturatingAdding($1.reasoning) },
         ]
         return zip(TokenKindPalette.all, sums)
             .map { (label: $0.label, color: $0.color, value: $1) }

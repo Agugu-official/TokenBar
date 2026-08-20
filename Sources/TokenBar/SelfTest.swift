@@ -10543,6 +10543,18 @@ enum SelfTest {
             ).totals(confirmed: [crRecords[0]]).assigned.map(\.target) == ["wide"],
             "CR3 and the provider-wide one still applies when no override exists")
 
+        // CR7. The equivalence footer reads only the settled window. A sample
+        // from the previous provider-anchored interval carries the earlier
+        // cycle's movement, and including it made that line describe a window
+        // the chart beside it said held no reading at all.
+        let crSamples = [QuotaSample(atMs: 1_000, usedPercent: 4),
+                         QuotaSample(atMs: 9_000, usedPercent: 30)]
+        let crInside = crSamples.filter { $0.atMs >= 5_000 && $0.atMs <= 12_000 }
+        expect(WindowEquivalence.row(samples: crInside, messages: []) == .unavailable,
+               "CR7 one sample inside the settled window yields no delta at all")
+        expect(WindowEquivalence.row(samples: crSamples, messages: []) != .unavailable,
+               "CR7 and the unfiltered pair does yield one, which is the difference filtering makes")
+
         // CR5. The non-cache subtotal is summed from components, not
         // subtracted from the saturated total. With input and cacheRead both at
         // the ceiling, `tokens - cacheRead` reports zero non-cache work for a

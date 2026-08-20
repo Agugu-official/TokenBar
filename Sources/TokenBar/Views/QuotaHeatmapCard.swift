@@ -262,8 +262,10 @@ struct QuotaHeatmapCard: View {
     private func equivalent(_ percent: Double, row: WindowEquivalence.Row?) -> some View {
         if case let .ratio(tokensPerTenth, costPerTenth, errorPercent) = row {
             let share = percent / 10
+            // Clamped: the ratio itself can already be saturated, and a cell
+            // above 10% scales it further, past what `Int64(_:)` accepts.
             Text(verbatim: "≈ " + Format.compactTokens(
-                Int64((Double(tokensPerTenth) * share).rounded())))
+                WindowEquivalence.clamped((Double(tokensPerTenth) * share).rounded())))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Text("~ %@ API-equivalent, ±%@%%".localized(

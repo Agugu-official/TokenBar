@@ -1140,15 +1140,30 @@ private struct DashboardSnapshot {
 
         // Cycles follow the scan's client, not every displayed one: the history
         // is a per-subscription list and only the open tab shows it.
-        if let client = windowUsageClient,
-           let cycles = WindowCardLoader.cycles(
-               payload: agentUsage, clientId: client, curve: readCurve)
-        {
-            quotaCycles = cycles
-            rebuildQuotaHistory()
-        } else if windowUsageClient == nil {
+        //
+        // The client the published cycles belong to is tracked, because "keep
+        // what we had" is only safe while the question has not changed. A
+        // transient read failure on B used to leave A's cycles published, and
+        // `QuotaView` then drew them under B's name — one subscription's
+        // history labelled as another's, which is worse than an empty card and
+        // indistinguishable from a correct one.
+        if let client = windowUsageClient {
+            if let cycles = WindowCardLoader.cycles(
+                payload: agentUsage, clientId: client, curve: readCurve)
+            {
+                quotaCycles = cycles
+                quotaCyclesClient = client
+                rebuildQuotaHistory()
+            } else if quotaCyclesClient != client {
+                // Could not read, and what we hold is somebody else's.
+                quotaCycles = []
+                quotaHistory = []
+                quotaCyclesClient = nil
+            }
+        } else {
             quotaCycles = []
             quotaHistory = []
+            quotaCyclesClient = nil
         }
     }
 
@@ -1235,6 +1250,9 @@ private struct DashboardSnapshot {
     /// Recorded-cycle summaries for EVERY displayed client's windows, for the
     /// all-agent lens. Curve reads only, so unlike `quotaHistory` this needs no
     /// message scan and is safe on the landing view.
+    /// Whose cycles `quotaCycles` currently holds. Nil when it is empty.
+    @ObservationIgnored private var quotaCyclesClient: String?
+
     private(set) var quotaWindowSummaries: [QuotaWindowSummary] = []
     /// One weekday-by-hour grid per window, keyed as `QuotaWindowSummary.id`.
     /// Written in the same guarded block as the summaries, so it cannot be
