@@ -29,6 +29,16 @@ public enum WindowEquivalence {
         case unaccounted(deltaPercent: Double)
         /// Fewer than two samples inside the window, so no Δ exists at all.
         case unavailable
+        /// Tokens estimated, money not — the admitted cycles carry usage the
+        /// pricing tables could not value.
+        ///
+        /// Kept apart from `ratio` rather than reported with a zero dollar
+        /// figure, which would read as "this quota is free". Unlike `ratio`
+        /// this is not gated on the tolerance: `spread` exists to avoid quoting
+        /// one money figure the cycles disagree about, and here there is no
+        /// money figure at all, so the token estimate with its own error bar is
+        /// the entire answer rather than half of one.
+        case tokensOnly(tokensPerTenth: Int64, errorPercent: Int)
         /// The cycles are fine; there are not enough of them yet.
         ///
         /// Distinct from `insufficient`, which it was folded into and which
@@ -89,6 +99,9 @@ public enum WindowEquivalence {
                 .localizedWindowRow(String(Int(delta.rounded())))
         case .unavailable:
             return "Not enough quota readings yet".localizedWindowRow()
+        case let .tokensOnly(t, error):
+            return "10%% of quota ~ %@, unpriced models, ±%@%%".localizedWindowRow(
+                tokens(t), String(error))
         case let .tooFewCycles(count, needed):
             return "%@ of %@ windows recorded — the estimate needs that many"
                 .localizedWindowRow(String(count), String(needed))
@@ -135,7 +148,11 @@ public enum WindowEquivalence {
         let cost = inSpan.reduce(0.0) { $0 + $1.cost }
         let error = Int((quantisationHalfStep / delta * 100).rounded())
 
-        guard tokens > 0 else { return .unaccounted(deltaPercent: delta) }
+        // "Recorded" means either kind of evidence. A provider row can carry a
+        // cost with no token components, and the pooled path already admits
+        // one; requiring tokens here made the single-window footer say "none of
+        // it recorded on this machine" about usage sitting in the same scan.
+        guard tokens > 0 || cost > 0 else { return .unaccounted(deltaPercent: delta) }
         guard delta >= minimumDelta else {
             return .insufficient(deltaPercent: delta, errorPercent: error)
         }
@@ -210,10 +227,15 @@ public enum WindowEquivalence {
     /// state is a missing declaration, and it is the state most users are in.
     public static func aggregate(declared: Bool = true, cycles: [Cycle]) -> Row {
         guard declared else { return .undeclared }
+        // Admission is about EVIDENCE, not about money. Gating on `spanCost`
+        // alone rejected every cycle whose models carry no price — the tokens
+        // were recorded and the quota moved, and the caller then reported that
+        // as "none of it recorded on this machine", which is false about the
+        // one thing it could see.
         let admitted = cycles.filter {
             $0.deltaPercent >= minimumDelta
                 && $0.observedFraction >= minimumObservedFraction
-                && $0.spanCost > 0
+                && ($0.spanCost > 0 || $0.spanTokens > 0)
         }
         guard !admitted.isEmpty else {
             let anyMovement = cycles.reduce(0.0) { $0 + $1.deltaPercent }
@@ -239,8 +261,41 @@ public enum WindowEquivalence {
             let delta = set.reduce(0.0) { $0 + $1.deltaPercent }
             return delta > 0 ? set.reduce(0.0) { $0 + pick($1) } / delta : 0
         }
-        let costRatio = pooled(admitted) { $0.spanCost }
+        // Two denominators on purpose. Tokens pool over everything admitted;
+        // cost pools only over the cycles that carry one, because a cycle with
+        // real tokens and no price contributes its delta to the denominator
+        // while contributing nothing to the numerator, which would drag the
+        // money figure down in proportion to how much unpriced work happened.
+        let priced = admitted.filter { $0.spanCost > 0 }
+        let costRatio = pooled(priced) { $0.spanCost }
         let tokenRatio = pooled(admitted) { Double($0.spanTokens) }
+
+        /// Leave-one-out spread of a pooled estimate, relative to the estimate.
+        func jackknifeRelative(_ set: [Cycle], _ pick: (Cycle) -> Double) -> Double {
+            let estimate = pooled(set, pick)
+            guard set.count >= minimumCycles, estimate > 0 else { return .infinity }
+            let n = Double(set.count)
+            var leaveOneOut: [Double] = []
+            for index in set.indices {
+                var rest = set
+                rest.remove(at: index)
+                leaveOneOut.append(pooled(rest, pick))
+            }
+            let mean = leaveOneOut.reduce(0, +) / n
+            let variance = (n - 1) / n
+                * leaveOneOut.reduce(0.0) { $0 + ($1 - mean) * ($1 - mean) }
+            return variance.squareRoot() / estimate
+        }
+
+        // No defensible money figure: report what IS known rather than a
+        // dollar amount pooled over cycles that carry no price.
+        guard priced.count >= minimumCycles else {
+            let tokenError = jackknifeRelative(admitted) { Double($0.spanTokens) }
+            return .tokensOnly(
+                tokensPerTenth: clamped((tokenRatio * 10).rounded()),
+                errorPercent: tokenError.isFinite
+                    ? max(1, Int((tokenError * 100).rounded())) : 0)
+        }
 
         // Jackknife: recompute the pooled estimate with each cycle left out and
         // take the spread of those. It measures the ESTIMATE's stability rather
@@ -262,21 +317,12 @@ public enum WindowEquivalence {
         // with the account-scope schema bump, and `Cycle` gains a `planKey` to
         // partition on. Until it does, an estimate spanning a plan change is
         // silently wrong and nothing here can tell.
-        let n = Double(admitted.count)
-        var leaveOneOut: [Double] = []
-        for index in admitted.indices {
-            var rest = admitted
-            rest.remove(at: index)
-            leaveOneOut.append(pooled(rest) { $0.spanCost })
-        }
-        let mean = leaveOneOut.reduce(0, +) / n
-        let variance = (n - 1) / n
-            * leaveOneOut.reduce(0.0) { $0 + ($1 - mean) * ($1 - mean) }
-        let standardError = variance.squareRoot()
-        let relativeError = costRatio > 0 ? standardError / costRatio : .infinity
+        // The error bar describes the COST estimate, so it is computed over the
+        // cycles that estimate is made of.
+        let relativeError = jackknifeRelative(priced) { $0.spanCost }
 
         guard relativeError <= tolerance else {
-            let ratios = admitted.map { $0.spanCost / $0.deltaPercent * 10 }
+            let ratios = priced.map { $0.spanCost / $0.deltaPercent * 10 }
             let tokens = admitted.map { Double($0.spanTokens) / $0.deltaPercent * 10 }
             return .spread(
                 lowPerTenth: clamped((tokens.min() ?? 0).rounded()),

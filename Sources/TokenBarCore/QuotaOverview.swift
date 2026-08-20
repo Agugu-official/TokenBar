@@ -27,6 +27,32 @@ public struct QuotaWindowSummary: Equatable, Sendable, Identifiable {
     public var id: String { "\(clientId)|\(cardId)" }
 }
 
+/// A window the heatmap can draw, whether or not it has completed a cycle yet.
+///
+/// Deliberately not `QuotaWindowSummary`: that one exists only for windows with
+/// recorded HISTORY, and the heatmap is built from the raw curve. A window whose
+/// only movement is in the cycle currently running has a grid and no summary, so
+/// keying the picker on summaries made that grid unreachable and the card
+/// announced "no allowance movement recorded yet" until the first cycle
+/// completed — days, on a weekly window.
+public struct QuotaHeatmapWindow: Equatable, Sendable, Identifiable {
+    public let clientId: String
+    public let cardId: String
+    public let windowLabel: String
+    /// Everything the grid accounts for, used to order the picker so the window
+    /// worth looking at leads.
+    public let total: Double
+
+    public var id: String { "\(clientId)|\(cardId)" }
+
+    public init(clientId: String, cardId: String, windowLabel: String, total: Double) {
+        self.clientId = clientId
+        self.cardId = cardId
+        self.windowLabel = windowLabel
+        self.total = total
+    }
+}
+
 public enum QuotaOverviewFold {
     /// A cycle at or above this counts as having reached the ceiling. Not 100:
     /// providers report whole percents and stop updating once the allowance is

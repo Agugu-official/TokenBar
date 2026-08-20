@@ -1071,6 +1071,15 @@ private struct DashboardSnapshot {
                let (settled, usage) = WindowCardLoader.usageHalf(
                    quota: q, scan: scan, confirmed: UsageAttribution.confirmed().records) {
                 windowCards[clientId] = .ready(settled, usage)
+            } else if case .loading = state, windowCards[clientId] != nil {
+                // A curve read that throws is a transient generation expiry —
+                // `quotaHalf` answers `.loading`, which is right as an answer
+                // and wrong as a replacement. Overwriting sent a drawn card
+                // back to "Waiting for quota…" until a later refresh, which is
+                // the flicker the summaries block a few lines down already
+                // refuses to produce. Keep what the row had; the next refresh
+                // publishes the new state.
+                continue
             } else {
                 windowCards[clientId] = state
             }
@@ -1087,10 +1096,24 @@ private struct DashboardSnapshot {
         // `displayClients`, which arrives with graph data, so it is briefly
         // empty whenever the top-level view changes — which is exactly when the
         // card was seen blanking and coming back.
+        // An empty client set has two causes. `displayClients` arrives with
+        // graph data, so before that it is empty transiently — publishing then
+        // overwrote a populated strip with nothing on every top-level view
+        // change. But the user hiding their last visible client is ALSO an
+        // empty set, and a permanent one: skipping publication there left the
+        // strip and the grid showing a client that is no longer on screen.
+        // `stats` is the graph's own arrival signal, so it separates the two.
+        if windowCardClients.isEmpty, stats != nil {
+            quotaWindowSummaries = []
+            quotaHeatmaps = [:]
+            quotaHeatmapWindows = []
+            qualifyingCycles = [:]
+        }
         if let payload = agentUsage, !windowCardClients.isEmpty {
             var collected: [(clientId: String, cardId: String, label: String,
                              cycles: [QuotaCycle])] = []
             var heatmaps: [String: QuotaHeatmap] = [:]
+            var heatmapWindows: [QuotaHeatmapWindow] = []
             // A THROWN read is a transient generation expiry, which happens
             // when another publication lands while these synchronous reads run.
             // Skipping that window and publishing the rest would drop it from
@@ -1109,8 +1132,13 @@ private struct DashboardSnapshot {
                     catch { readFailed = true; continue }
                     guard let curve = attempt else { continue }
                     let points = curve.points
-                    heatmaps["\(agent.clientId)|\(window.cardId)"] =
-                        QuotaHeatmapFold.build(points: points)
+                    let grid = QuotaHeatmapFold.build(points: points)
+                    heatmaps["\(agent.clientId)|\(window.cardId)"] = grid
+                    if !grid.isEmpty {
+                        heatmapWindows.append(QuotaHeatmapWindow(
+                            clientId: agent.clientId, cardId: window.cardId,
+                            windowLabel: window.label, total: grid.total))
+                    }
                     collected.append((
                         clientId: agent.clientId, cardId: window.cardId,
                         label: window.label,
@@ -1126,6 +1154,7 @@ private struct DashboardSnapshot {
             if !readFailed {
                 quotaWindowSummaries = QuotaOverviewFold.summaries(windows: collected)
                 quotaHeatmaps = heatmaps
+                quotaHeatmapWindows = heatmapWindows.sorted { $0.total > $1.total }
                 qualifyingCycles = Dictionary(
                     uniqueKeysWithValues: collected.compactMap { window in
                         let admitted = window.cycles.filter {
@@ -1258,6 +1287,10 @@ private struct DashboardSnapshot {
     /// Written in the same guarded block as the summaries, so it cannot be
     /// blanked by a refresh that saw no clients either.
     private(set) var quotaHeatmaps: [String: QuotaHeatmap] = [:]
+    /// Every window that has a grid, heaviest first. Separate from the
+    /// summaries because a window can have movement in its running cycle and no
+    /// completed history at all.
+    private(set) var quotaHeatmapWindows: [QuotaHeatmapWindow] = []
     /// Per-window quota equivalence, keyed `"<clientId>|<cardId>"`. Only windows
     /// with enough admitted cycles appear. Empty until the scan lands — the
     /// strips above it are free and must not wait for this.

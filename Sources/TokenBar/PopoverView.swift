@@ -288,6 +288,19 @@ struct PopoverView: View {
                 source: UsageDataSources.current,
                 confirmed: UsageAttribution.parseRaw(attributionRaw).records)
         }
+        // A transition invalidates the model's provenance and its cached rows,
+        // but the `points` it already published are untouched and this task is
+        // keyed on the declarations alone, so nothing restarts it. The trend
+        // chart would keep drawing day buckets and axis labels from the zone
+        // the user just left until the popover was rebuilt.
+        .onReceive(NotificationCenter.default.publisher(
+            for: .NSSystemTimeZoneDidChange)) { _ in
+            Task {
+                await series.load(
+                    source: UsageDataSources.current,
+                    confirmed: UsageAttribution.parseRaw(attributionRaw).records)
+            }
+        }
         .onAppear {
             installKeyMonitors()
             // `--tab=` must win even after activeTab is persisted (@AppStorage
@@ -650,6 +663,7 @@ struct PopoverView: View {
                     // fold directly would silently skip that check.
                     windowSummaries: model.quotaWindowSummaries,
                     heatmaps: model.quotaHeatmaps,
+                    heatmapWindows: model.quotaHeatmapWindows,
                     equivalences: model.quotaEquivalences,
                     trend: series.points.map {
                         SubscriptionTrendFold.build(

@@ -158,3 +158,4 @@
 "This agent reported no quota windows." = "This agent reported no quota windows.";
 "Not in the latest quota report." = "Not in the latest quota report.";
 "Quota unavailable" = "Quota unavailable";
+"10%% of quota ~ %@, unpriced models, ±%@%%" = "10%% of quota ~ %@, unpriced models, ±%@%%";

@@ -11218,6 +11218,74 @@ enum SelfTest {
             m.refreshWindowQuotaHalves()
             return (present: present, afterEmpty: m.quotaWindowSummaries.count)
         }
+        // SS2. A window whose only movement is in the cycle now running has a
+        // grid and no summary — the strip excludes active cycles deliberately.
+        // Keying the heatmap picker on summaries made that grid unreachable and
+        // the card said nothing had been recorded, for as long as the cycle
+        // takes to finish. Same fixture as SS1 but left ACTIVE.
+        let activeOnly: (summaries: Int, heatmaps: Int)? = awaitMainActorValue {
+            let src = WindowScanCountingSource(payload: wPayload)
+            src.curve = windowCurve(
+                resetAtSecs: wReset, durationSecs: 18_000,
+                at: [(wNow - 3_000, 4), (wNow - 600, 9)], isActive: true)
+            let m = DashboardModel(source: src, initialYear: nil)
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while m.agentUsage == nil, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            poll.cancel()
+            _ = await poll.value
+            m.windowCardClients = ["codex"]
+            m.refreshWindowQuotaHalves()
+            return (summaries: m.quotaWindowSummaries.count,
+                    heatmaps: m.quotaHeatmapWindows.count)
+        }
+        expect(activeOnly?.summaries == 0,
+               "SS2 a window with only a running cycle has no completed history")
+        expect((activeOnly?.heatmaps ?? 0) >= 1,
+               "SS2 but it does have a grid, and the picker can still reach it")
+
+        // SS3. The other half of the empty-client rule. Skipping publication
+        // stops a top-level view change from blanking the strip, but the user
+        // hiding their LAST visible client is also an empty set — a permanent
+        // one — and skipping there left the strip and the grid drawing a client
+        // no longer on screen. `stats` is the graph's arrival signal, so it is
+        // what separates the transient empty from the settled one.
+        let clearedWhenHidden: (before: Int, after: Int, settled: Bool)? =
+            awaitMainActorValue {
+                let src = WindowScanCountingSource(payload: wPayload)
+                src.curve = windowCurve(
+                    resetAtSecs: wReset, durationSecs: 18_000,
+                    at: [(wNow - 3_000, 4), (wNow - 600, 9)], isActive: false)
+                let m = DashboardModel(source: src, initialYear: nil)
+                let poll = Task { await m.pollAgentUsage() }
+                var spins = 0
+                while m.agentUsage == nil, spins < 2_000 {
+                    try? await Task.sleep(nanoseconds: 1_000_000)
+                    spins += 1
+                }
+                poll.cancel()
+                _ = await poll.value
+                // The graph has to have landed, or an empty set is still the
+                // transient kind and must NOT clear.
+                await m.load()
+                m.windowCardClients = ["codex"]
+                m.refreshWindowQuotaHalves()
+                let before = m.quotaWindowSummaries.count
+                m.windowCardClients = []
+                m.refreshWindowQuotaHalves()
+                return (before: before, after: m.quotaWindowSummaries.count,
+                        settled: m.stats != nil)
+            }
+        expect(clearedWhenHidden?.settled == true,
+               "SS3 the fixture does reach a settled graph, so the case below is reachable")
+        expect((clearedWhenHidden?.before ?? 0) >= 1,
+               "SS3 and it populates first, so the clearing is observable")
+        expect(clearedWhenHidden?.after == 0,
+               "SS3 hiding the last client clears the derived quota state")
+
         expect((stripSummaries?.present ?? 0) >= 1,
                "SS1 the fixture does produce a summary, so the check below is not vacuous")
         expect(stripSummaries != nil && stripSummaries?.afterEmpty == stripSummaries?.present,
@@ -11770,6 +11838,71 @@ enum SelfTest {
             WindowEquivalence.aggregate(declared: true, cycles: [aeCycle(60, 0, 0)])
                 != .undeclared,
             "V15 and the flag is what decides it, not the empty spend those cycles carry")
+        // V16. Pricing that is unavailable is not usage that is absent. Three
+        // cycles with real tokens and no price used to fail the cost-only
+        // admission gate and be reported as "none of it recorded on this
+        // machine" — false about the one thing the machine could see.
+        let aeUnpriced = [aeCycle(50, 1_000, 0), aeCycle(50, 1_000, 0),
+                          aeCycle(50, 1_000, 0)]
+        if case let .tokensOnly(tokens, _) = WindowEquivalence.aggregate(cycles: aeUnpriced) {
+            expect(tokens == 200,
+                   "V16 unpriced cycles still yield a token estimate: 3000 tokens over 150 points")
+        } else {
+            expect(false, "V16 unpriced cycles still yield a token estimate")
+        }
+        expect(
+            WindowEquivalence.aggregate(cycles: aeUnpriced) != .unaccounted(deltaPercent: 150),
+            "V16 and are not reported as usage nobody recorded")
+        // The money figure must not be pooled over cycles that carry no price:
+        // one priced cycle among three would otherwise be divided by all three
+        // deltas and read a third of its true rate.
+        let aeMixed = [aeCycle(50, 1_000, 10), aeCycle(50, 1_000, 0),
+                       aeCycle(50, 1_000, 0)]
+        expect(
+            WindowEquivalence.aggregate(cycles: aeMixed) ==
+                WindowEquivalence.aggregate(cycles: aeUnpriced),
+            "V16 a single priced cycle is not enough for a money figure, so the row is the same")
+        // With enough priced cycles the money figure appears — and it must be
+        // pooled over THOSE, not over every admitted cycle. Three priced cycles
+        // at $10 per 50 points is $2 per tenth; dividing the same $30 by all
+        // four deltas would read $1.50 and understate in proportion to how much
+        // unpriced work happened.
+        let aeEnoughPriced = [aeCycle(50, 1_000, 10), aeCycle(50, 1_000, 10),
+                              aeCycle(50, 1_000, 10), aeCycle(50, 1_000, 0)]
+        if case let .ratio(tokens, cost, _) =
+            WindowEquivalence.aggregate(cycles: aeEnoughPriced)
+        {
+            expect(abs(cost - 2.0) < 1e-9,
+                   "V16 the money figure is pooled over priced cycles only")
+            expect(tokens == 200,
+                   "V16 while the token figure still pools over every admitted cycle")
+        } else {
+            expect(false, "V16 enough priced cycles do produce a ratio")
+        }
+
+        // V17. A provider row can carry a cost and no token components. The
+        // pooled path admits one; the single-window footer required tokens and
+        // reported "none of it recorded on this machine" about usage sitting in
+        // the same scan.
+        let v17CostOnly = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":1500,"client":"t","providerId":"t","modelId":"t","input":0,
+              "output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,"cost":4.5,
+              "isTurnStart":true}]
+            """.utf8))
+        expect(
+            WindowEquivalence.row(
+                samples: [QuotaSample(atMs: 1_000, usedPercent: 1),
+                          QuotaSample(atMs: 2_000, usedPercent: 20)],
+                messages: v17CostOnly) != .unaccounted(deltaPercent: 19),
+            "V17 a cost-only row counts as usage this machine recorded")
+        expect(
+            WindowEquivalence.row(
+                samples: [QuotaSample(atMs: 1_000, usedPercent: 1),
+                          QuotaSample(atMs: 2_000, usedPercent: 20)],
+                messages: []) == .unaccounted(deltaPercent: 19),
+            "V17 and an empty span still is not, so the check above is not vacuous")
         expect(
             WindowEquivalence.aggregate(cycles: []) == .unavailable,
             "AE4 no cycles means no estimate at all")

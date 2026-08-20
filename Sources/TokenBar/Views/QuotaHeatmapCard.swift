@@ -9,10 +9,12 @@ import TokenBarCore
 /// percentage points of two different subscriptions are not the same quantity
 /// to begin with.
 struct QuotaHeatmapCard: View {
-    /// Same list the strip card draws, heaviest peak first, so the picker's
-    /// order matches the card above it.
-    let summaries: [QuotaWindowSummary]
-    /// Keyed as `QuotaWindowSummary.id`.
+    /// Every window that has a grid, heaviest first — NOT the strip card's
+    /// summaries. Those exist only for windows with completed history, so a
+    /// window whose only movement is in the cycle now running had a grid the
+    /// picker could not reach, and the card said nothing was recorded.
+    let windows: [QuotaHeatmapWindow]
+    /// Keyed as `QuotaHeatmapWindow.id`.
     let heatmaps: [String: QuotaHeatmap]
     /// The per-window equivalence, keyed the same way. What turns a percentage
     /// into money — and the only reason this card can show money at all
@@ -41,20 +43,18 @@ struct QuotaHeatmapCard: View {
     /// activity instead of 167 blank cells.
     private static let floorShare: Double = 0.06
 
-    private var selected: QuotaWindowSummary? {
-        summaries.first { $0.id == selectedRaw }
-            // Not merely the first summary: one with no placed consumption
-            // draws an empty grid on open, which reads as a broken card rather
-            // than as a window nobody has used this week.
-            ?? summaries.first { !(heatmaps[$0.id]?.isEmpty ?? true) }
-            ?? summaries.first
+    private var selected: QuotaHeatmapWindow? {
+        // The list already excludes empty grids and leads with the heaviest, so
+        // the fallback is simply "the first one" rather than a search for one
+        // with something to draw.
+        windows.first { $0.id == selectedRaw } ?? windows.first
     }
 
     private var grid: QuotaHeatmap? { selected.flatMap { heatmaps[$0.id] } }
 
     var body: some View {
         DashCard("When the allowance goes", subtitle: subtitle) {
-            if summaries.count > 1 { picker }
+            if windows.count > 1 { picker }
         } content: {
             if let grid, !grid.isEmpty {
                 heatmap(grid)
@@ -85,11 +85,11 @@ struct QuotaHeatmapCard: View {
     /// the place to abbreviate a subscription's own label.
     private var picker: some View {
         Menu {
-            ForEach(summaries) { summary in
+            ForEach(windows) { window in
                 Button {
-                    selectedRaw = summary.id
+                    selectedRaw = window.id
                 } label: {
-                    Text(verbatim: label(summary))
+                    Text(verbatim: label(window))
                 }
             }
         } label: {
@@ -111,9 +111,9 @@ struct QuotaHeatmapCard: View {
         .fixedSize()
     }
 
-    private func label(_ summary: QuotaWindowSummary) -> String {
-        "\(ClientRegistry.style(summary.clientId).displayName) · "
-            + summary.windowLabel.localized
+    private func label(_ window: QuotaHeatmapWindow) -> String {
+        "\(ClientRegistry.style(window.clientId).displayName) · "
+            + window.windowLabel.localized
     }
 
     private func heatmap(_ grid: QuotaHeatmap) -> some View {
