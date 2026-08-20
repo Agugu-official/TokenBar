@@ -125,16 +125,44 @@ enum WindowCardLoader {
         payload: AgentUsagePayload?, clientId: String, attempted: Bool,
         curve: (String, String, UInt64) throws -> QuotaCurve?, nowMs: Int64
     ) -> WindowCardState {
-        guard let payload else { return attempted ? .loading : .loading }
+        // `attempted` decides whether an absence is a wait or an answer. Both
+        // guards used to return `.loading` either way — the first through a
+        // ternary whose branches were identical, which is how it survived
+        // review — so a quota fetch that kept failing left this card spinning
+        // for ever while every other surface had learned to say so.
+        guard let payload else {
+            return attempted
+                ? .blocked(clientId: clientId,
+                           reason: "Quota could not be loaded.".localized)
+                : .loading
+        }
         guard let agent = payload.agents.first(where: { $0.clientId == clientId })
-        else { return .loading }
+        else {
+            // Not "reported no windows" — this agent is not in the report at
+            // all, and a client enabled a moment ago sits here until the next
+            // poll. The wording has to be about the report, not about an answer
+            // the agent never gave.
+            return attempted
+                ? .blocked(clientId: clientId,
+                           reason: "Not in the latest quota report.".localized)
+                : .loading
+        }
         if let error = agent.error {
             return .blocked(clientId: clientId, reason: error)
         }
+        // The third copy of the same rule, and the one the wording above was
+        // written for: the agent IS in the report, has no error, and offers no
+        // window the picker can settle on. The wire format allows an empty
+        // `windows` array, so this is a real answer, not a wait.
         guard let selected = select(
             payload: payload, clientId: clientId,
             chosen: UserDefaults.standard.string(forKey: selectionKey))
-        else { return .loading }
+        else {
+            return attempted
+                ? .blocked(clientId: clientId,
+                           reason: "This agent reported no quota windows.".localized)
+                : .loading
+        }
 
         let window = selected.window
         let candidates = agent.uniqueCardWindows.map {

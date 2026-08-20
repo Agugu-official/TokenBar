@@ -1,6 +1,6 @@
 import Foundation
 
-/// PROTOTYPE — usage inside one quota window. Throwaway; not for commit.
+/// Usage inside one quota window: the per-message rows the quota lens folds.
 ///
 /// One row per message, not per bucket: a quota window is a small slice of
 /// history, so the curve's resolution stays a UI choice instead of a wire

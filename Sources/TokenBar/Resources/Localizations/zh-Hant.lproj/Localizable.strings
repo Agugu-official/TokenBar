@@ -437,7 +437,7 @@
 "Heaviest %@%% · never ran out" = "最多用到 %@%%，從未用完";
 "Heaviest %@%% · ran out at least once" = "最多用到 %@%%，至少用完過一次";
 "Pace" = "步調";
-"Every window is running under its expected pace" = "所有時間窗都低於預期進度";
+"Every measured window is under its expected pace" = "量得到的時間窗都在預期步調之內";
 "10%% of quota ~ %@-%@ · %@-%@ API-equivalent" = "額度 10%% ≈ %@〜%@ token · %@〜%@（API 等值）";
 
 /* ===== 總覽卡片組裝 ===== */
@@ -466,7 +466,7 @@
 "No allowance movement recorded yet. It accumulates as TokenBar runs." = "還沒有記錄到額度變動。TokenBar 執行期間會逐步累積。";
 "%@%% consumed between readings too far apart to place" = "有 %@%% 落在間隔過長的兩次讀數之間，無法定位到時段";
 "No allowance consumed in this slot" = "這個時段沒有消耗額度";
-"%@%% of the allowance" = "額度的 %@%%";
+"%@ allowance-points spent here" = "這個時段累計花掉 %@ 個額度百分點";
 "~ %@ API-equivalent, ±%@%%" = "≈ %@（API 等值，誤差 ±%@%%）";
 "Not enough history to convert this window to a figure" = "這個窗的歷史還不足以換算成金額";
 "Mon" = "一";
@@ -478,7 +478,11 @@
 "Sun" = "日";
 "Classify your usage in Settings to see what this window is worth" = "到設定裡分類用量，才能知道這個窗值多少";
 "Nothing is classified yet. Settings › Usage attribution splits this by subscription." = "還沒有分類過任何用量。設定 › 用量歸屬可以把這張圖拆成各個訂閱。";
-"%@ of %@ windows recorded — the estimate needs one more" = "已記錄 %@ 個時間窗，要 %@ 個才能給出估計";
+"%@ of %@ windows recorded — the estimate needs that many" = "已記錄 %@ 個時間窗，要 %@ 個才能給出估計";
 "runs out at this rate" = "照現速會用完";
 "Peaked at %@%% · never ran out" = "最高讀數 %@%%・從未用完";
 "Peaked at %@%% · ran out at least once" = "最高讀數 %@%%・至少用完過一次";
+"Quota could not be loaded." = "無法載入額度。";
+"This agent reported no quota windows." = "這個 agent 沒有回報任何額度時間窗。";
+"Not in the latest quota report." = "不在最近一次的額度回報裡。";
+"Quota unavailable" = "額度無法取得";

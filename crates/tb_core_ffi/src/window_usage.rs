@@ -1,4 +1,4 @@
-//! PROTOTYPE — window usage for the quota-window card. Throwaway; not for commit.
+//! Window usage for the quota lens: per-message rows inside an absolute interval.
 //!
 //! Returns the messages inside an absolute [from, until) window, one row each.
 //! No bucketing: a quota window is a tiny slice of history, so the consumer

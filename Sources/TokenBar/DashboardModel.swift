@@ -1370,7 +1370,17 @@ private struct DashboardSnapshot {
             // "the first attempt is still in flight" from "the attempt finished
             // and produced nothing", and UI that waits on the payload would spin
             // forever against a persistent failure.
+            let firstSettlement = !agentUsageAttempted
             agentUsageAttempted = true
+            // And recompute the cards on that first failure, because
+            // `refreshWindowQuotaHalves` is the only writer of `windowCards`
+            // and it was called from the success branch alone. Teaching
+            // `quotaHalf` to answer `.blocked` once the attempt has settled did
+            // nothing on its own: with nothing else writing that state, the
+            // card kept the `.loading` it was built with until a tab change
+            // rebuilt it. Only on the transition, so a run of failures does not
+            // redo the same work every minute.
+            if payload == nil, firstSettlement { refreshWindowQuotaHalves() }
             try? await Task.sleep(for: .seconds(60))
         }
     }

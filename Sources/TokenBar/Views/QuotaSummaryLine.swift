@@ -27,6 +27,22 @@ struct QuotaSummaryLine: View {
         VStack(alignment: .leading, spacing: 7) {
             if let summary {
                 tightestRow(summary)
+                // "Every measured window", not "every window". The count
+                // guards against speaking with nothing checked, but it cannot
+                // make the sentence true of the windows that were skipped: with
+                // four windows and one measurable, the old wording vouched for
+                // three nobody looked at. Scoping the claim to what was
+                // measured is honest at any coverage, and dropping the line
+                // whenever coverage is partial would hide it most of the time —
+                // the historical basis is per window and often still learning.
+                //
+                // Gated on `paceCheckedWindows` as well as on there being
+                // other windows: with pace off, or while the historical basis
+                // is still learning, `compute` returns nil for every window and
+                // `burning` is nil because nothing was asked, not because
+                // nothing was wrong. Printing the reassurance then states a
+                // guarantee that was never evaluated.
+                //
                 // A slot that is empty whenever nothing is wrong teaches the
                 // user to ignore it, and on this data it is empty nearly
                 // always — every window measured runs 3.5 to 68 points under
@@ -34,9 +50,9 @@ struct QuotaSummaryLine: View {
                 // most reliable fact here into something worth reading.
                 if let burning = summary.burning {
                     burnRow(burning)
-                } else if summary.otherWindows > 0 {
+                } else if summary.otherWindows > 0, summary.paceCheckedWindows > 0 {
                     row(label: "Pace", tint: .secondary) {
-                        Text("Every window is running under its expected pace")
+                        Text("Every measured window is under its expected pace")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)

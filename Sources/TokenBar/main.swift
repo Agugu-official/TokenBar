@@ -9,8 +9,9 @@ AppLanguage.prepareDirectRunResources()
 if CommandLine.arguments.contains("--smoke") {
     exit(Smoke.run())
 }
-// PROTOTYPE probe — throwaway. Prints the current quota window's attributed
-// totals using real local data, so the seam can be seen working before any UI.
+// Measurement lane, not a prototype: prints the current quota window's
+// attributed totals and the scan timings the feature's performance comments
+// quote. See `WindowProbe`.
 if CommandLine.arguments.contains("--window-probe") {
     WindowProbe.run()
 }

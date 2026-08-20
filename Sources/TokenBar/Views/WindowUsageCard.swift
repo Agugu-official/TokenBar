@@ -59,8 +59,12 @@ struct WindowUsageCard: View {
                 placeholder("Waiting for quota…")
             }
         case let .blocked(clientId, reason):
+            // Not "Waiting for quota": this state is now also reached once the
+            // fetch has settled without an answer, and a card whose body says
+            // it could not load while its subtitle says it is still waiting
+            // contradicts itself.
             DashCard("%@ window".localized(ClientRegistry.style(clientId).displayName),
-                     subtitle: "Waiting for quota") {
+                     subtitle: "Quota unavailable") {
                 Text(reason)
                     .font(.caption)
                     .foregroundStyle(.secondary)

@@ -231,7 +231,13 @@ struct QuotaHeatmapCard: View {
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
                 } else {
-                    Text("%@%% of the allowance".localized(Self.percent(value)))
+                    // Points, not "% of the allowance". A slot accumulates
+                    // across every recorded cycle, so with enough history it
+                    // passes 100 and the percentage has no denominator left to
+                    // be a percentage of. What the number honestly is: how many
+                    // percentage points of allowance were spent in this slot,
+                    // summed over the window's whole recorded history.
+                    Text("%@ allowance-points spent here".localized(Self.percent(value)))
                         .font(.caption2)
                     equivalent(value, row: equivalences[selected.id])
                 }

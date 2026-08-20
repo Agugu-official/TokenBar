@@ -29,10 +29,14 @@ enum Format {
 
     /// Today's contribution-graph day key. tokscale-core buckets days in the
     /// local timezone as `%Y-%m-%d`, so we must match that exactly.
-    static func todayKey(now: Date = Date()) -> String {
+    /// `timeZone` is injectable so a test can pin one. It defaults to
+    /// `.current`, which is what every caller wants and what made the day-key
+    /// assertions pass on the author's machine and fail on a UTC runner: an
+    /// instant expressed as "07:33 local" is only that in one zone.
+    static func todayKey(now: Date = Date(), timeZone: TimeZone = .current) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current
+        formatter.timeZone = timeZone
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter.string(from: now)
     }
@@ -44,9 +48,13 @@ enum Format {
     /// `86_400 * n` seconds: a DST transition makes one of those days 23 or 25
     /// hours long, and the arithmetic version silently lands on the wrong date
     /// twice a year.
-    static func dayKey(daysAgo: Int, now: Date = Date()) -> String {
-        let shifted = Calendar.current.date(byAdding: .day, value: -daysAgo, to: now) ?? now
-        return todayKey(now: shifted)
+    static func dayKey(
+        daysAgo: Int, now: Date = Date(), timeZone: TimeZone = .current
+    ) -> String {
+        var calendar = Calendar.current
+        calendar.timeZone = timeZone
+        let shifted = calendar.date(byAdding: .day, value: -daysAgo, to: now) ?? now
+        return todayKey(now: shifted, timeZone: timeZone)
     }
 
     private static let monthsShort = [

@@ -54,6 +54,11 @@ struct PopoverView: View {
     // on the next reopen. Reading these raws in `displayClients` establishes the
     // body dependency; the reactive overload does the parsing.
     @AppStorage(ClientRegistry.tabHiddenKey) private var hiddenRaw = ""
+    /// Observed, not read through `ClientRegistry.quotaExcludedClients()`: that
+    /// helper reads `UserDefaults` directly, and a computed read is not a view
+    /// dependency, so toggling a client's limits in Settings would leave the
+    /// Overview summary naming it until something unrelated rebuilt the body.
+    @AppStorage(ClientRegistry.limitsHiddenKey) private var limitsHiddenRaw = ""
     @AppStorage(ClientRegistry.tabOrderKey) private var orderRaw = ""
     /// Observed so the Overview summary's projection follows the same setting
     /// the Agent-limits card obeys, live rather than on the next reopen.
@@ -609,9 +614,19 @@ struct PopoverView: View {
                     // pace off, the card hid its marker while the summary kept
                     // naming a fastest burner. `compute` returns nil for `.off`,
                     // so passing the real mode suppresses the line too.
+                    // The same union `ClientRegistry.quotaExcludedClients()`
+                    // forms for the tray, built from observed values here. `QuotaSummaryFold` documents
+                    // that it reuses `QuotaResolver` so this sentence and the
+                    // menu bar can never name different subscriptions — but the
+                    // shared function was being handed different arguments, so
+                    // a client hidden only from Agent limits was excluded by
+                    // the tray and named by this line. Since the limits card
+                    // stopped drawing that client's row, the sentence pointed
+                    // at something no longer below it.
                     quotaSummary: QuotaSummaryFold.build(
                         payload: model.agentUsage,
-                        excluding: ClientRegistry.parseIdSet(hiddenRaw),
+                        excluding: ClientRegistry.parseIdSet(hiddenRaw)
+                            .union(ClientRegistry.parseIdSet(limitsHiddenRaw)),
                         paceMode: PaceMode(rawValue: paceModeRaw) ?? .historical),
                     usageAttempted: model.agentUsageAttempted,
                     windowCurves: singleClient == nil ? model.windowCurves : [:],

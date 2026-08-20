@@ -10958,6 +10958,52 @@ enum SelfTest {
         expect(transientIsLoading,
                "L6b a failed curve read is transient, never a claim of no history")
 
+        // L6d. `attempted` has to change the answer, or it is not a parameter.
+        // Both no-payload guards returned `.loading` regardless — one through a
+        // ternary whose two branches were identical — so a quota fetch that
+        // kept failing left this card spinning for ever.
+        func stateIsLoading(_ state: WindowCardState) -> Bool {
+            if case .loading = state { return true }
+            return false
+        }
+        func stateIsBlocked(_ state: WindowCardState) -> Bool {
+            if case .blocked = state { return true }
+            return false
+        }
+        expect(
+            stateIsLoading(WindowCardLoader.quotaHalf(
+                payload: nil, clientId: "codex", attempted: false,
+                curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
+            "L6d no payload and no attempt yet is still waiting")
+        expect(
+            stateIsBlocked(WindowCardLoader.quotaHalf(
+                payload: nil, clientId: "codex", attempted: true,
+                curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
+            "L6d no payload after the attempt settled is a terminal answer")
+        expect(
+            stateIsBlocked(WindowCardLoader.quotaHalf(
+                payload: wPayload, clientId: "not-in-payload", attempted: true,
+                curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
+            "L6d a client the settled payload does not carry is answered, not awaited")
+        // The third guard, and the one the "no quota windows" wording was
+        // written for: present, no error, and offering nothing to settle on.
+        // The wire format allows an empty `windows` array, so this is an
+        // answer. It returned `.loading` unconditionally — the same defect as
+        // the two above, in the copy neither review round reached.
+        let emptyWindows = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data(#"{"generatedAt":"now","agents":[{"clientId":"codex","source":"fixture","updatedAt":"now","windows":[]}]}"#.utf8))
+        expect(
+            stateIsBlocked(WindowCardLoader.quotaHalf(
+                payload: emptyWindows, clientId: "codex", attempted: true,
+                curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
+            "L6d an agent present with no windows is answered once the attempt has settled")
+        expect(
+            stateIsLoading(WindowCardLoader.quotaHalf(
+                payload: emptyWindows, clientId: "codex", attempted: false,
+                curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
+            "L6d and is still a wait before it has")
+
         // And the two must stay distinguishable at the layer below, or the
         // check above is one `try?` away from silently reverting.
         expect(
@@ -11489,6 +11535,20 @@ enum SelfTest {
                 payload: burnPayload([(client: "codex", used: 80, elapsedFraction: 0.5)]),
                 paceMode: .off, now: burnNow)?.tightestClient == "codex",
             "QS9 and the tightest line survives, because it is not a projection")
+        // QS10. `burning == nil` alone cannot carry the reassurance the view
+        // prints beside it. With pace off nothing was measured, so "every
+        // window is running under its expected pace" would be a guarantee
+        // nobody evaluated; the count is what lets the view tell the two apart.
+        expect(
+            QuotaSummaryFold.build(
+                payload: burnPayload([(client: "codex", used: 80, elapsedFraction: 0.5)]),
+                paceMode: .off, now: burnNow)?.paceCheckedWindows == 0,
+            "QS10 pace off checks no window, so the reassurance has nothing behind it")
+        expect(
+            (QuotaSummaryFold.build(
+                payload: burnPayload([(client: "codex", used: 80, elapsedFraction: 0.5)]),
+                paceMode: .linear, now: burnNow)?.paceCheckedWindows ?? 0) > 0,
+            "QS10 and a live mode does check, so the count is not always zero")
 
         // The burn line correctly never fires on this machine's live data —
         // measured, every window runs under its expected line. That makes
@@ -11659,7 +11719,7 @@ enum SelfTest {
             WindowEquivalence.text(
                 .tooFewCycles(count: 2, needed: 3),
                 tokens: Format.compactTokens, money: Format.usd)
-                == "2 of 3 windows recorded — the estimate needs one more",
+                == "2 of 3 windows recorded — the estimate needs that many",
             "V15 and it says so, without quoting a movement figure that contradicts it")
         expect(
             WindowEquivalence.aggregate(declared: false, cycles: [aeCycle(60, 0, 0)])
@@ -11722,13 +11782,35 @@ enum SelfTest {
         // MARK: day keys (SU5)
 
         // Calendar days, not 86_400-second multiples — the arithmetic version
-        // lands on the wrong date across a DST transition.
-        expect(Format.dayKey(daysAgo: 0) == Format.todayKey(),
-               "SU5 zero days ago is today")
-        expect(Format.dayKey(
-            daysAgo: 1,
-            now: Date(timeIntervalSince1970: 1_775_000_000)) == "2026-03-31",
-               "SU5 one day back from 2026-04-01 07:33 local is 2026-03-31")
+        // lands on the wrong date across a DST transition. The zone is pinned
+        // because "07:33 local" names a different date in each of them, and an
+        // assertion that reads the runner's own zone passes wherever it was
+        // written and fails everywhere else. It did: on a UTC runner this epoch
+        // is still 2026-03-31, so the expectation below was a day out for a
+        // day, on every run, while the local suite stayed green.
+        let su5Zone = TimeZone(identifier: "Asia/Taipei")!
+        let su5Instant = Date(timeIntervalSince1970: 1_775_000_000)
+        expect(
+            Format.todayKey(now: su5Instant, timeZone: su5Zone) == "2026-04-01",
+            "SU5 the fixture instant is 2026-04-01 in the zone it is stated in")
+        expect(
+            Format.dayKey(daysAgo: 1, now: su5Instant, timeZone: su5Zone) == "2026-03-31",
+            "SU5 one day back from it is the previous calendar day")
+        // Not `dayKey(daysAgo: 0) == todayKey()`, which cannot fail: `dayKey`
+        // is defined as `todayKey` of a shifted date, so at zero it IS that
+        // call.
+        //
+        // 2026-03-08 is the US spring-forward day, 23 hours long. From 00:30 on
+        // the 9th, subtracting 86_400 seconds lands at 23:30 on the SEVENTH —
+        // two calendar days back — while walking one calendar day lands on the
+        // eighth. A fall-back fixture would not discriminate: on a 25-hour day
+        // both answers stay inside the same date.
+        expect(
+            Format.dayKey(
+                daysAgo: 1,
+                now: Date(timeIntervalSince1970: 1_773_030_600),
+                timeZone: TimeZone(identifier: "America/New_York")!) == "2026-03-08",
+            "SU5 one day back across a 23-hour day is a calendar day, not 86,400 seconds")
 
         // MARK: Overview composition (OC)
         //

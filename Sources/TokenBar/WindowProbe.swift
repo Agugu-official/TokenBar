@@ -1,8 +1,22 @@
 import Foundation
 import TokenBarCore
 
-/// PROTOTYPE — throwaway. Resolves the real quota window, then reports what was
-/// spent inside it, attributed. Not part of the shipping app.
+/// The measurement lane behind `--window-probe`, kept deliberately.
+///
+/// Resolves the real quota window against real local data and reports what was
+/// spent inside it, attributed, with timings. Every performance figure quoted in
+/// this feature's comments — 14.93 days and 109,278 messages at 67 seconds,
+/// 5.4 days and 45,844 at 4.6 — came from here, and the scan range grows with
+/// recorded history, so those figures need re-taking rather than trusting.
+///
+/// It was headed "throwaway, not for commit" while being committed. That was
+/// simply untrue, and the header is what a reader checks before believing
+/// anything else in the file.
+///
+/// Not reachable from the shipping UI: `main.swift` runs it only for the flag
+/// and exits. Its attribution folds mirror the production ones deliberately —
+/// a probe that classified usage differently from the app would measure a
+/// different app.
 enum WindowProbe {
     private static func fmtDay(_ secs: Int64) -> String {
         let f = DateFormatter()

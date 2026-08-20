@@ -105,7 +105,7 @@
 "Heaviest %@%% · never ran out" = "Heaviest %@%% · never ran out";
 "Heaviest %@%% · ran out at least once" = "Heaviest %@%% · ran out at least once";
 "Pace" = "Pace";
-"Every window is running under its expected pace" = "Every window is running under its expected pace";
+"Every measured window is under its expected pace" = "Every measured window is under its expected pace";
 "10%% of quota ~ %@-%@ · %@-%@ API-equivalent" = "10%% of quota ~ %@-%@ · %@-%@ API-equivalent";
 
 /* ===== overview composition ===== */
@@ -138,7 +138,7 @@
 "No allowance movement recorded yet. It accumulates as TokenBar runs." = "No allowance movement recorded yet. It accumulates as TokenBar runs.";
 "%@%% consumed between readings too far apart to place" = "%@%% consumed between readings too far apart to place";
 "No allowance consumed in this slot" = "No allowance consumed in this slot";
-"%@%% of the allowance" = "%@%% of the allowance";
+"%@ allowance-points spent here" = "%@ allowance-points spent here";
 "~ %@ API-equivalent, ±%@%%" = "~ %@ API-equivalent, ±%@%%";
 "Not enough history to convert this window to a figure" = "Not enough history to convert this window to a figure";
 "Mon" = "Mon";
@@ -150,7 +150,11 @@
 "Sun" = "Sun";
 "Classify your usage in Settings to see what this window is worth" = "Classify your usage in Settings to see what this window is worth";
 "Nothing is classified yet. Settings › Usage attribution splits this by subscription." = "Nothing is classified yet. Settings › Usage attribution splits this by subscription.";
-"%@ of %@ windows recorded — the estimate needs one more" = "%@ of %@ windows recorded — the estimate needs one more";
+"%@ of %@ windows recorded — the estimate needs that many" = "%@ of %@ windows recorded — the estimate needs that many";
 "runs out at this rate" = "runs out at this rate";
 "Peaked at %@%% · never ran out" = "Peaked at %@%% · never ran out";
 "Peaked at %@%% · ran out at least once" = "Peaked at %@%% · ran out at least once";
+"Quota could not be loaded." = "Quota could not be loaded.";
+"This agent reported no quota windows." = "This agent reported no quota windows.";
+"Not in the latest quota report." = "Not in the latest quota report.";
+"Quota unavailable" = "Quota unavailable";

@@ -90,7 +90,7 @@ public enum WindowEquivalence {
         case .unavailable:
             return "Not enough quota readings yet".localizedWindowRow()
         case let .tooFewCycles(count, needed):
-            return "%@ of %@ windows recorded — the estimate needs one more"
+            return "%@ of %@ windows recorded — the estimate needs that many"
                 .localizedWindowRow(String(count), String(needed))
         case .undeclared:
             return "Classify your usage in Settings to see what this window is worth"

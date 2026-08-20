@@ -27,6 +27,15 @@ public struct QuotaSummary: Equatable, Sendable {
     /// schedule allows will run out before one sitting at 18% that nobody has
     /// touched since morning, and only this line can say so.
     public let burning: BurnWarning?
+    /// How many windows the burn check actually evaluated.
+    ///
+    /// `burning == nil` has two causes that look identical from outside: every
+    /// window was measured and none is ahead, or none could be measured at all
+    /// — `UsagePace.compute` returns nil with pace off, while the historical
+    /// basis is still learning, and when a window reports no duration. Without
+    /// this count the view rendered the second as the first and told the user
+    /// "every window is running under its expected pace" having checked none.
+    public let paceCheckedWindows: Int
 
     public var allOthersComfortable: Bool {
         otherWindows > 0 && othersComfortable == otherWindows
@@ -69,13 +78,16 @@ public enum QuotaSummaryFold {
 
         var others: [Double] = []
         var burning: BurnWarning?
+        var paceChecked = 0
         for agent in payload.agents
         where agent.error == nil && !excluding.contains(agent.clientId) {
             for window in agent.uniqueCardWindows where window.remainingPercent.isFinite {
                 // The burn check covers EVERY eligible window including the
                 // tightest, because the tightest one may also be the fastest
                 // and skipping it would drop the most urgent case.
-                if let pace = UsagePace.compute(window: window, mode: paceMode, now: now),
+                let pace = UsagePace.compute(window: window, mode: paceMode, now: now)
+                if pace != nil { paceChecked += 1 }
+                if let pace,
                    pace.stage.isDeficit,
                    pace.deltaPercent > (burning?.aheadPercent ?? 0)
                 {
@@ -102,6 +114,7 @@ public enum QuotaSummaryFold {
             resetsAt: tightest.window.resetsAt,
             otherWindows: others.count,
             othersComfortable: others.filter { $0 >= comfortablePercent }.count,
-            burning: burning)
+            burning: burning,
+            paceCheckedWindows: paceChecked)
     }
 }
