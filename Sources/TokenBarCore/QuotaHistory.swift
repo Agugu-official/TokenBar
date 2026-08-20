@@ -185,22 +185,28 @@ public enum QuotaHistoryFold {
                     client: message.client, provider: message.providerId,
                     model: message.modelId, records: confirmed)
                 if case let .assigned(target) = state, target == subscription {
-                    mine.tokens += message.tokens
-                    mine.exCacheRead += message.tokens - message.cacheRead
+                    // `saturatingAdding`, like every other fold over these
+                    // counters. Saturating per message is not enough: two rows
+                    // that each saturate still trap when added together, and
+                    // the accumulator is where a corrupt transcript would land.
+                    let exCacheRead = message.tokens - message.cacheRead
+                    mine.tokens = mine.tokens.saturatingAdding(message.tokens)
+                    mine.exCacheRead = mine.exCacheRead.saturatingAdding(exCacheRead)
                     mine.cost += message.cost
                     if message.timestamp > cycle.firstSampleMs,
                        message.timestamp <= cycle.lastSampleMs
                     {
-                        span.exCacheRead += message.tokens - message.cacheRead
+                        span.exCacheRead = span.exCacheRead.saturatingAdding(exCacheRead)
                         span.cost += message.cost
                     }
                     let key = ModelKey(
                         providerId: message.providerId, modelId: message.modelId)
                     let current = byModel[key] ?? (0, 0)
                     byModel[key] = (
-                        current.tokens + message.tokens, current.cost + message.cost)
+                        current.tokens.saturatingAdding(message.tokens),
+                        current.cost + message.cost)
                 } else {
-                    other.tokens += message.tokens
+                    other.tokens = other.tokens.saturatingAdding(message.tokens)
                     other.cost += message.cost
                 }
             }

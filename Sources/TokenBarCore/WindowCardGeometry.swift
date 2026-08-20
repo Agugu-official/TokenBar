@@ -164,12 +164,20 @@ public enum WindowCardGeometry {
         //
         // One pass over the messages instead of one per zone: the per-zone
         // filter was O(zones x messages) and ran on every hover event.
+        // Each zone is closed by the sample that ends it, hence `(lo, hi]` —
+        // except the first, which owns its own lower bound. `UnionScan.slice`
+        // admits a message landing exactly on the window start, and for an
+        // inferred window that message IS the start, so leaving zone 0
+        // exclusive put it in the card's totals and in no bar at all.
         var weights = [Int64](repeating: 0, count: hits.count)
         for m in messages {
-            guard let i = hits.firstIndex(where: {
-                m.timestamp > $0.loMs && m.timestamp <= $0.hiMs
+            guard let i = hits.indices.first(where: { index in
+                let zone = hits[index]
+                let insideStart = index == 0
+                    ? m.timestamp >= zone.loMs : m.timestamp > zone.loMs
+                return insideStart && m.timestamp <= zone.hiMs
             }) else { continue }
-            weights[i] += m.tokens - m.cacheRead
+            weights[i] = weights[i].saturatingAdding(m.tokens - m.cacheRead)
         }
         let tallest = max(weights.max() ?? 0, 1)
         let bars = zip(hits, weights).map { zone, w in

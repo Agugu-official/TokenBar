@@ -10496,6 +10496,29 @@ enum SelfTest {
             crScan.slice(from: 2_000, to: 3_000).count == 1,
             "CR1 and the message at the end is not, so two adjacent windows cannot both claim it")
 
+        // CR4. The first bar owns the window's own start. `UnionScan.slice`
+        // admits a message landing exactly on `windowStartMs`, and for an
+        // inferred window that message defines the start — so with every zone
+        // exclusive at its lower bound it counted toward the card's total and
+        // toward no bar, and the bars stopped summing to the number above them.
+        let crBoundary = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":1000,"client":"t","providerId":"t","modelId":"t","input":7,
+              "output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,"cost":0,
+              "isTurnStart":true}]
+            """.utf8))
+        let crGeometry = WindowCardGeometry.usageGeometry(
+            windowStartMs: 1_000, windowEndMs: 3_000, nowMs: 3_000,
+            samples: [QuotaSample(atMs: 1_000, usedPercent: 1),
+                      QuotaSample(atMs: 2_000, usedPercent: 4),
+                      QuotaSample(atMs: 3_000, usedPercent: 9)],
+            messages: crBoundary)
+        expect(crGeometry.bars.contains { !$0.isEmpty },
+               "CR4 a message at the window start is drawn in some bar at all")
+        expect(crGeometry.bars.filter { !$0.isEmpty }.count == 1,
+               "CR4 and in exactly one, so no zone double-counts it")
+
         // CR3. A model-specific declaration outranks the provider-wide one,
         // and the window folds must see it. They passed `model: nil`, which
         // makes the resolver skip every override — so a user who classified one

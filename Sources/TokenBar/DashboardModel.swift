@@ -1091,12 +1091,23 @@ private struct DashboardSnapshot {
             var collected: [(clientId: String, cardId: String, label: String,
                              cycles: [QuotaCycle])] = []
             var heatmaps: [String: QuotaHeatmap] = [:]
+            // A THROWN read is a transient generation expiry, which happens
+            // when another publication lands while these synchronous reads run.
+            // Skipping that window and publishing the rest would drop it from
+            // the strip and the heatmap until some later refresh — the same
+            // "absent because we could not ask" mistake, arriving through a
+            // partial result rather than an empty one. A successful nil is
+            // still genuinely no history and still skips.
+            var readFailed = false
             for agent in payload.agents where windowCardClients.contains(agent.clientId) {
                 for window in agent.uniqueCardWindows {
                     guard let key = window.paceStatus.windowKey,
-                          let generation = payload.publicationGeneration,
-                          let curve = ((try? readCurve(agent.clientId, key, generation)) ?? nil)
+                          let generation = payload.publicationGeneration
                     else { continue }
+                    let attempt: QuotaCurve?
+                    do { attempt = try readCurve(agent.clientId, key, generation) }
+                    catch { readFailed = true; continue }
+                    guard let curve = attempt else { continue }
                     let points = curve.points
                     heatmaps["\(agent.clientId)|\(window.cardId)"] =
                         QuotaHeatmapFold.build(points: points)
@@ -1106,17 +1117,24 @@ private struct DashboardSnapshot {
                         cycles: QuotaHistoryFold.cycles(points: points)))
                 }
             }
-            quotaWindowSummaries = QuotaOverviewFold.summaries(windows: collected)
-            quotaHeatmaps = heatmaps
-            qualifyingCycles = Dictionary(
-                uniqueKeysWithValues: collected.compactMap { window in
-                    let admitted = window.cycles.filter {
-                        $0.usedPercent >= WindowEquivalence.minimumDelta
-                            && $0.observedFraction >= WindowEquivalence.minimumObservedFraction
-                    }
-                    guard admitted.count >= WindowEquivalence.minimumCycles else { return nil }
-                    return ("\(window.clientId)|\(window.cardId)", admitted)
-                })
+            // Skip this publication rather than replace a complete set with a
+            // partial one. Deliberately not an early `return`: the per-client
+            // cycles below are read through a different path and have their own
+            // error handling, and suppressing them here would trade one stale
+            // surface for another.
+            if !readFailed {
+                quotaWindowSummaries = QuotaOverviewFold.summaries(windows: collected)
+                quotaHeatmaps = heatmaps
+                qualifyingCycles = Dictionary(
+                    uniqueKeysWithValues: collected.compactMap { window in
+                        let admitted = window.cycles.filter {
+                            $0.usedPercent >= WindowEquivalence.minimumDelta
+                                && $0.observedFraction >= WindowEquivalence.minimumObservedFraction
+                        }
+                        guard admitted.count >= WindowEquivalence.minimumCycles else { return nil }
+                        return ("\(window.clientId)|\(window.cardId)", admitted)
+                    })
+            }
         }
 
         // Cycles follow the scan's client, not every displayed one: the history
