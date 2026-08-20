@@ -11146,6 +11146,20 @@ enum SelfTest {
         expect(sparse.total == 0 && abs(sparse.unplacedPercent - 9) < 1e-9,
                "QM3 consumption between readings 7h apart is unplaced, not spread")
 
+        // QM6. "Days observed" counts LOCAL days, like the cells it describes.
+        // Two readings four hours apart on one Taipei morning straddle UTC
+        // midnight, so counting UTC dates reports two days of evidence where
+        // the grid drew one.
+        let taipei = TimeZone(identifier: "Asia/Taipei")!
+        let straddling = QuotaHeatmapFold.build(
+            points: [heatPoint(1_767_564_000, 2, reset: monReset),
+                     heatPoint(1_767_578_400, 5, reset: monReset)],
+            timeZone: taipei)
+        expect(straddling.observedDays == 1,
+               "QM6 one local morning is one observed day, whichever side of UTC midnight it falls")
+        expect(straddling.total > 0,
+               "QM6 and the fixture does place its consumption, so the count above is not of nothing")
+
         // QM4. Sunday is the last row, not the first: weekday 0 is Monday.
         let sunday = QuotaHeatmapFold.build(
             points: [heatPoint(1_768_140_000, 5, reset: sunReset),

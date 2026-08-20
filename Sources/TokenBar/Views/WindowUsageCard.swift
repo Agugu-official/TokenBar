@@ -333,8 +333,14 @@ struct WindowUsageCard: View {
         if let zone = hoverZone, cardFrame != .zero {
             WindowHoverTooltip(
                 zone: zone, metric: metric,
+                // Zone 0 owns its own lower bound, matching
+                // `WindowCardGeometry.usageGeometry`. Without this the bar
+                // drawn from a window-start message and the tooltip explaining
+                // that bar disagree about whether the message is in it.
                 messages: hoverMessages.filter {
-                    $0.timestamp > zone.loMs && $0.timestamp <= zone.hiMs
+                    let insideStart = zone.index == 0
+                        ? $0.timestamp >= zone.loMs : $0.timestamp > zone.loMs
+                    return insideStart && $0.timestamp <= zone.hiMs
                 },
                 subtitle: hoverSubtitle,
                 measuredSize: $tooltipSize)

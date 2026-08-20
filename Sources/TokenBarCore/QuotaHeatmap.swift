@@ -69,11 +69,20 @@ public enum QuotaHeatmapFold {
 
         var cells = Array(repeating: Array(repeating: 0.0, count: 24), count: 7)
         var unplaced = 0.0
-        var days = Set<Int64>()
+        // Local days, not `sampledAt / 86_400`. That divides UTC seconds into
+        // UTC dates, while every cell above is placed on the LOCAL weekday and
+        // hour — so away from UTC the denominator counted a different calendar
+        // from the grid it describes, splitting one local day either side of
+        // UTC midnight in two and merging two into one.
+        var days = Set<DateComponents>()
 
         for (_, cyclePoints) in Dictionary(grouping: points, by: \.resetAt) {
             let sorted = cyclePoints.sorted { $0.sampledAt < $1.sampledAt }
-            for point in sorted { days.insert(point.sampledAt / 86_400) }
+            for point in sorted {
+                days.insert(local.dateComponents(
+                    [.year, .month, .day],
+                    from: Date(timeIntervalSince1970: Double(point.sampledAt))))
+            }
             for (previous, current) in zip(sorted, sorted.dropFirst()) {
                 let delta = current.usedPercent - previous.usedPercent
                 // Negative means the reading went backwards inside one cycle —

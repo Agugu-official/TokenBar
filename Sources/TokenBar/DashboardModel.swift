@@ -1251,7 +1251,14 @@ private struct DashboardSnapshot {
     /// scoped to exactly what an estimate needs and no further.
     @ObservationIgnored private var qualifyingCycles: [String: [QuotaCycle]] = [:]
 
-    /// Identifies the newest window scan this model has started.
+    /// Identifies the newest window scan any model has started.
+    ///
+    /// Static, because what it guards is static. `PopoverView` builds a new
+    /// `DashboardModel` on every reopen, so an instance-local counter gives the
+    /// abandoned model and its replacement the same value of 1 and the guard
+    /// passes for both — the token's scope has to match `lastUnionScan`'s, or
+    /// it protects nothing across a reopen, which is exactly when a scan is
+    /// most likely to be abandoned mid-flight.
     ///
     /// `LiveUsageDataSource.windowUsage` hands the blocking FFI call to a
     /// detached task, so cancelling the SwiftUI task that awaits it does not
@@ -1259,13 +1266,13 @@ private struct DashboardSnapshot {
     /// lenses mid-scan lets an older, narrower request land after a newer one
     /// and overwrite `unionScan` with a stale message set stamped `capturedAt`
     /// now, which then serves as fresh for the whole 30s window.
-    @ObservationIgnored private var windowScanToken = 0
+    @ObservationIgnored private static var windowScanToken = 0
 
     /// Stage 2. One scan for the open agent tab, which every card for that
     /// client then filters from in memory.
     func refreshWindowUsage() async {
-        windowScanToken &+= 1
-        let scanToken = windowScanToken
+        Self.windowScanToken &+= 1
+        let scanToken = Self.windowScanToken
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         // Two callers, two scopes. An open agent tab needs its own window and
         // its history; the all-agent Quota lens needs only the windows that can
@@ -1279,7 +1286,7 @@ private struct DashboardSnapshot {
             { rebuildQuotaEquivalences(); return }
             guard let usage = try? await source.windowUsage(from: from, until: now)
             else { return }
-            guard windowScanToken == scanToken else { return }
+            guard Self.windowScanToken == scanToken else { return }
             unionScan = UnionScan(
                 fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages)
             rebuildQuotaEquivalences()
@@ -1302,7 +1309,7 @@ private struct DashboardSnapshot {
         }
         guard let usage = try? await source.windowUsage(from: from, until: now)
         else { return }
-        guard windowScanToken == scanToken else { return }
+        guard Self.windowScanToken == scanToken else { return }
         unionScan = UnionScan(
             fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages)
         refreshWindowQuotaHalves()
