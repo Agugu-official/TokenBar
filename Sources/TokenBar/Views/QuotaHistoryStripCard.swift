@@ -77,7 +77,8 @@ struct QuotaHistoryStripCard: View {
                 Text("Consumed %@%% of the allowance".localized(
                     String(Int(value.rounded()))))
                     .font(.caption2)
-                if value >= QuotaOverviewFold.exhaustedPercent {
+                if summary.recentPeaks.indices.contains(hover.index),
+                   summary.recentPeaks[hover.index] >= QuotaOverviewFold.exhaustedPercent {
                     Text("Ran out")
                         .font(.system(size: 9))
                         .foregroundStyle(.orange)
@@ -186,8 +187,11 @@ struct QuotaHistoryStripCard: View {
 
     private func headline(_ summary: QuotaWindowSummary) -> String {
         let peak = String(Int(summary.peakPercent.rounded()))
+        // "Peaked at", not "heaviest": this is the highest READING, while the
+        // bars draw consumption, and the two differ whenever the app started
+        // watching a cycle partway through.
         return summary.neverExhausted
-            ? "Heaviest %@%% · never ran out".localized(peak)
-            : "Heaviest %@%% · ran out at least once".localized(peak)
+            ? "Peaked at %@%% · never ran out".localized(peak)
+            : "Peaked at %@%% · ran out at least once".localized(peak)
     }
 }

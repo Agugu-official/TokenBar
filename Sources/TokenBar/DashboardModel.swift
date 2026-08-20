@@ -1114,7 +1114,8 @@ private struct DashboardSnapshot {
                     collected.append((
                         clientId: agent.clientId, cardId: window.cardId,
                         label: window.label,
-                        cycles: QuotaHistoryFold.cycles(points: points)))
+                        cycles: QuotaHistoryFold.cycles(
+                            points: points, activeResetAt: curve.activeResetAt)))
                 }
             }
             // Skip this publication rather than replace a complete set with a
@@ -1182,7 +1183,9 @@ private struct DashboardSnapshot {
                         client: message.client, provider: message.providerId,
                         model: message.modelId, records: confirmed), target == client
                     else { continue }
-                    tokens += message.tokens - message.cacheRead
+                    tokens = tokens.saturatingAdding(
+                        message.tokens.subtractingReportingOverflow(
+                            message.cacheRead).partialValue)
                     cost += message.cost
                 }
                 return WindowEquivalence.Cycle(

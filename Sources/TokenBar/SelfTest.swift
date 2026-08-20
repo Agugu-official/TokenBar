@@ -10841,8 +10841,11 @@ enum SelfTest {
             return try! JSONDecoder().decode(AgentUsagePayload.self, from: Data(json.utf8))
         }
 
+        // `isActive` says whether the curve's reset group is the one still
+        // running. Cycles that are still open are not history, so a fixture
+        // that wants a COMPLETED cycle has to say so.
         func windowCurve(resetAtSecs: Int64, durationSecs: Int64,
-                         at: [(Int64, Double)]) -> QuotaCurve {
+                         at: [(Int64, Double)], isActive: Bool = true) -> QuotaCurve {
             let points = at.map { t, pct in
                 """
                 {"sampledAt":\(t),"usedPercent":\(pct),"resetAt":\(resetAtSecs),
@@ -10854,7 +10857,7 @@ enum SelfTest {
             {"points":[\(points)],
              "coverage":{"oldestSampledAt":\(at.first?.0 ?? 0),
                          "newestSampledAt":\(at.last?.0 ?? 0),"sampleCount":\(at.count)},
-             "activeResetAt":\(resetAtSecs),"generation":7}
+             "activeResetAt":\(isActive ? String(resetAtSecs) : "null"),"generation":7}
             """
             return try! JSONDecoder().decode(QuotaCurve.self, from: Data(json.utf8))
         }
@@ -11071,9 +11074,11 @@ enum SelfTest {
         // windows recorded yet" mid-switch and then come back.
         let stripSummaries: (present: Int, afterEmpty: Int)? = awaitMainActorValue {
             let src = WindowScanCountingSource(payload: wPayload)
+            // Completed, not running: the strip summarises past windows, and a
+            // fixture whose only cycle is the open one now yields none.
             src.curve = windowCurve(
                 resetAtSecs: wReset, durationSecs: 18_000,
-                at: [(wNow - 3_000, 4), (wNow - 600, 9)])
+                at: [(wNow - 3_000, 4), (wNow - 600, 9)], isActive: false)
             let m = DashboardModel(source: src, initialYear: nil)
             let poll = Task { await m.pollAgentUsage() }
             var spins = 0
@@ -11145,6 +11150,41 @@ enum SelfTest {
             timeZone: utc)
         expect(sparse.total == 0 && abs(sparse.unplacedPercent - 9) < 1e-9,
                "QM3 consumption between readings 7h apart is unplaced, not spread")
+
+        // QH-A. The running cycle is not history. It appears in a strip
+        // captioned "past windows", stands beside completed spans as though
+        // comparable, and counts toward the three-cycle threshold the
+        // equivalence needs — an estimate that would then move under the reader
+        // as the cycle filled.
+        let qhaPoints = [
+            heatPoint(1_767_605_400, 10, reset: monReset),
+            heatPoint(1_767_612_600, 14, reset: monReset),
+            heatPoint(1_767_616_200, 40, reset: otherReset),
+        ]
+        expect(QuotaHistoryFold.cycles(points: qhaPoints).count == 2,
+               "QH-A both groups are cycles when no active reset is named")
+        expect(
+            QuotaHistoryFold.cycles(points: qhaPoints, activeResetAt: otherReset)
+                .map(\.resetAtMs) == [monReset * 1000],
+            "QH-A naming the active reset leaves only the completed cycle")
+
+        // QH-B. Exhaustion is an absolute reading, not the observed span. A
+        // cycle first seen at 40% and last at 100% consumed 60 points as far as
+        // this machine can tell, and reached the ceiling; deriving the ceiling
+        // from the span called it a quiet window.
+        let qhbCycles = QuotaHistoryFold.cycles(points: [
+            heatPoint(1_767_605_400, 40, reset: monReset),
+            heatPoint(1_767_612_600, 100, reset: monReset),
+        ])
+        expect(qhbCycles.first.map { abs($0.usedPercent - 60) < 1e-9 } == true,
+               "QH-B consumption is still the span this machine witnessed")
+        expect(qhbCycles.first.map { abs($0.peakUsedPercent - 100) < 1e-9 } == true,
+               "QH-B and the peak is the absolute reading, so the ceiling is knowable")
+        expect(
+            QuotaOverviewFold.summaries(windows: [
+                (clientId: "c", cardId: "w", label: "W", cycles: qhbCycles)
+            ]).first?.neverExhausted == false,
+            "QH-B a cycle that reached 100% is not reported as never having run out")
 
         // QM6. "Days observed" counts LOCAL days, like the cells it describes.
         // Two readings four hours apart on one Taipei morning straddle UTC

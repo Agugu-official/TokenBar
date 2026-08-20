@@ -118,7 +118,12 @@ public enum WindowEquivalence {
         let inSpan = messages.filter {
             $0.timestamp > first.atMs && $0.timestamp <= last.atMs
         }
-        let tokens = inSpan.reduce(Int64(0)) { $0 + $1.tokens - $1.cacheRead }
+        // Saturating, and subtracting inside the message rather than across
+        // the running total: `tokens - cacheRead` can itself trap on a corrupt
+        // row where cacheRead exceeds the saturated total.
+        let tokens = inSpan.reduce(Int64(0)) {
+            $0.saturatingAdding($1.tokens.subtractingReportingOverflow($1.cacheRead).partialValue)
+        }
         let cost = inSpan.reduce(0.0) { $0 + $1.cost }
         let error = Int((quantisationHalfStep / delta * 100).rounded())
 

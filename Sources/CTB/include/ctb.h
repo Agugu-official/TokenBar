@@ -94,7 +94,14 @@ char *tb_agent_usage(void);
 // request; the returned JSON is released with tb_free.
 char *tb_quota_curve(const char *client_id, const char *window_key, uint64_t generation);
 
-/* PROTOTYPE - usage inside an absolute [from_ms, until_ms) window. */
+/* PROTOTYPE - usage inside an absolute [from_ms, until_ms) window.
+ *
+ * `until_ms` is quantised to the minute for caching, so two calls sharing a
+ * `from_ms` and landing in the same minute are answered from one scan: the
+ * later call can be up to a minute short of its own end. Deliberate, and
+ * tested (`window_usage::tests::quantised_window_calls_scan_once`) — the sole
+ * consumer already serves its own scan for 30s before asking again, so exact
+ * ends would buy precision nobody reads at the cost of a 0% hit rate. */
 char *tb_window_usage(int64_t from_ms, int64_t until_ms);
 
 // Release a string returned by any tb_* entry point.

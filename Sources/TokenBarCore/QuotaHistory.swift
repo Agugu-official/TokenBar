@@ -29,6 +29,14 @@ public struct QuotaCycle: Equatable, Sendable {
     /// understating is the right direction — the alternative assumes the app
     /// witnessed a window it may have joined late.
     public let usedPercent: Double
+    /// The highest absolute reading seen in this cycle.
+    ///
+    /// Separate from `usedPercent`, which is the observed SPAN. The two answer
+    /// different questions and only coincide when the app watched the cycle
+    /// from zero: a cycle first seen at 40% and last seen at 100% consumed 60
+    /// points as far as this machine can tell, and reached the ceiling. Deriving
+    /// "never ran out" from the span called that cycle a quiet one.
+    public let peakUsedPercent: Double
     public let sampleCount: Int
     /// The instants of the first and last reading in this cycle.
     ///
@@ -51,8 +59,10 @@ public struct QuotaCycle: Equatable, Sendable {
     public init(
         resetAtMs: Int64, startMs: Int64, usedPercent: Double,
         sampleCount: Int, observedFraction: Double,
-        firstSampleMs: Int64 = 0, lastSampleMs: Int64 = 0
+        firstSampleMs: Int64 = 0, lastSampleMs: Int64 = 0,
+        peakUsedPercent: Double? = nil
     ) {
+        self.peakUsedPercent = peakUsedPercent ?? usedPercent
         self.resetAtMs = resetAtMs
         self.startMs = startMs
         self.usedPercent = usedPercent
@@ -125,9 +135,23 @@ public enum QuotaHistoryFold {
     /// length is taken from its own newest point: a window whose provider changed
     /// its reported duration mid-cycle should be placed by what it reports now,
     /// not by what it reported when sampling began.
-    public static func cycles(points: [QuotaCurvePoint]) -> [QuotaCycle] {
+    /// Completed cycles only.
+    ///
+    /// `activeResetAt` names the group the window is still inside. Folding it
+    /// in put the running cycle in a strip captioned "past windows", let a
+    /// partially observed span stand beside completed ones, and let it count
+    /// toward the three-cycle threshold the equivalence needs — an estimate
+    /// that would then change under the reader as the cycle filled. Nil means
+    /// the caller does not know, and then everything present is treated as
+    /// finished, which is the old behaviour and the safe reading for a curve
+    /// with no active group.
+    public static func cycles(
+        points: [QuotaCurvePoint], activeResetAt: Int64? = nil
+    ) -> [QuotaCycle] {
         var grouped: [Int64: [QuotaCurvePoint]] = [:]
-        for point in points { grouped[point.resetAt, default: []].append(point) }
+        for point in points where point.resetAt != activeResetAt {
+            grouped[point.resetAt, default: []].append(point)
+        }
 
         return grouped.compactMap { resetAt, raw -> QuotaCycle? in
             let sorted = raw.sorted { $0.sampledAt < $1.sampledAt }
@@ -144,7 +168,8 @@ public enum QuotaHistoryFold {
                 observedFraction: min(1, max(0, Double(last.sampledAt - first.sampledAt)
                     / Double(last.durationSeconds))),
                 firstSampleMs: first.sampledAt * 1000,
-                lastSampleMs: last.sampledAt * 1000)
+                lastSampleMs: last.sampledAt * 1000,
+                peakUsedPercent: used.max() ?? 0)
         }
         .sorted { $0.resetAtMs > $1.resetAtMs }
     }

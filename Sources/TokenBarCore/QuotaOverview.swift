@@ -13,6 +13,9 @@ public struct QuotaWindowSummary: Equatable, Sendable, Identifiable {
     /// the reader compares the latest bar against the ones before it rather
     /// than against a number.
     public let recent: [Double]
+    /// The highest absolute reading of each cycle in `recent`, same order.
+    /// The bars draw consumption; only this can say whether a cycle ran out.
+    public let recentPeaks: [Double]
     /// The heaviest cycle ever recorded for this window.
     public let peakPercent: Double
     /// True when no recorded cycle reached the ceiling. Stated positively
@@ -48,11 +51,16 @@ public enum QuotaOverviewFold {
             // reads left to right in time.
             let ordered = window.cycles.prefix(stripLength).reversed()
             let consumption = ordered.map(\.usedPercent)
-            let peak = window.cycles.map(\.usedPercent).max() ?? 0
+            let peaks = ordered.map(\.peakUsedPercent)
+            // Consumption for the strip, absolute reading for the ceiling.
+            // `usedPercent` is a span, so a cycle first observed at 40% and
+            // last at 100% has a span of 60 and would have been called quiet.
+            let peak = window.cycles.map(\.peakUsedPercent).max() ?? 0
             return QuotaWindowSummary(
                 clientId: window.clientId, cardId: window.cardId,
                 windowLabel: window.label,
                 recent: Array(consumption),
+                recentPeaks: Array(peaks),
                 peakPercent: peak,
                 neverExhausted: peak < exhaustedPercent,
                 cycleCount: window.cycles.count)

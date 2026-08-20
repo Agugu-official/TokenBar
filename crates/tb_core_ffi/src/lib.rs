@@ -1895,6 +1895,11 @@ mod tests {
 }
 
 /// PROTOTYPE — usage inside an absolute [from_ms, until_ms) window.
+///
+/// `until_ms` is quantised to the minute by `window_usage::cache_key`, so the
+/// answer can be up to a minute short of the requested end when an earlier call
+/// in the same minute already scanned. See the header for why that is the
+/// deliberate trade.
 /// Throwaway; not for commit.
 #[no_mangle]
 pub extern "C" fn tb_window_usage(from_ms: i64, until_ms: i64) -> *mut c_char {

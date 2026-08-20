@@ -269,7 +269,8 @@ enum WindowCardLoader {
         let attempt: QuotaCurve?
         do { attempt = try read(clientId, key, generation) } catch { return nil }
         guard let curve = attempt else { return [] }
-        return QuotaHistoryFold.cycles(points: curve.points)
+        return QuotaHistoryFold.cycles(
+            points: curve.points, activeResetAt: curve.activeResetAt)
     }
 
     /// Not private: `AgentLimitsCard`'s sparkline needs the same series for

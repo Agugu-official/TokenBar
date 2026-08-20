@@ -152,3 +152,5 @@
 "Nothing is classified yet. Settings › Usage attribution splits this by subscription." = "Nothing is classified yet. Settings › Usage attribution splits this by subscription.";
 "%@ of %@ windows recorded — the estimate needs one more" = "%@ of %@ windows recorded — the estimate needs one more";
 "runs out at this rate" = "runs out at this rate";
+"Peaked at %@%% · never ran out" = "Peaked at %@%% · never ran out";
+"Peaked at %@%% · ran out at least once" = "Peaked at %@%% · ran out at least once";

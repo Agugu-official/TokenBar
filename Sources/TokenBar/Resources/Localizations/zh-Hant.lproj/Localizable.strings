@@ -480,3 +480,5 @@
 "Nothing is classified yet. Settings › Usage attribution splits this by subscription." = "還沒有分類過任何用量。設定 › 用量歸屬可以把這張圖拆成各個訂閱。";
 "%@ of %@ windows recorded — the estimate needs one more" = "已記錄 %@ 個時間窗，要 %@ 個才能給出估計";
 "runs out at this rate" = "照現速會用完";
+"Peaked at %@%% · never ran out" = "最高讀數 %@%%・從未用完";
+"Peaked at %@%% · ran out at least once" = "最高讀數 %@%%・至少用完過一次";
