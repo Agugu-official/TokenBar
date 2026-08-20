@@ -34,6 +34,15 @@ public struct QuotaTrend: Equatable, Sendable {
     /// Not a %/hour rate, for the reason given above. This is normalised by the
     /// window's own remaining time, so a 5h and a 31d window compare directly.
     public let projectedDeltaPercent: Double
+
+    /// Whether the recent rate spends the whole allowance before the window
+    /// resets.
+    ///
+    /// Lives here rather than in the row that draws it because it decides what
+    /// that row may say: past this point the delta is larger than the axis has
+    /// room for, and printing it produces a drop bigger than the amount that
+    /// exists. The row names the state instead.
+    public var runsOutEarly: Bool { projectedUsedPercent > 100 }
 }
 
 public enum QuotaTrendFold {

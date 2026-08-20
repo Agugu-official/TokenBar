@@ -479,3 +479,4 @@
 "Classify your usage in Settings to see what this window is worth" = "到設定裡分類用量，才能知道這個窗值多少";
 "Nothing is classified yet. Settings › Usage attribution splits this by subscription." = "還沒有分類過任何用量。設定 › 用量歸屬可以把這張圖拆成各個訂閱。";
 "%@ of %@ windows recorded — the estimate needs one more" = "已記錄 %@ 個時間窗，要 %@ 個才能給出估計";
+"runs out at this rate" = "照現速會用完";

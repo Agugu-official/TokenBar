@@ -11680,6 +11680,20 @@ enum SelfTest {
             trendHand.map { abs($0.projectedUsedPercent - 60) < 1e-9 } == true,
                 "quota trend: hand-computed projection 50 + 0.5*0.2*100 = 60")
         expect(trendHand?.direction == .rising, "quota trend: a positive recent slope is rising")
+        // The live shape that produced an impossible row: 13 points gone in the
+        // first 35 minutes of a five-hour window, four hours still to run. The
+        // projection is arithmetically fine and the delta it implies (88 points)
+        // is larger than the 87 that remain, so the row must not print it.
+        let trendSaturating = QuotaTrendFold.trend(
+            usedPercent: 13, windowStartMs: 0, windowEndMs: 18_000_000,
+            nowMs: 3_600_000,
+            samples: [QuotaSample(atMs: 1_500_000, usedPercent: 0),
+                      QuotaSample(atMs: 3_600_000, usedPercent: 13)])
+        expect(trendSaturating?.runsOutEarly == true
+                && (trendSaturating?.projectedDeltaPercent ?? 0) > 87,
+               "quota trend: a rate that spends more than remains is flagged, not printed")
+        expect(trendHand?.runsOutEarly == false,
+               "quota trend: an ordinary projection is not flagged, so the flag is not always on")
         // The row prints this, not the projection: what the current slope still
         // costs between now and reset. It must be the projection minus the
         // reading it was projected from, or the number on screen and the number

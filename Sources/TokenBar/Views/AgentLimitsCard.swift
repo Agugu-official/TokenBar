@@ -768,7 +768,7 @@ struct AgentLimitsCard: View {
     /// can go both ways: a mid-window refill lowers the meter.
     @ViewBuilder private func trendIndicator(_ trend: QuotaTrend?, id: String) -> some View {
         if let trend {
-            let runsOutEarly = trend.projectedUsedPercent > 100
+            let runsOutEarly = trend.runsOutEarly
             let direction: QuotaTrend.Direction = asUsed ? trend.direction : {
                 switch trend.direction {
                 case .rising: return .falling
@@ -786,7 +786,20 @@ struct AgentLimitsCard: View {
             let rounded = Int(axisDelta.rounded())
             HStack(spacing: 1) {
                 Image(systemName: symbol)
-                if direction != .flat, rounded != 0 {
+                if runsOutEarly {
+                    // Words, not the delta, once the projection passes 100.
+                    //
+                    // The delta is only meaningful while the axis has room for
+                    // it. Seen on live data: a session window at 87% remaining
+                    // showed "18% less left" grow to "88% less left" — a drop
+                    // larger than the amount that exists, printed beside the
+                    // 87% it contradicts. The projection was arithmetically
+                    // right (13 points burned in 35 minutes, four hours to go)
+                    // and the sentence it produced was impossible. Saturation
+                    // is a state, and naming the state is the honest form of a
+                    // number that has run out of axis.
+                    Text("runs out at this rate")
+                } else if direction != .flat, rounded != 0 {
                     let magnitude = "\(abs(rounded))%"
                     Text(asUsed
                          ? "%@ used".localized(
