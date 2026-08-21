@@ -1411,12 +1411,11 @@ private struct DashboardSnapshot {
             return
         }
         guard Self.windowScanToken == scanToken else { return }
-        // Only THIS client's failure. A bare `nil` cleared whichever client
-        // was recorded, and this scan's range is derived from THIS client's
-        // window, so it is not evidence about anyone else's — B's window can
-        // start earlier than it reaches. The cached branch above is where a
-        // scan clears another client, because that is where coverage is
-        // actually tested.
+        // Only THIS client's failure — not because the scan cannot answer for
+        // another (it becomes `unionScan` on the next line and the cached
+        // branch above clears whoever it covers), but because coverage is not
+        // tested here. A bare `nil` cleared whichever client was recorded,
+        // which is neither of those things.
         windowScanFailedClients = Self.scanFailures(
             windowScanFailedClients, resolvedBy: client)
         unionScan = UnionScan(
@@ -1443,15 +1442,13 @@ private struct DashboardSnapshot {
     /// the never-ending spinner this state exists to remove. Half a rule is not
     /// a rule.
     ///
-    /// Two ways an entry is cleared, and the second is the one that keeps being
-    /// got wrong. Its own scan succeeds. Or, on its next visit, the cached
-    /// `unionScan` is found to cover its window AND to be younger than
-    /// `unionScanMaxAge` — whoever ran that scan, because `unionScan` is one
-    /// cross-client cache and `windowUsage(from:until:)` takes no client at
-    /// all. Both conjuncts are load-bearing: a covering scan that has aged out
-    /// clears nothing, and the client rescans instead.
-    ///
-    /// What never clears an entry is a scan that does not cover its window.
+    /// Cleared at exactly two sites, both in `refreshWindowUsage`: the cached
+    /// branch and the success path. Their conditions are deliberately NOT
+    /// restated here. Four successive attempts to paraphrase them each read as
+    /// precise and each omitted a conjunct — the scan-token check, the
+    /// freshness bound, the fact that coverage is tested against the widened
+    /// `from` rather than the window itself. Read the two `guard`s; a summary
+    /// of a conjunction is a place for one of its terms to go missing.
     ///
     /// Deliberately not cleared when a retry STARTS: the card would then flip
     /// failed → loading → failed on every poll, and the last settled answer is
