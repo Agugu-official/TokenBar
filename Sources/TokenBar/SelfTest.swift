@@ -11497,9 +11497,9 @@ enum SelfTest {
                 && qhcCycles.last?.resetAtMs == (monReset + 8 * qhcWeek) * 1000,
             "QH-CAP the cap keeps the NEWEST cycles — dropping those instead would "
                 + "bound the scan at the same place while showing stale rows")
-        expect(QuotaOverviewFold.stripLength <= QuotaHistoryFold.consideredCycles,
-               "QH-CAP the widest surface drawn from these cycles still fits inside the "
-                + "cap, which would otherwise silently draw fewer")
+        expect(QuotaHistoryCard.visibleRows <= QuotaHistoryFold.consideredCycles,
+               "QH-CAP the history card's row list still fits inside the cap, which "
+                + "would otherwise silently draw fewer rows than the card intends")
         // QH-CAP-LIFETIME. The cap belongs to the surfaces that pay for a scan.
         // Lifetime summaries pay nothing and answer about ALL of history, so a
         // cap applied at the fold made a window that ran out forty cycles ago

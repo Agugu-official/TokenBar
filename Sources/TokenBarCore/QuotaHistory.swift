@@ -112,7 +112,6 @@ public struct QuotaHistoryRow: Equatable, Sendable, Identifiable {
     public let models: [QuotaHistoryModel]
 
     public var id: Int64 { cycle.resetAtMs }
-    public var hasUsage: Bool { mineTokens > 0 || otherTokens > 0 }
 }
 
 public struct QuotaHistoryModel: Equatable, Sendable, Identifiable {
@@ -233,9 +232,13 @@ public enum QuotaHistoryFold {
     ///
     /// 32 does not bite on any window here today (the widest has 27), which is
     /// the point: it bounds the growth without moving a number anyone reads.
-    /// It also stays comfortably above `QuotaOverviewFold.stripLength`, the
-    /// widest surface drawn from these cycles — anything displaying more than
-    /// the cap would silently show fewer, so a selftest asserts the fit.
+    ///
+    /// The surface that has to fit inside it is the history card's row list,
+    /// which draws `QuotaHistoryCard.visibleRows`; a cap below that would
+    /// silently draw fewer rows than the card intends, so a selftest asserts
+    /// the fit. NOT `QuotaOverviewFold.stripLength`, which an earlier version
+    /// of this comment named: the overview strip reads the uncapped `collected`
+    /// list, so the cap never reaches it.
     public static let consideredCycles = 32
 
     /// Joins each cycle to the messages inside it.

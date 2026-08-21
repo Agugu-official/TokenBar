@@ -52,7 +52,10 @@ struct QuotaHistoryCard: View {
     /// Enough to read a trend without turning the lens into a scroll marathon.
     /// The engine retains 128 cycles, so this is a display choice, not a
     /// storage one — and one worth revisiting if anyone asks for more.
-    private static let visibleRows = 12
+    /// Not private: `QuotaHistoryFold.consideredCycles` has to stay at or above
+    /// it, and the selftest asserts that. A cap below this number would draw
+    /// fewer rows than this card intends without anything saying so.
+    static let visibleRows = 12
 
     private var byCycle: [Int64: QuotaHistoryRow] {
         Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -244,13 +247,23 @@ struct QuotaHistoryCard: View {
                 // spend read as one with nothing else in it. The same reason
                 // the equivalence grew a `costOnly` row.
                 if row.otherTokens > 0 || row.otherCost > 0 {
-                    // Cost-only usage gets the one-value phrasing rather than
-                    // "0 · $12", which reads as a contradiction of itself.
-                    Text(row.otherTokens > 0
-                        ? "Other subscriptions in the same hours: %@ · %@".localized(
-                            Format.compactTokens(row.otherTokens), Format.usd(row.otherCost))
-                        : "Other subscriptions in the same hours: %@".localized(
-                            Format.usd(row.otherCost)))
+                    // One-value phrasing whenever one side is absent, in EITHER
+                    // direction. The first version handled only the cost-only
+                    // case and left its mirror printing "2.1M · $0.00" for
+                    // unpriced models — the same missing-metric-as-measured-zero
+                    // this branch exists to avoid, surviving on the other side
+                    // of its own condition.
+                    Text({
+                        if row.otherTokens > 0, row.otherCost > 0 {
+                            return "Other subscriptions in the same hours: %@ · %@".localized(
+                                Format.compactTokens(row.otherTokens),
+                                Format.usd(row.otherCost))
+                        }
+                        return "Other subscriptions in the same hours: %@".localized(
+                            row.otherTokens > 0
+                                ? Format.compactTokens(row.otherTokens)
+                                : Format.usd(row.otherCost))
+                    }())
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
                         .padding(.top, 1)

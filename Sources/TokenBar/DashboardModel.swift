@@ -1071,7 +1071,8 @@ private struct DashboardSnapshot {
                let (settled, usage) = WindowCardLoader.usageHalf(
                    quota: q, scan: scan, confirmed: UsageAttribution.confirmed().records) {
                 windowCards[clientId] = .ready(settled, usage)
-            } else if case let .quotaOnly(q, _) = state, windowScanFailed {
+            } else if case let .quotaOnly(q, _) = state,
+                      windowScanFailed(for: clientId) {
                 // The loader cannot know this — it never runs the scan. Carried
                 // in here so the card can say the scan failed instead of
                 // spinning under a chart that is already drawn.
@@ -1361,12 +1362,14 @@ private struct DashboardSnapshot {
             if let cached = unionScan, cached.covers(start: from),
                Date().timeIntervalSince(cached.capturedAt) < Self.unionScanMaxAge
             { rebuildQuotaEquivalences(); return }
-            guard let usage = try? await source.windowUsage(from: from, until: now) else {
-                if Self.windowScanToken == scanToken { windowScanFailed = true }
-                return
-            }
+            // Deliberately does NOT touch `windowScanFailedClient`: this branch
+            // serves the all-agent equivalence, which draws no window card. The
+            // first version set the shared flag here, so an equivalence scan
+            // failing on the lens made every client's card claim its own scan
+            // had failed the moment the user opened a tab.
+            guard let usage = try? await source.windowUsage(from: from, until: now)
+            else { return }
             guard Self.windowScanToken == scanToken else { return }
-            windowScanFailed = false
             unionScan = UnionScan(
                 fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages)
             rebuildQuotaEquivalences()
@@ -1394,12 +1397,12 @@ private struct DashboardSnapshot {
         // failure from settling a newer request, exactly as its success is.
         guard let usage = try? await source.windowUsage(from: from, until: now) else {
             guard Self.windowScanToken == scanToken else { return }
-            windowScanFailed = true
+            windowScanFailedClient = client
             refreshWindowQuotaHalves()
             return
         }
         guard Self.windowScanToken == scanToken else { return }
-        windowScanFailed = false
+        windowScanFailedClient = nil
         unionScan = UnionScan(
             fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages)
         refreshWindowQuotaHalves()
@@ -1407,13 +1410,26 @@ private struct DashboardSnapshot {
         rebuildQuotaEquivalences()
     }
 
-    /// Whether the last stage-two scan settled with an error.
+    /// The client whose stage-two scan settled with an error, if any.
     ///
     /// Distinguishes "still scanning" from "asked and failed" — `.quotaOnly`
     /// alone cannot, and both halves of the lens rendered the second as the
-    /// first. Cleared by the next successful scan, so a transient failure
-    /// heals without a separate reset.
-    private(set) var windowScanFailed = false
+    /// first. Cleared by the next successful scan, so a transient failure heals
+    /// without a separate reset.
+    ///
+    /// The CLIENT, not a bare flag. A shared boolean answers "did the last scan
+    /// fail", which is a different question from "did THIS card's scan fail":
+    /// one transient failure on the all-agent lens then made the next tab the
+    /// user opened claim its own scan had failed before that scan had even
+    /// started — the same inversion this state exists to remove, running the
+    /// other way.
+    private(set) var windowScanFailedClient: String?
+
+    /// Whether the card currently shown for `clientId` should say the scan
+    /// failed rather than that it is still running.
+    func windowScanFailed(for clientId: String) -> Bool {
+        windowScanFailedClient == clientId
+    }
 
     private func reconcileQuotaRemaining(with payload: AgentUsagePayload) {
         guard source.allowsQuotaCachePersistence else { return }

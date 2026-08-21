@@ -503,3 +503,4 @@
 "Other subscriptions in the same hours: %@" = "同一時段的其他訂閱：%@";
 "Local usage could not be read." = "無法讀取本機用量。";
 "tokens unavailable, ±%@%%" = "無 token 明細，誤差 ±%@%%";
+"~ %@ – %@ API-equivalent" = "≈ %@ – %@（API 等值）";

@@ -315,6 +315,27 @@ struct QuotaHeatmapCard: View {
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
+        } else if case let .spread(lowPerTenth, highPerTenth, lowCost, highCost) = row {
+            // The third sibling of the two branches above, missed when they were
+            // written. `.spread` is a measured answer — the cycles disagree, so
+            // the fold reports a range instead of a point — and the strip card
+            // prints exactly that range for the same row. Falling through made
+            // one card say "not enough history" about a window the card beside
+            // it was quantifying.
+            let share = percent / 10
+            Text(verbatim: "≈ "
+                + Format.compactTokens(
+                    WindowEquivalence.clamped((Double(lowPerTenth) * share).rounded()))
+                + "–"
+                + Format.compactTokens(
+                    WindowEquivalence.clamped((Double(highPerTenth) * share).rounded())))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("~ %@ – %@ API-equivalent".localized(
+                Format.usd(lowCost * share), Format.usd(highCost * share)))
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
         } else {
             Text(row == .undeclared
                  ? "Classify your usage in Settings to see what this window is worth"

@@ -657,7 +657,10 @@ struct PopoverView: View {
                     singleClient: singleClient, clientIds: clientIds,
                     trace: model.trace, agentUsage: model.agentUsage,
                     usageAttempted: model.agentUsageAttempted,
-                    scanFailed: model.windowScanFailed,
+                    // Scoped to the tab being drawn: the history card belongs to
+                    // one client, and a failure recorded against another is not
+                    // an answer about this one.
+                    scanFailed: singleClient.map(model.windowScanFailed(for:)) ?? false,
                     // `@Observable` tracks per property, so reading this on a
                     // lens that draws no sparkline would make every
                     // `refreshWindowQuotaHalves()` write invalidate this body
