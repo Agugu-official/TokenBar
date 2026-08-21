@@ -1412,10 +1412,10 @@ private struct DashboardSnapshot {
         }
         guard Self.windowScanToken == scanToken else { return }
         // Only THIS client's failure — not because the scan cannot answer for
-        // another (it becomes `unionScan` on the next line and the cached
-        // branch above clears whoever it covers), but because coverage is not
-        // tested here. A bare `nil` cleared whichever client was recorded,
-        // which is neither of those things.
+        // another (it becomes `unionScan` on the next line, and another
+        // client's own visit may then find it covering), but because coverage
+        // is not tested here. A bare `nil` cleared whichever client was
+        // recorded, which is neither of those things.
         windowScanFailedClients = Self.scanFailures(
             windowScanFailedClients, resolvedBy: client)
         unionScan = UnionScan(
@@ -1447,8 +1447,12 @@ private struct DashboardSnapshot {
     /// restated here. Four successive attempts to paraphrase them each read as
     /// precise and each omitted a conjunct — the scan-token check, the
     /// freshness bound, the fact that coverage is tested against the widened
-    /// `from` rather than the window itself. Read the two `guard`s; a summary
-    /// of a conjunction is a place for one of its terms to go missing.
+    /// `from` rather than the window itself. Read the two sites; a summary of a
+    /// conjunction is a place for one of its terms to go missing.
+    ///
+    /// One thing worth stating because it is counter-intuitive: `unionScan` is
+    /// cross-client in PROVENANCE, not in effect. Each visit clears at most its
+    /// own client, and tests coverage against its own widened range.
     ///
     /// Deliberately not cleared when a retry STARTS: the card would then flip
     /// failed → loading → failed on every poll, and the last settled answer is
