@@ -38,6 +38,25 @@ struct WindowUsageHalf: Sendable {
 /// What the card is, at any moment. Five cases, exhaustive by construction:
 /// there is no "absent", because absence is what this slice exists to remove.
 enum WindowCardState: Sendable {
+    /// Which window this state is about, when it is about one.
+    ///
+    /// Retention decisions have to be made on the identity the CARD shows, not
+    /// on the client: two window selections share a client, so keeping "the
+    /// card we already had for this client" across a transient read failure
+    /// could leave the chart on the window the user just navigated away from
+    /// while the picker highlighted the new one.
+    var cardId: String? {
+        switch self {
+        case let .noQuotaHistory(_, _, _, cardId): return cardId
+        // `WindowQuotaHalf.cardId` is already `"<clientId>|<cardId>"`; building
+        // the pair again here produced `codex|codex|session.v1`, which matched
+        // nothing and quietly disabled the retention it was added for.
+        case let .quotaOnly(half): return half.cardId
+        case let .ready(half, _): return half.cardId
+        case .loading, .blocked: return nil
+        }
+    }
+
     /// No quota payload has arrived yet, not even a failed one.
     case loading
     /// A provider reported an error instead of windows.

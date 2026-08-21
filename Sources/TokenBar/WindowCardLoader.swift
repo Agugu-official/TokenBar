@@ -301,6 +301,19 @@ enum WindowCardLoader {
             points: curve.points, activeResetAt: curve.activeResetAt)
     }
 
+    /// The `"<clientId>|<cardId>"` the card is currently showing, or nil when
+    /// nothing can be selected. One statement of "which window is on screen",
+    /// so retention decisions elsewhere compare against the same answer the
+    /// card itself resolves.
+    static func selectedCardId(payload: AgentUsagePayload?, clientId: String) -> String? {
+        guard let payload,
+              let selected = select(
+                  payload: payload, clientId: clientId,
+                  chosen: UserDefaults.standard.string(forKey: selectionKey))
+        else { return nil }
+        return "\(clientId)|\(selected.window.cardId)"
+    }
+
     /// Not private: `AgentLimitsCard`'s sparkline needs the same series for
     /// every window a client offers, not just the one the card selected. Same
     /// function so the two surfaces cannot disagree about which readings belong

@@ -11016,6 +11016,28 @@ enum SelfTest {
                 curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d a client missing from an unsettled payload is still a wait")
 
+        // L6f. Retention has to be keyed on the identity the CARD shows. Two
+        // window selections share a client, so "keep what we had for this
+        // client" could leave the chart on the window the user navigated away
+        // from while the picker highlighted the new one.
+        let wSelected = WindowCardLoader.selectedCardId(
+            payload: wPayload, clientId: "codex")
+        expect(wSelected == "codex|session.v1",
+               "L6f the selected card id names the client AND the window")
+        expect(
+            WindowCardLoader.selectedCardId(payload: wPayload, clientId: "absent") == nil,
+            "L6f and is nil when nothing can be selected, so a retained card cannot match it")
+        expect(
+            WindowCardLoader.quotaHalf(
+                payload: wPayload, clientId: "codex", attempted: true,
+                curve: { _, _, _ in wCurve }, nowMs: wNow * 1000).cardId == wSelected,
+            "L6f a resolved card reports the same identity the selection does")
+        expect(
+            WindowCardLoader.quotaHalf(
+                payload: nil, clientId: "codex", attempted: false,
+                curve: { _, _, _ in nil }, nowMs: wNow * 1000).cardId == nil,
+            "L6f while a card about no window reports none, so it is never retained")
+
         // L6e. Teaching `quotaHalf` to answer is not the same as the answer
         // reaching the card. `refreshWindowQuotaHalves` is the only writer of
         // `windowCards`, and it was called from the poll's success branch

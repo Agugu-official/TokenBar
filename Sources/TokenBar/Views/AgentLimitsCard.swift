@@ -270,18 +270,23 @@ struct AgentLimitsCard: View {
         func known(_ id: String) -> Bool {
             Self.placeholderRows[id] != nil || snapshots[id] != nil
         }
-        if restrict { return clients.filter(known) }
+        // The per-client Agent-limits toggle applies on every surface, not only
+        // the multi-agent one. Settings promises it "hides only that client's
+        // quota card here and on its own tab".
+        //
+        // Applied BEFORE the restricted return, not after. Moving it out of
+        // `reorderable` last round was necessary and not sufficient: the
+        // restricted path returns three lines above, so a client's own tab
+        // still reached that return and drew the card the user had switched
+        // off. The rule has to sit ahead of every exit, or it is only applied
+        // on the exits that happen to come later.
+        let limitsHidden = ClientRegistry.parseIdSet(limitsHiddenRaw)
+        if restrict {
+            return clients.filter { known($0) && !limitsHidden.contains($0) }
+        }
         var seen = Set<String>()
         var base = (clients.filter(known) + (agentUsage?.agents.map(\.clientId) ?? []))
             .filter { seen.insert($0).inserted }
-
-        // The per-client Agent-limits toggle applies on every surface, not
-        // only the multi-agent one. Settings promises it "hides only that
-        // client's quota card here and on its own tab"; gating it on
-        // `reorderable` honoured the first half and silently broke the second,
-        // so the card the user switched off reappeared as soon as they opened
-        // that client.
-        let limitsHidden = ClientRegistry.parseIdSet(limitsHiddenRaw)
         base = base.filter { !limitsHidden.contains($0) }
         // Tab visibility is a multi-agent concern only: a hidden tab cannot be
         // the tab you are on, and filtering by it in the restricted path would

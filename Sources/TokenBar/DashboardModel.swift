@@ -1071,7 +1071,10 @@ private struct DashboardSnapshot {
                let (settled, usage) = WindowCardLoader.usageHalf(
                    quota: q, scan: scan, confirmed: UsageAttribution.confirmed().records) {
                 windowCards[clientId] = .ready(settled, usage)
-            } else if case .loading = state, windowCards[clientId] != nil {
+            } else if case .loading = state,
+                      let held = windowCards[clientId]?.cardId,
+                      held == WindowCardLoader.selectedCardId(
+                          payload: agentUsage, clientId: clientId) {
                 // A curve read that throws is a transient generation expiry —
                 // `quotaHalf` answers `.loading`, which is right as an answer
                 // and wrong as a replacement. Overwriting sent a drawn card
@@ -1079,6 +1082,11 @@ private struct DashboardSnapshot {
                 // the flicker the summaries block a few lines down already
                 // refuses to produce. Keep what the row had; the next refresh
                 // publishes the new state.
+                //
+                // Only when the held card is about the window now selected:
+                // two selections share a client, so retaining by client alone
+                // left the chart and totals on the window the user had just
+                // navigated away from while the picker highlighted the new one.
                 continue
             } else {
                 windowCards[clientId] = state
@@ -1177,22 +1185,25 @@ private struct DashboardSnapshot {
         // history labelled as another's, which is worse than an empty card and
         // indistinguishable from a correct one.
         if let client = windowUsageClient {
+            let selected = WindowCardLoader.selectedCardId(
+                payload: agentUsage, clientId: client)
             if let cycles = WindowCardLoader.cycles(
                 payload: agentUsage, clientId: client, curve: readCurve)
             {
                 quotaCycles = cycles
-                quotaCyclesClient = client
+                quotaCyclesCardId = selected
                 rebuildQuotaHistory()
-            } else if quotaCyclesClient != client {
-                // Could not read, and what we hold is somebody else's.
+            } else if quotaCyclesCardId != selected || selected == nil {
+                // Could not read, and what we hold is about a different window
+                // — another client's, or another window of this one.
                 quotaCycles = []
                 quotaHistory = []
-                quotaCyclesClient = nil
+                quotaCyclesCardId = nil
             }
         } else {
             quotaCycles = []
             quotaHistory = []
-            quotaCyclesClient = nil
+            quotaCyclesCardId = nil
         }
     }
 
@@ -1279,8 +1290,11 @@ private struct DashboardSnapshot {
     /// Recorded-cycle summaries for EVERY displayed client's windows, for the
     /// all-agent lens. Curve reads only, so unlike `quotaHistory` this needs no
     /// message scan and is safe on the landing view.
-    /// Whose cycles `quotaCycles` currently holds. Nil when it is empty.
-    @ObservationIgnored private var quotaCyclesClient: String?
+    /// Which window's cycles `quotaCycles` currently holds — client AND card,
+    /// not client alone. Two window selections share a client, so a client-only
+    /// comparison could keep the previous window's history beneath the newly
+    /// selected card. Nil when empty.
+    @ObservationIgnored private var quotaCyclesCardId: String?
 
     private(set) var quotaWindowSummaries: [QuotaWindowSummary] = []
     /// One weekday-by-hour grid per window, keyed as `QuotaWindowSummary.id`.
