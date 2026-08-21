@@ -33,12 +33,11 @@ enum Format {
     /// `"$%.2f"` turns anything under half a cent into "$0.00", which reads as
     /// "we measured zero" when the truth is "we measured something below the
     /// resolution of this format". A single list-priced call at $0.003 is
-    /// ordinary, and a line reading "2.1M · $0.00" contradicts itself. Use this
-    /// wherever a zero would be a claim rather than a total.
+    /// ordinary, and a line reading "2.1M · $0.00" contradicts itself.
     ///
-    /// Handles the sub-cent case ONLY. An exact zero still renders "$0.00",
-    /// which is right for a total and wrong for a price nobody could compute —
-    /// use `money(tokens:cost:)` wherever tokens are shown beside the amount.
+    /// The sub-cent case ONLY. An exact zero still renders "$0.00", which is
+    /// right for a total and wrong for a price nobody could compute — where a
+    /// token count sits beside the amount, use `money(tokens:cost:)` instead.
     ///
     /// Surfaces outside the quota lens still call `usd` directly and can print
     /// the same false zero. Deliberately left alone: they predate this work and
@@ -46,6 +45,12 @@ enum Format {
     /// enumerated either — a list of view names in a comment goes stale and
     /// then misdescribes what it defers, which is worse than no list.
     /// `grep -rn 'Format\.usd(' Sources/` is the current answer.
+    static func usdOrBelowCent(_ amount: Double) -> String {
+        // `amount == 0` catches -0.0 too, which `usd` alone renders "$-0.00".
+        if amount == 0 { return usd(0) }
+        return amount > 0 && amount < 0.005 ? "<$0.01" : usd(amount)
+    }
+
     /// An amount shown beside a token count.
     ///
     /// `"$%.2f"` cannot distinguish "nothing" from "nothing we could price"
@@ -57,12 +62,6 @@ enum Format {
     static func money(tokens: Int64, cost: Double) -> String {
         if cost <= 0, tokens > 0 { return "—" }
         return usdOrBelowCent(cost)
-    }
-
-    static func usdOrBelowCent(_ amount: Double) -> String {
-        // `amount == 0` catches -0.0 too, which `usd` alone renders "$-0.00".
-        if amount == 0 { return usd(0) }
-        return amount > 0 && amount < 0.005 ? "<$0.01" : usd(amount)
     }
 
     /// Today's contribution-graph day key. tokscale-core buckets days in the

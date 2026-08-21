@@ -295,11 +295,12 @@ struct QuotaHeatmapCard: View {
             // The mirror of `.tokensOnly`, and it fell through to "not enough
             // history" for the same wrong reason: the history IS sufficient,
             // and the money estimate is the part of the answer that exists.
-            // The slot's share of a tenth shrinks without bound — a
-            // 0.05-point cell still draws — so an ordinary `costPerTenth`
-            // reaches sub-cent here. "$0.00 API-equivalent" would be a
-            // measured-zero claim; on the branches that carry one, with an
-            // error bar attached to it.
+            // `usdOrBelowCent`, not `money`: this branch has no token count
+            // to pair — that is what makes it cost-only — and `.costOnly` is
+            // constructed only from positive cost, so the exact-zero case
+            // cannot arise. What can is sub-cent: the slot's share of a tenth
+            // shrinks without bound, a 0.05-point cell still draws, and an
+            // ordinary `costPerTenth` scaled by it lands under half a cent.
             Text(verbatim: "~ " + Format.usdOrBelowCent(costPerTenth * (percent / 10)))
                 .font(.caption2)
                 .foregroundStyle(.secondary)

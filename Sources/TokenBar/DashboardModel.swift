@@ -1426,32 +1426,31 @@ private struct DashboardSnapshot {
 
     /// The clients whose stage-two scan settled with an error.
     ///
-    /// A SET, not one client. The single-slot version scoped its CLEAR to the
-    /// client that succeeded but let its SET overwrite whichever client was
-    /// recorded, so two failures in a row lost the first and its card went back
-    /// to "Reading local usage…" — the never-ending spinner this state exists
-    /// to remove. Half a rule is not a rule.
-    ///
     /// Distinguishes "still scanning" from "asked and failed" — `.quotaOnly`
     /// alone cannot, and both halves of the lens rendered the second as the
-    /// first. Cleared for a client when a scan COVERING that client's window
-    /// succeeds — whether run for that client, or run for the all-agent
-    /// equivalence and found on the next visit to cover it. A success for a
-    /// DIFFERENT client never clears it: the property holds one client, and
-    /// forgetting a failure is not the same as answering it.
+    /// first. A per-client answer, not a shared flag: a single boolean says
+    /// "did the last scan fail", which is a different question from "did THIS
+    /// card's scan fail", and one transient failure on the all-agent lens made
+    /// the next tab the user opened claim its own scan had failed before that
+    /// scan had started.
+    ///
+    /// A SET, not one client, for the mirror of the same reason. The
+    /// single-slot version scoped its CLEAR to the client that succeeded but
+    /// let its SET overwrite whichever client was recorded, so two failures in
+    /// a row lost the first and its card went back to "Reading local usage…" —
+    /// the never-ending spinner this state exists to remove. Half a rule is not
+    /// a rule.
+    ///
+    /// An entry is cleared when a scan COVERING that client's window succeeds —
+    /// whether run for that client, or run for the all-agent equivalence and
+    /// found on the next visit to cover it. A success for a DIFFERENT client
+    /// clears nothing: forgetting a failure is not the same as answering it.
     ///
     /// Deliberately not cleared when a retry STARTS: the card would then flip
     /// failed → loading → failed on every poll, and the last settled answer is
     /// more useful than a spinner that keeps restarting. During a retry the
     /// card still says the last attempt failed, which is true and is the
     /// intended reading.
-    ///
-    /// The CLIENT, not a bare flag. A shared boolean answers "did the last scan
-    /// fail", which is a different question from "did THIS card's scan fail":
-    /// one transient failure on the all-agent lens then made the next tab the
-    /// user opened claim its own scan had failed before that scan had even
-    /// started — the same inversion this state exists to remove, running the
-    /// other way.
     private(set) var windowScanFailedClients: Set<String> = []
 
     /// Whether the card currently shown for `clientId` should say the scan
