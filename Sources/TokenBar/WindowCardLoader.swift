@@ -227,6 +227,19 @@ enum WindowCardLoader {
     static func usageHalf(
         quota: WindowQuotaHalf, scan: UnionScan, confirmed: [UsageAttribution.Record]
     ) -> (WindowQuotaHalf, WindowUsageHalf)? {
+        // One predicate, used twice. The usage this card DISPLAYS is filtered
+        // to messages declared against this subscription; the window it infers
+        // was anchored to the earliest message in the whole union scan, so
+        // another subscription's work could set this one's start — or invent an
+        // active window for a subscription that has done nothing since its
+        // reset. The chart would then begin before any usage it goes on to
+        // count as this client's.
+        func isMine(_ message: WindowMessage) -> Bool {
+            UsageAttribution.resolve(
+                client: message.client, provider: message.providerId,
+                model: message.modelId, records: confirmed) == .assigned(quota.clientId)
+        }
+
         // Refine `.idle` now that usage is known: the same resolver, this time
         // with the first usage after the reset.
         var resolved = quota.resolution
@@ -234,7 +247,8 @@ enum WindowCardLoader {
             resolved = WindowResolver.resolve(
                 resetsAtMs: reset, durationMs: quota.durationMs, now: quota.nowMs,
                 firstUsageAfterReset: WindowResolver.firstUsageAfterReset(
-                    messages: scan.slice(from: reset, to: quota.nowMs), resetMs: reset))
+                    messages: scan.slice(from: reset, to: quota.nowMs).filter(isMine),
+                    resetMs: reset))
         }
         let settled = WindowQuotaHalf(
             clientId: quota.clientId, cardId: quota.cardId,
@@ -249,11 +263,7 @@ enum WindowCardLoader {
         // A scan that starts after this window did cannot answer for it.
         guard scan.covers(start: start) else { return nil }
 
-        let mine = scan.slice(from: start, to: min(end, quota.nowMs)).filter {
-            UsageAttribution.resolve(
-                client: $0.client, provider: $0.providerId, model: $0.modelId,
-                records: confirmed) == .assigned(quota.clientId)
-        }
+        let mine = scan.slice(from: start, to: min(end, quota.nowMs)).filter(isMine)
         let geo = WindowCardGeometry.usageGeometry(
             windowStartMs: start, windowEndMs: end, nowMs: min(quota.nowMs, end),
             samples: quota.samples, messages: mine)

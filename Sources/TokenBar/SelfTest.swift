@@ -10503,6 +10503,35 @@ enum SelfTest {
             crScan.slice(from: 2_000, to: 3_000).count == 1,
             "CR1 and the message at the end is not, so two adjacent windows cannot both claim it")
 
+        // CR8. The inferred window is anchored by usage this subscription
+        // owns. The card filters what it DISPLAYS by attribution and anchored
+        // the window it infers to the earliest message in the whole union scan,
+        // so another subscription's work could set this one's start — the chart
+        // then begins before any usage it goes on to count as this client's.
+        let cr8Mixed = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":1000,"client":"other","providerId":"other","modelId":"m",
+              "input":5,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+              "cost":0,"isTurnStart":true},
+             {"timestamp":5000,"client":"mine","providerId":"mine","modelId":"m",
+              "input":5,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+              "cost":0,"isTurnStart":true}]
+            """.utf8))
+        let cr8Records = [UsageAttribution.Record(
+            client: "mine", provider: "mine", state: .assigned("mine"))]
+        expect(
+            WindowResolver.firstUsageAfterReset(messages: cr8Mixed, resetMs: 0) == 1_000,
+            "CR8 unfiltered, the other subscription's message anchors the window")
+        expect(
+            WindowResolver.firstUsageAfterReset(
+                messages: cr8Mixed.filter {
+                    UsageAttribution.resolve(
+                        client: $0.client, provider: $0.providerId, model: $0.modelId,
+                        records: cr8Records) == .assigned("mine")
+                }, resetMs: 0) == 5_000,
+            "CR8 filtered, it is anchored by usage this subscription owns")
+
         // CR4. The first bar owns the window's own start. `UnionScan.slice`
         // admits a message landing exactly on `windowStartMs`, and for an
         // inferred window that message defines the start — so with every zone
