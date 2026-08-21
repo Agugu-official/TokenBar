@@ -11016,6 +11016,26 @@ enum SelfTest {
                 curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d a client missing from an unsettled payload is still a wait")
 
+        // L6g. The picker's selection must be one of its own options. The
+        // stored value is a single preference shared by every client, so it
+        // routinely names another client's window; the loader already falls
+        // back, and the picker echoing the stored value left it selecting
+        // nothing it offered. Pure form of the rule the binding applies.
+        func pickerSelection(stored: String, cardId: String,
+                             candidates: [String]) -> String {
+            candidates.contains(stored) ? stored : cardId
+        }
+        expect(
+            pickerSelection(stored: "claude|weekly.v1", cardId: "codex|session.v1",
+                            candidates: ["codex|session.v1", "codex|main.weekly.v1"])
+                == "codex|session.v1",
+            "L6g a stored selection from another client falls back to the shown window")
+        expect(
+            pickerSelection(stored: "codex|main.weekly.v1", cardId: "codex|session.v1",
+                            candidates: ["codex|session.v1", "codex|main.weekly.v1"])
+                == "codex|main.weekly.v1",
+            "L6g while one this client does offer is honoured, so the fallback is not blanket")
+
         // L6f. Retention has to be keyed on the identity the CARD shows. Two
         // window selections share a client, so "keep what we had for this
         // client" could leave the chart on the window the user navigated away

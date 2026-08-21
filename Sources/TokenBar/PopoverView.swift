@@ -295,6 +295,14 @@ struct PopoverView: View {
         // the user just left until the popover was rebuilt.
         .onReceive(NotificationCenter.default.publisher(
             for: .NSSystemTimeZoneDidChange)) { _ in
+            // The grids bucket by the current zone too, and only
+            // `refreshWindowQuotaHalves` rebuilds them — so without this the
+            // weekday cells and the observed-day count stay in the zone the
+            // user left until a later successful quota poll, or for ever if
+            // those keep failing. Teaching this handler about one of the two
+            // timezone-dependent folds was the same half-applied rule as the
+            // rest of this round.
+            model.refreshWindowQuotaHalves()
             Task {
                 await series.load(
                     source: UsageDataSources.current,

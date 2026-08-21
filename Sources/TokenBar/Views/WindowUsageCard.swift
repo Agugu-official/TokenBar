@@ -150,8 +150,20 @@ struct WindowUsageCard: View {
     ) -> some View {
         if candidates.count > 1 {
             SegmentedPicker(
-                selection: Binding(get: { selection.isEmpty ? cardId : selection },
-                                   set: { selection = $0 }),
+                // Present-in-candidates, not merely non-empty. The stored
+                // selection is one preference shared by every client, so it
+                // routinely names another client's window — and a provider can
+                // stop offering one. `WindowCardLoader.select` already falls
+                // back to `cardId` in both cases; echoing the stored value here
+                // left the picker with a selection matching none of its
+                // options, so the card drew one window while no button was
+                // highlighted.
+                selection: Binding(
+                    get: {
+                        candidates.contains { $0.cardId == selection }
+                            ? selection : cardId
+                    },
+                    set: { selection = $0 }),
                 options: candidates.map { (value: $0.cardId, label: $0.label) })
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
