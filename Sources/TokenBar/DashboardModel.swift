@@ -1414,8 +1414,16 @@ private struct DashboardSnapshot {
     ///
     /// Distinguishes "still scanning" from "asked and failed" — `.quotaOnly`
     /// alone cannot, and both halves of the lens rendered the second as the
-    /// first. Cleared by the next successful scan, so a transient failure heals
-    /// without a separate reset.
+    /// first. Cleared by the next successful scan FOR THAT CLIENT, and by
+    /// nothing else.
+    ///
+    /// Deliberately not cleared when a retry STARTS: the card would then flip
+    /// failed → loading → failed on every poll, and the last settled answer is
+    /// more useful than a spinner that keeps restarting. It follows that during
+    /// a retry the card still says the last attempt failed — true, and the
+    /// intended reading. The all-agent equivalence scan does not clear it
+    /// either: that scan answers a different question over a different range,
+    /// so its success is not evidence about this client's window.
     ///
     /// The CLIENT, not a bare flag. A shared boolean answers "did the last scan
     /// fail", which is a different question from "did THIS card's scan fail":

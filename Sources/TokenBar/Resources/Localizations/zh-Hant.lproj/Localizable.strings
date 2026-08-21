@@ -504,3 +504,6 @@
 "Local usage could not be read." = "無法讀取本機用量。";
 "tokens unavailable, ±%@%%" = "無 token 明細，誤差 ±%@%%";
 "~ %@ – %@ API-equivalent" = "≈ %@ – %@（API 等值）";
+"The allowance did not move in this window" = "這個時間窗內額度沒有變動";
+"The allowance moved too little to convert reliably" = "額度變動太小，無法可靠換算";
+"The allowance moved, but no usage was recorded on this machine" = "額度有變動，但這台機器上沒有記錄到用量";

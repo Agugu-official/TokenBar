@@ -337,12 +337,33 @@ struct QuotaHeatmapCard: View {
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
-            Text(row == .undeclared
-                 ? "Classify your usage in Settings to see what this window is worth"
-                 : "Not enough history to convert this window to a figure")
+            Text(Self.noFigureReason(row).localized)
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Why there is no figure, stated per case rather than blamed on history.
+    ///
+    /// "Not enough history" used to cover everything that reached here, and it
+    /// is a false sentence for three of them: `.insufficient`, `.notMoved` and
+    /// `.unaccounted` all have sufficient history and fail for a different
+    /// reason each. That is the same defect as sending `.spread` here — copy
+    /// answering a narrower question than the state it describes — with the
+    /// difference that no number is being hidden, only a wrong reason given.
+    static func noFigureReason(_ row: WindowEquivalence.Row?) -> String {
+        switch row {
+        case .undeclared:
+            return "Classify your usage in Settings to see what this window is worth"
+        case .notMoved:
+            return "The allowance did not move in this window"
+        case .insufficient:
+            return "The allowance moved too little to convert reliably"
+        case .unaccounted:
+            return "The allowance moved, but no usage was recorded on this machine"
+        default:
+            return "Not enough history to convert this window to a figure"
         }
     }
 

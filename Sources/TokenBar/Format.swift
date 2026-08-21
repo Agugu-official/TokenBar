@@ -27,6 +27,18 @@ enum Format {
         String(format: "$%.2f", amount)
     }
 
+    /// `usd`, except that a real amount too small to show is said to be small
+    /// rather than rendered as nothing.
+    ///
+    /// `"$%.2f"` turns anything under half a cent into "$0.00", which reads as
+    /// "we measured zero" when the truth is "we measured something below the
+    /// resolution of this format". A single list-priced call at $0.003 is
+    /// ordinary, and a line reading "2.1M · $0.00" contradicts itself. Use this
+    /// wherever a zero would be a claim rather than a total.
+    static func usdOrBelowCent(_ amount: Double) -> String {
+        amount > 0 && amount < 0.005 ? "<$0.01" : usd(amount)
+    }
+
     /// Today's contribution-graph day key. tokscale-core buckets days in the
     /// local timezone as `%Y-%m-%d`, so we must match that exactly.
     /// `timeZone` is injectable so a test can pin one. It defaults to

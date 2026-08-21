@@ -11497,6 +11497,41 @@ enum SelfTest {
                 && qhcCycles.last?.resetAtMs == (monReset + 8 * qhcWeek) * 1000,
             "QH-CAP the cap keeps the NEWEST cycles — dropping those instead would "
                 + "bound the scan at the same place while showing stale rows")
+        // QH-MONEY. `$%.2f` cannot tell "nothing" from "nothing we could price"
+        // from "less than half a cent"; all three render "$0.00" and only the
+        // first is true. A single list-priced call at $0.003 is ordinary, so
+        // "2.1M · $0.00" — the string the other-subscription line was rewritten
+        // to stop printing — survived inside the rewrite itself.
+        expect(Format.usdOrBelowCent(0.003) == "<$0.01"
+                   && Format.usdOrBelowCent(0) == "$0.00"
+                   && Format.usdOrBelowCent(1.5) == "$1.50",
+               "QH-MONEY a real amount below the format's resolution is said to be "
+                   + "small, while an exact zero and an ordinary amount are unchanged")
+        expect(QuotaHistoryCard.money(tokens: 2_100_000, cost: 0) == "—"
+                   && QuotaHistoryCard.money(tokens: 0, cost: 0) == "$0.00"
+                   && QuotaHistoryCard.money(tokens: 2_100_000, cost: 0.003) == "<$0.01",
+               "QH-MONEY tokens with no price get a dash rather than a false total, "
+                   + "while a window that genuinely spent nothing still reads $0.00")
+        // QH-REASON. "Not enough history" is a false sentence for three of the
+        // states that reach the heatmap tooltip's fallback: their history is
+        // sufficient and each fails for its own reason.
+        expect(
+            QuotaHeatmapCard.noFigureReason(.notMoved)
+                != QuotaHeatmapCard.noFigureReason(.unavailable)
+                && QuotaHeatmapCard.noFigureReason(.insufficient(
+                        deltaPercent: 2, errorPercent: 25))
+                    != QuotaHeatmapCard.noFigureReason(.unavailable)
+                && QuotaHeatmapCard.noFigureReason(.unaccounted(deltaPercent: 9))
+                    != QuotaHeatmapCard.noFigureReason(.unavailable),
+            "QH-REASON a window with sufficient history is not told its history is "
+                + "insufficient")
+        expect(
+            QuotaHeatmapCard.noFigureReason(.unavailable)
+                == "Not enough history to convert this window to a figure"
+                && QuotaHeatmapCard.noFigureReason(.undeclared)
+                    == "Classify your usage in Settings to see what this window is worth",
+            "QH-REASON and the two states that genuinely lack history or a "
+                + "declaration keep the sentences they had")
         expect(QuotaHistoryCard.visibleRows <= QuotaHistoryFold.consideredCycles,
                "QH-CAP the history card's row list still fits inside the cap, which "
                 + "would otherwise silently draw fewer rows than the card intends")
