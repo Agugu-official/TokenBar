@@ -51,6 +51,53 @@ extension UsageDataSource {
 }
 
 /// The only normal-runtime owner of usage calls into `TBCore`.
+/// A floor under how often the OAuth quota endpoints are asked.
+///
+/// Three independent callers fetch this payload — the popover's poll loop, the
+/// Settings window's own poll loop, and the tray's five-minute refresh — and
+/// each is written fetch-first: it calls, then sleeps. The popover's loop is
+/// mounted by a `.task` that dies with the popover, so every reopen starts the
+/// loop again and issues the leading call immediately. Opening and closing the
+/// popover ten times issues ten requests, with nothing in between them.
+///
+/// That is enough to reach Anthropic's rate limit on `oauth/usage`. The engine
+/// has a gate for the aftermath — a 429 blocks further attempts until the
+/// `Retry-After` passes — but nothing bounded the attempts that produce the
+/// 429 in the first place. This is that bound.
+///
+/// 50 seconds, against a 60-second poll: short enough that the poll itself is
+/// never skipped, long enough that reopening cannot outpace it. The five-minute
+/// tray refresh is unaffected. One consequence worth knowing: a payload
+/// carrying the gate's own "retrying in ~Ns" message is cached like any other,
+/// so that countdown can read up to 50s stale.
+///
+/// An actor rather than a lock, so concurrent callers coalesce: the second
+/// arrival waits for the first's fetch and is then served from it, instead of
+/// starting a second request against the same endpoint.
+actor AgentUsageThrottle {
+    static let shared = AgentUsageThrottle()
+
+    static let minimumInterval: TimeInterval = 50
+
+    private var last: (payload: AgentUsagePayload, at: Date)?
+
+    /// `now` is injectable so a test can drive the clock rather than sleep.
+    func payload(
+        now: Date = Date(),
+        fetch: @Sendable () async throws -> AgentUsagePayload
+    ) async throws -> AgentUsagePayload {
+        if let last, now.timeIntervalSince(last.at) < Self.minimumInterval {
+            return last.payload
+        }
+        let fresh = try await fetch()
+        last = (fresh, now)
+        return fresh
+    }
+
+    /// Test seam only: forget the cached payload.
+    func reset() { last = nil }
+}
+
 struct LiveUsageDataSource: UsageDataSource {
     let allowsQuotaCachePersistence = true
 
@@ -111,9 +158,11 @@ struct LiveUsageDataSource: UsageDataSource {
     }
 
     func agentUsage() async throws -> AgentUsagePayload {
-        try await Task.detached(priority: .utility) {
-            try TBCore.agentUsage()
-        }.value
+        try await AgentUsageThrottle.shared.payload {
+            try await Task.detached(priority: .utility) {
+                try TBCore.agentUsage()
+            }.value
+        }
     }
 
     func usageTrace(windowSecs: Int64) async throws -> [TraceBucket] {

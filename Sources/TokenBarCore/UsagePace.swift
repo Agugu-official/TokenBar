@@ -64,8 +64,23 @@ public struct UsagePace: Sendable {
     }
 
     /// Right-hand projection: "Lasts until reset" / "Projected empty in 2h 10m".
+    ///
+    /// The lasts-until-reset phrasing names its basis, because it is the one
+    /// variant that can contradict the recent-trend indicator beside it. That
+    /// indicator extrapolates the last few samples and can say the window runs
+    /// out while this one, reading a whole-window average or a historical
+    /// profile, says it lasts — both true about different spans, and read as a
+    /// self-contradiction when each is stated bare. The other variants agree
+    /// with the indicator whenever it is showing, so they are left alone.
+    ///
+    /// `.linear` reaches this too, so the label follows `basis` rather than
+    /// assuming the historical one.
     public var etaText: String? {
-        if willLastToReset { return "Lasts until reset".localized }
+        if willLastToReset {
+            return basis == .historical
+                ? "Historically: lasts until reset".localized
+                : "On average: lasts until reset".localized
+        }
         guard let etaSeconds else { return nil }
         let t = Self.durationText(etaSeconds)
         // `durationText` is already localized, so compare against the same

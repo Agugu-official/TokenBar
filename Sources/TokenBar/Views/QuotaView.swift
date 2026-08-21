@@ -58,7 +58,7 @@ struct QuotaView: View {
                         title: "%@ limits".localized(
                             ClientRegistry.style(singleClient).displayName),
                         note: "Session / weekly / model limits",
-                        restrict: true)
+                        restrict: true, curves: windowCurves)
                 }
                 QuotaHistoryCard(
                     clientId: singleClient, cycles: quotaCycles,

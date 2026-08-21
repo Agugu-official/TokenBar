@@ -661,11 +661,16 @@ struct PopoverView: View {
                     // one client, and a failure recorded against another is not
                     // an answer about this one.
                     scanFailed: singleClient.map(model.windowScanFailed(for:)) ?? false,
-                    // `@Observable` tracks per property, so reading this on a
-                    // lens that draws no sparkline would make every
-                    // `refreshWindowQuotaHalves()` write invalidate this body
-                    // for nothing.
-                    windowCurves: singleClient == nil ? model.windowCurves : [:],
+                    // Both lenses now. The gate here used to pass `[:]` on a
+                    // client tab, because `@Observable` tracks per property and
+                    // reading this on a lens that drew no sparkline would make
+                    // every `refreshWindowQuotaHalves()` write invalidate this
+                    // body for nothing. That lens draws one: its Agent-limits
+                    // card has the same recent-consumption indicator as the
+                    // all-agent one, and the indicator is computed from these
+                    // curves — so the gate was not saving work, it was blanking
+                    // a feature.
+                    windowCurves: model.windowCurves,
                     windowCard: singleClient.flatMap { model.windowCards[$0] },
                     quotaCycles: model.quotaCycles, quotaHistory: model.quotaHistory,
                     colors: model.colors,

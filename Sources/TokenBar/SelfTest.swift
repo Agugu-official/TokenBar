@@ -12,6 +12,11 @@ private final class AsyncResultBox<Value: Sendable>: @unchecked Sendable {
     var result: Result<Value, Error>?
 }
 
+private actor ThrottleCallCounter {
+    private(set) var count = 0
+    func bump() { count += 1 }
+}
+
 private actor ControlledTurnUsageDataSource: UsageDataSource {
     private struct PendingHourly {
         let clients: [String]?
@@ -742,6 +747,40 @@ enum SelfTest {
             }
             return try? box.result?.get()
         }
+
+        // THROTTLE. Three independent callers fetch the OAuth quota payload
+        // fetch-first, and the popover's loop is remounted by a `.task` on every
+        // reopen — so opening and closing ten times issued ten requests, which
+        // is enough to reach Anthropic's rate limit. The engine's gate handles
+        // the aftermath of a 429; nothing bounded the attempts that cause one.
+        let throttleResult = awaitMainActorValue { () async throws -> [Int] in
+            let throttle = AgentUsageThrottle()
+            let base = Date(timeIntervalSince1970: 1_000_000)
+            let counter = ThrottleCallCounter()
+            let empty = try JSONDecoder().decode(
+                AgentUsagePayload.self,
+                from: Data(#"{"generatedAt":"2026-08-22T00:00:00Z","agents":[]}"#.utf8))
+            let fetch: @Sendable () async throws -> AgentUsagePayload = {
+                await counter.bump()
+                return empty
+            }
+            _ = try await throttle.payload(now: base, fetch: fetch)
+            // Nine reopens inside the floor.
+            for i in 1...9 {
+                _ = try await throttle.payload(
+                    now: base.addingTimeInterval(Double(i)), fetch: fetch)
+            }
+            let insideFloor = await counter.count
+            // The 60s poll tick is outside it and must still go through.
+            _ = try await throttle.payload(
+                now: base.addingTimeInterval(60), fetch: fetch)
+            return [insideFloor, await counter.count]
+        }
+        expect(throttleResult?.first == 1,
+               "THROTTLE ten opens within the floor issue ONE request, not ten")
+        expect(throttleResult?.last == 2,
+               "THROTTLE and the 60s poll tick still goes through, so the floor "
+                   + "collapses reopens without slowing the cadence it protects")
 
         expect(
             !AppLanguage.requiresRelaunch(from: "en", to: "en"),
@@ -2864,7 +2903,10 @@ enum SelfTest {
         expect(ahead?.etaText == "Projected empty in 8m", "pace eta text")
         let reserve = UsagePace.compute(window: v3Window(used: 40), now: now)
         expect(reserve?.stage == .behind && reserve?.label == "10% in reserve", "pace reserve label")
-        expect(reserve?.willLastToReset == true && reserve?.etaText == "Lasts until reset", "slow burn lasts")
+        expect(reserve?.willLastToReset == true
+                   && reserve?.etaText == "On average: lasts until reset",
+               "slow burn lasts, and says on what basis — the recent-trend indicator "
+                   + "beside it reads a different span and can disagree")
         let learningDurationWindow = v3Window(used: 50, state: .learningDuration)
         expect(UsagePace.compute(window: learningDurationWindow, now: now) == nil,
             "learning duration has no pace")
@@ -2900,6 +2942,18 @@ enum SelfTest {
         expect(hist?.willLastToReset == true && hist?.etaSeconds == nil,
             "historical lasts result is trusted")
         expect(hist?.isHistoricalDeficit == false, "historical reserve is not a deficit")
+        // PACE-BASIS. The lasts-until-reset phrasing names the span it read,
+        // because the recent-trend indicator beside it can say the window runs
+        // out — both true, and a self-contradiction when each is stated bare.
+        // `.linear` reaches the same branch, so a label hardcoded to the
+        // historical wording would be a false attribution on the other mode.
+        expect(hist?.etaText == "Historically: lasts until reset",
+               "PACE-BASIS a historical projection says it is historical")
+        expect(
+            reserve?.etaText != hist?.etaText
+                && reserve?.willLastToReset == hist?.willLastToReset,
+            "PACE-BASIS and the linear one says something different for the same "
+                + "verdict, so the basis is read rather than assumed")
 
         let riskyWindow = v3Window(
             used: 90, state: .available,

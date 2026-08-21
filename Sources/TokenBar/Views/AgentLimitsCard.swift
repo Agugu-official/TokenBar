@@ -823,7 +823,12 @@ struct AgentLimitsCard: View {
                     // and the sentence it produced was impossible. Saturation
                     // is a state, and naming the state is the honest form of a
                     // number that has run out of axis.
-                    Text("runs out at this rate")
+                    // "Recently:" because the pace footer on this same row can
+                    // say the window lasts until reset. Both are true — this
+                    // reads the last few samples, that reads a whole-window
+                    // average or a historical profile — and stating either bare
+                    // beside the other reads as the card contradicting itself.
+                    Text("Recently: runs out")
                 } else if direction != .flat, rounded != 0 {
                     let magnitude = "\(abs(rounded))%"
                     Text(asUsed
