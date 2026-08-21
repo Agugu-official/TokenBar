@@ -268,14 +268,17 @@ public enum WindowEquivalence {
             let delta = set.reduce(0.0) { $0 + $1.deltaPercent }
             return delta > 0 ? set.reduce(0.0) { $0 + pick($1) } / delta : 0
         }
-        // Two denominators on purpose. Tokens pool over everything admitted;
-        // cost pools only over the cycles that carry one, because a cycle with
-        // real tokens and no price contributes its delta to the denominator
-        // while contributing nothing to the numerator, which would drag the
-        // money figure down in proportion to how much unpriced work happened.
+        // Each estimate pools over the cycles that carry ITS evidence. A cycle
+        // contributing quota delta to a denominator while contributing nothing
+        // to the numerator drags that estimate down in proportion to how much
+        // of the history it represents — true of unpriced cycles for the money
+        // figure, and equally true of cost-only cycles for the token figure.
+        // Filtering one and not the other was the same defect twice, and only
+        // the first half was fixed.
         let priced = admitted.filter { $0.spanCost > 0 }
+        let tokenBearing = admitted.filter { $0.spanTokens > 0 }
         let costRatio = pooled(priced) { $0.spanCost }
-        let tokenRatio = pooled(admitted) { Double($0.spanTokens) }
+        let tokenRatio = pooled(tokenBearing) { Double($0.spanTokens) }
 
         /// Leave-one-out spread of a pooled estimate, relative to the estimate.
         func jackknifeRelative(_ set: [Cycle], _ pick: (Cycle) -> Double) -> Double {
@@ -295,9 +298,15 @@ public enum WindowEquivalence {
         }
 
         // No defensible money figure: report what IS known rather than a
-        // dollar amount pooled over cycles that carry no price.
+        // dollar amount pooled over cycles that carry no price. And if neither
+        // estimate has enough cycles behind it, say that instead of inventing
+        // one from the handful that do.
         guard priced.count >= minimumCycles else {
-            let tokenError = jackknifeRelative(admitted) { Double($0.spanTokens) }
+            guard tokenBearing.count >= minimumCycles else {
+                return .tooFewCycles(
+                    count: max(priced.count, tokenBearing.count), needed: minimumCycles)
+            }
+            let tokenError = jackknifeRelative(tokenBearing) { Double($0.spanTokens) }
             return .tokensOnly(
                 tokensPerTenth: clamped((tokenRatio * 10).rounded()),
                 errorPercent: tokenError.isFinite
@@ -330,7 +339,7 @@ public enum WindowEquivalence {
 
         guard relativeError <= tolerance else {
             let ratios = priced.map { $0.spanCost / $0.deltaPercent * 10 }
-            let tokens = admitted.map { Double($0.spanTokens) / $0.deltaPercent * 10 }
+            let tokens = tokenBearing.map { Double($0.spanTokens) / $0.deltaPercent * 10 }
             return .spread(
                 lowPerTenth: clamped((tokens.min() ?? 0).rounded()),
                 highPerTenth: clamped((tokens.max() ?? 0).rounded()),

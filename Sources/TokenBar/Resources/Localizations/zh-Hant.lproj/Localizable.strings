@@ -487,3 +487,4 @@
 "Not in the latest quota report." = "不在最近一次的額度回報裡。";
 "Quota unavailable" = "額度無法取得";
 "10%% of quota ~ %@, unpriced models, ±%@%%" = "額度 10%% ≈ %@ token（模型無定價，誤差 ±%@%%）";
+"unpriced models, ±%@%%" = "模型無定價，誤差 ±%@%%";

@@ -266,7 +266,21 @@ struct QuotaHeatmapCard: View {
     /// say so, carrying the same error the history card publishes.
     @ViewBuilder
     private func equivalent(_ percent: Double, row: WindowEquivalence.Row?) -> some View {
-        if case let .ratio(tokensPerTenth, costPerTenth, errorPercent) = row {
+        if case let .tokensOnly(tokensPerTenth, errorPercent) = row {
+            // The fold produces this deliberately when the models carry no
+            // price; matching only `.ratio` sent it to "not enough history",
+            // which is false — the history is sufficient and the token estimate
+            // is the part of the answer that exists.
+            let share = percent / 10
+            Text(verbatim: "≈ " + Format.compactTokens(
+                WindowEquivalence.clamped((Double(tokensPerTenth) * share).rounded())))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("unpriced models, ±%@%%".localized(String(errorPercent)))
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if case let .ratio(tokensPerTenth, costPerTenth, errorPercent) = row {
             let share = percent / 10
             // Clamped: the ratio itself can already be saturated, and a cell
             // above 10% scales it further, past what `Int64(_:)` accepts.

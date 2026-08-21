@@ -11925,6 +11925,35 @@ enum SelfTest {
                           QuotaSample(atMs: 2_000, usedPercent: 20)],
                 messages: []) == .unaccounted(deltaPercent: 19),
             "V17 and an empty span still is not, so the check above is not vacuous")
+        // V19. The token estimate pools over token-bearing cycles, mirroring
+        // what the money estimate already did. A cost-only cycle carries quota
+        // delta and no tokens, so leaving it in the denominator understated the
+        // token figure by exactly the share of history it represents — the same
+        // defect as the money one, on the other side, fixed only on one side.
+        let aeCostOnly = [aeCycle(50, 1_000, 10), aeCycle(50, 1_000, 10),
+                          aeCycle(50, 1_000, 10), aeCycle(50, 0, 10)]
+        if case let .ratio(tokens, _, _) = WindowEquivalence.aggregate(cycles: aeCostOnly) {
+            expect(tokens == 200,
+                   "V19 3000 tokens over the 150 points that produced them, not over 200")
+        } else {
+            expect(false, "V19 a mixed history still produces a ratio")
+        }
+        // Neither estimate has enough behind it. Two admitted cycles fail the
+        // count gate before the split even matters, and the count the user sees
+        // is of recorded windows — which is what the sentence says.
+        expect(
+            WindowEquivalence.aggregate(cycles: [aeCycle(50, 1_000, 0), aeCycle(50, 0, 10)])
+                == .tooFewCycles(count: 2, needed: WindowEquivalence.minimumCycles),
+            "V19 two admitted cycles are too few whichever evidence they carry")
+        // Three admitted, but split one-and-two across the two kinds: neither
+        // estimate has three behind it, and inventing one from the majority
+        // kind would be a figure with less history than the row claims.
+        expect(
+            WindowEquivalence.aggregate(cycles: [
+                aeCycle(50, 1_000, 0), aeCycle(50, 1_000, 0), aeCycle(50, 0, 10),
+            ]) == .tooFewCycles(count: 2, needed: WindowEquivalence.minimumCycles),
+            "V19 and a history split across both kinds is counted per kind, not in total")
+
         // V18. The fallback classifier had to learn the same rule. Small
         // unpriced cycles are not admitted, and calling them unrecorded is the
         // third copy of the sentence this branch keeps deleting.
