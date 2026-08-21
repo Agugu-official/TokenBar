@@ -31,8 +31,10 @@ struct OverviewView: View {
     /// Whether the first quota fetch has settled, so a nil summary can read as
     /// "nothing to report" rather than "still asking".
     var usageAttempted = true
-    /// Quota readings per `"<clientId>|<cardId>"`, for the Agent-limits
-    /// sparkline on the all-agent tab.
+    /// Quota readings per `"<clientId>|<cardId>"`, for the Agent-limits card's
+    /// sparkline and recent-consumption indicator. Both tabs: the client tab
+    /// draws the same card, and an empty map here silently blanks the indicator
+    /// rather than saving anything.
     var windowCurves: [String: [QuotaSample]] = [:]
     var agentUsage: AgentUsagePayload?
 
@@ -86,7 +88,13 @@ struct OverviewView: View {
                         ? "OAuth quota" : "Session / weekly / model limits",
                     restrict: singleClient != nil,
                     reorderable: singleClient == nil,
-                    curves: singleClient == nil ? windowCurves : [:])
+                    // Both tabs. This gate was a copy of the one in
+                    // `PopoverView`, and removing that one left this one
+                    // blanking the same indicator on the same lens — the rule
+                    // was stated twice and reconciled once. The client tab's
+                    // card carries the recent-consumption indicator too, and it
+                    // is computed from these curves.
+                    curves: windowCurves)
             }
         case .chart:
             chart

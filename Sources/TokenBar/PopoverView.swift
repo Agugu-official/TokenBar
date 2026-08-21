@@ -650,7 +650,13 @@ struct PopoverView: View {
                             .union(ClientRegistry.parseIdSet(limitsHiddenRaw)),
                         paceMode: PaceMode(rawValue: paceModeRaw) ?? .historical),
                     usageAttempted: model.agentUsageAttempted,
-                    windowCurves: singleClient == nil ? model.windowCurves : [:],
+                    // The FOURTH statement of this gate, and the one that made
+                    // the previous fix inert: the Overview lens is fed here, so
+                    // removing the gate at the Quota lens' call site below and
+                    // inside `OverviewView` left this one still handing a client
+                    // tab an empty map. The rule was written in four places and
+                    // reconciled in three.
+                    windowCurves: model.windowCurves,
                     agentUsage: model.agentUsage)
             case .quota:
                 QuotaView(
