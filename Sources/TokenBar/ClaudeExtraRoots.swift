@@ -68,13 +68,41 @@ enum ClaudeExtraRoots {
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
+    private static let applyQueue = DispatchQueue(
+        label: "com.nyanako.tokenbar.claude-extra-roots", qos: .utility)
+
     /// Push the persisted config dirs to the Rust registry. Call at launch
-    /// (before the first scan) and after every add/remove so the change
-    /// takes effect without an app restart (D1). Failures are logged by
-    /// `TBCore`, not thrown further — a bridge failure here must not block
-    /// the rest of app startup or a Settings edit.
-    @discardableResult
-    static func apply() -> ExtraScanPathsResult? {
-        try? TBCore.setExtraScanPaths(json: payloadJSON(load()))
+    /// and after every add/remove so the change takes effect without an app
+    /// restart (D1). Failures are logged by `TBCore`, not thrown further — a
+    /// bridge failure here must not block the rest of app startup or a
+    /// Settings edit.
+    ///
+    /// **Never runs the setter on the calling actor.** The core probes every
+    /// configured path with `read_dir`, and an unmounted external volume or a
+    /// stalled network mount can block that syscall for a long time — which is
+    /// precisely the case this feature exists to tolerate. Doing it inline
+    /// would freeze launch or the Settings window in the exact scenario the
+    /// keep-and-retry behavior was built for, so the probe goes to a utility
+    /// queue and only the result comes back to the main actor.
+    ///
+    /// Reading UserDefaults stays on the caller: it is cheap, and hopping with
+    /// an already-serialized payload keeps the background block from touching
+    /// app state at all.
+    ///
+    /// Serial, not `DispatchQueue.global()`: each call replaces the whole
+    /// registry, so two applies racing — Settings removing two rows in quick
+    /// succession — could finish in either order on a concurrent queue and
+    /// leave the core scanning a list UserDefaults no longer holds, silently,
+    /// since neither side reports an error. Serial means the last save is
+    /// also the last registered.
+    static func apply(
+        then completion: (@Sendable @MainActor (ExtraScanPathsResult?) -> Void)? = nil
+    ) {
+        let json = payloadJSON(load())
+        applyQueue.async {
+            let result = try? TBCore.setExtraScanPaths(json: json)
+            guard let completion else { return }
+            Task { @MainActor in completion(result) }
+        }
     }
 }

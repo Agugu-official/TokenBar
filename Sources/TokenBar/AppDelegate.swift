@@ -77,10 +77,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Record the timezone the (still empty) graph cache will be filled
         // under, before the title-refresh loop below starts warming it.
         AttributedSeriesModel.captureLaunchTimeZone()
-        // Push any configured Claude extra scan roots before the first scan —
-        // the FFI registry starts empty every process launch (it's an
-        // in-memory RwLock, not persisted core-side; UserDefaults is the
-        // source of truth Swift owns).
+        // Push any configured Claude extra scan roots. The FFI registry starts
+        // empty every process launch (it's an in-memory RwLock, not persisted
+        // core-side; UserDefaults is the source of truth Swift owns).
+        //
+        // This races the first scan by design and does not block launch. The
+        // setter probes each path with `read_dir`, so an unmounted volume —
+        // the case the keep-and-retry behavior exists for — could otherwise
+        // stall startup. Losing that race costs one scan: the extra roots join
+        // the next one. Freezing the menu bar until a dead network mount times
+        // out costs considerably more.
         ClaudeExtraRoots.apply()
 
         let controller = StatusItemController()

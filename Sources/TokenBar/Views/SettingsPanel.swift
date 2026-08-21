@@ -1005,7 +1005,7 @@ struct SettingsPanel: View {
 
     private func commitClaudeExtraRoots() {
         ClaudeExtraRoots.save(claudeExtraRoots)
-        claudeExtraRootsResult = ClaudeExtraRoots.apply()
+        ClaudeExtraRoots.apply { claudeExtraRootsResult = $0 }
     }
 
     @ViewBuilder

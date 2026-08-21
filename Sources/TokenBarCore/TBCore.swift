@@ -55,14 +55,14 @@ struct TBEnvelope<T: Decodable>: Decodable {
 
 /// A single extra scan path with a note attached: `client`/`path` identify
 /// it, `reason` explains why it's in this list.
-public struct ScanPathNote: Decodable, Equatable {
+public struct ScanPathNote: Decodable, Equatable, Sendable {
     public let client: String
     public let path: String
     public let reason: String
 }
 
 /// Result of `tb_set_extra_scan_paths`.
-public struct ExtraScanPathsResult: Decodable, Equatable {
+public struct ExtraScanPathsResult: Decodable, Equatable, Sendable {
     /// Paths actually entered into the scan registry, including ones
     /// currently listed in `unreadable`.
     public let registeredCount: Int
