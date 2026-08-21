@@ -35,8 +35,17 @@ enum Format {
     /// resolution of this format". A single list-priced call at $0.003 is
     /// ordinary, and a line reading "2.1M · $0.00" contradicts itself. Use this
     /// wherever a zero would be a claim rather than a total.
+    ///
+    /// The quota lens is converted. Older surfaces that pair a token count with
+    /// a price — the usage chart, the agents list, the contribution views, the
+    /// model and daily and monthly breakdowns — still call `usd` directly and
+    /// can print the same false zero. Left alone deliberately rather than
+    /// missed: they predate this work, and changing them touches surfaces
+    /// nothing here tests.
     static func usdOrBelowCent(_ amount: Double) -> String {
-        amount > 0 && amount < 0.005 ? "<$0.01" : usd(amount)
+        // `amount == 0` catches -0.0 too, which `usd` alone renders "$-0.00".
+        if amount == 0 { return usd(0) }
+        return amount > 0 && amount < 0.005 ? "<$0.01" : usd(amount)
     }
 
     /// Today's contribution-graph day key. tokscale-core buckets days in the

@@ -295,7 +295,11 @@ struct QuotaHeatmapCard: View {
             // The mirror of `.tokensOnly`, and it fell through to "not enough
             // history" for the same wrong reason: the history IS sufficient,
             // and the money estimate is the part of the answer that exists.
-            Text(verbatim: "~ " + Format.usd(costPerTenth * (percent / 10)))
+            // `share` shrinks without bound — a 0.05-point slot still draws —
+            // so an ordinary `costPerTenth` reaches sub-cent here. "$0.00
+            // API-equivalent, ±5%" is a measured-zero claim with an error bar
+            // attached to it.
+            Text(verbatim: "~ " + Format.usdOrBelowCent(costPerTenth * (percent / 10)))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Text("tokens unavailable, ±%@%%".localized(String(errorPercent)))
@@ -311,7 +315,7 @@ struct QuotaHeatmapCard: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Text("~ %@ API-equivalent, ±%@%%".localized(
-                Format.usd(costPerTenth * share), String(errorPercent)))
+                Format.usdOrBelowCent(costPerTenth * share), String(errorPercent)))
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -332,7 +336,8 @@ struct QuotaHeatmapCard: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Text("~ %@ – %@ API-equivalent".localized(
-                Format.usd(lowCost * share), Format.usd(highCost * share)))
+                Format.usdOrBelowCent(lowCost * share),
+                Format.usdOrBelowCent(highCost * share)))
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)

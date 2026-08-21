@@ -124,7 +124,7 @@ struct QuotaHistoryStripCard: View {
                 .foregroundStyle(.tertiary)
             if let row = equivalences[summary.id] {
                 Text(WindowEquivalence.text(
-                    row, tokens: Format.compactTokens, money: Format.usd))
+                    row, tokens: Format.compactTokens, money: Format.usdOrBelowCent))
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

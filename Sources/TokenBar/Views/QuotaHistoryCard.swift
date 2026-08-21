@@ -319,7 +319,7 @@ struct QuotaHistoryCard: View {
                             spanTokens: $0.spanTokensExCacheRead, spanCost: $0.spanCost,
                             observedFraction: $0.cycle.observedFraction)
                     }),
-                tokens: Format.compactTokens, money: Format.usd))
+                tokens: Format.compactTokens, money: Format.usdOrBelowCent))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

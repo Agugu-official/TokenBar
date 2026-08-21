@@ -423,7 +423,7 @@ struct WindowUsageCard: View {
         let row = WindowEquivalence.row(samples: inWindow, messages: mine)
         let plain: Bool = { if case .ratio = row { return false }; return true }()
         return Text(WindowEquivalence.text(
-            row, tokens: Format.compactTokens, money: Format.usd))
+            row, tokens: Format.compactTokens, money: Format.usdOrBelowCent))
             .font(.caption2)
             .foregroundStyle(plain ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -488,7 +488,10 @@ private struct WindowHoverTooltip: View {
             HStack {
                 Text("%@ tokens".localized(Format.compactTokens(total)))
                 Spacer()
-                Text(Format.usd(messages.reduce(0) { $0 + $1.cost }))
+                // Per-interval, an all-unpriced message set is ordinary —
+                // far more so than per-day — so a bare "$0.00" beside a token
+                // count would state a price nobody has.
+                Text(Format.usdOrBelowCent(messages.reduce(0) { $0 + $1.cost }))
             }
             .font(.caption2)
             .foregroundStyle(.secondary)

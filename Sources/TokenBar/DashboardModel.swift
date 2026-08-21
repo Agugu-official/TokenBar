@@ -1388,6 +1388,14 @@ private struct DashboardSnapshot {
         // the wait visible, it did not make it rare.
         if let cached = unionScan, cached.covers(start: from),
            Date().timeIntervalSince(cached.capturedAt) < Self.unionScanMaxAge {
+            // A fresh scan that covers this window IS an answer for it, whoever
+            // ran it. Returning without clearing left the card reporting a
+            // failure while the model held the very data that refutes it — and
+            // refusing to rescan for another 30 seconds.
+            if windowScanFailedClient == client {
+                clearScanFailure(for: client)
+                refreshWindowQuotaHalves()
+            }
             return
         }
         // A throw here is a SETTLED answer, not a slow one. Returning silently
@@ -1402,7 +1410,11 @@ private struct DashboardSnapshot {
             return
         }
         guard Self.windowScanToken == scanToken else { return }
-        windowScanFailedClient = nil
+        // Only THIS client's failure. A bare `nil` cleared whichever client was
+        // recorded, so a success on B erased A's failure although no scan for A
+        // had succeeded — the property holds one client, and forgetting it is
+        // not the same as answering it.
+        clearScanFailure(for: client)
         unionScan = UnionScan(
             fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages)
         refreshWindowQuotaHalves()
@@ -1414,16 +1426,17 @@ private struct DashboardSnapshot {
     ///
     /// Distinguishes "still scanning" from "asked and failed" — `.quotaOnly`
     /// alone cannot, and both halves of the lens rendered the second as the
-    /// first. Cleared by the next successful scan FOR THAT CLIENT, and by
-    /// nothing else.
+    /// first. Cleared for a client when a scan COVERING that client's window
+    /// succeeds — whether run for that client, or run for the all-agent
+    /// equivalence and found on the next visit to cover it. A success for a
+    /// DIFFERENT client never clears it: the property holds one client, and
+    /// forgetting a failure is not the same as answering it.
     ///
     /// Deliberately not cleared when a retry STARTS: the card would then flip
     /// failed → loading → failed on every poll, and the last settled answer is
-    /// more useful than a spinner that keeps restarting. It follows that during
-    /// a retry the card still says the last attempt failed — true, and the
-    /// intended reading. The all-agent equivalence scan does not clear it
-    /// either: that scan answers a different question over a different range,
-    /// so its success is not evidence about this client's window.
+    /// more useful than a spinner that keeps restarting. During a retry the
+    /// card still says the last attempt failed, which is true and is the
+    /// intended reading.
     ///
     /// The CLIENT, not a bare flag. A shared boolean answers "did the last scan
     /// fail", which is a different question from "did THIS card's scan fail":
@@ -1437,6 +1450,23 @@ private struct DashboardSnapshot {
     /// failed rather than that it is still running.
     func windowScanFailed(for clientId: String) -> Bool {
         windowScanFailedClient == clientId
+    }
+
+    private func clearScanFailure(for clientId: String) {
+        windowScanFailedClient = Self.scanFailure(
+            windowScanFailedClient, resolvedBy: clientId)
+    }
+
+    /// The recorded failure after a scan for `client` succeeds.
+    ///
+    /// Static and pure so the rule can be asserted on: the version this
+    /// replaced assigned `nil` unconditionally, so a success on one client
+    /// erased another's recorded failure, and the doc comment above claimed
+    /// the opposite. Nothing in a view or an async method could catch that.
+    nonisolated static func scanFailure(
+        _ current: String?, resolvedBy client: String
+    ) -> String? {
+        current == client ? nil : current
     }
 
     private func reconcileQuotaRemaining(with payload: AgentUsagePayload) {

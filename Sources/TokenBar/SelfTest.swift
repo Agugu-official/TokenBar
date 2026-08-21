@@ -11532,6 +11532,22 @@ enum SelfTest {
                     == "Classify your usage in Settings to see what this window is worth",
             "QH-REASON and the two states that genuinely lack history or a "
                 + "declaration keep the sentences they had")
+        // QH-FAIL. A success for one client must not erase another's recorded
+        // failure. The version this replaced assigned nil unconditionally, so
+        // opening tab B after tab A's scan failed made A's card forget — while
+        // the doc comment two lines up claimed the flag was cleared "for that
+        // client, and by nothing else". The rule is pure and static precisely
+        // so this can be asserted; nothing in the async method could catch it.
+        expect(DashboardModel.scanFailure("claude", resolvedBy: "codex") == "claude",
+               "QH-FAIL a successful scan for another client leaves this one's "
+                   + "recorded failure alone")
+        expect(DashboardModel.scanFailure("claude", resolvedBy: "claude") == nil
+                   && DashboardModel.scanFailure(nil, resolvedBy: "claude") == nil,
+               "QH-FAIL and a success for the client that failed does clear it, so the "
+                   + "check above is not simply refusing to clear anything")
+        // QH-MONEY-ZERO. `usd` renders -0.0 as "$-0.00".
+        expect(Format.usdOrBelowCent(-0.0) == "$0.00",
+               "QH-MONEY a negative zero is still zero dollars")
         expect(QuotaHistoryCard.visibleRows <= QuotaHistoryFold.consideredCycles,
                "QH-CAP the history card's row list still fits inside the cap, which "
                 + "would otherwise silently draw fewer rows than the card intends")
