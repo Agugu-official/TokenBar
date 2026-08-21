@@ -49,6 +49,19 @@ public struct QuotaCycle: Equatable, Sendable {
     /// spread on live data (46% to 38%).
     public let firstSampleMs: Int64
     public let lastSampleMs: Int64
+
+    /// How far back this cycle's evidence reaches — the earlier of where the
+    /// window is computed to have started and where sampling actually began.
+    ///
+    /// Normally `startMs`, since the first reading lands after the window
+    /// opens. They invert when the provider SHORTENS its reported duration
+    /// mid-cycle: `startMs` is derived from the newest point's duration, so a
+    /// window that went from seven days to five moves its own start forward,
+    /// past readings already taken. Bounding a message scan at `startMs` would
+    /// then drop usage from before it while `usedPercent` — the span between
+    /// the first and last reading — still counts the movement those readings
+    /// showed. Numerator short, denominator whole.
+    public var evidenceStartMs: Int64 { min(startMs, firstSampleMs) }
     /// Fraction of the window the samples actually cover, 0...1. A cycle
     /// observed for eight minutes of five hours is not evidence about that
     /// cycle, and the UI has to be able to say so.
@@ -148,6 +161,14 @@ public enum QuotaHistoryFold {
     public static func cycles(
         points: [QuotaCurvePoint], activeResetAt: Int64? = nil
     ) -> [QuotaCycle] {
+        allCycles(points: points, activeResetAt: activeResetAt)
+            .prefix(consideredCycles)
+            .map { $0 }
+    }
+
+    private static func allCycles(
+        points: [QuotaCurvePoint], activeResetAt: Int64?
+    ) -> [QuotaCycle] {
         var grouped: [Int64: [QuotaCurvePoint]] = [:]
         for point in points where point.resetAt != activeResetAt {
             grouped[point.resetAt, default: []].append(point)
@@ -174,6 +195,44 @@ public enum QuotaHistoryFold {
         .sorted { $0.resetAtMs > $1.resetAtMs }
     }
 
+    /// The same fold without the cap. Exists for `--window-probe`, which has to
+    /// be able to measure what the cap changed without depending on the cap.
+    /// Not called from the shipping UI.
+    public static func cyclesUncapped(
+        points: [QuotaCurvePoint], activeResetAt: Int64? = nil
+    ) -> [QuotaCycle] {
+        allCycles(points: points, activeResetAt: activeResetAt)
+    }
+
+    /// How far back any cycle-derived surface reaches, in cycles.
+    ///
+    /// The engine retains 128 cycles per series and this fold used to return
+    /// all of them, but nothing downstream wants that many: the history card
+    /// draws 12 rows and the overview strip 16. The cost of the extra ones is
+    /// not the list, it is that the OLDEST cycle sets where the message scan
+    /// starts — `min(windowStart, cycles.last.startMs)` — so a 5-hour session
+    /// window at 128 cycles asked for a 26-day scan to render twelve rows, and
+    /// a weekly window walked that start backwards for ever. Capping the fold
+    /// bounds the scan as a consequence, which is why the cap lives here and
+    /// not at each consumer.
+    ///
+    /// 32, not the 16 the issue proposed. `--window-probe` swept the cap over
+    /// this machine's real history on 2026-08-21 and the estimate collapses
+    /// below 20 recorded cycles: at 20/24/28 the session window reports
+    /// 651k-689k tokens per 10% with an 8-10% error bar, and at 8/12/16 it
+    /// reports no figure at all, only a 242k-1054k spread. 16 is enough for the
+    /// jackknife in principle and was not on the data — admitted cycles are a
+    /// subset of recorded ones, so the pool empties faster than the count
+    /// suggests. A cap that turns a point estimate into a range is a
+    /// user-visible regression bought for a bound that 32 also provides.
+    ///
+    /// 32 does not bite on any window here today (the widest has 27), which is
+    /// the point: it bounds the growth without moving a number anyone reads.
+    /// It also stays comfortably above `QuotaOverviewFold.stripLength`, the
+    /// widest surface drawn from these cycles — anything displaying more than
+    /// the cap would silently show fewer, so a selftest asserts the fit.
+    public static let consideredCycles = 32
+
     /// Joins each cycle to the messages inside it.
     ///
     /// `subscription` is the attribution target this history belongs to — the
@@ -190,18 +249,24 @@ public enum QuotaHistoryFold {
         // 15 x 45,844 walks of the whole array on the main actor.
         let sorted = messages.sorted { $0.timestamp < $1.timestamp }
         let stamps = sorted.map(\.timestamp)
+        let spans = spanTotals(
+            cycles: cycles, sorted: sorted, stamps: stamps,
+            subscription: subscription, confirmed: confirmed)
 
-        return cycles.map { cycle in
-            // `[start, reset)` — inclusive at the start, exclusive at the
-            // reset. The reset instant is when the allowance refills, so work
+        return zip(cycles, spans).map { cycle, span in
+            // `[evidenceStart, reset)` — inclusive at the start, exclusive at
+            // the reset. The start is `evidenceStartMs` rather than `startMs`
+            // so this column cannot come out SMALLER than the span inside it
+            // when a provider shortens its reported duration; a lengthened
+            // duration still moves `startMs` backwards, which `min` leaves
+            // alone and which no cycle boundary here has ever guarded. The reset instant is when the allowance refills, so work
             // stamped exactly there was charged to the cycle that instant
             // OPENS, not the one it closes. Adjacent cycles share that
             // boundary, so getting it wrong double counts rather than merely
             // misfiling.
-            let lo = lowerBound(stamps, cycle.startMs)
+            let lo = lowerBound(stamps, cycle.evidenceStartMs)
             let hi = lowerBound(stamps, cycle.resetAtMs)
             var mine = (tokens: Int64(0), exCacheRead: Int64(0), cost: 0.0)
-            var span = (exCacheRead: Int64(0), cost: 0.0)
             var other = (tokens: Int64(0), cost: 0.0)
             var byModel: [ModelKey: (tokens: Int64, cost: Double)] = [:]
 
@@ -218,12 +283,6 @@ public enum QuotaHistoryFold {
                     mine.tokens = mine.tokens.saturatingAdding(message.tokens)
                     mine.exCacheRead = mine.exCacheRead.saturatingAdding(exCacheRead)
                     mine.cost += message.cost
-                    if message.timestamp > cycle.firstSampleMs,
-                       message.timestamp <= cycle.lastSampleMs
-                    {
-                        span.exCacheRead = span.exCacheRead.saturatingAdding(exCacheRead)
-                        span.cost += message.cost
-                    }
                     let key = ModelKey(
                         providerId: message.providerId, modelId: message.modelId)
                     let current = byModel[key] ?? (0, 0)
@@ -253,6 +312,59 @@ public enum QuotaHistoryFold {
     }
 
     /// First index whose value is >= `value`.
+    /// What this subscription spent inside each cycle's OBSERVED span —
+    /// `(firstSampleMs, lastSampleMs]`, the interval between the two readings
+    /// the cycle's `usedPercent` is the difference of.
+    ///
+    /// One statement of that rule, for the two surfaces that need it: the
+    /// history card's per-cycle numbers and the equivalence estimate's
+    /// numerators. It was written twice, and the second copy re-filtered the
+    /// whole message array per cycle on the main actor — the same
+    /// O(cycles x messages) shape the comment in `rows` documents having
+    /// removed, reintroduced by a second implementation of the same fold.
+    ///
+    /// Returned parallel to `cycles`, one entry each, so a caller that already
+    /// has the sorted array pays no second sort.
+    public static func spans(
+        cycles: [QuotaCycle], messages: [WindowMessage], subscription: String,
+        confirmed: [UsageAttribution.Record]
+    ) -> [(exCacheRead: Int64, cost: Double)] {
+        let sorted = messages.sorted { $0.timestamp < $1.timestamp }
+        return spanTotals(
+            cycles: cycles, sorted: sorted, stamps: sorted.map(\.timestamp),
+            subscription: subscription, confirmed: confirmed)
+    }
+
+    private static func spanTotals(
+        cycles: [QuotaCycle], sorted: [WindowMessage], stamps: [Int64],
+        subscription: String, confirmed: [UsageAttribution.Record]
+    ) -> [(exCacheRead: Int64, cost: Double)] {
+        cycles.map { cycle in
+            // Bounded by the SPAN, not by `[start, reset)`. The span is what
+            // the denominator measures, and it is not always inside the cycle:
+            // see `evidenceStartMs`. The slice is a superset — the `where`
+            // below states the actual rule — so the bounds only have to be
+            // safe, and `saturatingAdding` keeps the exclusive upper edge from
+            // overflowing on a corrupt timestamp.
+            let lo = lowerBound(stamps, cycle.firstSampleMs)
+            let hi = lowerBound(stamps, cycle.lastSampleMs.saturatingAdding(1))
+            var span = (exCacheRead: Int64(0), cost: 0.0)
+            for message in sorted[lo..<max(lo, hi)]
+            where message.timestamp > cycle.firstSampleMs
+                && message.timestamp <= cycle.lastSampleMs
+            {
+                guard case let .assigned(target) = UsageAttribution.resolve(
+                    client: message.client, provider: message.providerId,
+                    model: message.modelId, records: confirmed), target == subscription
+                else { continue }
+                span.exCacheRead = span.exCacheRead.saturatingAdding(
+                    message.tokensExCacheRead)
+                span.cost += message.cost
+            }
+            return span
+        }
+    }
+
     public static func lowerBound(_ values: [Int64], _ value: Int64) -> Int {
         var low = 0, high = values.count
         while low < high {

@@ -119,6 +119,79 @@ enum WindowProbe {
                 }
             }
 
+            print("\n=== SCAN BOUND（#229：上限前後，掃描要往回走多久）===")
+            print("  每個窗的訊息掃描起點是最舊的 considered cycle。上限之前是引擎保留的"
+                  + "全部 128 個，之後是最新的 \(QuotaHistoryFold.consideredCycles) 個。")
+            for agent in payload.agents {
+                for w in agent.uniqueCardWindows {
+                    guard let key = w.paceStatus.windowKey,
+                          let gen = payload.publicationGeneration,
+                          let curve = (try? TBCore.quotaCurve(
+                              clientId: agent.clientId, windowKey: key, generation: gen)) ?? nil,
+                          !curve.points.isEmpty
+                    else { continue }
+                    // The uncapped fold, reproduced here so the comparison does
+                    // not depend on the very cap it is measuring.
+                    var byCycle: [Int64: [QuotaCurvePoint]] = [:]
+                    for pt in curve.points where pt.resetAt != curve.activeResetAt {
+                        byCycle[pt.resetAt, default: []].append(pt)
+                    }
+                    let uncapped: [Int64] = byCycle.compactMap { resetAt, raw in
+                        let sorted = raw.sorted { $0.sampledAt < $1.sampledAt }
+                        guard let last = sorted.last, let first = sorted.first,
+                              last.durationSeconds > 0
+                        else { return nil }
+                        return min(resetAt - last.durationSeconds, first.sampledAt)
+                    }
+                    guard let oldestUncapped = uncapped.min() else { continue }
+                    let capped = QuotaHistoryFold.cycles(
+                        points: curve.points, activeResetAt: curve.activeResetAt)
+                    guard let oldestCapped = capped.last?.evidenceStartMs else { continue }
+                    let nowS = Int64(Date().timeIntervalSince1970)
+                    let beforeDays = Double(nowS - oldestUncapped) / 86400
+                    let afterDays = Double(nowS - oldestCapped / 1000) / 86400
+                    print(String(format:
+                        "  %@ / %@  週期 %d → %d，掃描回溯 %.2f 天 → %.2f 天%@",
+                        agent.clientId as NSString, w.cardId as NSString,
+                        uncapped.count, capped.count, beforeDays, afterDays,
+                        (uncapped.count > capped.count ? "  ← 收窄" : "") as NSString))
+                    // Windows with enough history to sweep. Deliberately not
+                    // "windows the cap currently bites": the constant is set
+                    // from where the estimate collapses, which has to stay
+                    // measurable while the cap sits above it.
+                    guard uncapped.count >= 8 else { continue }
+                    let full = QuotaHistoryFold.cyclesUncapped(
+                        points: curve.points, activeResetAt: curve.activeResetAt)
+                    guard let messages = try? TBCore.windowUsage(
+                        from: oldestUncapped * 1000, until: nowS * 1000).messages
+                    else { continue }
+                    let confirmed = UsageAttribution.confirmed().records
+                    func estimate(_ set: [QuotaCycle]) -> WindowEquivalence.Row {
+                        let admitted = set.filter {
+                            $0.usedPercent >= WindowEquivalence.minimumDelta
+                                && $0.observedFraction >= WindowEquivalence.minimumObservedFraction
+                        }
+                        let spans = QuotaHistoryFold.spans(
+                            cycles: admitted, messages: messages,
+                            subscription: agent.clientId, confirmed: confirmed)
+                        return WindowEquivalence.aggregate(
+                            declared: !confirmed.isEmpty,
+                            cycles: zip(admitted, spans).map { cycle, span in
+                                WindowEquivalence.Cycle(
+                                    deltaPercent: cycle.usedPercent,
+                                    spanTokens: span.exCacheRead, spanCost: span.cost,
+                                    observedFraction: cycle.observedFraction)
+                            })
+                    }
+                    // The sweep that set `consideredCycles`. Re-run it before
+                    // moving that constant: the estimate does not degrade
+                    // gracefully as the pool shrinks, it stops existing.
+                    for cap in [8, 12, 16, 20, 24, 28, 32, full.count] {
+                        print("      上限 \(cap >= full.count ? "無" : String(cap))：\(estimate(Array(full.prefix(cap))))")
+                    }
+                }
+            }
+
             print("\n=== PERF（我加進 main actor 的兩件事）===")
             var perfT = Date()
             var curveMs: [(String, Double)] = []

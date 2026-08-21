@@ -11441,6 +11441,90 @@ enum SelfTest {
                 .map(\.resetAtMs) == [monReset * 1000],
             "QH-A naming the active reset leaves only the completed cycle")
 
+        // QH-CAP. The fold used to return everything the engine retained (128
+        // cycles per series). Nothing draws that many — the history card shows
+        // 12 rows and the overview strip 16 — but the OLDEST cycle is what
+        // bounds the message scan, so a 5-hour window at 128 cycles asked for a
+        // 26-day scan to render twelve rows, and a weekly window walked that
+        // bound backwards for ever.
+        func qhcPoint(_ at: Int64, _ used: Double, reset: Int64, duration: Int64) -> QuotaCurvePoint {
+            try! JSONDecoder().decode(QuotaCurvePoint.self, from: Data("""
+            {"sampledAt":\(at),"usedPercent":\(used),"resetAt":\(reset),
+             "durationSeconds":\(duration),"durationSource":"provider","origin":"liveV3"}
+            """.utf8))
+        }
+        let qhcWeek: Int64 = 604_800
+        let qhcPoints: [QuotaCurvePoint] = (0..<40).flatMap { index -> [QuotaCurvePoint] in
+            let reset = monReset + Int64(index) * qhcWeek
+            return [qhcPoint(reset - qhcWeek + 60, 10, reset: reset, duration: qhcWeek),
+                    qhcPoint(reset - 60, 30, reset: reset, duration: qhcWeek)]
+        }
+        let qhcCycles = QuotaHistoryFold.cycles(points: qhcPoints)
+        expect(qhcCycles.count == QuotaHistoryFold.consideredCycles,
+               "QH-CAP forty recorded cycles fold to the considered cap, not all forty")
+        expect(
+            qhcCycles.first?.resetAtMs == (monReset + 39 * qhcWeek) * 1000
+                && qhcCycles.last?.resetAtMs == (monReset + 8 * qhcWeek) * 1000,
+            "QH-CAP the cap keeps the NEWEST cycles — dropping those instead would "
+                + "bound the scan at the same place while showing stale rows")
+        expect(QuotaOverviewFold.stripLength <= QuotaHistoryFold.consideredCycles,
+               "QH-CAP the widest surface drawn from these cycles still fits inside the "
+                + "cap, which would otherwise silently draw fewer")
+
+        // QH-SHRINK. `startMs` comes from the NEWEST point's duration, so a
+        // provider that shortens its reported window moves the cycle's start
+        // forward, past readings already taken. Bounding the join there dropped
+        // usage from before it while `usedPercent` still counted the movement
+        // those readings showed: numerator short, denominator whole.
+        let qhsReset: Int64 = 1_768_900_000
+        let qhsCycles = QuotaHistoryFold.cycles(points: [
+            qhcPoint(qhsReset - qhcWeek, 10, reset: qhsReset, duration: qhcWeek),
+            qhcPoint(qhsReset - 86_400, 30, reset: qhsReset, duration: 172_800),
+        ])
+        expect(
+            qhsCycles.first.map { $0.evidenceStartMs < $0.startMs } == true,
+            "QH-SHRINK the shortened duration puts the computed start after the first "
+                + "reading, which is the condition the rest of this case needs")
+        // A message inside the observed span but before the recomputed start.
+        let qhsMessages = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":\((qhsReset - 500_000) * 1000),"client":"c","providerId":"p",
+              "modelId":"m","input":100,"output":0,"cacheRead":0,"cacheWrite":0,
+              "reasoning":0,"cost":0.25,"isTurnStart":true}]
+            """.utf8))
+        let qhsRecords = [UsageAttribution.Record(
+            client: "c", provider: "p", state: .assigned("c"))]
+        let qhsSpans = QuotaHistoryFold.spans(
+            cycles: qhsCycles, messages: qhsMessages, subscription: "c",
+            confirmed: qhsRecords)
+        expect(qhsSpans.first?.exCacheRead == 100 && qhsSpans.first.map { abs($0.cost - 0.25) < 1e-9 } == true,
+               "QH-SHRINK usage taken before the recomputed start still counts toward the "
+                + "span its own readings bracket")
+
+        // QH-SPAN. The cycle column and the span are different questions, and
+        // the equivalence must use the second: a message inside the window but
+        // outside the interval the two readings bracket has no quota movement
+        // to be divided by.
+        let qhspMessages = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":\((qhsReset - 500_000) * 1000),"client":"c","providerId":"p",
+              "modelId":"m","input":100,"output":0,"cacheRead":0,"cacheWrite":0,
+              "reasoning":0,"cost":0.25,"isTurnStart":true},
+             {"timestamp":\((qhsReset - 3_600) * 1000),"client":"c","providerId":"p",
+              "modelId":"m","input":700,"output":0,"cacheRead":0,"cacheWrite":0,
+              "reasoning":0,"cost":1.75,"isTurnStart":true}]
+            """.utf8))
+        let qhspRows = QuotaHistoryFold.rows(
+            cycles: qhsCycles, messages: qhspMessages, subscription: "c",
+            confirmed: qhsRecords)
+        expect(qhspRows.first?.mineTokensExCacheRead == 800,
+               "QH-SPAN the cycle column counts everything charged to the window")
+        expect(qhspRows.first?.spanTokensExCacheRead == 100,
+               "QH-SPAN the span counts only what the two readings bracket — the later "
+                + "message sits after the last sample, so no observed movement measures it")
+
         // QH-B. Exhaustion is an absolute reading, not the observed span. A
         // cycle first seen at 40% and last at 100% consumed 60 points as far as
         // this machine can tell, and reached the ceiling; deriving the ceiling

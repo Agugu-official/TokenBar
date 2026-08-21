@@ -1221,37 +1221,32 @@ private struct DashboardSnapshot {
         let confirmed = UsageAttribution.confirmed().records
         for (key, cycles) in qualifyingCycles {
             guard let client = key.split(separator: "|").first.map(String.init),
-                  let oldest = cycles.last, scan.covers(start: oldest.startMs)
+                  let oldest = cycles.last, scan.covers(start: oldest.evidenceStartMs)
             else { continue }
             // `declared` carries the empty-declaration case into the fold,
             // which is where the difference between "nothing recorded" and
             // "nothing classified" is defined.
+            // The span rule and its numerators come from the same fold the
+            // history card uses, sorted once and sliced per cycle. The filter
+            // that used to live here re-walked the whole scan per cycle on the
+            // main actor.
+            let spans = QuotaHistoryFold.spans(
+                cycles: cycles, messages: scan.messages, subscription: client,
+                confirmed: confirmed)
             built[key] = WindowEquivalence.aggregate(
-                declared: !confirmed.isEmpty, cycles: cycles.map { cycle in
-                var tokens: Int64 = 0
-                var cost = 0.0
-                for message in scan.messages
-                where message.timestamp > cycle.firstSampleMs
-                    && message.timestamp <= cycle.lastSampleMs
-                {
-                    guard case let .assigned(target) = UsageAttribution.resolve(
-                        client: message.client, provider: message.providerId,
-                        model: message.modelId, records: confirmed), target == client
-                    else { continue }
-                    tokens = tokens.saturatingAdding(message.tokensExCacheRead)
-                    cost += message.cost
-                }
-                return WindowEquivalence.Cycle(
-                    deltaPercent: cycle.usedPercent, spanTokens: tokens, spanCost: cost,
-                    observedFraction: cycle.observedFraction)
-            })
+                declared: !confirmed.isEmpty,
+                cycles: zip(cycles, spans).map { cycle, span in
+                    WindowEquivalence.Cycle(
+                        deltaPercent: cycle.usedPercent, spanTokens: span.exCacheRead,
+                        spanCost: span.cost, observedFraction: cycle.observedFraction)
+                })
         }
         quotaEquivalences = built
     }
 
     private func rebuildQuotaHistory() {
         guard let client = windowUsageClient, let scan = unionScan,
-              let oldest = quotaCycles.last, scan.covers(start: oldest.startMs)
+              let oldest = quotaCycles.last, scan.covers(start: oldest.evidenceStartMs)
         else {
             quotaHistory = []
             return
@@ -1344,7 +1339,7 @@ private struct DashboardSnapshot {
         // its history; the all-agent Quota lens needs only the windows that can
         // actually produce an estimate, which on live data is one of six.
         let equivalenceStart = quotaLensAllAgents
-            ? qualifyingCycles.values.compactMap { $0.last?.startMs }.min() : nil
+            ? qualifyingCycles.values.compactMap { $0.last?.evidenceStartMs }.min() : nil
         guard let client = windowUsageClient else {
             guard let from = equivalenceStart else { return }
             if let cached = unionScan, cached.covers(start: from),
@@ -1365,7 +1360,7 @@ private struct DashboardSnapshot {
         // one scan rather than issuing a second. Measured 2026-08-16 on live
         // data: 5.4 days, 45,844 messages, 4.6s — an order of magnitude below
         // the 14.93-day union this replaced, and paid only on the Quota lens.
-        let from = min(windowStart, quotaCycles.last?.startMs ?? windowStart)
+        let from = min(windowStart, quotaCycles.last?.evidenceStartMs ?? windowStart)
         // Serve the cached scan while it still covers the range and is fresh.
         // Rescanning on every reopen was the whole complaint: the staging made
         // the wait visible, it did not make it rare.
