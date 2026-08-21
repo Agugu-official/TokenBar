@@ -488,3 +488,4 @@
 "Quota unavailable" = "額度無法取得";
 "10%% of quota ~ %@, unpriced models, ±%@%%" = "額度 10%% ≈ %@ token（模型無定價，誤差 ±%@%%）";
 "unpriced models, ±%@%%" = "模型無定價，誤差 ±%@%%";
+"10%% of quota ~ %@ API-equivalent, tokens unavailable, ±%@%%" = "額度 10%% ≈ %@（API 等值，無 token 明細，誤差 ±%@%%）";

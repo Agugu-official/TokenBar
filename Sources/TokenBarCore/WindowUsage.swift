@@ -85,11 +85,11 @@ public extension WindowUsage {
             switch state {
             case let .assigned(target):
                 let cur = byTarget[target] ?? (0, 0)
-                byTarget[target] = (cur.0 + m.tokens, cur.1 + m.cost)
+                byTarget[target] = (cur.0.saturatingAdding(m.tokens), cur.1 + m.cost)
             case .excluded:
-                excluded = (excluded.0 + m.tokens, excluded.1 + m.cost)
+                excluded = (excluded.0.saturatingAdding(m.tokens), excluded.1 + m.cost)
             case .unassigned:
-                unassigned = (unassigned.0 + m.tokens, unassigned.1 + m.cost)
+                unassigned = (unassigned.0.saturatingAdding(m.tokens), unassigned.1 + m.cost)
             }
         }
 
@@ -109,7 +109,7 @@ public extension WindowUsage {
         guard bucketMs > 0, count > 0 else { return out }
         for m in messages {
             let idx = Int((m.timestamp - from) / bucketMs)
-            if idx >= 0 && idx < count { out[idx] += m.tokens }
+            if idx >= 0 && idx < count { out[idx] = out[idx].saturatingAdding(m.tokens) }
         }
         return out
     }

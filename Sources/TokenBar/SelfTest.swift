@@ -10575,6 +10575,17 @@ enum SelfTest {
              "cacheRead":9223372036854775807,"cacheWrite":0,"reasoning":0,
              "cost":0,"isTurnStart":true}
             """.utf8))
+        // The probe folds the same untrusted rows the production folds do, and
+        // it exists to be pointed at data that looks wrong — so it must not
+        // trap on the malformed input it is meant to inspect.
+        let crSaturated = WindowUsage(
+            messages: [crBoth, crBoth], undatedCount: 0, processingTimeMs: 0)
+        expect(crSaturated.buckets(from: 0, bucketMs: 10, count: 2)
+                .allSatisfy { $0 <= Int64.max },
+               "CR5 two saturated rows fold into a bucket without trapping")
+        expect(crSaturated.totals(confirmed: []).unassigned.tokens == Int64.max,
+               "CR5 and into the attribution totals the same way")
+
         expect(crBoth.tokensExCacheRead == Int64.max,
                "CR5 the ex-cache subtotal keeps the input it is made of")
         expect(crBoth.tokens - crBoth.cacheRead == 0,
@@ -11945,6 +11956,28 @@ enum SelfTest {
                           QuotaSample(atMs: 2_000, usedPercent: 20)],
                 messages: []) == .unaccounted(deltaPercent: 19),
             "V17 and an empty span still is not, so the check above is not vacuous")
+        // V20. The three-cycle threshold guards BOTH estimates or neither.
+        // Splitting the pooling without splitting the guard let a token figure
+        // built from one cycle sit beside a properly supported money figure, on
+        // one line, under an error bar that described only the money.
+        let aeCostHeavy = [aeCycle(50, 0, 10), aeCycle(50, 0, 10),
+                           aeCycle(50, 0, 10), aeCycle(50, 1_000, 10)]
+        if case let .costOnly(cost, _) = WindowEquivalence.aggregate(cycles: aeCostHeavy) {
+            expect(abs(cost - 2.0) < 1e-9,
+                   "V20 the money figure stands on its four priced cycles")
+        } else {
+            expect(false, "V20 enough priced and too few token-bearing yields a cost-only row")
+        }
+        expect(
+            WindowEquivalence.aggregate(cycles: aeCostHeavy).isRatio == false,
+            "V20 and never a ratio, which would publish tokens from a single cycle")
+        // The mirror still works: enough of both is still a ratio.
+        expect(
+            WindowEquivalence.aggregate(cycles: [
+                aeCycle(50, 1_000, 10), aeCycle(50, 1_000, 10), aeCycle(50, 1_000, 10),
+            ]).isRatio,
+            "V20 while enough of both kinds still produces one, so the guard is not blanket")
+
         // V19. The token estimate pools over token-bearing cycles, mirroring
         // what the money estimate already did. A cost-only cycle carries quota
         // delta and no tokens, so leaving it in the denominator understated the

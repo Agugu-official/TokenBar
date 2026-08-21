@@ -29,6 +29,15 @@ public enum WindowEquivalence {
         case unaccounted(deltaPercent: Double)
         /// Fewer than two samples inside the window, so no Δ exists at all.
         case unavailable
+        /// Money estimated, tokens not — the mirror of `tokensOnly`.
+        ///
+        /// Reachable when enough cycles carry a price and too few carry tokens,
+        /// which the supported cost-only row shape makes ordinary rather than
+        /// exotic. Splitting the two estimates without splitting the threshold
+        /// that guards them let a token figure derived from a single cycle sit
+        /// beside a properly supported money figure, on one line, with one
+        /// error bar that described only the money.
+        case costOnly(costPerTenth: Double, errorPercent: Int)
         /// Tokens estimated, money not — the admitted cycles carry usage the
         /// pricing tables could not value.
         ///
@@ -99,6 +108,9 @@ public enum WindowEquivalence {
                 .localizedWindowRow(String(Int(delta.rounded())))
         case .unavailable:
             return "Not enough quota readings yet".localizedWindowRow()
+        case let .costOnly(cost, error):
+            return "10%% of quota ~ %@ API-equivalent, tokens unavailable, ±%@%%"
+                .localizedWindowRow(money(cost), String(error))
         case let .tokensOnly(t, error):
             return "10%% of quota ~ %@, unpriced models, ±%@%%".localizedWindowRow(
                 tokens(t), String(error))
@@ -333,6 +345,19 @@ public enum WindowEquivalence {
         // with the account-scope schema bump, and `Cycle` gains a `planKey` to
         // partition on. Until it does, an estimate spanning a plan change is
         // silently wrong and nothing here can tell.
+        // The same threshold on the other estimate. Enough priced cycles says
+        // nothing about how many carried tokens, and publishing a token figure
+        // from fewer than `minimumCycles` would breach the rule this function
+        // enforces two guards above — quietly, because the error bar beside it
+        // is the money's.
+        guard tokenBearing.count >= minimumCycles else {
+            let costError = jackknifeRelative(priced) { $0.spanCost }
+            return .costOnly(
+                costPerTenth: costRatio * 10,
+                errorPercent: costError.isFinite
+                    ? max(1, Int((costError * 100).rounded())) : 0)
+        }
+
         // The error bar describes the COST estimate, so it is computed over the
         // cycles that estimate is made of.
         let relativeError = jackknifeRelative(priced) { $0.spanCost }

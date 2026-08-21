@@ -160,3 +160,4 @@
 "Quota unavailable" = "Quota unavailable";
 "10%% of quota ~ %@, unpriced models, ±%@%%" = "10%% of quota ~ %@, unpriced models, ±%@%%";
 "unpriced models, ±%@%%" = "unpriced models, ±%@%%";
+"10%% of quota ~ %@ API-equivalent, tokens unavailable, ±%@%%" = "10%% of quota ~ %@ API-equivalent, tokens unavailable, ±%@%%";
