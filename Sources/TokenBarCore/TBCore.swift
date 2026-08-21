@@ -53,6 +53,30 @@ struct TBEnvelope<T: Decodable>: Decodable {
     }
 }
 
+/// A single extra scan path with a note attached: `client`/`path` identify
+/// it, `reason` explains why it's in this list.
+public struct ScanPathNote: Decodable, Equatable, Sendable {
+    public let client: String
+    public let path: String
+    public let reason: String
+}
+
+/// Result of `tb_set_extra_scan_paths`.
+public struct ExtraScanPathsResult: Decodable, Equatable, Sendable {
+    /// Paths actually entered into the scan registry, including ones
+    /// currently listed in `unreadable`.
+    public let registeredCount: Int
+    /// Registered, but `read_dir` failed for it right now (unmounted volume,
+    /// not-yet-created config dir). Retried automatically on the next scan —
+    /// no action needed from the user beyond fixing the underlying cause.
+    public let unreadable: [ScanPathNote]
+    /// NOT registered, and never will be without the user acting: either the
+    /// client id has no extra-root support here, or the path cannot be a scan
+    /// root at all (empty, relative, or something that exists but isn't a
+    /// directory). Unlike `unreadable`, waiting does not fix these.
+    public let rejected: [ScanPathNote]
+}
+
 /// Thin Swift facade over the tb_core_ffi staticlib. All calls are blocking;
 /// invoke from a background thread/actor in app code. `agentUsage()` is also
 /// network-bound.
@@ -256,6 +280,19 @@ public enum TBCore {
     public static func tokensPerMin() throws -> Double {
         let payload: TokensPerMin = try unwrap(tb_tokens_per_min())
         return payload.tokensPerMin
+    }
+
+    /// Replace the process-wide extra-scan-paths registry. `json` is an object
+    /// of `{"<public-client-id>": ["<absolute-dir-path>", ...]}`; full-replace
+    /// semantics — passing `{}` clears every configured root. Takes effect on
+    /// the very next report/parse call, no restart needed. A directory that
+    /// merely can't be read right now is still registered — `unreadable` lists
+    /// those, and the next scan retries them automatically with no further
+    /// action. `rejected` lists paths that are NOT registered: an unsupported
+    /// client id, or a path that can never be a scan root (empty, relative, or
+    /// an existing non-directory).
+    public static func setExtraScanPaths(json: String) throws -> ExtraScanPathsResult {
+        try unwrap(json.withCString { tb_set_extra_scan_paths($0) })
     }
 
     /// OAuth quota cards for codex/claude/antigravity/copilot/grok. Network-bound;

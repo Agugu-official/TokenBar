@@ -96,6 +96,14 @@ struct SettingsPanel: View {
     @State private var showLanguageRestartPrompt = false
     @State private var attributionNotice: String?
     @State private var attributionRevision = 0
+    /// Loaded once per panel appearance; mutations write through
+    /// `ClaudeExtraRoots.save`/`.apply` immediately (D1: no restart).
+    @State private var claudeExtraRoots: [String] = ClaudeExtraRoots.load()
+    @State private var claudeExtraRootsResult: ExtraScanPathsResult?
+    /// Filled off the main actor — see `ClaudeExtraRoots.missingRoots`. Empty
+    /// until the first probe lands, so a row shows no warning rather than a
+    /// wrong one while the answer is still unknown.
+    @State private var missingClaudeRoots: Set<String> = []
     /// 0 = auto (≈60% of the screen). The popover's drag handle writes the
     /// same key, so the two stay in sync.
     @AppStorage(PopoverChrome.heightKey) private var popoverHeight = 0.0
@@ -919,6 +927,8 @@ struct SettingsPanel: View {
         }
         .id(SettingsWindowController.Destination.discord.anchor)
 
+        claudeExtraRootsSection()
+
         section("Language") {
             radioGroup(
                 selection: Binding(
@@ -934,6 +944,78 @@ struct SettingsPanel: View {
                 options: AppLanguage.allCases.map { ($0.rawValue, $0.label) })
             hint("Takes effect the next time TokenBar starts.")
         }
+    }
+
+    /// A second (or further) Claude account isolated with `CLAUDE_CONFIG_DIR`
+    /// is otherwise invisible to TokenBar's scan (see `docs/knowledge/
+    /// architecture.md`'s extra-scan-paths section). Each config dir here
+    /// expands to its `projects`/`transcripts` sub-roots and merges into the
+    /// single reported total — there is no per-account breakdown.
+    @ViewBuilder
+    private func claudeExtraRootsSection() -> some View {
+        section("Claude accounts") {
+            ForEach(claudeExtraRoots, id: \.self) { path in
+                row(path) {
+                    HStack(spacing: 6) {
+                        if missingClaudeRoots.contains(path) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                                .help("Not found on disk right now — kept in the list in case it's an unmounted drive or a typo you'll fix.".localized)
+                        }
+                        Button {
+                            claudeExtraRoots.removeAll { $0 == path }
+                            commitClaudeExtraRoots()
+                        } label: {
+                            Image(systemName: "minus.circle")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            Button {
+                addClaudeExtraRoot()
+            } label: {
+                Label("Add config dir…".localized, systemImage: "plus.circle")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 10)
+            if let result = claudeExtraRootsResult, !result.unreadable.isEmpty {
+                hint("%lld of %lld path(s) can't be read right now — this is retried automatically on the next scan.".localized(
+                    result.unreadable.count, result.registeredCount))
+            }
+            if let result = claudeExtraRootsResult, !result.rejected.isEmpty {
+                hint("%lld path(s) can't be used as a scan folder and were not added.".localized(
+                    result.rejected.count))
+            }
+            hint("For a second Claude account, run it with CLAUDE_CONFIG_DIR pointed at an isolated folder, then add that folder here. Its usage is merged into the totals above everywhere in TokenBar — there is no separate per-account view.")
+        }
+        .onAppear { refreshMissingClaudeRoots() }
+    }
+
+    private func addClaudeExtraRoot() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Add".localized
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let path = url.path
+        guard !ClaudeExtraRoots.isRejectedRoot(path), !claudeExtraRoots.contains(path) else { return }
+        claudeExtraRoots.append(path)
+        commitClaudeExtraRoots()
+    }
+
+    private func commitClaudeExtraRoots() {
+        ClaudeExtraRoots.save(claudeExtraRoots)
+        ClaudeExtraRoots.apply { claudeExtraRootsResult = $0 }
+        refreshMissingClaudeRoots()
+    }
+
+    private func refreshMissingClaudeRoots() {
+        ClaudeExtraRoots.missingRoots(in: claudeExtraRoots) { missingClaudeRoots = $0 }
     }
 
     @ViewBuilder

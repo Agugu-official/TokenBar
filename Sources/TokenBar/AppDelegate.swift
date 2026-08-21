@@ -32,6 +32,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // then — never on the flood of unrelated writes. Same value-gating
     // discipline as refreshIntervalMin, to avoid the CPU-regression storm.
     private var lastHiddenRaw = UserDefaults.standard.string(forKey: ClientRegistry.tabHiddenKey) ?? ""
+    // Value gate for the Claude extra-scan-roots list, same discipline as
+    // lastHiddenRaw: didChangeNotification fires for every unrelated write,
+    // so only re-push to the FFI registry when this specific key actually
+    // changed (e.g. Settings added/removed a config dir).
+    private var lastExtraRootsRaw = UserDefaults.standard.string(forKey: ClaudeExtraRoots.storageKey) ?? ""
     // The Discord presence client, or nil whenever this process may not connect
     // (switched off, or a demo/test run). Only makeDiscordClient creates it.
     private var discord: DiscordIPCClient?
@@ -72,6 +77,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Record the timezone the (still empty) graph cache will be filled
         // under, before the title-refresh loop below starts warming it.
         AttributedSeriesModel.captureLaunchTimeZone()
+        // Push any configured Claude extra scan roots. The FFI registry starts
+        // empty every process launch (it's an in-memory RwLock, not persisted
+        // core-side; UserDefaults is the source of truth Swift owns).
+        //
+        // This races the first scan by design and does not block launch. The
+        // setter probes each path with `read_dir`, so an unmounted volume —
+        // the case the keep-and-retry behavior exists for — could otherwise
+        // stall startup. Losing that race costs one scan: the extra roots join
+        // the next one. Freezing the menu bar until a dead network mount times
+        // out costs considerably more.
+        ClaudeExtraRoots.apply()
 
         let controller = StatusItemController()
         statusController = controller
@@ -360,6 +376,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if hiddenChanged {
                 self.lastHiddenRaw = hiddenRaw
                 self.refreshFilteredRate()
+            }
+
+            // Settings added/removed/edited a Claude config dir — push the
+            // new list to the FFI registry immediately (D1: no restart).
+            let extraRootsRaw = UserDefaults.standard.string(
+                forKey: ClaudeExtraRoots.storageKey) ?? ""
+            if extraRootsRaw != self.lastExtraRootsRaw {
+                self.lastExtraRootsRaw = extraRootsRaw
+                ClaudeExtraRoots.apply()
             }
 
             // Hiding a client has to leave the published presence in the SAME

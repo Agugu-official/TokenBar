@@ -94,6 +94,23 @@ char *tb_agent_usage(void);
 // request; the returned JSON is released with tb_free.
 char *tb_quota_curve(const char *client_id, const char *window_key, uint64_t generation);
 
+// Replace the process-wide extra-scan-paths registry used by every
+// subsequent report/parse call (no restart needed). `json` is an object of
+// `{"<public-client-id>": ["<absolute-dir-path>", ...]}`, full-replace
+// semantics ({} clears it). Success data is
+// `{"registeredCount":N,"unreadable":[{"client","path","reason"}],"rejected":[{"client","path","reason"}]}`.
+// A directory that merely can't be read right now (unmounted volume, config
+// dir not yet created) is still registered: it is listed in `unreadable` and
+// picked up automatically by the next scan, with no need to call this again.
+// `rejected` paths are NOT registered and will never contribute — because the
+// client id has no extra-root support here, or because the path cannot become
+// a scan root at all (empty, relative, or an existing non-directory). The last
+// case matters: the scanner walks any path that exists, so a transcript FILE
+// passed as a root would otherwise be ingested while being reported as merely
+// unreadable. Malformed JSON returns the normal error envelope and leaves the
+// registry untouched.
+char *tb_set_extra_scan_paths(const char *json);
+
 // Release a string returned by any tb_* entry point.
 void tb_free(char *p);
 
