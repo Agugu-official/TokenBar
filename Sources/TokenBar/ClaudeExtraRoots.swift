@@ -32,6 +32,11 @@ enum ClaudeExtraRoots {
     /// silently drop the user's setting the way vendor's own scan does for
     /// paths that vanish mid-session; the difference is Settings can *show*
     /// the warning, where a background scan has nowhere to show it.
+    ///
+    /// Blocking: `fileExists` stats the path, which on a stalled network or
+    /// external mount takes as long as the mount takes to time out. Call it
+    /// off the main actor — `missingRoots(in:then:)` is the wrapper Settings
+    /// uses.
     static func isMissing(_ path: String) -> Bool {
         var isDir: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
@@ -66,6 +71,26 @@ enum ClaudeExtraRoots {
         let object = ["claude": expanded]
         let data = (try? JSONEncoder().encode(object)) ?? Data("{}".utf8)
         return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
+    /// Which of `paths` are missing right now, resolved off the calling actor.
+    ///
+    /// Settings renders a warning icon per row, and doing that from `isMissing`
+    /// during view construction meant a `stat` per row on the main actor, on
+    /// every render — the same stall as the setter, on the same kind of path,
+    /// for a feature whose whole point is tolerating roots that are
+    /// temporarily unreachable.
+    ///
+    /// Shares `applyQueue` with `apply`, so a probe issued after a save
+    /// observes the registry that save produced rather than racing it.
+    static func missingRoots(
+        in paths: [String],
+        then completion: @escaping @Sendable @MainActor (Set<String>) -> Void
+    ) {
+        applyQueue.async {
+            let missing = Set(paths.filter(isMissing))
+            Task { @MainActor in completion(missing) }
+        }
     }
 
     private static let applyQueue = DispatchQueue(

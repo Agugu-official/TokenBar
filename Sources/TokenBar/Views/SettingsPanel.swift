@@ -100,6 +100,10 @@ struct SettingsPanel: View {
     /// `ClaudeExtraRoots.save`/`.apply` immediately (D1: no restart).
     @State private var claudeExtraRoots: [String] = ClaudeExtraRoots.load()
     @State private var claudeExtraRootsResult: ExtraScanPathsResult?
+    /// Filled off the main actor — see `ClaudeExtraRoots.missingRoots`. Empty
+    /// until the first probe lands, so a row shows no warning rather than a
+    /// wrong one while the answer is still unknown.
+    @State private var missingClaudeRoots: Set<String> = []
     /// 0 = auto (≈60% of the screen). The popover's drag handle writes the
     /// same key, so the two stay in sync.
     @AppStorage(PopoverChrome.heightKey) private var popoverHeight = 0.0
@@ -953,7 +957,7 @@ struct SettingsPanel: View {
             ForEach(claudeExtraRoots, id: \.self) { path in
                 row(path) {
                     HStack(spacing: 6) {
-                        if ClaudeExtraRoots.isMissing(path) {
+                        if missingClaudeRoots.contains(path) {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .font(.caption2)
                                 .foregroundStyle(.orange)
@@ -988,6 +992,7 @@ struct SettingsPanel: View {
             }
             hint("For a second Claude account, run it with CLAUDE_CONFIG_DIR pointed at an isolated folder, then add that folder here. Its usage is merged into the totals above everywhere in TokenBar — there is no separate per-account view.")
         }
+        .onAppear { refreshMissingClaudeRoots() }
     }
 
     private func addClaudeExtraRoot() {
@@ -1006,6 +1011,11 @@ struct SettingsPanel: View {
     private func commitClaudeExtraRoots() {
         ClaudeExtraRoots.save(claudeExtraRoots)
         ClaudeExtraRoots.apply { claudeExtraRootsResult = $0 }
+        refreshMissingClaudeRoots()
+    }
+
+    private func refreshMissingClaudeRoots() {
+        ClaudeExtraRoots.missingRoots(in: claudeExtraRoots) { missingClaudeRoots = $0 }
     }
 
     @ViewBuilder

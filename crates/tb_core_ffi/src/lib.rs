@@ -870,7 +870,35 @@ unsafe fn set_extra_scan_paths_from_c(json: *const c_char) -> Result<serde_json:
     let raw = unsafe { CStr::from_ptr(json) }
         .to_str()
         .map_err(|_| "extra scan paths payload is not valid UTF-8".to_string())?;
-    extra_scan_paths::set_from_json(raw)
+    let result = extra_scan_paths::set_from_json(raw)?;
+    invalidate_scan_caches();
+    Ok(result)
+}
+
+/// Drop everything that could answer a scan question from before the root set
+/// changed. Called only after a successful registry replace.
+///
+/// The setter's contract is that the next report picks up the new roots, and
+/// two caches sit in front of that. `graph_cached` returns any entry younger
+/// than `ONESHOT_MAX_AGE_SECS` outright — it only probes the source token
+/// *after* aging out — so a graph computed seconds before a Settings edit
+/// would keep reporting a removed account's usage, or keep omitting a
+/// just-added one. `tail_tick_if_stale` holds its event window for
+/// `TAIL_TICK_SECS` the same way. Both self-heal once their timer expires,
+/// because a changed root set changes the source token; clearing here is what
+/// makes "immediately" true rather than "within half a minute".
+///
+/// Clearing unconditionally is deliberate: the setter runs at launch (empty
+/// cache, no-op) and on Settings edits (rare). Comparing old and new registries
+/// to skip a no-op replace would cost more than the recompute it saves.
+fn invalidate_scan_caches() {
+    GRAPH_CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clear();
+    // Unstamping is enough to force the next tick; `in_flight` still guards
+    // against a second parse starting while one is running.
+    lock_tick().last = None;
 }
 
 /// Release a string returned by any tb_* entry point.
@@ -895,6 +923,52 @@ mod tests {
     use usage_tail::UsageTailer;
 
     static QUOTA_CURVE_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    /// The setter promises the next report sees the new roots. Two caches can
+    /// answer a report without rescanning, so replacing the registry has to
+    /// drop both — otherwise a Settings edit is invisible until they age out
+    /// on their own (30s for the graph, 10s for the live tail).
+    ///
+    /// Drives the real `extern "C"` entry point rather than `set_from_json`,
+    /// because the invalidation hangs off the FFI wrapper: calling the inner
+    /// function would pass with the fix removed.
+    #[test]
+    fn setting_extra_scan_paths_drops_the_caches_that_could_answer_from_the_old_roots() {
+        let _g = extra_scan_paths::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        GRAPH_CACHE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                "2026".to_string(),
+                (Instant::now(), 1234, serde_json::json!({"from": "old roots"})),
+            );
+        lock_tick().last = Some(Instant::now());
+
+        let payload = CString::new("{}").expect("payload has no interior NUL");
+        let raw = unsafe { tb_set_extra_scan_paths(payload.as_ptr()) };
+        assert!(!raw.is_null(), "setter returned NULL");
+        let reply = unsafe { CStr::from_ptr(raw) }
+            .to_str()
+            .expect("reply is UTF-8")
+            .to_string();
+        unsafe { tb_free(raw) };
+        assert!(reply.contains("\"ok\":true"), "setter failed: {reply}");
+
+        assert!(
+            GRAPH_CACHE
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_empty(),
+            "graph cache still holds an entry computed under the old root set"
+        );
+        assert!(
+            lock_tick().last.is_none(),
+            "live tail is still stamped fresh, so the next tick would skip the reparse"
+        );
+    }
 
     #[test]
     fn select_user_home_prefers_non_empty_home() {

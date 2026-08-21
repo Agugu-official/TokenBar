@@ -159,17 +159,20 @@ pub(crate) fn set_from_json(raw: &str) -> Result<serde_json::Value, String> {
     }))
 }
 
+/// Guards every test that touches `EXTRA_SCAN_PATHS` behind one process-wide
+/// mutex so concurrent `cargo test` threads don't stomp each other's writes —
+/// the static is process state, not per-test state. It lives outside the tests
+/// module because `lib.rs` has a test that drives the registry through the FFI
+/// entry point and has to serialize against these.
+#[cfg(test)]
+pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::LocalSourceContext;
     use std::fs;
     use std::path::Path;
-
-    /// Guards every test in this module behind one process-wide mutex so
-    /// concurrent `cargo test` threads don't stomp each other's `EXTRA_SCAN_PATHS`
-    /// writes — the static is process state, not per-test state.
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn reset() {
         *EXTRA_SCAN_PATHS
