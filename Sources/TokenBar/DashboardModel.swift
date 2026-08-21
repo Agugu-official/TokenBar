@@ -1441,10 +1441,13 @@ private struct DashboardSnapshot {
     /// the never-ending spinner this state exists to remove. Half a rule is not
     /// a rule.
     ///
-    /// An entry is cleared when a scan COVERING that client's window succeeds —
-    /// whether run for that client, or run for the all-agent equivalence and
-    /// found on the next visit to cover it. A success for a DIFFERENT client
-    /// clears nothing: forgetting a failure is not the same as answering it.
+    /// An entry is cleared when a scan covering that client's window succeeds,
+    /// WHOEVER RAN IT. `unionScan` is one cross-client cache and
+    /// `windowUsage(from:until:)` takes no client, so coverage is a question
+    /// about time ranges and nothing else: a scan run for A, or for the
+    /// all-agent equivalence, clears B on B's next visit as soon as it is found
+    /// to cover B's window. What never clears an entry is a scan that does not
+    /// cover it — forgetting a failure is not the same as answering it.
     ///
     /// Deliberately not cleared when a retry STARTS: the card would then flip
     /// failed → loading → failed on every poll, and the last settled answer is

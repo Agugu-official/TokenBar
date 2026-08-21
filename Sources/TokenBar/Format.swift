@@ -44,7 +44,11 @@ enum Format {
     /// changing them touches views nothing here tests. Deliberately not
     /// enumerated either — a list of view names in a comment goes stale and
     /// then misdescribes what it defers, which is worse than no list.
-    /// `grep -rn 'Format\.usd(' Sources/` is the current answer.
+    ///
+    /// `grep -rn 'Format\.usd(' Sources/` finds them, plus two things that are
+    /// not deferred surfaces and should stay on `usd`: `TrayMode`, which has no
+    /// token count beside it, and `CrossCheckHarness`, which exists to check
+    /// `usd` itself against the shared `format.json` fixtures.
     static func usdOrBelowCent(_ amount: Double) -> String {
         // `amount == 0` catches -0.0 too, which `usd` alone renders "$-0.00".
         if amount == 0 { return usd(0) }
