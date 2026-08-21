@@ -12320,6 +12320,86 @@ enum SelfTest {
                 samples: [QuotaSample(atMs: 60_000, usedPercent: 40),
                           QuotaSample(atMs: 80_000, usedPercent: 50)]) == nil,
             "quota trend: a window with no duration yields no indicator")
+        // MARK: - Claude extra scan roots (CLAUDE-EXTRA-ROOT-E1; append-only)
+        //
+        // This module never calls the FFI (see the module comment atop this
+        // file); the hermetic scan-adds-up assertions (A1-A6, A8) live in the
+        // Rust `crates/tb_core_ffi/src/extra_scan_paths.rs` tests instead,
+        // where a real `LocalSourceContext` can point at a temp root. What's
+        // testable here is the pure Swift side: expanding a config dir into
+        // the two sub-roots the engine actually scans, and encoding that into
+        // the exact JSON `tb_set_extra_scan_paths` expects.
+        expect(
+            ClaudeExtraRoots.expand("/Users/x/.claude-work")
+                == ["/Users/x/.claude-work/projects", "/Users/x/.claude-work/transcripts"],
+            "D2: a config dir expands to BOTH projects and transcripts sub-roots "
+                + "(mutation: expanding to only one silently drops whichever "
+                + "sub-root a real isolated CLAUDE_CONFIG_DIR produces)")
+
+        let payloadOne = ClaudeExtraRoots.payloadJSON(["/Users/x/.claude-work"])
+        let decodedOne = try! JSONDecoder().decode(
+            [String: [String]].self, from: Data(payloadOne.utf8))
+        expect(
+            decodedOne["claude"] == [
+                "/Users/x/.claude-work/projects", "/Users/x/.claude-work/transcripts",
+            ],
+            "payloadJSON encodes one config dir as {\"claude\":[projects,transcripts]}")
+
+        // Two dirs whose expansions don't overlap: both fully present, in order.
+        let payloadTwo = ClaudeExtraRoots.payloadJSON(["/Users/a", "/Users/b"])
+        let decodedTwo = try! JSONDecoder().decode(
+            [String: [String]].self, from: Data(payloadTwo.utf8))
+        expect(
+            decodedTwo["claude"] == [
+                "/Users/a/projects", "/Users/a/transcripts",
+                "/Users/b/projects", "/Users/b/transcripts",
+            ],
+            "payloadJSON carries every configured dir's expansion, not just the first")
+
+        // Empty list -> empty array, not an absent key or {} — the setter's
+        // full-replace semantics need an explicit empty list to clear the
+        // registry (the Settings rollback path), not a missing "claude" key
+        // that leaves whatever was there before untouched.
+        let payloadEmpty = ClaudeExtraRoots.payloadJSON([])
+        let decodedEmpty = try! JSONDecoder().decode(
+            [String: [String]].self, from: Data(payloadEmpty.utf8))
+        expect(
+            decodedEmpty["claude"] == [],
+            "payloadJSON([]) encodes an explicit empty array (mutation: an absent key "
+                + "would leave the core registry unchanged instead of clearing it)")
+
+        // Duplicate config dirs (e.g. the same folder added twice, or two
+        // dirs whose expansions collide) collapse to one entry per path in
+        // the wire payload — dedup happens before the JSON leaves Swift, not
+        // relied on solely by the Rust-side canonical-path dedup.
+        let payloadDup = ClaudeExtraRoots.payloadJSON(["/Users/x/.claude-work", "/Users/x/.claude-work"])
+        let decodedDup = try! JSONDecoder().decode(
+            [String: [String]].self, from: Data(payloadDup.utf8))
+        expect(
+            decodedDup["claude"] == [
+                "/Users/x/.claude-work/projects", "/Users/x/.claude-work/transcripts",
+            ],
+            "payloadJSON deduplicates repeated config dirs instead of doubling the path list")
+
+        // isRejectedRoot: home and root are refused; an ordinary subfolder is not.
+        let ceHome = FileManager.default.homeDirectoryForCurrentUser.path
+        expect(
+            ClaudeExtraRoots.isRejectedRoot(ceHome) && ClaudeExtraRoots.isRejectedRoot("/")
+                && !ClaudeExtraRoots.isRejectedRoot("\(ceHome)/.claude-work"),
+            "isRejectedRoot refuses the home directory and filesystem root but not an "
+                + "ordinary subfolder (mutation: refusing everything would make Settings' "
+                + "add button always a no-op; refusing nothing would let a scan-everything "
+                + "root through unwarned)")
+
+        // isMissing: a real directory is present; a path that doesn't exist is missing.
+        let ceTempDir = FileManager.default.temporaryDirectory.path
+        expect(
+            !ClaudeExtraRoots.isMissing(ceTempDir)
+                && ClaudeExtraRoots.isMissing("\(ceTempDir)/tokenbar-selftest-does-not-exist"),
+            "isMissing distinguishes a present directory from an absent path "
+                + "(this is display-only — a missing path stays in the persisted list, "
+                + "matching how vendor's own scan silently skips nonexistent roots "
+                + "instead of dropping the user's configuration)")
 
         if failures > 0 {
             print("\(failures) selftest check(s) failed")

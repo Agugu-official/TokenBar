@@ -57,6 +57,27 @@ enum Smoke {
                 + "top=\(top.map(\.agent) ?? "none")"
         }
 
+        // The extra-scan-paths setter is the only FFI entry point whose Swift
+        // caller swallows its error (`ClaudeExtraRoots.apply` uses `try?`, so a
+        // bridge failure surfaces as a silently empty result rather than a
+        // crash). Exercising it here is what keeps an envelope-field or decoder
+        // mismatch from passing every other gate: the Rust tests call
+        // `set_from_json` directly and the Swift selftest never touches the FFI.
+        // An empty object is safe — the registry is process-local, so clearing
+        // it affects nothing beyond this short-lived smoke process.
+        summarize("extra-scan-paths") {
+            let result = try TBCore.setExtraScanPaths(json: "{}")
+            guard result.registeredCount == 0,
+                result.unreadable.isEmpty,
+                result.rejected.isEmpty
+            else {
+                throw TBCoreError.bridge(
+                    "empty registry decoded as registered=\(result.registeredCount) "
+                        + "unreadable=\(result.unreadable.count) rejected=\(result.rejected.count)")
+            }
+            return "empty registry round-trips (registered 0, unreadable 0, rejected 0)"
+        }
+
         summarize("trace") {
             let buckets = try TBCore.usageTrace(windowSecs: 600)
             let rate = try TBCore.tokensPerMin()

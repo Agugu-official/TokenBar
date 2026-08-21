@@ -79,29 +79,50 @@ fn compute(
     until_ms: i64,
     key: CacheKey,
 ) -> Result<Value, String> {
+    let generation = crate::root_generation();
     let token =
         tokscale_core::local_source_change_token(&context.parse_options(None, None)).unwrap_or(0);
     let data = run(context, from_ms, until_ms)?;
-    {
-        let mut cache = crate::WINDOW_USAGE_CACHE
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // One entry, not a history. The key carries `until_ms` floored to the
-        // minute and the consumer polls every 60s with `until = now`, so each
-        // poll mints a key that will never be asked for again — and this map is
-        // a process-lifetime static with no eviction anywhere on the production
-        // path. Every minute the Quota lens stayed open therefore left a whole
-        // window's messages resident for the life of the app.
-        //
-        // Measured on the shipping build: ~39 MB per minute with the lens open,
-        // and none of it returned when it closed — 507 MB before opening, 1451
-        // MB after ten minutes and a close. Clearing keeps the hit that matters
-        // (a second call inside the same minute still finds this entry) and
-        // drops the ones that cannot be hit again by construction.
-        cache.clear();
-        cache.insert(key, (Instant::now(), token, data.clone()));
-    }
+    // The caller still gets this payload when `publish` refuses it: it answers
+    // a question asked before the roots changed, and the next call recomputes.
+    publish(key, generation, (Instant::now(), token, data.clone()));
     Ok(data)
+}
+
+/// Cache a freshly scanned window unless the root registry moved while the scan
+/// was running.
+///
+/// Same lock discipline as `publish_graph`: the generation is re-read inside
+/// the lock `invalidate_scan_caches` clears under, so a replace cannot land
+/// between the check and the insert. A window scan runs for tens of seconds on
+/// a large store, which makes that interleaving ordinary rather than exotic
+/// here — and the entry it would leave behind is served without a token probe
+/// for `ONESHOT_MAX_AGE_SECS`.
+///
+/// The insert clears first: one entry, not a history. The key carries
+/// `until_ms` floored to the minute and the consumer polls every 60s with
+/// `until = now`, so each poll mints a key that will never be asked for again —
+/// and this map is a process-lifetime static with no eviction anywhere on the
+/// production path. Every minute the Quota lens stayed open therefore left a
+/// whole window's messages resident for the life of the app.
+///
+/// Measured on the shipping build: ~39 MB per minute with the lens open, and
+/// none of it returned when it closed — 507 MB before opening, 1451 MB after
+/// ten minutes and a close. Clearing keeps the hit that matters (a second call
+/// inside the same minute still finds this entry) and drops the ones that
+/// cannot be hit again by construction.
+///
+/// Returns whether the entry was published, which is what the tests assert on.
+pub(crate) fn publish(key: CacheKey, generation: u64, entry: CacheEntry) -> bool {
+    let mut cache = crate::WINDOW_USAGE_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if crate::root_generation() != generation {
+        return false;
+    }
+    cache.clear();
+    cache.insert(key, entry);
+    true
 }
 
 #[derive(Debug, Clone, Serialize)]
