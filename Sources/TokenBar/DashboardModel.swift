@@ -1446,13 +1446,13 @@ private struct DashboardSnapshot {
     /// branch and the success path. Their conditions are deliberately NOT
     /// restated here. Four successive attempts to paraphrase them each read as
     /// precise and each omitted a conjunct — the scan-token check, the
-    /// freshness bound, the fact that coverage is tested against the widened
-    /// `from` rather than the window itself. Read the two sites; a summary of a
-    /// conjunction is a place for one of its terms to go missing.
+    /// freshness bound, the fact that the cached branch tests coverage against
+    /// `from` rather than against the window. Read the two sites; a summary of
+    /// a conjunction is a place for one of its terms to go missing.
     ///
     /// One thing worth stating because it is counter-intuitive: `unionScan` is
-    /// cross-client in PROVENANCE, not in effect. Each visit clears at most its
-    /// own client, and tests coverage against its own widened range.
+    /// cross-client in PROVENANCE, not in effect. A scan run for A can clear B,
+    /// but only when B itself visits, and only B.
     ///
     /// Deliberately not cleared when a retry STARTS: the card would then flip
     /// failed → loading → failed on every poll, and the last settled answer is
