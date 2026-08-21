@@ -35,6 +35,7 @@ mod usage_tail;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{c_char, CStr, CString};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -244,6 +245,19 @@ static RAYON_INIT: LazyLock<()> = LazyLock::new(|| {
 type GraphCacheEntry = (Instant, u64, serde_json::Value);
 static GRAPH_CACHE: LazyLock<Mutex<HashMap<String, GraphCacheEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Bumped every time the extra-scan-paths registry is replaced. A scan that
+/// started before the replace snapshots its roots at the top
+/// (`LocalSourceContext::current()`) and publishes minutes of work later, so
+/// clearing the caches is not enough on its own: the in-flight scan would
+/// insert its old-root result *after* the clear and the next reader would
+/// serve it. Every publisher records the generation it started under and
+/// drops its result if the registry moved underneath it.
+///
+/// Checked inside the lock that guards the thing being published, and bumped
+/// before either clear, so "check the generation" and "publish" cannot be
+/// split by a replace landing between them.
+static ROOT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 static TAILER: LazyLock<UsageTailer> = LazyLock::new(UsageTailer::new);
 /// Live-tail tick bookkeeping. `last` is the completion time of the most recent
@@ -583,15 +597,48 @@ fn graph_compute(year: &str) -> Result<serde_json::Value, String> {
     // mid-compute changes the token, so the next aged-out read recomputes
     // rather than serving a graph that missed it. Keep the same context for
     // both paths so the probe and report scan observe identical source roots.
+    let generation = ROOT_GENERATION.load(Ordering::SeqCst);
     let context = LocalSourceContext::current();
     let token =
         tokscale_core::local_source_change_token(&context.parse_options(None, None)).unwrap_or(0);
     let data = usage_graph::run(&context, year)?;
-    GRAPH_CACHE
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(year.to_string(), (Instant::now(), token, data.clone()));
+    // The caller still gets this payload even when `publish_graph` refuses it.
+    // It answers a request made before the roots changed, and the next call
+    // recomputes rather than serving it again.
+    publish_graph(year, generation, (Instant::now(), token, data.clone()));
     Ok(data)
+}
+
+/// Cache a freshly computed graph unless the root registry moved while it was
+/// being computed.
+///
+/// The generation is re-read inside the lock `invalidate_scan_caches` clears
+/// under. Reading it outside would let a replace land between the check and
+/// the insert — the exact interleaving this guard exists for, and one that
+/// leaves the stale entry in place until it ages out.
+///
+/// Returns whether the entry was published, which is what the tests assert on.
+fn publish_graph(year: &str, generation: u64, entry: GraphCacheEntry) -> bool {
+    let mut cache = GRAPH_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    if ROOT_GENERATION.load(Ordering::SeqCst) != generation {
+        return false;
+    }
+    cache.insert(year.to_string(), entry);
+    true
+}
+
+/// Stamp the live tail as freshly ticked unless the root registry moved during
+/// the tick. Leaving it unstamped makes the next call tick again, which is what
+/// re-reads the new roots; stamping would hide them for `TAIL_TICK_SECS`.
+///
+/// Same lock discipline as `publish_graph`, for the same reason.
+fn stamp_tick_if_current(generation: u64) -> bool {
+    let mut st = lock_tick();
+    if ROOT_GENERATION.load(Ordering::SeqCst) != generation {
+        return false;
+    }
+    st.last = Some(Instant::now());
+    true
 }
 
 fn lock_tick() -> std::sync::MutexGuard<'static, TickState> {
@@ -635,9 +682,10 @@ fn tail_tick_if_stale() {
         }
     };
     if claimed {
+        let generation = ROOT_GENERATION.load(Ordering::SeqCst);
         let _guard = TickGuard; // clears in_flight on drop (success or panic)
         TAILER.tick();
-        lock_tick().last = Some(Instant::now()); // success only — panic skips this
+        stamp_tick_if_current(generation); // success only — panic skips this
     }
 }
 
@@ -891,7 +939,18 @@ unsafe fn set_extra_scan_paths_from_c(json: *const c_char) -> Result<serde_json:
 /// Clearing unconditionally is deliberate: the setter runs at launch (empty
 /// cache, no-op) and on Settings edits (rare). Comparing old and new registries
 /// to skip a no-op replace would cost more than the recompute it saves.
+///
+/// Clearing alone would still lose to a scan already running: it snapshots its
+/// roots at the top and publishes after, so its old-root result would land
+/// after the clear. `ROOT_GENERATION` is bumped first, before either clear,
+/// and both publishers re-read it inside the same lock they publish under —
+/// so a scan that started earlier either publishes before the clear (and gets
+/// cleared) or sees the new generation and drops its result.
 fn invalidate_scan_caches() {
+    // Bump first. Both clears below release their locks, and a publisher that
+    // acquires one afterwards has to observe the new generation for its check
+    // to mean anything.
+    ROOT_GENERATION.fetch_add(1, Ordering::SeqCst);
     GRAPH_CACHE
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -923,6 +982,76 @@ mod tests {
     use usage_tail::UsageTailer;
 
     static QUOTA_CURVE_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    /// Clearing the caches loses to a scan that was already running: it
+    /// snapshots its roots at the top and publishes after the clear, putting
+    /// an old-root result back where the next reader finds it. Both publishers
+    /// carry the generation they started under and drop their result when the
+    /// registry moved.
+    ///
+    /// Moves the generation with the real `extern "C"` setter rather than
+    /// bumping the counter directly, so the test fails if the setter ever
+    /// stops bumping it.
+    #[test]
+    fn a_scan_that_started_before_a_root_change_does_not_publish_its_result() {
+        let _g = extra_scan_paths::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        // What an in-flight scan captured before the user touched Settings.
+        let generation_at_scan_start = ROOT_GENERATION.load(Ordering::SeqCst);
+        let stale = (
+            Instant::now(),
+            1234,
+            serde_json::json!({"from": "old roots"}),
+        );
+
+        let payload = CString::new("{}").expect("payload has no interior NUL");
+        let raw = unsafe { tb_set_extra_scan_paths(payload.as_ptr()) };
+        assert!(!raw.is_null(), "setter returned NULL");
+        unsafe { tb_free(raw) };
+
+        assert!(
+            !publish_graph("2026", generation_at_scan_start, stale),
+            "a graph computed under the old roots was cached anyway"
+        );
+        assert!(
+            GRAPH_CACHE
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get("2026")
+                .is_none(),
+            "the old-root graph landed in the cache after the replace"
+        );
+        assert!(
+            !stamp_tick_if_current(generation_at_scan_start),
+            "a tick that parsed the old roots stamped the tail as fresh"
+        );
+        assert!(
+            lock_tick().last.is_none(),
+            "the tail is stamped, so the next call would skip the reparse that \
+             would pick up the new roots"
+        );
+
+        // Control: a scan starting after the replace publishes normally —
+        // without this the guard could refuse everything and still pass above.
+        let current = ROOT_GENERATION.load(Ordering::SeqCst);
+        assert!(
+            publish_graph("2026", current, (Instant::now(), 5678, serde_json::json!({"from": "new roots"}))),
+            "a graph computed under the current roots was refused"
+        );
+        assert!(
+            stamp_tick_if_current(current),
+            "a tick under the current roots failed to stamp"
+        );
+
+        // Leave no state behind for the other tests sharing these statics.
+        GRAPH_CACHE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+        lock_tick().last = None;
+    }
 
     /// The setter promises the next report sees the new roots. Two caches can
     /// answer a report without rescanning, so replacing the registry has to
