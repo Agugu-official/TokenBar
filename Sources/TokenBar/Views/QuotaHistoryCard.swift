@@ -57,19 +57,6 @@ struct QuotaHistoryCard: View {
     /// fewer rows than this card intends without anything saying so.
     static let visibleRows = 12
 
-    /// A money column for a row that may carry tokens without a price.
-    ///
-    /// `Format.usd` is `"$%.2f"`, so it answers "how much" with a number that
-    /// cannot distinguish "nothing" from "nothing we could price" or from
-    /// "less than half a cent". All three render "$0.00", and only the first is
-    /// true. Priced usage below the format's resolution is said to be small;
-    /// usage with no price at all gets a dash, which is what a fixed-width
-    /// column can say instead of a false total.
-    static func money(tokens: Int64, cost: Double) -> String {
-        if cost <= 0, tokens > 0 { return "—" }
-        return Format.usdOrBelowCent(cost)
-    }
-
     private var byCycle: [Int64: QuotaHistoryRow] {
         Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
@@ -133,7 +120,7 @@ struct QuotaHistoryCard: View {
                     // the alternative to a placeholder is a false total — the
                     // same missing-metric-as-a-measured-zero the other-line
                     // below avoids, in the column above it.
-                    Text(Self.money(tokens: row.mineTokens, cost: row.mineCost))
+                    Text(Format.money(tokens: row.mineTokens, cost: row.mineCost))
                         .font(.caption2.monospacedDigit())
                         .frame(width: 54, alignment: .trailing)
                 } else {
@@ -247,7 +234,7 @@ struct QuotaHistoryCard: View {
                         Spacer(minLength: 4)
                         Text(Format.compactTokens(model.tokens))
                             .foregroundStyle(.secondary)
-                        Text(Self.money(tokens: model.tokens, cost: model.cost))
+                        Text(Format.money(tokens: model.tokens, cost: model.cost))
                             .frame(width: 54, alignment: .trailing)
                     }
                     .font(.system(size: 10).monospacedDigit())

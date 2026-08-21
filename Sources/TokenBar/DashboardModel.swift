@@ -1362,7 +1362,7 @@ private struct DashboardSnapshot {
             if let cached = unionScan, cached.covers(start: from),
                Date().timeIntervalSince(cached.capturedAt) < Self.unionScanMaxAge
             { rebuildQuotaEquivalences(); return }
-            // Deliberately does NOT touch `windowScanFailedClient`: this branch
+            // Deliberately does NOT touch `windowScanFailedClients`: this branch
             // serves the all-agent equivalence, which draws no window card. The
             // first version set the shared flag here, so an equivalence scan
             // failing on the lens made every client's card claim its own scan
@@ -1392,8 +1392,9 @@ private struct DashboardSnapshot {
             // ran it. Returning without clearing left the card reporting a
             // failure while the model held the very data that refutes it — and
             // refusing to rescan for another 30 seconds.
-            if windowScanFailedClient == client {
-                clearScanFailure(for: client)
+            if windowScanFailedClients.contains(client) {
+                windowScanFailedClients = Self.scanFailures(
+                    windowScanFailedClients, resolvedBy: client)
                 refreshWindowQuotaHalves()
             }
             return
@@ -1405,16 +1406,17 @@ private struct DashboardSnapshot {
         // failure from settling a newer request, exactly as its success is.
         guard let usage = try? await source.windowUsage(from: from, until: now) else {
             guard Self.windowScanToken == scanToken else { return }
-            windowScanFailedClient = client
+            windowScanFailedClients.insert(client)
             refreshWindowQuotaHalves()
             return
         }
         guard Self.windowScanToken == scanToken else { return }
-        // Only THIS client's failure. A bare `nil` cleared whichever client was
-        // recorded, so a success on B erased A's failure although no scan for A
-        // had succeeded — the property holds one client, and forgetting it is
-        // not the same as answering it.
-        clearScanFailure(for: client)
+        // Only THIS client's failure. A bare `nil` cleared whichever client
+        // was recorded, so a success on B erased A's failure although no scan
+        // for A had succeeded — forgetting a failure is not the same as
+        // answering it.
+        windowScanFailedClients = Self.scanFailures(
+            windowScanFailedClients, resolvedBy: client)
         unionScan = UnionScan(
             fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages)
         refreshWindowQuotaHalves()
@@ -1422,7 +1424,13 @@ private struct DashboardSnapshot {
         rebuildQuotaEquivalences()
     }
 
-    /// The client whose stage-two scan settled with an error, if any.
+    /// The clients whose stage-two scan settled with an error.
+    ///
+    /// A SET, not one client. The single-slot version scoped its CLEAR to the
+    /// client that succeeded but let its SET overwrite whichever client was
+    /// recorded, so two failures in a row lost the first and its card went back
+    /// to "Reading local usage…" — the never-ending spinner this state exists
+    /// to remove. Half a rule is not a rule.
     ///
     /// Distinguishes "still scanning" from "asked and failed" — `.quotaOnly`
     /// alone cannot, and both halves of the lens rendered the second as the
@@ -1444,29 +1452,24 @@ private struct DashboardSnapshot {
     /// user opened claim its own scan had failed before that scan had even
     /// started — the same inversion this state exists to remove, running the
     /// other way.
-    private(set) var windowScanFailedClient: String?
+    private(set) var windowScanFailedClients: Set<String> = []
 
     /// Whether the card currently shown for `clientId` should say the scan
     /// failed rather than that it is still running.
     func windowScanFailed(for clientId: String) -> Bool {
-        windowScanFailedClient == clientId
+        windowScanFailedClients.contains(clientId)
     }
 
-    private func clearScanFailure(for clientId: String) {
-        windowScanFailedClient = Self.scanFailure(
-            windowScanFailedClient, resolvedBy: clientId)
-    }
-
-    /// The recorded failure after a scan for `client` succeeds.
+    /// The recorded failures after a scan for `client` succeeds.
     ///
-    /// Static and pure so the rule can be asserted on: the version this
-    /// replaced assigned `nil` unconditionally, so a success on one client
-    /// erased another's recorded failure, and the doc comment above claimed
-    /// the opposite. Nothing in a view or an async method could catch that.
-    nonisolated static func scanFailure(
-        _ current: String?, resolvedBy client: String
-    ) -> String? {
-        current == client ? nil : current
+    /// Static and pure so the rule can be asserted on: an earlier version
+    /// assigned `nil` unconditionally, so a success on one client erased
+    /// another's recorded failure while the doc comment claimed the opposite.
+    /// Nothing in a view or an async method could catch that.
+    nonisolated static func scanFailures(
+        _ current: Set<String>, resolvedBy client: String
+    ) -> Set<String> {
+        current.subtracting([client])
     }
 
     private func reconcileQuotaRemaining(with payload: AgentUsagePayload) {

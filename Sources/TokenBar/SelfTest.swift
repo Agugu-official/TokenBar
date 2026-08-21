@@ -11507,9 +11507,9 @@ enum SelfTest {
                    && Format.usdOrBelowCent(1.5) == "$1.50",
                "QH-MONEY a real amount below the format's resolution is said to be "
                    + "small, while an exact zero and an ordinary amount are unchanged")
-        expect(QuotaHistoryCard.money(tokens: 2_100_000, cost: 0) == "—"
-                   && QuotaHistoryCard.money(tokens: 0, cost: 0) == "$0.00"
-                   && QuotaHistoryCard.money(tokens: 2_100_000, cost: 0.003) == "<$0.01",
+        expect(Format.money(tokens: 2_100_000, cost: 0) == "—"
+                   && Format.money(tokens: 0, cost: 0) == "$0.00"
+                   && Format.money(tokens: 2_100_000, cost: 0.003) == "<$0.01",
                "QH-MONEY tokens with no price get a dash rather than a false total, "
                    + "while a window that genuinely spent nothing still reads $0.00")
         // QH-REASON. "Not enough history" is a false sentence for three of the
@@ -11538,13 +11538,24 @@ enum SelfTest {
         // the doc comment two lines up claimed the flag was cleared "for that
         // client, and by nothing else". The rule is pure and static precisely
         // so this can be asserted; nothing in the async method could catch it.
-        expect(DashboardModel.scanFailure("claude", resolvedBy: "codex") == "claude",
-               "QH-FAIL a successful scan for another client leaves this one's "
-                   + "recorded failure alone")
-        expect(DashboardModel.scanFailure("claude", resolvedBy: "claude") == nil
-                   && DashboardModel.scanFailure(nil, resolvedBy: "claude") == nil,
-               "QH-FAIL and a success for the client that failed does clear it, so the "
-                   + "check above is not simply refusing to clear anything")
+        expect(
+            DashboardModel.scanFailures(["claude", "codex"], resolvedBy: "codex")
+                == ["claude"],
+            "QH-FAIL a successful scan for one client leaves every OTHER client's "
+                + "recorded failure alone")
+        expect(
+            DashboardModel.scanFailures(["claude"], resolvedBy: "claude").isEmpty
+                && DashboardModel.scanFailures([], resolvedBy: "claude").isEmpty,
+            "QH-FAIL and a success for the client that failed does clear it, so the "
+                + "check above is not simply refusing to clear anything")
+        // QH-MONEY-UNPRICED. `usdOrBelowCent` covers only the sub-cent half:
+        // an exact zero still renders "$0.00", which is right for a total and
+        // wrong for a price nobody could compute. Two comments were written
+        // claiming the unpriced case was handled by it; neither was.
+        expect(Format.usdOrBelowCent(0) == "$0.00"
+                   && Format.money(tokens: 5_200_000, cost: 0) == "—",
+               "QH-MONEY the sub-cent helper still reports an exact zero as zero, "
+                   + "so a token count beside it needs the tokens-aware rule instead")
         // QH-MONEY-ZERO. `usd` renders -0.0 as "$-0.00".
         expect(Format.usdOrBelowCent(-0.0) == "$0.00",
                "QH-MONEY a negative zero is still zero dollars")

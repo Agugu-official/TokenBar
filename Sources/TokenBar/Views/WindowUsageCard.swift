@@ -488,10 +488,12 @@ private struct WindowHoverTooltip: View {
             HStack {
                 Text("%@ tokens".localized(Format.compactTokens(total)))
                 Spacer()
-                // Per-interval, an all-unpriced message set is ordinary —
-                // far more so than per-day — so a bare "$0.00" beside a token
-                // count would state a price nobody has.
-                Text(Format.usdOrBelowCent(messages.reduce(0) { $0 + $1.cost }))
+                // `money`: an all-unpriced interval sums to exactly zero,
+                // which `usdOrBelowCent` renders "$0.00" — it only covers the
+                // sub-cent half. Per-interval this is the likelier case of the
+                // two, not the rarer one.
+                Text(Format.money(
+                    tokens: total, cost: messages.reduce(0) { $0 + $1.cost }))
             }
             .font(.caption2)
             .foregroundStyle(.secondary)

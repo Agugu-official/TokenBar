@@ -245,7 +245,8 @@ struct SubscriptionTrendCard: View {
                                 Text(name(target))
                                 Spacer(minLength: 6)
                                 Text(verbatim: metric == .cost
-                                     ? Format.usd(bucket.cost)
+                                     ? Format.money(
+                                        tokens: bucket.tokens, cost: bucket.cost)
                                      : Format.compactTokens(bucket.tokens))
                                     .foregroundStyle(.secondary)
                             }
@@ -257,7 +258,8 @@ struct SubscriptionTrendCard: View {
                         Text("Total")
                         Spacer()
                         Text(verbatim: metric == .cost
-                             ? Format.usd(day.totalCost)
+                             ? Format.money(
+                                tokens: day.totalTokens, cost: day.totalCost)
                              : Format.compactTokens(day.totalTokens))
                     }
                     .font(.caption2.weight(.medium))

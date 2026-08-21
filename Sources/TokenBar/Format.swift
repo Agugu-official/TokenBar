@@ -36,12 +36,29 @@ enum Format {
     /// ordinary, and a line reading "2.1M · $0.00" contradicts itself. Use this
     /// wherever a zero would be a claim rather than a total.
     ///
-    /// The quota lens is converted. Older surfaces that pair a token count with
-    /// a price — the usage chart, the agents list, the contribution views, the
-    /// model and daily and monthly breakdowns — still call `usd` directly and
-    /// can print the same false zero. Left alone deliberately rather than
-    /// missed: they predate this work, and changing them touches surfaces
-    /// nothing here tests.
+    /// Handles the sub-cent case ONLY. An exact zero still renders "$0.00",
+    /// which is right for a total and wrong for a price nobody could compute —
+    /// use `money(tokens:cost:)` wherever tokens are shown beside the amount.
+    ///
+    /// Surfaces outside the quota lens still call `usd` directly and can print
+    /// the same false zero. Deliberately left alone: they predate this work and
+    /// changing them touches views nothing here tests. Deliberately not
+    /// enumerated either — a list of view names in a comment goes stale and
+    /// then misdescribes what it defers, which is worse than no list.
+    /// `grep -rn 'Format\.usd(' Sources/` is the current answer.
+    /// An amount shown beside a token count.
+    ///
+    /// `"$%.2f"` cannot distinguish "nothing" from "nothing we could price"
+    /// from "less than half a cent". All three render "$0.00" and only the
+    /// first is true, so a line reading "5.2M tokens · $0.00" states a price
+    /// nobody has. Usage with no price at all gets a dash; priced usage below
+    /// the format's resolution is said to be small; an exact zero beside no
+    /// tokens is a real total and keeps its "$0.00".
+    static func money(tokens: Int64, cost: Double) -> String {
+        if cost <= 0, tokens > 0 { return "—" }
+        return usdOrBelowCent(cost)
+    }
+
     static func usdOrBelowCent(_ amount: Double) -> String {
         // `amount == 0` catches -0.0 too, which `usd` alone renders "$-0.00".
         if amount == 0 { return usd(0) }

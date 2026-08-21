@@ -60,12 +60,13 @@ struct QuotaSummaryLine: View {
                 }
                 if let today {
                     row(label: "Today", tint: .secondary) {
-                        // `usdOrBelowCent`: this pairs a token count with a
-                        // price, so "5.2K tokens · $0.00" is a claim about the
-                        // price rather than a total — a day of unpriced models,
-                        // or one totalling under half a cent, reads as free.
+                        // `money`, not `usdOrBelowCent`: the latter handles
+                        // only the sub-cent half. A day of entirely unpriced
+                        // models sums to exactly zero, so "5.2K tokens · $0.00"
+                        // — the case the first version of this comment claimed
+                        // to have fixed — survived it untouched.
                         Text(verbatim: "\(Format.compactTokens(today.tokens)) tokens · "
-                             + Format.usdOrBelowCent(today.cost))
+                             + Format.money(tokens: today.tokens, cost: today.cost))
                             .font(.caption)
                     }
                 }
