@@ -1412,9 +1412,11 @@ private struct DashboardSnapshot {
         }
         guard Self.windowScanToken == scanToken else { return }
         // Only THIS client's failure. A bare `nil` cleared whichever client
-        // was recorded, so a success on B erased A's failure although no scan
-        // for A had succeeded — forgetting a failure is not the same as
-        // answering it.
+        // was recorded, and this scan's range is derived from THIS client's
+        // window, so it is not evidence about anyone else's — B's window can
+        // start earlier than it reaches. The cached branch above is where a
+        // scan clears another client, because that is where coverage is
+        // actually tested.
         windowScanFailedClients = Self.scanFailures(
             windowScanFailedClients, resolvedBy: client)
         unionScan = UnionScan(
@@ -1441,13 +1443,15 @@ private struct DashboardSnapshot {
     /// the never-ending spinner this state exists to remove. Half a rule is not
     /// a rule.
     ///
-    /// An entry is cleared when a scan covering that client's window succeeds,
-    /// WHOEVER RAN IT. `unionScan` is one cross-client cache and
-    /// `windowUsage(from:until:)` takes no client, so coverage is a question
-    /// about time ranges and nothing else: a scan run for A, or for the
-    /// all-agent equivalence, clears B on B's next visit as soon as it is found
-    /// to cover B's window. What never clears an entry is a scan that does not
-    /// cover it — forgetting a failure is not the same as answering it.
+    /// Two ways an entry is cleared, and the second is the one that keeps being
+    /// got wrong. Its own scan succeeds. Or, on its next visit, the cached
+    /// `unionScan` is found to cover its window AND to be younger than
+    /// `unionScanMaxAge` — whoever ran that scan, because `unionScan` is one
+    /// cross-client cache and `windowUsage(from:until:)` takes no client at
+    /// all. Both conjuncts are load-bearing: a covering scan that has aged out
+    /// clears nothing, and the client rescans instead.
+    ///
+    /// What never clears an entry is a scan that does not cover its window.
     ///
     /// Deliberately not cleared when a retry STARTS: the card would then flip
     /// failed → loading → failed on every poll, and the last settled answer is
