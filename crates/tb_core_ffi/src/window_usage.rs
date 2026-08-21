@@ -82,10 +82,25 @@ fn compute(
     let token =
         tokscale_core::local_source_change_token(&context.parse_options(None, None)).unwrap_or(0);
     let data = run(context, from_ms, until_ms)?;
-    crate::WINDOW_USAGE_CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(key, (Instant::now(), token, data.clone()));
+    {
+        let mut cache = crate::WINDOW_USAGE_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // One entry, not a history. The key carries `until_ms` floored to the
+        // minute and the consumer polls every 60s with `until = now`, so each
+        // poll mints a key that will never be asked for again — and this map is
+        // a process-lifetime static with no eviction anywhere on the production
+        // path. Every minute the Quota lens stayed open therefore left a whole
+        // window's messages resident for the life of the app.
+        //
+        // Measured on the shipping build: ~39 MB per minute with the lens open,
+        // and none of it returned when it closed — 507 MB before opening, 1451
+        // MB after ten minutes and a close. Clearing keeps the hit that matters
+        // (a second call inside the same minute still finds this entry) and
+        // drops the ones that cannot be hit again by construction.
+        cache.clear();
+        cache.insert(key, (Instant::now(), token, data.clone()));
+    }
     Ok(data)
 }
 
@@ -182,6 +197,35 @@ mod tests {
         assert_eq!(scan_count(), before + 1);
         // If until_ms is no longer quantised, these two calls use different
         // keys and this assertion catches the accidental 0%-hit-rate change.
+    }
+
+    #[test]
+    fn cache_keeps_only_the_newest_window() {
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let context = crate::LocalSourceContext::for_home(PathBuf::from("/private/tmp"));
+        let from_ms = 1_700_000_000_000;
+        crate::WINDOW_USAGE_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+
+        // Three different minutes: exactly what a poll every 60s produces, and
+        // what used to leave three whole scans resident for ever.
+        for minute in 0..3 {
+            cached(&context, from_ms, from_ms + 60_000 * (minute + 1))
+                .expect("window scan");
+        }
+        let cache = crate::WINDOW_USAGE_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            cache.len(),
+            1,
+            "the map is a process-lifetime static with no eviction, so anything \
+             it keeps beyond the newest entry is kept until the app exits"
+        );
     }
 
     #[test]
