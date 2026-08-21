@@ -33,6 +33,16 @@ public struct QuotaHeatmap: Equatable, Sendable {
         peak: 0, total: 0, unplacedPercent: 0, observedDays: 0)
 
     public var isEmpty: Bool { total <= 0 }
+
+    /// Whether the allowance moved at all, placed or not.
+    ///
+    /// NOT `!isEmpty`. `total` counts only what the grid could place, so a
+    /// window whose every reading pair straddles more than `maximumGapSeconds`
+    /// has `total == 0` while having consumed real allowance. Treating that as
+    /// nothing dropped the window from the picker and made the card report "no
+    /// allowance movement recorded yet" — the opposite of what happened, with
+    /// the one line that explains it unreachable behind the same condition.
+    public var hasMovement: Bool { !isEmpty || unplacedPercent >= 1 }
 }
 
 public enum QuotaHeatmapFold {

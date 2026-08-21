@@ -1142,7 +1142,12 @@ private struct DashboardSnapshot {
                     let points = curve.points
                     let grid = QuotaHeatmapFold.build(points: points)
                     heatmaps["\(agent.clientId)|\(window.cardId)"] = grid
-                    if !grid.isEmpty {
+                    // Unplaced-only windows stay in the picker. `total` is
+                    // zero when every reading pair straddles more than six
+                    // hours, but the allowance still moved; dropping the window
+                    // made the card report "nothing recorded yet" and put the
+                    // line that explains it out of reach.
+                    if grid.hasMovement {
                         heatmapWindows.append(QuotaHeatmapWindow(
                             clientId: agent.clientId, cardId: window.cardId,
                             windowLabel: window.label, total: grid.total))

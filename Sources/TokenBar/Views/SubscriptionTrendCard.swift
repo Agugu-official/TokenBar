@@ -74,16 +74,26 @@ struct SubscriptionTrendCard: View {
                 selection: Binding(get: { metric }, set: { metricRaw = $0.rawValue }),
                 options: Metric.allCases.map { (value: $0, label: $0.label) })
         } content: {
-            if let trend, !trend.days.isEmpty, peak > 0 {
-                chart(trend)
-                axis(trend)
-                legend(trend)
-                undeclaredHint(trend)
-            } else if trend != nil {
+            switch Self.state(trend: trend, metric: metric) {
+            case .chart:
+                if let trend {
+                    chart(trend)
+                    axis(trend)
+                    legend(trend)
+                    undeclaredHint(trend)
+                }
+            case .metricUnavailable:
+                placeholder(Text(
+                    (metric == .cost
+                        ? "Usage recorded, but none of it is priced."
+                        : "Usage recorded, but it carries no token counts.").localized)
+                    .font(.caption)
+                    .foregroundStyle(.secondary))
+            case .noUsage:
                 placeholder(Text("No usage recorded in this range.".localized)
                     .font(.caption)
                     .foregroundStyle(.secondary))
-            } else {
+            case .loading:
                 placeholder(LoadingLine(title: "Reading daily usage…"))
             }
         }
@@ -95,6 +105,31 @@ struct SubscriptionTrendCard: View {
     private var peak: Double {
         guard let trend else { return 0 }
         return metric == .cost ? trend.peakCost : Double(trend.peakTokens)
+    }
+
+    enum ContentState: Equatable {
+        case loading
+        case chart
+        /// Usage was recorded, but the SELECTED metric has none of it.
+        case metricUnavailable
+        case noUsage
+    }
+
+    /// Which of the four things this card can show.
+    ///
+    /// Lifted out of `body` because the defect it exists to prevent lives in
+    /// the branch order, and a condition written inside a SwiftUI view cannot
+    /// be asserted on. `peak` is metric-specific, so testing it alone reported
+    /// the whole range as empty whenever the other metric held everything —
+    /// unpriced models in Price view, cost-carrying rows without token counts
+    /// in Tokens view. The range is a fact about the data; only the copy is a
+    /// fact about the toggle.
+    static func state(trend: SubscriptionTrend?, metric: Metric) -> ContentState {
+        guard let trend else { return .loading }
+        guard !trend.days.isEmpty, trend.peakCost > 0 || trend.peakTokens > 0
+        else { return .noUsage }
+        let selected = metric == .cost ? trend.peakCost : Double(trend.peakTokens)
+        return selected > 0 ? .chart : .metricUnavailable
     }
 
     private func placeholder(_ content: some View) -> some View {

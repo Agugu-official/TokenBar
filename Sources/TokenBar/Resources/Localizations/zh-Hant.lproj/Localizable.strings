@@ -497,3 +497,6 @@
 "10%% of quota ~ %@, unpriced models, ±%@%%" = "額度 10%% ≈ %@ token（模型無定價，誤差 ±%@%%）";
 "unpriced models, ±%@%%" = "模型無定價，誤差 ±%@%%";
 "10%% of quota ~ %@ API-equivalent, tokens unavailable, ±%@%%" = "額度 10%% ≈ %@（API 等值，無 token 明細，誤差 ±%@%%）";
+"%@%% consumed, but every pair of readings was too far apart to place on the grid. It fills in as sampling gets denser." = "已消耗 %@%%，但每一組讀數的間隔都太遠，無法定位到格子上。取樣變密之後會逐步填上。";
+"Usage recorded, but none of it is priced." = "有記錄到用量，但都沒有定價。";
+"Usage recorded, but it carries no token counts." = "有記錄到用量，但沒有附帶 token 數。";

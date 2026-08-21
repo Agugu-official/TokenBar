@@ -60,6 +60,17 @@ struct QuotaHeatmapCard: View {
                 heatmap(grid)
                 hourAxis
                 footnote(grid)
+            } else if let grid, grid.hasMovement {
+                // Movement WAS recorded — every pair of readings was simply too
+                // far apart to place it on a grid, which leaves `total` at zero.
+                // Falling through to "nothing recorded yet" stated the opposite
+                // of the truth, and hid the one line that explains it.
+                Text("%@%% consumed, but every pair of readings was too far apart to place on the grid. It fills in as sampling gets denser."
+                    .localized(String(Int(grid.unplacedPercent.rounded()))))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else if attempted {
                 Text("No allowance movement recorded yet. It accumulates as TokenBar runs.")
                     .font(.caption)

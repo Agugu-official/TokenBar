@@ -11424,6 +11424,19 @@ enum SelfTest {
         expect(sparse.total == 0 && abs(sparse.unplacedPercent - 9) < 1e-9,
                "QM3 consumption between readings 7h apart is unplaced, not spread")
 
+        // QM4. That same grid still counts as a window where the allowance
+        // moved. `isEmpty` reads `total`, which counts only what could be
+        // placed, so an unplaced-only window was dropped from the picker and
+        // the card then reported "no allowance movement recorded yet" — the
+        // opposite of what QM3 just measured, with the line that explains it
+        // unreachable behind the same condition.
+        expect(sparse.isEmpty && sparse.hasMovement,
+               "QM4 a window whose movement is entirely unplaced is empty as a GRID "
+                   + "but is not a window without movement")
+        expect(!QuotaHeatmap.empty.hasMovement,
+               "QM4 and a window with nothing recorded at all still has no movement, "
+                   + "so the honest empty state is still reachable")
+
         // QH-A. The running cycle is not history. It appears in a strip
         // captioned "past windows", stands beside completed spans as though
         // comparable, and counts toward the three-cycle threshold the
@@ -12187,6 +12200,37 @@ enum SelfTest {
                "ST5 stacking order is by total cost, so the biggest payer is the base")
         expect(stTrend.peakCost == 100,
                "ST6 the peak is a DAY total, not the range total")
+
+        // ST8. Which of the four things the card shows. The empty state is a
+        // claim about the RANGE; only the copy is a claim about the toggle.
+        // Deriving it from the metric-specific peak reported recorded usage as
+        // absent whenever the other metric held all of it — the default Price
+        // view over unpriced models, and its mirror in Tokens.
+        // Through the fold, not a hand-built value: the initialisers are
+        // internal to Core, and a fixture that cannot be produced by the
+        // pipeline is a fixture the pipeline need not respect.
+        let stTokensOnly = SubscriptionTrendFold.build(
+            points: [seriesPoint("2026-08-16", .assigned("claude"), "unpriced", 900, 0)],
+            today: "2026-08-16", days: 1)
+        let stCostOnly = SubscriptionTrendFold.build(
+            points: [seriesPoint("2026-08-16", .assigned("claude"), "opaque", 0, 12)],
+            today: "2026-08-16", days: 1)
+        expect(
+            SubscriptionTrendCard.state(trend: stTokensOnly, metric: .cost)
+                == .metricUnavailable
+                && SubscriptionTrendCard.state(trend: stTokensOnly, metric: .tokens) == .chart,
+            "ST8 unpriced usage draws in Tokens and says so in Price, rather than "
+                + "reporting the range as empty")
+        expect(
+            SubscriptionTrendCard.state(trend: stCostOnly, metric: .tokens)
+                == .metricUnavailable
+                && SubscriptionTrendCard.state(trend: stCostOnly, metric: .cost) == .chart,
+            "ST8 and the mirror holds for usage that carries a cost but no token counts")
+        expect(
+            SubscriptionTrendCard.state(trend: .empty, metric: .cost) == .noUsage
+                && SubscriptionTrendCard.state(trend: nil, metric: .cost) == .loading,
+            "ST8 a genuinely empty range is still reported as empty, and a range not "
+                + "yet read is still reported as loading")
 
         // A DST-safe walk, checked against a transition the arithmetic version
         // gets wrong: 2026-11-01 is the US fall-back day.
