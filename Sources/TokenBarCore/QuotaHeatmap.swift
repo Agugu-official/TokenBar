@@ -42,7 +42,14 @@ public struct QuotaHeatmap: Equatable, Sendable {
     /// nothing dropped the window from the picker and made the card report "no
     /// allowance movement recorded yet" — the opposite of what happened, with
     /// the one line that explains it unreachable behind the same condition.
-    public var hasMovement: Bool { !isEmpty || unplacedPercent >= 1 }
+    ///
+    /// Any positive value, not a full point. Curve readings are arbitrary
+    /// finite percentages, so a pair of readings seven hours apart moving 0.5
+    /// points is movement this fold recorded and a `>= 1` test would discard.
+    /// The one-point threshold belongs to the footnote, which is a question
+    /// about whether a line is worth drawing, not about whether anything
+    /// happened.
+    public var hasMovement: Bool { !isEmpty || unplacedPercent > 0 }
 }
 
 public enum QuotaHeatmapFold {

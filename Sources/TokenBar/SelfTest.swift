@@ -11436,6 +11436,17 @@ enum SelfTest {
         expect(!QuotaHeatmap.empty.hasMovement,
                "QM4 and a window with nothing recorded at all still has no movement, "
                    + "so the honest empty state is still reachable")
+        // QM5. Any positive unplaced movement, not a full point. Curve readings
+        // are arbitrary finite percentages, so a pair seven hours apart moving
+        // half a point is movement this fold recorded — and a `>= 1` test threw
+        // it away, dropping the window from the picker exactly as QM4 describes.
+        let qm5 = QuotaHeatmapFold.build(
+            points: [heatPoint(1_767_661_200, 20, reset: monReset),
+                     heatPoint(1_767_686_400, 20.5, reset: monReset)],
+            timeZone: utc)
+        expect(qm5.total == 0 && qm5.unplacedPercent > 0 && qm5.unplacedPercent < 1
+                   && qm5.hasMovement,
+               "QM5 half a point of unplaced movement is still movement")
 
         // QH-A. The running cycle is not history. It appears in a strip
         // captioned "past windows", stands beside completed spans as though

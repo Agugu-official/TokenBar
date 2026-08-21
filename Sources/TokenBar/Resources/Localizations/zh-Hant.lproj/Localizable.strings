@@ -502,3 +502,4 @@
 "Usage recorded, but it carries no token counts." = "有記錄到用量，但沒有附帶 token 數。";
 "Other subscriptions in the same hours: %@" = "同一時段的其他訂閱：%@";
 "Local usage could not be read." = "無法讀取本機用量。";
+"tokens unavailable, ±%@%%" = "無 token 明細，誤差 ±%@%%";

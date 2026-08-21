@@ -66,7 +66,7 @@ struct QuotaHeatmapCard: View {
                 // Falling through to "nothing recorded yet" stated the opposite
                 // of the truth, and hid the one line that explains it.
                 Text("%@%% consumed, but every pair of readings was too far apart to place on the grid. It fills in as sampling gets denser."
-                    .localized(String(Int(grid.unplacedPercent.rounded()))))
+                    .localized(Self.percent(grid.unplacedPercent)))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -288,6 +288,17 @@ struct QuotaHeatmapCard: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Text("unpriced models, ±%@%%".localized(String(errorPercent)))
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if case let .costOnly(costPerTenth, errorPercent) = row {
+            // The mirror of `.tokensOnly`, and it fell through to "not enough
+            // history" for the same wrong reason: the history IS sufficient,
+            // and the money estimate is the part of the answer that exists.
+            Text(verbatim: "~ " + Format.usd(costPerTenth * (percent / 10)))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("tokens unavailable, ±%@%%".localized(String(errorPercent)))
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
