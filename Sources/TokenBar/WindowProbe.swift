@@ -143,40 +143,28 @@ enum WindowProbe {
                               clientId: agent.clientId, windowKey: key, generation: gen)) ?? nil,
                           !curve.points.isEmpty
                     else { continue }
-                    // The uncapped fold, reproduced here so the comparison does
-                    // not depend on the very cap it is measuring.
-                    var byCycle: [Int64: [QuotaCurvePoint]] = [:]
-                    for pt in curve.points where pt.resetAt != curve.activeResetAt {
-                        byCycle[pt.resetAt, default: []].append(pt)
-                    }
-                    let uncapped: [Int64] = byCycle.compactMap { resetAt, raw in
-                        let sorted = raw.sorted { $0.sampledAt < $1.sampledAt }
-                        guard let last = sorted.last, let first = sorted.first,
-                              last.durationSeconds > 0
-                        else { return nil }
-                        return min(resetAt - last.durationSeconds, first.sampledAt)
-                    }
-                    guard let oldestUncapped = uncapped.min() else { continue }
-                    let capped = QuotaHistoryFold.cycles(
+                    let full = QuotaHistoryFold.cycles(
                         points: curve.points, activeResetAt: curve.activeResetAt)
-                    guard let oldestCapped = capped.last?.evidenceStartMs else { continue }
+                    let capped = QuotaHistoryFold.considered(full)
+                    guard let oldestUncapped = full.last?.evidenceStartMs,
+                          let oldestCapped = capped.last?.evidenceStartMs
+                    else { continue }
                     let nowS = Int64(Date().timeIntervalSince1970)
-                    let beforeDays = Double(nowS - oldestUncapped) / 86400
+                    let beforeDays = Double(nowS - oldestUncapped / 1000) / 86400
                     let afterDays = Double(nowS - oldestCapped / 1000) / 86400
                     print(String(format:
                         "  %@ / %@  週期 %d → %d，掃描回溯 %.2f 天 → %.2f 天%@",
                         agent.clientId as NSString, w.cardId as NSString,
-                        uncapped.count, capped.count, beforeDays, afterDays,
-                        (uncapped.count > capped.count ? "  ← 收窄" : "") as NSString))
+                        full.count, capped.count, beforeDays, afterDays,
+                        (full.count > capped.count ? "  ← 收窄" : "") as NSString))
                     // Windows with enough history to sweep. Deliberately not
                     // "windows the cap currently bites": the constant is set
                     // from where the estimate collapses, which has to stay
                     // measurable while the cap sits above it.
-                    guard uncapped.count >= 8 else { continue }
-                    let full = QuotaHistoryFold.cyclesUncapped(
-                        points: curve.points, activeResetAt: curve.activeResetAt)
+                    guard full.count >= 8 else { continue }
+                    // `evidenceStartMs` is already milliseconds; `nowS` is not.
                     guard let messages = try? TBCore.windowUsage(
-                        from: oldestUncapped * 1000, until: nowS * 1000).messages
+                        from: oldestUncapped, until: nowS * 1000).messages
                     else { continue }
                     let confirmed = UsageAttribution.confirmed().records
                     func estimate(_ set: [QuotaCycle]) -> WindowEquivalence.Row {

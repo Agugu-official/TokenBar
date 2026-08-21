@@ -1175,7 +1175,13 @@ private struct DashboardSnapshot {
                 quotaHeatmapWindows = heatmapWindows.sorted { $0.total > $1.total }
                 qualifyingCycles = Dictionary(
                     uniqueKeysWithValues: collected.compactMap { window in
-                        let admitted = window.cycles.filter {
+                        // Capped BEFORE admitting, which is what the probe
+                        // sweep measured and what actually bounds the scan:
+                        // capping the admitted count instead would let 32
+                        // admitted cycles span a hundred recorded ones.
+                        // `collected` keeps the full list for the lifetime
+                        // summaries below.
+                        let admitted = QuotaHistoryFold.considered(window.cycles).filter {
                             $0.usedPercent >= WindowEquivalence.minimumDelta
                                 && $0.observedFraction >= WindowEquivalence.minimumObservedFraction
                         }

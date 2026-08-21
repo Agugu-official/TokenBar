@@ -158,16 +158,16 @@ public enum QuotaHistoryFold {
     /// the caller does not know, and then everything present is treated as
     /// finished, which is the old behaviour and the safe reading for a curve
     /// with no active group.
+    ///
+    /// Returns EVERY recorded cycle. The cap that bounds the message scan is
+    /// `considered(_:)`, applied by the consumers that pay for a scan — not
+    /// here. Putting it here looked like the tidier place ("bound it once, at
+    /// the source") and was wrong: `QuotaOverviewFold.summaries` derives
+    /// LIFETIME facts from this array — `peakPercent`, `neverExhausted`,
+    /// `cycleCount` — and costs no scan at all. A capped fold made a window
+    /// that ran out thirty-three cycles ago report that it never had.
     public static func cycles(
         points: [QuotaCurvePoint], activeResetAt: Int64? = nil
-    ) -> [QuotaCycle] {
-        allCycles(points: points, activeResetAt: activeResetAt)
-            .prefix(consideredCycles)
-            .map { $0 }
-    }
-
-    private static func allCycles(
-        points: [QuotaCurvePoint], activeResetAt: Int64?
     ) -> [QuotaCycle] {
         var grouped: [Int64: [QuotaCurvePoint]] = [:]
         for point in points where point.resetAt != activeResetAt {
@@ -195,13 +195,14 @@ public enum QuotaHistoryFold {
         .sorted { $0.resetAtMs > $1.resetAtMs }
     }
 
-    /// The same fold without the cap. Exists for `--window-probe`, which has to
-    /// be able to measure what the cap changed without depending on the cap.
-    /// Not called from the shipping UI.
-    public static func cyclesUncapped(
-        points: [QuotaCurvePoint], activeResetAt: Int64? = nil
-    ) -> [QuotaCycle] {
-        allCycles(points: points, activeResetAt: activeResetAt)
+    /// The newest cycles a scan-paying surface may look at.
+    ///
+    /// Applied by the consumers whose cost grows with the answer: the history
+    /// card's cycle list, which bounds the union scan through its oldest
+    /// entry's `evidenceStartMs`, and the admitted set behind the equivalence.
+    /// Lifetime summaries deliberately do not call this.
+    public static func considered(_ cycles: [QuotaCycle]) -> [QuotaCycle] {
+        Array(cycles.prefix(consideredCycles))
     }
 
     /// How far back any cycle-derived surface reaches, in cycles.

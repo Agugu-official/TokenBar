@@ -307,8 +307,10 @@ enum WindowCardLoader {
         let attempt: QuotaCurve?
         do { attempt = try read(clientId, key, generation) } catch { return nil }
         guard let curve = attempt else { return [] }
-        return QuotaHistoryFold.cycles(
-            points: curve.points, activeResetAt: curve.activeResetAt)
+        // Capped: this list is what the history card draws AND what bounds the
+        // union scan, through its oldest entry's `evidenceStartMs`.
+        return QuotaHistoryFold.considered(QuotaHistoryFold.cycles(
+            points: curve.points, activeResetAt: curve.activeResetAt))
     }
 
     /// The `"<clientId>|<cardId>"` the card is currently showing, or nil when

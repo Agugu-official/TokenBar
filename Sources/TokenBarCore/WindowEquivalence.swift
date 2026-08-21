@@ -168,11 +168,21 @@ public enum WindowEquivalence {
         guard delta >= minimumDelta else {
             return .insufficient(deltaPercent: delta, errorPercent: error)
         }
+        // Clamping, not truncating: a saturated token count over a small delta
+        // scales past `Int64`, and the plain initializer traps on a Double
+        // outside the range.
+        let perTenth = clamped((Double(tokens) / delta * 10).rounded())
+        // Same split as the pooled path, for the same reason. Admitting either
+        // kind of evidence above and then always answering `.ratio` presented
+        // the MISSING metric as a measured zero: an unpriced window read as a
+        // $0 API equivalent, and a cost-only one as 0 tokens. Both are
+        // unavailable, which is a different claim.
+        guard cost > 0 else { return .tokensOnly(tokensPerTenth: perTenth, errorPercent: error) }
+        guard tokens > 0 else {
+            return .costOnly(costPerTenth: cost / delta * 10, errorPercent: error)
+        }
         return .ratio(
-            // Clamping, not truncating: a saturated token count over a small
-            // delta scales past `Int64`, and the plain initializer traps on a
-            // Double outside the range.
-            tokensPerTenth: clamped((Double(tokens) / delta * 10).rounded()),
+            tokensPerTenth: perTenth,
             costPerTenth: cost / delta * 10,
             errorPercent: error)
     }

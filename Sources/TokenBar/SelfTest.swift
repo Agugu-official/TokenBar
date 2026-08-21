@@ -11467,14 +11467,20 @@ enum SelfTest {
             """.utf8))
         }
         let qhcWeek: Int64 = 604_800
+        // The oldest cycle is the only one that ran the allowance out, so it is
+        // also the fixture for what the cap must NOT hide.
         let qhcPoints: [QuotaCurvePoint] = (0..<40).flatMap { index -> [QuotaCurvePoint] in
             let reset = monReset + Int64(index) * qhcWeek
             return [qhcPoint(reset - qhcWeek + 60, 10, reset: reset, duration: qhcWeek),
-                    qhcPoint(reset - 60, 30, reset: reset, duration: qhcWeek)]
+                    qhcPoint(reset - 60, index == 0 ? 100 : 30,
+                             reset: reset, duration: qhcWeek)]
         }
-        let qhcCycles = QuotaHistoryFold.cycles(points: qhcPoints)
+        let qhcAll = QuotaHistoryFold.cycles(points: qhcPoints)
+        let qhcCycles = QuotaHistoryFold.considered(qhcAll)
+        expect(qhcAll.count == 40,
+               "QH-CAP the fold itself returns every recorded cycle")
         expect(qhcCycles.count == QuotaHistoryFold.consideredCycles,
-               "QH-CAP forty recorded cycles fold to the considered cap, not all forty")
+               "QH-CAP forty recorded cycles reduce to the considered cap")
         expect(
             qhcCycles.first?.resetAtMs == (monReset + 39 * qhcWeek) * 1000
                 && qhcCycles.last?.resetAtMs == (monReset + 8 * qhcWeek) * 1000,
@@ -11483,6 +11489,16 @@ enum SelfTest {
         expect(QuotaOverviewFold.stripLength <= QuotaHistoryFold.consideredCycles,
                "QH-CAP the widest surface drawn from these cycles still fits inside the "
                 + "cap, which would otherwise silently draw fewer")
+        // QH-CAP-LIFETIME. The cap belongs to the surfaces that pay for a scan.
+        // Lifetime summaries pay nothing and answer about ALL of history, so a
+        // cap applied at the fold made a window that ran out forty cycles ago
+        // report that it never had.
+        let qhcSummary = QuotaOverviewFold.summaries(windows: [
+            (clientId: "c", cardId: "w", label: "W", cycles: qhcAll)
+        ]).first
+        expect(qhcSummary?.neverExhausted == false && qhcSummary?.cycleCount == 40,
+               "QH-CAP-LIFETIME exhaustion older than the cap is still visible to the "
+                   + "overview, and the recorded count is not truncated by it")
 
         // QH-SHRINK. `startMs` comes from the NEWEST point's duration, so a
         // provider that shortens its reported window moves the cycle's start
@@ -12082,6 +12098,37 @@ enum SelfTest {
                           QuotaSample(atMs: 2_000, usedPercent: 20)],
                 messages: []) == .unaccounted(deltaPercent: 19),
             "V17 and an empty span still is not, so the check above is not vacuous")
+        // V21. Admitting either kind of evidence and then always answering
+        // `.ratio` presented the MISSING metric as a measured zero: the
+        // cost-only window above as `0` tokens, and its mirror as a $0 API
+        // equivalent. Unavailable and zero are different claims, and the pooled
+        // path already distinguished them.
+        let v21TokensOnly = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":1500,"client":"t","providerId":"t","modelId":"t","input":900,
+              "output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,"cost":0,
+              "isTurnStart":true}]
+            """.utf8))
+        let v21Samples = [QuotaSample(atMs: 1_000, usedPercent: 1),
+                          QuotaSample(atMs: 2_000, usedPercent: 20)]
+        func v21Kind(_ messages: [WindowMessage]) -> String {
+            switch WindowEquivalence.row(samples: v21Samples, messages: messages) {
+            case .ratio: return "ratio"
+            case .costOnly: return "costOnly"
+            case .tokensOnly: return "tokensOnly"
+            default: return "other"
+            }
+        }
+        expect(v21Kind(v17CostOnly) == "costOnly",
+               "V21 a window with cost but no tokens reports cost only, rather than a "
+                   + "ratio claiming zero tokens")
+        expect(v21Kind(v21TokensOnly) == "tokensOnly",
+               "V21 and a window with tokens but no price reports tokens only, rather "
+                   + "than a ratio claiming a $0 equivalent")
+        expect(v21Kind(v17CostOnly + v21TokensOnly) == "ratio",
+               "V21 and a window carrying both still reports a full ratio, so the two "
+                   + "checks above are not simply refusing everything")
         // V20. The three-cycle threshold guards BOTH estimates or neither.
         // Splitting the pooling without splitting the guard let a token figure
         // built from one cycle sit beside a properly supported money figure, on
