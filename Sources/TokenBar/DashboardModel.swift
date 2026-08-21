@@ -1067,10 +1067,15 @@ private struct DashboardSnapshot {
                 curve: readCurve, nowMs: now)
             // Fold in a usage half we already hold, so a stage-1 refresh does
             // not throw away a completed scan and blink back to loading.
-            if case let .quotaOnly(q) = state, let scan = unionScan,
+            if case let .quotaOnly(q, _) = state, let scan = unionScan,
                let (settled, usage) = WindowCardLoader.usageHalf(
                    quota: q, scan: scan, confirmed: UsageAttribution.confirmed().records) {
                 windowCards[clientId] = .ready(settled, usage)
+            } else if case let .quotaOnly(q, _) = state, windowScanFailed {
+                // The loader cannot know this — it never runs the scan. Carried
+                // in here so the card can say the scan failed instead of
+                // spinning under a chart that is already drawn.
+                windowCards[clientId] = .quotaOnly(q, scanFailed: true)
             } else if case .loading = state,
                       let held = windowCards[clientId]?.cardId,
                       held == WindowCardLoader.selectedCardId(
@@ -1350,9 +1355,12 @@ private struct DashboardSnapshot {
             if let cached = unionScan, cached.covers(start: from),
                Date().timeIntervalSince(cached.capturedAt) < Self.unionScanMaxAge
             { rebuildQuotaEquivalences(); return }
-            guard let usage = try? await source.windowUsage(from: from, until: now)
-            else { return }
+            guard let usage = try? await source.windowUsage(from: from, until: now) else {
+                if Self.windowScanToken == scanToken { windowScanFailed = true }
+                return
+            }
             guard Self.windowScanToken == scanToken else { return }
+            windowScanFailed = false
             unionScan = UnionScan(
                 fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages)
             rebuildQuotaEquivalences()
@@ -1373,15 +1381,33 @@ private struct DashboardSnapshot {
            Date().timeIntervalSince(cached.capturedAt) < Self.unionScanMaxAge {
             return
         }
-        guard let usage = try? await source.windowUsage(from: from, until: now)
-        else { return }
+        // A throw here is a SETTLED answer, not a slow one. Returning silently
+        // left the card in `.quotaOnly` with "Reading local usage…" under a
+        // drawn chart for as long as the failure lasted, which is a spinner
+        // that will never stop. The token check keeps an overtaken scan's
+        // failure from settling a newer request, exactly as its success is.
+        guard let usage = try? await source.windowUsage(from: from, until: now) else {
+            guard Self.windowScanToken == scanToken else { return }
+            windowScanFailed = true
+            refreshWindowQuotaHalves()
+            return
+        }
         guard Self.windowScanToken == scanToken else { return }
+        windowScanFailed = false
         unionScan = UnionScan(
             fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages)
         refreshWindowQuotaHalves()
         rebuildQuotaHistory()
         rebuildQuotaEquivalences()
     }
+
+    /// Whether the last stage-two scan settled with an error.
+    ///
+    /// Distinguishes "still scanning" from "asked and failed" — `.quotaOnly`
+    /// alone cannot, and both halves of the lens rendered the second as the
+    /// first. Cleared by the next successful scan, so a transient failure
+    /// heals without a separate reset.
+    private(set) var windowScanFailed = false
 
     private func reconcileQuotaRemaining(with payload: AgentUsagePayload) {
         guard source.allowsQuotaCachePersistence else { return }

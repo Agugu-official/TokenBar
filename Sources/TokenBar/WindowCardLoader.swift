@@ -200,7 +200,7 @@ enum WindowCardLoader {
             candidates: candidates, resolution: resolved, samples: samples,
             resetMs: window.resetsAt.flatMap(parseISO8601Ms),
             durationMs: window.durationSeconds.map { $0 * 1000 },
-            placementPending: pending, nowMs: nowMs))
+            placementPending: pending, nowMs: nowMs), scanFailed: false)
     }
 
     /// The earliest interval start across every candidate window of every

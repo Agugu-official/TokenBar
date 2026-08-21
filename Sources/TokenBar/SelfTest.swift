@@ -10966,7 +10966,7 @@ enum SelfTest {
             payload: wPayload, clientId: "codex", attempted: true,
             curve: { _, _, _ in wCurve }, nowMs: wNow * 1000)
         var stage1Placed = false
-        if case let .quotaOnly(q) = stage1 {
+        if case let .quotaOnly(q, _) = stage1 {
             if case .active = q.resolution { stage1Placed = q.samples.count == 2 }
         }
         expect(stage1Placed,
@@ -11181,7 +11181,7 @@ enum SelfTest {
         // because filtering from it would silently under-count.
         let late = UnionScan(fromMs: wNow * 1000, untilMs: wNow * 1000,
                              capturedAt: Date(), messages: [])
-        if case let .quotaOnly(q) = stage1 {
+        if case let .quotaOnly(q, _) = stage1 {
             expect(WindowCardLoader.usageHalf(quota: q, scan: late, confirmed: []) == nil,
                    "L2a a scan that begins after the window did cannot answer for it")
             let covering = UnionScan(

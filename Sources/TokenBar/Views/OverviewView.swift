@@ -58,7 +58,12 @@ struct OverviewView: View {
     private func card(_ card: OverviewCard) -> some View {
         switch card {
         case .quotaSummary:
-            if singleClient == nil {
+            // `limitsEnabled` too, not just the tab. Settings promises "Off
+            // hides the Agent-limits quota card everywhere — the Overview
+            // summary, every client's own tab, and this preview", and this is
+            // that Overview summary; only the `.limits` branch below was
+            // honouring it.
+            if singleClient == nil, limitsEnabled {
                 QuotaSummaryLine(
                     summary: quotaSummary, attempted: usageAttempted,
                     today: stats.perDayMap[Format.todayKey()].map {

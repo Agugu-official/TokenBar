@@ -51,7 +51,7 @@ enum WindowCardState: Sendable {
         // `WindowQuotaHalf.cardId` is already `"<clientId>|<cardId>"`; building
         // the pair again here produced `codex|codex|session.v1`, which matched
         // nothing and quietly disabled the retention it was added for.
-        case let .quotaOnly(half): return half.cardId
+        case let .quotaOnly(half, _): return half.cardId
         case let .ready(half, _): return half.cardId
         case .loading, .blocked: return nil
         }
@@ -66,8 +66,12 @@ enum WindowCardState: Sendable {
     /// mapping it to `loading` would spin forever.
     case noQuotaHistory(clientId: String, windowLabel: String,
                         candidates: [(cardId: String, label: String)], cardId: String)
-    /// Window placed; usage still scanning.
-    case quotaOnly(WindowQuotaHalf)
+    /// Window placed; the usage half is not in.
+    ///
+    /// `scanFailed` separates "still scanning" from "asked and failed". Without
+    /// it a persistently failing scan rendered identically to a slow one, so
+    /// the card sat under a drawn chart saying "Reading local usage…" forever.
+    case quotaOnly(WindowQuotaHalf, scanFailed: Bool)
     /// Both halves in.
     case ready(WindowQuotaHalf, WindowUsageHalf)
 }
@@ -75,7 +79,7 @@ enum WindowCardState: Sendable {
 extension WindowCardState {
     var quotaHalf: WindowQuotaHalf? {
         switch self {
-        case let .quotaOnly(q), let .ready(q, _): return q
+        case let .quotaOnly(q, _), let .ready(q, _): return q
         case .loading, .blocked, .noQuotaHistory: return nil
         }
     }

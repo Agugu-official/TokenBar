@@ -657,6 +657,7 @@ struct PopoverView: View {
                     singleClient: singleClient, clientIds: clientIds,
                     trace: model.trace, agentUsage: model.agentUsage,
                     usageAttempted: model.agentUsageAttempted,
+                    scanFailed: model.windowScanFailed,
                     // `@Observable` tracks per property, so reading this on a
                     // lens that draws no sparkline would make every
                     // `refreshWindowQuotaHalves()` write invalidate this body

@@ -17,6 +17,9 @@ struct QuotaView: View {
     let trace: [TraceBucket]
     let agentUsage: AgentUsagePayload?
     var usageAttempted = true
+    /// Whether the stage-two usage scan settled with an error, so the history
+    /// card can say so instead of spinning under rows that are already drawn.
+    var scanFailed = false
     /// Quota readings per `"<clientId>|<cardId>"`, for the sparklines.
     var windowCurves: [String: [QuotaSample]] = [:]
     /// The selected window's card state on a single-client tab.
@@ -59,7 +62,8 @@ struct QuotaView: View {
                 }
                 QuotaHistoryCard(
                     clientId: singleClient, cycles: quotaCycles,
-                    rows: quotaHistory, colors: colors, attempted: usageAttempted)
+                    rows: quotaHistory, colors: colors, attempted: usageAttempted,
+                    scanFailed: scanFailed)
             } else {
                 // Trend first: it answers "where is my spend going" across
                 // subscriptions, which the window-by-window card below cannot.

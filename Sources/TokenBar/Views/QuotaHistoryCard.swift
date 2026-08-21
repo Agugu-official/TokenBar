@@ -27,6 +27,10 @@ struct QuotaHistoryCard: View {
     /// Without this the card announced no history while the window card
     /// directly above it was still showing its own spinner.
     var attempted = true
+    /// Whether the usage scan settled with an error. Same distinction the
+    /// window card makes: an expanded row with no usage half is either still
+    /// scanning or done and failed, and only one of those is a spinner.
+    var scanFailed = false
 
     /// Observed, not read once: `span` above is accumulated only for messages
     /// assigned to THIS subscription, so with nothing declared every cycle
@@ -157,10 +161,23 @@ struct QuotaHistoryCard: View {
         }
     }
 
+    /// The rows actually on screen.
+    ///
+    /// One statement of it. The question is asked three times — the `ForEach`
+    /// draws `cycles.prefix(visibleRows)`, the equivalence accumulates over the
+    /// same set, and the usage bar scales against it — and had three answers,
+    /// the scale's being "every retained row". A hidden older cycle with the
+    /// largest total then set the scale and made every visible bar short, which
+    /// is precisely the comparison the bar claims to be making.
+    private var shownRows: [QuotaHistoryRow] {
+        let shown = Set(cycles.prefix(Self.visibleRows).map(\.resetAtMs))
+        return rows.filter { shown.contains($0.id) }
+    }
+
     /// The largest attributed token count among the visible rows, and therefore
     /// the usage bar's full width. Nil when nothing has been scanned yet.
     private var usageScale: Int64? {
-        let peak = rows.map(\.mineTokens).max() ?? 0
+        let peak = shownRows.map(\.mineTokens).max() ?? 0
         return peak > 0 ? peak : nil
     }
 
@@ -221,13 +238,27 @@ struct QuotaHistoryCard: View {
                 }
                 // The line that explains a flat bar. Without it a 1% window
                 // holding $535 of work looks like a quiet afternoon.
-                if row.otherTokens > 0 {
-                    Text("Other subscriptions in the same hours: %@ · %@".localized(
-                        Format.compactTokens(row.otherTokens), Format.usd(row.otherCost)))
+                // Tokens OR cost. A supported cost-only source — priced usage
+                // whose transcript carries no token counts — suppressed this
+                // line entirely, so a window full of another subscription's
+                // spend read as one with nothing else in it. The same reason
+                // the equivalence grew a `costOnly` row.
+                if row.otherTokens > 0 || row.otherCost > 0 {
+                    // Cost-only usage gets the one-value phrasing rather than
+                    // "0 · $12", which reads as a contradiction of itself.
+                    Text(row.otherTokens > 0
+                        ? "Other subscriptions in the same hours: %@ · %@".localized(
+                            Format.compactTokens(row.otherTokens), Format.usd(row.otherCost))
+                        : "Other subscriptions in the same hours: %@".localized(
+                            Format.usd(row.otherCost)))
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
                         .padding(.top, 1)
                 }
+            } else if scanFailed {
+                Text("Local usage could not be read.".localized)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
             } else {
                 LoadingLine(title: "Reading local usage…")
                     .scaleEffect(0.85, anchor: .leading)
@@ -246,8 +277,7 @@ struct QuotaHistoryCard: View {
     /// reason to accumulate is that the individual figures cannot be trusted.
     @ViewBuilder
     private var equivalence: some View {
-        let shown = Set(cycles.prefix(Self.visibleRows).map(\.resetAtMs))
-        let counted = rows.filter { shown.contains($0.id) }
+        let counted = shownRows
         if !counted.isEmpty {
             Text(WindowEquivalence.text(
                 WindowEquivalence.aggregate(

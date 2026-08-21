@@ -18,6 +18,19 @@ import TokenBarCore
 /// a probe that classified usage differently from the app would measure a
 /// different app.
 enum WindowProbe {
+    /// Saturating fold over untrusted transcript counters, matching the
+    /// production folds rather than diverging from them.
+    ///
+    /// `reduce(0, +)` traps on overflow, and the probe reads the very files
+    /// `WindowMessage.tokens` is deliberately bounded for. A malformed row must
+    /// not be able to kill the instrument — and worse than killing it, an
+    /// unbounded `tokens - cacheRead` can wrap NEGATIVE once `tokens`
+    /// saturates, which is a numerator that flows into a ratio and produces a
+    /// wrong constant instead of a crash.
+    private static func sum(_ values: [Int64]) -> Int64 {
+        values.reduce(Int64(0)) { $0.saturatingAdding($1) }
+    }
+
     private static func fmtDay(_ secs: Int64) -> String {
         let f = DateFormatter()
         f.dateFormat = "MM-dd HH:mm"
@@ -576,7 +589,7 @@ enum WindowProbe {
                         }
                     // Everything except cache read: measured to separate moved
                     // from still buckets 4.5x, vs 1.2x for input+output+reasoning.
-                    let spanFresh = spanMine.map { $0.tokens - $0.cacheRead }.reduce(0, +)
+                    let spanFresh = sum(spanMine.map(\.tokensExCacheRead))
                     let spanCost = spanMine.map(\.cost).reduce(0, +)
                     if dPct <= 0 {
                         print("      等值比：額度未移動（Δ \(dPct)%），無法計算")
@@ -605,9 +618,9 @@ enum WindowProbe {
                             && UsageAttribution.resolve(
                                 client: m.client, provider: m.providerId,
                                 model: m.modelId, records: confirmed) == .assigned(client) {
-                            fA += m.input + m.output + m.reasoning
-                            fB += m.input + m.output + m.reasoning + m.cacheWrite
-                            fC += m.tokens
+                            fA = sum([fA, m.input, m.output, m.reasoning])
+                            fB = sum([fB, m.input, m.output, m.reasoning, m.cacheWrite])
+                            fC = fC.saturatingAdding(m.tokens)
                         }
                     }
                     print(String(format:
@@ -633,8 +646,8 @@ enum WindowProbe {
                             && UsageAttribution.resolve(
                                 client: m.client, provider: m.providerId,
                                 model: m.modelId, records: confirmed) == .assigned(client) {
-                            v[0] += Double(m.input + m.output + m.reasoning)
-                            v[1] += Double(m.input + m.output + m.reasoning + m.cacheWrite)
+                            v[0] += Double(sum([m.input, m.output, m.reasoning]))
+                            v[1] += Double(sum([m.input, m.output, m.reasoning, m.cacheWrite]))
                             v[2] += Double(m.tokens)
                             v[3] += m.cost
                         }
@@ -669,13 +682,11 @@ enum WindowProbe {
                                     model: m.modelId, records: confirmed) == .assigned(client)
                             }
                         gaps.append(Int((h - l) / 60000))
-                        freshes.append(ms.map { $0.tokens - $0.cacheRead }.reduce(0, +))
+                        freshes.append(sum(ms.map(\.tokensExCacheRead)))
                         costs.append(ms.map(\.cost).reduce(0, +))
-                        kinds.append([ms.map(\.input).reduce(0, +),
-                                      ms.map(\.output).reduce(0, +),
-                                      ms.map(\.cacheRead).reduce(0, +),
-                                      ms.map(\.cacheWrite).reduce(0, +),
-                                      ms.map(\.reasoning).reduce(0, +)])
+                        kinds.append([sum(ms.map(\.input)), sum(ms.map(\.output)),
+                                      sum(ms.map(\.cacheRead)), sum(ms.map(\.cacheWrite)),
+                                      sum(ms.map(\.reasoning))])
                     }
                     print("      JSON: {\"used\":\(inWindow.map { Int($0.usedPercent) }), "
                           + "\"gaps\":\(gaps), \"fresh\":\(freshes), "
@@ -696,9 +707,9 @@ enum WindowProbe {
                         // Split it: cache reads dwarf everything by volume but
                         // cost a fraction of the quota, so a bar sized by total
                         // tokens cannot track the line by construction.
-                        let spent = mine.map(\.tokens).reduce(0, +)
-                        let fresh = mine.map { $0.input + $0.output + $0.reasoning }.reduce(0, +)
-                        let cacheR = mine.map(\.cacheRead).reduce(0, +)
+                        let spent = sum(mine.map(\.tokens))
+                        let fresh = sum(mine.map { sum([$0.input, $0.output, $0.reasoning]) })
+                        let cacheR = sum(mine.map(\.cacheRead))
                         print(String(format: "        +%.3f%%  總 %9ld (新鮮 %8ld, cacheR %9ld)  (%.0f 分)",
                                      b.usedPercent - a.usedPercent, spent, fresh, cacheR,
                                      Double(hi - lo) / 60000))

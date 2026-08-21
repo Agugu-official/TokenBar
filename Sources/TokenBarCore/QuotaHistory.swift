@@ -217,14 +217,18 @@ public enum QuotaHistoryFold {
     /// not at each consumer.
     ///
     /// 32, not the 16 the issue proposed. `--window-probe` swept the cap over
-    /// this machine's real history on 2026-08-21 and the estimate collapses
-    /// below 20 recorded cycles: at 20/24/28 the session window reports
-    /// 651k-689k tokens per 10% with an 8-10% error bar, and at 8/12/16 it
-    /// reports no figure at all, only a 242k-1054k spread. 16 is enough for the
-    /// jackknife in principle and was not on the data — admitted cycles are a
-    /// subset of recorded ones, so the pool empties faster than the count
-    /// suggests. A cap that turns a point estimate into a range is a
-    /// user-visible regression bought for a bound that 32 also provides.
+    /// this machine's real history on 2026-08-21: at 20 and above the session
+    /// window reports ~650-690k tokens per 10% with an 8-10% error bar, and at
+    /// 12 and below it reports no figure at all, only a 242k-955k spread.
+    ///
+    /// 16 is the cliff edge, and the sweep caught it moving. Two runs an hour
+    /// apart, differing by one newly completed cycle, put 16 on opposite sides:
+    /// `spread` at 27 recorded cycles, `ratio` at 28. A cap whose output flips
+    /// between "here is the number" and "we cannot say" as one ordinary cycle
+    /// closes is not a bound, it is a coin toss the user watches. 16 is enough
+    /// for the jackknife in principle and is not on the data, because admitted
+    /// cycles are a subset of recorded ones and the pool empties faster than
+    /// the count suggests.
     ///
     /// 32 does not bite on any window here today (the widest has 27), which is
     /// the point: it bounds the growth without moving a number anyone reads.

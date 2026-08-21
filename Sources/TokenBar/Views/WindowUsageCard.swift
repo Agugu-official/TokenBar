@@ -80,17 +80,19 @@ struct WindowUsageCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-        case let .quotaOnly(quota):
-            card(quota, usage: nil)
+        case let .quotaOnly(quota, scanFailed):
+            card(quota, usage: nil, scanFailed: scanFailed)
         case let .ready(quota, usage):
-            card(quota, usage: usage)
+            card(quota, usage: usage, scanFailed: false)
         }
     }
 
     /// One layout for both stages. `usage == nil` swaps content for
     /// placeholders of the same declared height; nothing else differs.
     @ViewBuilder
-    private func card(_ quota: WindowQuotaHalf, usage: WindowUsageHalf?) -> some View {
+    private func card(
+        _ quota: WindowQuotaHalf, usage: WindowUsageHalf?, scanFailed: Bool
+    ) -> some View {
         DashCard("%@ window".localized(quota.windowLabel), subtitle: stateLine(quota)) {
             SegmentedPicker(
                 selection: Binding(get: { asUsed }, set: { asUsed = $0 }),
@@ -115,6 +117,13 @@ struct WindowUsageCard: View {
                     if let usage {
                         equivalenceRow(
                             quota: quota, mine: usage.mine, interval: interval)
+                    } else if scanFailed {
+                        // A settled failure, not a slow success. The chart above
+                        // is drawn from the quota half and stays correct; only
+                        // this line has nothing to report.
+                        Text("Local usage could not be read.".localized)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     } else {
                         LoadingLine(title: "Reading local usage…")
                     }
