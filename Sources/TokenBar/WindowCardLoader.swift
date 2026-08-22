@@ -216,6 +216,23 @@ enum WindowCardLoader {
                 guard let reset = window.resetsAt.flatMap(parseISO8601Ms),
                       let duration = window.durationSeconds.map({ $0 * 1000 })
                 else { continue }
+                // The same anchor-validity rule the card itself applies, and
+                // the second place it is stated. An anchor more than one
+                // duration old — the app was offline, or the provider is
+                // reporting a long-dead cycle — resolves `.unavailable`, so
+                // the card draws nothing for it; yet `reset - duration` still
+                // dragged the union start back to wherever that dead reset
+                // sat, and opening the tab paid for a scan of months of local
+                // history to render a window that cannot display usage.
+                //
+                // `firstUsageAfterReset` is passed nil deliberately: both
+                // `.unavailable` verdicts are decided before the resolver
+                // consults usage, so the filter is exact without knowing the
+                // usage the scan has not run yet.
+                guard WindowResolver.resolve(
+                    resetsAtMs: reset, durationMs: duration, now: nowMs,
+                    firstUsageAfterReset: nil) != .unavailable
+                else { continue }
                 let start = reset - duration
                 if earliest == nil || start < earliest! { earliest = start }
             }

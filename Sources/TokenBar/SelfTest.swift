@@ -11306,6 +11306,43 @@ enum SelfTest {
                 == (wReset - 18_000) * 1000,
             "L3a a narrower client set gives a narrower union, so the bound is real")
 
+        // L3b. The union must apply the SAME anchor-validity rule the card
+        // does. A reset 60 days old resolves `.unavailable` — the card draws
+        // nothing for it — but `R - D` still put the scan 67 days back, so
+        // opening that tab paid for months of local history to render a window
+        // that displays no usage at all.
+        let wStale = ISO8601DateFormatter().string(
+            from: Date(timeIntervalSince1970: Double(wNow - 60 * 86_400)))
+        let withStale = windowPayload([
+            (client: "codex", windows: [(card: "session.v1", key: "session.v1",
+                                         resetsAt: wIso, durationSecs: 18_000)]),
+            (client: "claude", windows: [(card: "weekly.v1", key: "weekly.v1",
+                                          resetsAt: wStale, durationSecs: 604_800)]),
+        ])
+        expect(
+            WindowCardLoader.unionStart(
+                payload: withStale, clients: ["codex", "claude"], nowMs: wNow * 1000)
+                == (wReset - 18_000) * 1000,
+            "L3b a stale anchor the card cannot use does not widen the scan")
+
+        // The other direction, or the filter above is one `!=` away from
+        // excluding every past-reset window: a reset INSIDE one duration is
+        // `.idle`, which the card does display once usage places it, and its
+        // start must still bound the scan.
+        let wRecent = ISO8601DateFormatter().string(
+            from: Date(timeIntervalSince1970: Double(wNow - 3_600)))
+        let withRecent = windowPayload([
+            (client: "codex", windows: [(card: "session.v1", key: "session.v1",
+                                         resetsAt: wIso, durationSecs: 18_000)]),
+            (client: "claude", windows: [(card: "weekly.v1", key: "weekly.v1",
+                                          resetsAt: wRecent, durationSecs: 604_800)]),
+        ])
+        expect(
+            WindowCardLoader.unionStart(
+                payload: withRecent, clients: ["codex", "claude"], nowMs: wNow * 1000)
+                == (wNow - 3_600 - 604_800) * 1000,
+            "L3b a past reset still within one duration keeps bounding the scan")
+
         // L2a. `usageHalf` consumes a scan rather than issuing one: the single
         // scan is structural. It must also refuse a scan that starts too late,
         // because filtering from it would silently under-count.

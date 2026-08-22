@@ -510,7 +510,7 @@
 "Historically: lasts until reset" = "歷史：可撐到重置";
 "On average: lasts until reset" = "均速：可撐到重置";
 "Recently: runs out" = "近期：會用完";
-"%@ rows had no usable timestamp and are not in these totals" = "有 %@ 筆沒有可用的時間戳，未計入以上總計";
+"%@ scanned rows have no usable timestamp, so no window can count them" = "掃描到 %@ 筆沒有可用的時間戳，任何視窗都無法計入";
 "Quota history could not be read. It will be retried." = "無法讀取額度歷史，稍後會重試。";
 "Other subscriptions in the same hours:" = "同一時段的其他訂閱：";
 "Unclassified usage in the same hours:" = "同一時段的未分類用量：";

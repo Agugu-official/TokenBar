@@ -33,9 +33,12 @@ struct WindowUsageHalf: Sendable {
     let mine: [WindowMessage]
     let bars: [BarRect]
     let hits: [HitZone]
-    /// Rows the scan could not place in time. Carried alongside the totals they
-    /// are missing from, so the card can say the total is incomplete instead of
-    /// presenting it as definitive.
+    /// Rows the scan could not place in time — a property of the SCAN, not of
+    /// this card. It is the same number on every card by construction, and must
+    /// be presented as one: an undated row has no timestamp, so it belongs to
+    /// no window and cannot be attributed to one subscription's totals rather
+    /// than another's. Carried so the card can disclose the omission, never so
+    /// it can claim the omission was its own.
     var undatedCount: Int = 0
 }
 

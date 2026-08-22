@@ -408,10 +408,17 @@ struct WindowUsageCard: View {
     /// precisely so a consumer cannot present a window total as definitive
     /// while omitting them; every production path dropped the count until now,
     /// leaving `--window-probe` the only thing that ever mentioned it.
+    ///
+    /// Worded as a fact about the SCAN, not about this card's totals. The count
+    /// is scan-wide and cannot be narrowed: an undated row has no timestamp, so
+    /// its window membership is not merely unavailable through the FFI, it does
+    /// not exist to be recovered. Saying "not in these totals" on every card
+    /// therefore claimed each card had lost a row that may belong to another
+    /// subscription entirely — a per-card claim the data cannot support.
     @ViewBuilder
     private func undatedNote(_ usage: WindowUsageHalf?) -> some View {
         if let usage, usage.undatedCount > 0 {
-            Text("%@ rows had no usable timestamp and are not in these totals"
+            Text("%@ scanned rows have no usable timestamp, so no window can count them"
                 .localized(String(usage.undatedCount)))
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
