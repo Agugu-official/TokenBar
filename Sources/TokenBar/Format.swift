@@ -146,12 +146,38 @@ extension Format {
     /// Coarse remaining-time, e.g. "54m", "3h 54m", "5d 14h". Answers "how
     /// long have I got" and nothing finer; a window countdown that ticks
     /// seconds would redraw the card for no information.
+    /// Through the localized templates, not interpolated literals. The four
+    /// keys already exist and are already translated — this formatter simply
+    /// did not use them, so a Traditional Chinese build rendered "3h 5m 後重置"
+    /// with the units in one language and the sentence around them in another.
     static func duration(ms: Int64) -> String {
+        let (key, args) = durationTemplate(ms: ms)
+        return args.count == 2
+            ? key.localized(args[0], args[1])
+            : key.localized(args[0])
+    }
+
+    /// Which template a span uses, and with what numbers.
+    ///
+    /// Split out so the CHOICE can be asserted on. The rendering cannot: under
+    /// English every one of these templates is an identity, so a test that
+    /// compares the output string passes whether the code looks the key up or
+    /// interpolates it — which is how the interpolated version shipped and
+    /// rendered "3h 5m 後重置" in Traditional Chinese, units in one language
+    /// inside a sentence in another. Naming the key is the part a test can
+    /// still see when the translation is not loaded.
+    static func durationTemplate(ms: Int64) -> (key: String, args: [Int64]) {
         let mins = max(ms / 60_000, 0)
-        if mins < 60 { return "\(mins)m" }
+        if mins < 60 { return ("%lldm", [mins]) }
         let hours = mins / 60
-        if hours < 24 { return "\(hours)h \(mins % 60)m" }
-        return "\(hours / 24)d \(hours % 24)h"
+        if hours < 24 {
+            let rest = mins % 60
+            return rest > 0 ? ("%lldh %lldm", [hours, rest]) : ("%lldh", [hours])
+        }
+        let rest = hours % 24
+        return rest > 0
+            ? ("%lldd %lldh", [hours / 24, rest])
+            : ("%lldd", [hours / 24])
     }
 
     /// Wall-clock span of a hovered interval. POSIX locale so the string is

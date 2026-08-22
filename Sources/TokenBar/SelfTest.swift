@@ -11671,6 +11671,29 @@ enum SelfTest {
                 && DashboardModel.scanFailures([], resolvedBy: "claude").isEmpty,
             "QH-FAIL and a success for the client that failed does clear it, so the "
                 + "check above is not simply refusing to clear anything")
+        // FMT-DURATION. The window countdown interpolated its units instead of
+        // using the four localized templates that already existed and were
+        // already translated, so a Traditional Chinese build rendered
+        // "3h 5m 後重置" — units in one language, sentence in another.
+        // Asserted on the KEY, not the rendered string: under English every one
+        // of these templates is an identity, so comparing output passes whether
+        // the code looks the key up or interpolates it — verified by mutation,
+        // the interpolated version leaves the English run green.
+        expect(Format.durationTemplate(ms: 54 * 60_000) == ("%lldm", [54]),
+               "FMT-DURATION minutes use the localized minute template")
+        expect(Format.durationTemplate(ms: (3 * 60 + 5) * 60_000)
+                   == ("%lldh %lldm", [3, 5]),
+               "FMT-DURATION and hours with a remainder use the two-unit one")
+        expect(Format.durationTemplate(ms: 3 * 3_600_000) == ("%lldh", [3])
+                   && Format.durationTemplate(ms: 2 * 86_400_000) == ("%lldd", [2]),
+               "FMT-DURATION a whole number of hours or days uses the one-unit "
+                   + "template rather than printing an empty second unit")
+        expect(Format.durationTemplate(ms: (5 * 24 + 14) * 3_600_000)
+                   == ("%lldd %lldh", [5, 14]),
+               "FMT-DURATION and days with a remainder keep both")
+        expect(Format.duration(ms: (3 * 60 + 5) * 60_000) == "3h 5m",
+               "FMT-DURATION the rendered English string is unchanged")
+
         // QH-MONEY-UNPRICED. `usdOrBelowCent` covers only the sub-cent half:
         // an exact zero still renders "$0.00", which is right for a total and
         // wrong for a price nobody could compute. Two comments were written

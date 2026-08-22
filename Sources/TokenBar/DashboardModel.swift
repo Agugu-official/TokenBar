@@ -196,6 +196,26 @@ private struct DashboardSnapshot {
     private static let hourlyCacheLimit = 8
     private static var hourlyCache: [HourlyCacheKey: HourlyReport] = [:]
     private static var hourlyCacheOrder: [HourlyCacheKey] = []
+
+    /// Drop every process-wide cache holding scan-derived data.
+    ///
+    /// Called when the extra-scan-root registry is replaced. The engine clears
+    /// its own caches there and the setter's contract is that the next report
+    /// picks up the new roots — but these live on THIS side of the FFI, and
+    /// each serves its answer without asking the engine: the union scan for
+    /// `unionScanMaxAge`, the hourly fold and the reopen snapshot until
+    /// something evicts them. A root added in Settings would otherwise be
+    /// missing from the quota cards, or a removed one still counted, for as
+    /// long as the Swift copy outlived the change the engine had already
+    /// applied.
+    @MainActor
+    static func invalidateScanDerivedCaches() {
+        lastUnionScan = nil
+        lastSnapshot = nil
+        lastSnapshotOwner = nil
+        hourlyCache = [:]
+        hourlyCacheOrder = []
+    }
     /// Whether this model participates in the shared `lastSnapshot` cache.
     /// The newest participating instance becomes its sole writer.
     private let cachesSnapshot: Bool

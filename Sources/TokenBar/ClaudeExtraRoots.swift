@@ -126,8 +126,15 @@ enum ClaudeExtraRoots {
         let json = payloadJSON(load())
         applyQueue.async {
             let result = try? TBCore.setExtraScanPaths(json: json)
-            guard let completion else { return }
-            Task { @MainActor in completion(result) }
+            Task { @MainActor in
+                // The engine dropped its own caches inside the setter. These
+                // are the Swift ones, which answer without asking it — see
+                // `invalidateScanDerivedCaches`. Unconditional on `completion`,
+                // because whether a caller wants to hear about the result says
+                // nothing about whether the caches went stale.
+                DashboardModel.invalidateScanDerivedCaches()
+                completion?(result)
+            }
         }
     }
 }
