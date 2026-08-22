@@ -9890,14 +9890,15 @@ enum SelfTest {
             schema: Int = SnapshotEnvelope.schemaVersion,
             savedAt: Date = Date(),
             payload: UsagePayload? = nil,
-            knownYears: [String]? = nil
+            knownYears: [String]? = nil,
+            scanRoots: String = ClaudeExtraRoots.payloadJSON(ClaudeExtraRoots.load())
         ) -> SnapshotEnvelope {
             let p = payload ?? DemoData.payload(for: year)
             return SnapshotEnvelope(
                 snapshotSchemaVersion: schema, bundleIdentifier: identity.bundleIdentifier,
                 shortVersion: identity.shortVersion, buildNumber: identity.buildNumber,
                 savedAt: savedAt, selectedYear: year, payload: p,
-                knownYears: knownYears ?? p.years.map(\.year))
+                knownYears: knownYears ?? p.years.map(\.year), scanRoots: scanRoots)
         }
 
         let lp3Encoder: JSONEncoder = {
@@ -9954,6 +9955,25 @@ enum SelfTest {
         lp3ExpectRejected(
             "requested-year gate (snapshot all-time, process wants a year)",
             lp3Envelope(year: nil), expectedYear: "2033")
+        // LP3-ROOTS. Everything else here identifies the BUILD; nothing
+        // identified the INPUTS. Editing the scan roots dropped the in-memory
+        // caches and left this file passing every check, so the next open
+        // restored totals from a removed root — or without an added one — and
+        // published them as `.ready`.
+        lp3ExpectRejected(
+            "scan-root mismatch (snapshot built under a root this process does not have)",
+            lp3Envelope(
+                year: "2033",
+                scanRoots: ClaudeExtraRoots.payloadJSON(["/tmp/tokenbar-selftest-root"])))
+        // The other half, or the check above is satisfied by refusing any
+        // snapshot that mentions a root at all.
+        let lp3Roots = ClaudeExtraRoots.payloadJSON(["/tmp/tokenbar-selftest-root"])
+        expect(
+            SnapshotStore.validate(
+                lp3Envelope(year: "2033", scanRoots: lp3Roots),
+                expectedYear: "2033", identity: lp3Identity, scanRoots: lp3Roots),
+            "LP3-ROOTS and a snapshot built under the SAME roots is still accepted, "
+                + "so the gate is a comparison rather than a refusal")
         lp3ExpectRejected(
             "knownYears entry not four-digit ASCII",
             lp3Envelope(year: "2033", knownYears: ["abcd"]))
@@ -10228,7 +10248,7 @@ enum SelfTest {
         if let lp3AllowlistJSON { lp3CollectKeys(lp3AllowlistJSON, parentKey: nil, into: &lp3ActualKeys) }
         let lp3ExpectedKeys: Set<String> = [
             "snapshotSchemaVersion", "bundleIdentifier", "shortVersion", "buildNumber", "savedAt",
-            "selectedYear", "payload", "knownYears",
+            "selectedYear", "payload", "knownYears", "scanRoots",
             "meta", "generatedAt", "version", "dateRange", "start", "end",
             "summary", "totalTokens", "totalCost", "totalDays", "activeDays", "averagePerDay",
             "maxCostInSingleDay", "clients", "models",

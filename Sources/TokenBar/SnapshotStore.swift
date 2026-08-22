@@ -15,7 +15,7 @@ import TokenBarCore
 /// costs one deferred scan the model lenses already pay for on a cold open.
 struct SnapshotEnvelope: Codable, Sendable {
     /// Bump on any shape change. A mismatch is a cold fallback, never a migration.
-    static let schemaVersion = 1
+    static let schemaVersion = 2
 
     let snapshotSchemaVersion: Int
     let bundleIdentifier: String
@@ -26,6 +26,22 @@ struct SnapshotEnvelope: Codable, Sendable {
     let selectedYear: String?
     let payload: UsagePayload
     let knownYears: [String]
+    /// The scan roots this payload was produced under — the exact JSON handed
+    /// to the engine, so the recorded set and the scanned set cannot differ in
+    /// expansion, ordering, or deduplication.
+    ///
+    /// Everything else in this envelope identifies the BUILD. Nothing
+    /// identified the INPUTS, so editing the scan roots invalidated the
+    /// in-memory caches and left this file passing every check: the next open
+    /// restored totals from a removed root, or without an added one, and
+    /// published them as `.ready` until a fresh scan finished.
+    ///
+    /// A recorded fingerprint rather than deleting the file on the edit. The
+    /// edit is not the only way the roots can differ from the ones a snapshot
+    /// was built under — the app can be killed between the two, and the
+    /// registry is UserDefaults, which can move while the app is not running.
+    /// A check at restore covers every route; a delete covers one.
+    let scanRoots: String
 
     // Explicit for the same reason as the graph types: a field added later must
     // fail the exact-key test rather than being written to disk silently.
@@ -38,6 +54,7 @@ struct SnapshotEnvelope: Codable, Sendable {
         case selectedYear
         case payload
         case knownYears
+        case scanRoots
     }
 }
 
@@ -199,16 +216,27 @@ enum SnapshotStore {
     /// Every predicate that must hold before a decoded envelope may be shown.
     /// Rejects rather than partially restoring: a snapshot is either coherent or
     /// absent.
+    /// `scanRoots` is the root payload to check against, and it must match
+    /// exactly: a snapshot built under a different input set is not this
+    /// process's answer, whatever else about it still lines up.
+    ///
+    /// Defaulted to THIS process's current roots rather than to the empty set,
+    /// so a call site that forgets the argument is conservative instead of
+    /// wrong — the empty default would have quietly accepted every snapshot on
+    /// a machine that has extra roots configured, which is the exact case the
+    /// field exists for.
     static func validate(
         _ envelope: SnapshotEnvelope,
         expectedYear: String?,
         identity: BuildIdentity,
+        scanRoots: String = ClaudeExtraRoots.payloadJSON(ClaudeExtraRoots.load()),
         now: Date = Date()
     ) -> Bool {
         guard envelope.snapshotSchemaVersion == SnapshotEnvelope.schemaVersion,
               envelope.bundleIdentifier == identity.bundleIdentifier,
               envelope.shortVersion == identity.shortVersion,
-              envelope.buildNumber == identity.buildNumber
+              envelope.buildNumber == identity.buildNumber,
+              envelope.scanRoots == scanRoots
         else { return false }
 
         // The year this process will actually request, not the one that was
@@ -394,7 +422,8 @@ actor SnapshotWriter {
             savedAt: Self.canonicalDate,
             selectedYear: envelope.selectedYear,
             payload: envelope.payload,
-            knownYears: envelope.knownYears)
+            knownYears: envelope.knownYears,
+            scanRoots: envelope.scanRoots)
         guard let canonicalBytes = try? Self.encoder.encode(canonical) else { return }
         // Skip only when the content is unchanged AND the stamp is still fresh.
         // Dedup on content alone would let an idle machine keep the same bytes

@@ -221,6 +221,13 @@ private struct DashboardSnapshot {
         lastUnionScan = nil
         lastSnapshot = nil
         lastSnapshotOwner = nil
+        // The PERSISTED snapshot needs no clearing here, and deliberately gets
+        // none. It records the root set it was built under, so the restore in
+        // `init` rejects it by comparison — which also covers the routes a
+        // clear cannot reach: the process dying between the edit and the
+        // clear, and the registry being changed while the app is not running.
+        // Clearing it here as well would only turn a rejected restore into a
+        // missing one.
         hourlyCache = [:]
         hourlyCacheOrder = []
         // The fourth one, and it does not live on this type. The first version
@@ -341,7 +348,9 @@ private struct DashboardSnapshot {
                   let directory = resolvedSnapshotDirectory,
                   let bytes = SnapshotStore.readBytes(in: directory),
                   let envelope = try? Self.snapshotDecoder.decode(SnapshotEnvelope.self, from: bytes),
-                  SnapshotStore.validate(envelope, expectedYear: initialYear, identity: identity)
+                  SnapshotStore.validate(
+                      envelope, expectedYear: initialYear, identity: identity,
+                      scanRoots: ClaudeExtraRoots.payloadJSON(ClaudeExtraRoots.load()))
         {
             // The model report is never persisted (see SnapshotEnvelope's doc
             // comment), so a disk restore ALWAYS leaves modelReport/modelYear/
@@ -948,7 +957,8 @@ private struct DashboardSnapshot {
             savedAt: Date(),
             selectedYear: year,
             payload: payload,
-            knownYears: knownYears)
+            knownYears: knownYears,
+            scanRoots: ClaudeExtraRoots.payloadJSON(ClaudeExtraRoots.load()))
         Task.detached(priority: .utility) {
             await SnapshotWriter.shared.submit(sequence: sequence, envelope: envelope, directory: directory)
         }
