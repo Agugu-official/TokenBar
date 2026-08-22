@@ -377,9 +377,37 @@ enum WindowCardLoader {
         // No guard for an unobserved case, twice implemented wrongly, each
         // time causing the failure that IS observed. If a mixed-cycle window
         // ever appears, the fix belongs where the cycle is known: the engine.
-        return curve.points
+        let persisted = curve.points
             .filter { $0.sampledAt >= lo && $0.sampledAt <= hi }
             .sorted { $0.sampledAt < $1.sampledAt }
             .map { QuotaSample(atMs: $0.sampledAt * 1000, usedPercent: $0.usedPercent) }
+        return persisted + liveReading(window: window, after: persisted.last, nowMs: nowMs)
+    }
+
+    /// The reading the payload is carrying right now, which the store may not
+    /// have written yet.
+    ///
+    /// The history is a phase PROFILE, not a time series: it keeps one sample
+    /// per 48th of a cycle, replacing within the bucket rather than appending.
+    /// On a 5-hour session window that is a sample every six minutes and looks
+    /// like a curve; on a 7-day weekly window it is one every 3.5 hours, so a
+    /// freshly reset window shows a single point for hours while the headline
+    /// above it moves 97% → 95%. The card was drawing only what had been
+    /// persisted, and so reported "1 reading" about an app that had taken ten.
+    ///
+    /// Same admission rule as the engine's recorder — `0 < used <= 100` — so a
+    /// window at full allowance does not plant a point at zero, and the same
+    /// treatment as a bucket replacement: skipped when the newest persisted
+    /// sample already carries this value, since drawing a flat segment to it
+    /// would claim a measurement nobody took.
+    private static func liveReading(
+        window: UsageWindow, after last: QuotaSample?, nowMs: Int64
+    ) -> [QuotaSample] {
+        let used = window.usedPercent
+        guard used > 0, used <= 100 else { return [] }
+        if let last, last.atMs >= nowMs || abs(last.usedPercent - used) < 0.000_001 {
+            return []
+        }
+        return [QuotaSample(atMs: nowMs, usedPercent: used)]
     }
 }

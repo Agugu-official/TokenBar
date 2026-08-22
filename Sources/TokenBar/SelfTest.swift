@@ -11079,11 +11079,21 @@ enum SelfTest {
             payload: wPayload, clientId: "codex", attempted: true,
             curve: { _, _, _ in wCurve }, nowMs: wNow * 1000)
         var stage1Placed = false
+        var stage1Live = false
         if case let .quotaOnly(q, _) = stage1 {
-            if case .active = q.resolution { stage1Placed = q.samples.count == 2 }
+            if case .active = q.resolution {
+                // Two persisted, plus the reading the payload is carrying now.
+                stage1Placed = q.samples.count == 3
+                stage1Live = q.samples.last?.atMs == wNow * 1000
+            }
         }
         expect(stage1Placed,
                "L1a stage one places the window and carries its samples without a source")
+        expect(stage1Live,
+               "L1a and the newest sample is the payload's own reading, stamped now — "
+                   + "the store keeps one sample per 48th of a cycle, which on a weekly "
+                   + "window is one per 3.5 hours, so the persisted set alone shows a "
+                   + "single point while the headline above it moves")
 
         // L6a (i). No payload yet — loading, never absent, never unavailable.
         var isLoading = false
