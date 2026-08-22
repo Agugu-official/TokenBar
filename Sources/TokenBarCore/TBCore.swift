@@ -254,12 +254,30 @@ public enum TBCore {
         try unwrap(tb_window_usage(from, until))
     }
 
+    /// `accountKey` selects which account's series to read. `nil` is the
+    /// primary account, which is every account that exists today; an extra
+    /// Claude account passes the config directory its binding was published
+    /// under.
+    ///
+    /// It is a parameter rather than something the core infers, because the
+    /// failure it prevents is silent: with one account per client the binding
+    /// map used to be keyed on `(client, window)`, and a second account
+    /// publishing the same window would replace the first. The call would then
+    /// answer with the other account's curve under a generation that
+    /// validates — nothing on either side of the FFI could tell.
     public static func quotaCurve(
-        clientId: String, windowKey: String, generation: UInt64
+        clientId: String, accountKey: String? = nil, windowKey: String, generation: UInt64
     ) throws -> QuotaCurve? {
         let curve: QuotaCurve? = try clientId.withCString { client in
             try windowKey.withCString { window in
-                try unwrapOptional(tb_quota_curve(client, window, generation))
+                // `withCString` on an Optional would bind a temporary that dies
+                // before the call; the nil case has to pass a real NULL.
+                if let accountKey {
+                    return try accountKey.withCString { account in
+                        try unwrapOptional(tb_quota_curve(client, account, window, generation))
+                    }
+                }
+                return try unwrapOptional(tb_quota_curve(client, nil, window, generation))
             }
         }
         try requireAnswering(curve, request: generation)

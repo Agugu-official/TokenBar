@@ -466,37 +466,58 @@ struct LastGoodEntry {
     snapshot: AgentUsageSnapshot,
 }
 
+/// One account's slot in a per-client cache.
+///
+/// `None` is the primary account, which is every account that exists today —
+/// the dimension is here so a second Claude account cannot land in the
+/// primary's slot when one arrives. Keyed on `client_id` alone, the second
+/// account would overwrite the primary's entry on every refresh, and the
+/// primary would then have no last-good to fall back to the next time its own
+/// fetch failed. That is not a value being wrong; it is one account's state
+/// stored under another's name, which nothing downstream can detect.
+type AccountSlot = (String, Option<String>);
+
+fn account_slot(client_id: &str, account: Option<&str>) -> AccountSlot {
+    (
+        client_id.to_string(),
+        account
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+    )
+}
+
 #[derive(Debug, Default)]
 struct ProviderLastGoodCache {
-    entries: HashMap<String, LastGoodEntry>,
+    entries: HashMap<AccountSlot, LastGoodEntry>,
 }
 
 impl ProviderLastGoodCache {
     fn clean_for(
         &self,
-        client_id: &str,
+        slot: &AccountSlot,
         binding: &ProviderCacheBinding,
     ) -> Option<AgentUsageSnapshot> {
         self.entries
-            .get(client_id)
+            .get(slot)
             .filter(|entry| &entry.binding == binding)
             .map(|entry| entry.snapshot.clone())
     }
 
     fn replace(
         &mut self,
-        client_id: &str,
+        slot: &AccountSlot,
         binding: ProviderCacheBinding,
         mut snapshot: AgentUsageSnapshot,
     ) {
         snapshot.error = None;
         snapshot.transport_diagnostic = None;
         self.entries
-            .insert(client_id.to_string(), LastGoodEntry { binding, snapshot });
+            .insert(slot.clone(), LastGoodEntry { binding, snapshot });
     }
 
-    fn clear(&mut self, client_id: &str) {
-        self.entries.remove(client_id);
+    fn clear(&mut self, slot: &AccountSlot) {
+        self.entries.remove(slot);
     }
 }
 
@@ -1308,9 +1329,13 @@ fn apply_provider_outcome_with<F>(
 where
     F: FnMut(&mut AgentUsageSnapshot),
 {
+    // M1 has one account per client, so the slot is the primary's. M2 gives
+    // this function an account parameter and passes it here; the slot exists
+    // now so that arrival cannot overwrite the primary's entry.
+    let slot = account_slot(client_id, None);
     match outcome {
         ProviderFetchOutcome::Absent => {
-            lock_last_good(cache).clear(client_id);
+            lock_last_good(cache).clear(&slot);
             None
         }
         ProviderFetchOutcome::Success {
@@ -1320,7 +1345,7 @@ where
             match snapshot.account_scope.as_ref() {
                 Ok(_) | Err(AccountScopeError::NoTrustedEvidence) => {}
                 Err(_) => {
-                    lock_last_good(cache).clear(client_id);
+                    lock_last_good(cache).clear(&slot);
                     let source = snapshot.source.clone();
                     return Some(empty_error_snapshot(
                         client_id,
@@ -1342,13 +1367,13 @@ where
                 && usable_success(&snapshot);
             let mut cache = lock_last_good(cache);
             match (cacheable, cache_binding) {
-                (true, Some(binding)) => cache.replace(client_id, binding, snapshot.clone()),
-                _ => cache.clear(client_id),
+                (true, Some(binding)) => cache.replace(&slot, binding, snapshot.clone()),
+                _ => cache.clear(&slot),
             }
             Some(snapshot)
         }
         ProviderFetchOutcome::Failure(ProviderFetchFailure::Terminal { display }) => {
-            lock_last_good(cache).clear(client_id);
+            lock_last_good(cache).clear(&slot);
             Some(empty_error_snapshot(
                 client_id,
                 failure_source,
@@ -1364,9 +1389,9 @@ where
         }) => {
             let fallback = attempt_binding
                 .as_ref()
-                .and_then(|binding| lock_last_good(cache).clean_for(client_id, binding));
+                .and_then(|binding| lock_last_good(cache).clean_for(&slot, binding));
             let Some(mut snapshot) = fallback else {
-                lock_last_good(cache).clear(client_id);
+                lock_last_good(cache).clear(&slot);
                 return Some(empty_error_snapshot(
                     client_id,
                     failure_source,
@@ -1766,6 +1791,56 @@ async fn fetch_codex_inner() -> ProviderFetchOutcome {
         },
         cache_binding: Some(cache_binding),
     }
+}
+
+/// Claude's durable history identity.
+///
+/// The primary config directory resolves through the per-installation lineage
+/// constant — Claude's usage payload carries no owner ID on any route it
+/// serves, so there is nothing authoritative to key on. That is unchanged from
+/// before this seam existed, and it is what keeps every existing series
+/// addressable.
+///
+/// An account isolated with `CLAUDE_CONFIG_DIR` passes that directory's
+/// absolute path and resolves through the authoritative branch instead, so two
+/// accounts on one installation keep two series — the same outcome Codex
+/// already gets from `ChatGPT-Account-Id`.
+///
+/// **Why the directory path is admissible where other local state is not.**
+/// `agent_antigravity.rs` refuses `google_accounts.active` because it is
+/// unrelated local state that the credential fetching those quotas never
+/// authenticated. The config directory is not that: it *selects* the
+/// credential, because the Keychain service read for it is
+/// `Claude Code-credentials-<sha256(dir)[:8]>`. The identity and the credential
+/// come from the same choice.
+///
+/// That binding holds only for the Keychain route. `fetch_claude_inner` has
+/// four other credential sources — an OAuth token from the environment or a
+/// login shell, the `TOKENBAR_*` overrides, the hardcoded
+/// `~/.claude/.credentials.json`, and a fixed-service Keychain item — and none
+/// of them is chosen by the directory. A future caller that passes a directory
+/// while the credential came from one of those would be recording someone
+/// else's numbers under this directory's name. Passing `None` there is not a
+/// fallback, it is the correct answer, and the caller must additionally decline
+/// to record history at all.
+fn claude_history_scope(config_dir: Option<&str>) -> Result<HistoryScope, AccountScopeError> {
+    claude_history_scope_with(config_dir, agent_account_scope::resolve_history_scope)
+}
+
+fn claude_history_scope_with<R>(
+    config_dir: Option<&str>,
+    resolve: R,
+) -> Result<HistoryScope, AccountScopeError>
+where
+    R: FnOnce(&str, Option<(AuthoritativeIdKind, &str)>) -> Result<HistoryScope, AccountScopeError>,
+{
+    resolve(
+        "claude",
+        config_dir
+            .map(str::trim)
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| (AuthoritativeIdKind::OpaqueId, dir)),
+    )
 }
 
 /// Codex is one of the two routes with an authoritative owner ID today. Its
@@ -2182,8 +2257,10 @@ async fn fetch_claude_oauth_usage_request(
                         }),
                 }),
                 account_scope: Ok(account_scope),
-                // Claude exposes no stable owner ID on any route it serves today.
-                history_scope: agent_account_scope::resolve_history_scope("claude", None),
+                // Primary config directory: no authoritative owner ID exists on
+                // any Claude route, so this is the lineage constant. M2 threads
+                // an extra account's directory here.
+                history_scope: claude_history_scope(None),
                 windows,
                 credits: claude_credits(usage.extra_usage.as_ref()),
                 error: None,
@@ -2462,7 +2539,8 @@ async fn claude_header_snapshot(
                 .map(clean_plan),
             }),
             account_scope,
-            history_scope: agent_account_scope::resolve_history_scope("claude", None),
+            // Primary config directory — see `claude_history_scope`.
+            history_scope: claude_history_scope(None),
             windows,
             credits: None,
             error: None,
@@ -5797,7 +5875,7 @@ mod tests {
         assert_eq!(snapshot.windows.len(), 1);
         assert!((snapshot.windows[0].remaining_percent - 60.0).abs() < 0.01);
         assert!(snapshot.windows[0].resets_at.is_none());
-        let cached = lock_last_good(&cache).entries["copilot"].snapshot.clone();
+        let cached = lock_last_good(&cache).entries[&account_slot("copilot", None)].snapshot.clone();
         assert_eq!(cached.updated_at, snapshot.updated_at);
         assert_eq!(cached.windows.len(), 1);
         assert!(cached.error.is_none());
@@ -5897,7 +5975,7 @@ mod tests {
 
         let cached = lock_last_good(&cache)
             .entries
-            .get("codex")
+            .get(&account_slot("codex", None))
             .unwrap()
             .snapshot
             .clone();
@@ -5994,7 +6072,7 @@ mod tests {
             )
             .unwrap();
             assert!(result.windows.is_empty());
-            assert!(!lock_last_good(&cache).entries.contains_key("codex"));
+            assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("codex", None)));
         }
 
         let cache = Mutex::new(ProviderLastGoodCache::default());
@@ -6018,7 +6096,7 @@ mod tests {
             |_| panic!("absent must not enrich"),
         )
         .is_none());
-        assert!(!lock_last_good(&cache).entries.contains_key("codex"));
+        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("codex", None)));
         scope.cleanup();
     }
 
@@ -6060,7 +6138,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(anonymous.windows.len(), 1);
-        assert!(!lock_last_good(&cache).entries.contains_key("antigravity"));
+        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("antigravity", None)));
 
         apply_provider_outcome_with(
             &cache,
@@ -6088,7 +6166,7 @@ mod tests {
         )
         .unwrap();
         assert!(live_empty.windows.is_empty());
-        assert!(!lock_last_good(&cache).entries.contains_key("antigravity"));
+        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("antigravity", None)));
 
         apply_provider_outcome_with(
             &cache,
@@ -6120,7 +6198,7 @@ mod tests {
         .unwrap();
         assert!(invalid.windows.is_empty());
         assert_eq!(enrich_calls.get(), 0);
-        assert!(!lock_last_good(&cache).entries.contains_key("antigravity"));
+        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("antigravity", None)));
         scope.cleanup();
     }
 
@@ -10800,6 +10878,132 @@ mod tests {
             assert_ne!(fallback.as_str(), one.as_str());
             assert_ne!(fallback.as_str(), two.as_str());
         }
+        scope.cleanup();
+    }
+
+    /// G9a. The primary's last-good entry must survive a second account of the
+    /// same client writing its own.
+    ///
+    /// Keyed on `client_id` alone, the second account's every refresh would
+    /// overwrite the primary's entry, and the primary would have nothing to
+    /// fall back to the next time its own fetch failed — it would drop straight
+    /// to an error card. Nothing reports that, because a cache returning
+    /// someone else's snapshot under the right key looks exactly like a cache
+    /// working.
+    ///
+    /// Asserted at the cache rather than through a refresh cycle: M1 assembles
+    /// no second snapshot, so the live three-round scenario cannot happen
+    /// inside it. That scenario is G9b, in M2.
+    #[test]
+    fn g9a_a_second_account_does_not_evict_the_primarys_last_good() {
+        let scope = TestRefreshScope::new("claude", "g9a-last-good");
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let scope_primary = scope
+            .resolve_current("fixture", "account-primary", b"marker-primary")
+            .unwrap();
+        let scope_second = scope
+            .resolve_current("fixture", "account-second", b"marker-second")
+            .unwrap();
+        let binding = ProviderCacheBinding::primary(scope_primary.clone());
+
+        let primary = account_slot("claude", None);
+        let second = account_slot("claude", Some("/Users/someone/.claude-work"));
+        assert_ne!(primary, second, "the account dimension collapsed");
+
+        let cache = Mutex::new(ProviderLastGoodCache::default());
+        lock_last_good(&cache).replace(
+            &primary,
+            binding.clone(),
+            cache_test_snapshot("claude", Ok(scope_primary.clone()), now),
+        );
+        lock_last_good(&cache).replace(
+            &second,
+            binding.clone(),
+            cache_test_snapshot("claude", Ok(scope_second.clone()), now),
+        );
+
+        let recovered = lock_last_good(&cache)
+            .clean_for(&primary, &binding)
+            .expect("the primary must still have a last-good");
+        assert_eq!(
+            recovered.account_scope.as_ref().unwrap().as_str(),
+            scope_primary.as_str(),
+            "the second account overwrote the primary's slot"
+        );
+        assert_eq!(
+            lock_last_good(&cache)
+                .clean_for(&second, &binding)
+                .expect("the second account must have its own")
+                .account_scope
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            scope_second.as_str()
+        );
+
+        // Clearing one account must not evict the other.
+        lock_last_good(&cache).clear(&second);
+        assert!(
+            lock_last_good(&cache).clean_for(&primary, &binding).is_some(),
+            "clearing the second account evicted the primary"
+        );
+        assert!(lock_last_good(&cache).clean_for(&second, &binding).is_none());
+        scope.cleanup();
+    }
+
+    /// G1b. The primary config directory must keep resolving through the
+    /// lineage constant — that value addresses every series already on disk,
+    /// and nothing migrates a series whose key stops matching.
+    ///
+    /// This pins the derivation, not the call sites. `claude_header_snapshot`
+    /// and `fetch_claude_oauth_usage_request` both resolve the scope after
+    /// their HTTP call, so no hermetic test can observe what they pass; that
+    /// half is covered by G1d, which runs the app and asserts the baseline
+    /// scope keeps growing.
+    #[test]
+    fn g1b_claude_history_scope_keeps_the_primary_on_the_lineage_constant() {
+        let scope = TestRefreshScope::new("claude", "g1b-claude");
+        let resolve = |provider: &str, authoritative: Option<(AuthoritativeIdKind, &str)>| {
+            scope.resolve_history(provider, authoritative)
+        };
+
+        let constant = scope.resolve_history("claude", None).unwrap();
+
+        // Primary: no directory, and the blank forms a caller could produce.
+        for primary in [None, Some(""), Some("   ")] {
+            let resolved = claude_history_scope_with(primary, resolve)
+                .expect("the primary directory must resolve, not error");
+            assert_eq!(
+                resolved.as_str(),
+                constant.as_str(),
+                "the primary account left the lineage constant, which orphans every existing series"
+            );
+        }
+
+        // An isolated directory resolves authoritatively, on the directory path.
+        let a = "/Users/someone/.claude-work";
+        let b = "/Users/someone/.claude-other";
+        let resolved_a = claude_history_scope_with(Some(a), resolve).expect("authoritative scope");
+        assert_eq!(
+            resolved_a.as_str(),
+            scope
+                .resolve_authoritative("claude", AuthoritativeIdKind::OpaqueId, a)
+                .unwrap()
+                .as_str()
+        );
+        assert_ne!(
+            resolved_a.as_str(),
+            constant.as_str(),
+            "an extra account sharing the primary's scope is the contamination this exists to stop"
+        );
+
+        let resolved_b = claude_history_scope_with(Some(b), resolve).expect("second scope");
+        assert_ne!(
+            SeriesKey::new("claude", &resolved_a, "session.v1"),
+            SeriesKey::new("claude", &resolved_b, "session.v1"),
+            "two directories collapsed to one series key"
+        );
+
         scope.cleanup();
     }
 

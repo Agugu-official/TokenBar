@@ -1981,6 +1981,53 @@ mod tests {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
+    /// G1c. The installation key lives under `storage_dir()`, and the primary
+    /// account's history scope is derived from that key. If `storage_dir()`
+    /// ever learned to read an account-selection variable — the obvious way to
+    /// "support config dirs" — the key would move the moment such a variable
+    /// was set, the derived scope would change, and every existing series would
+    /// be orphaned with no corrupt file to point at.
+    ///
+    /// `$HOME` derivation is deliberate and out of scope here: the isolated
+    /// verification environment works by redirecting `HOME`, and that is the
+    /// intended behaviour, not a hazard.
+    ///
+    /// This test sets real environment variables, which is why it holds
+    /// `ENV_TEST_LOCK` and restores them. Asserting the path shape alone would
+    /// not fail under the mutation, because a variable nobody sets reads as
+    /// absent and the mutated code would fall through to the same default.
+    #[test]
+    fn g1c_storage_dir_ignores_account_selection_variables() {
+        static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let baseline = SystemBackend.storage_dir().expect("storage dir");
+
+        const VARS: &[&str] = &[
+            "CLAUDE_CONFIG_DIR",
+            "TOKENBAR_CLAUDE_CONFIG_DIR",
+            "TOKCAT_CLAUDE_CONFIG_DIR",
+        ];
+        let saved: Vec<_> = VARS.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        for key in VARS {
+            std::env::set_var(key, "/tmp/tokenbar-g1c-should-be-ignored");
+        }
+        let observed = SystemBackend.storage_dir();
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        assert_eq!(
+            observed.expect("storage dir under account-selection variables"),
+            baseline,
+            "storage_dir() moved with an account-selection variable, which relocates the \
+             installation key and orphans every existing series"
+        );
+    }
+
     #[test]
     fn domain_vectors_normalization_and_separation_are_stable() {
         let key: [u8; INSTALLATION_KEY_BYTES] = std::array::from_fn(|index| index as u8);

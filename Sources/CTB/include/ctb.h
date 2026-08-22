@@ -92,7 +92,12 @@ char *tb_agent_usage(void);
 // Read-only quota curve snapshot for one series selected by the latest
 // successful agent-usage publication generation. This call performs no network
 // request; the returned JSON is released with tb_free.
-char *tb_quota_curve(const char *client_id, const char *window_key, uint64_t generation);
+// `account_key` selects which account's series to read: NULL or empty is the
+// primary account, which is every account that exists today. Passing the wrong
+// one returns another account's curve under a generation that validates, so it
+// is a parameter rather than something inferred here.
+char *tb_quota_curve(const char *client_id, const char *account_key, const char *window_key,
+                     uint64_t generation);
 
 /* PROTOTYPE - usage inside an absolute [from_ms, until_ms) window.
  *
