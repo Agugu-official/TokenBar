@@ -69,10 +69,14 @@ struct PopoverView: View {
     /// as `UsageAttributionBreakdownCard`, which learned it the hard way.
     @AppStorage(UsageAttribution.confirmedKey) private var attributionRaw = ""
     /// Observed so a scan-root change restarts the loads that depend on it —
-    /// see the series task below. Reading it here is what makes it a view
-    /// dependency; `ClaudeExtraRoots.load()` is a plain `UserDefaults` read and
-    /// would not be.
-    @AppStorage(ClaudeExtraRoots.storageKey) private var extraRootsRaw = ""
+    /// see the series task below.
+    ///
+    /// The GENERATION, not the persisted list. The list changes the instant
+    /// Settings saves, which is before `ClaudeExtraRoots.apply` has handed the
+    /// new set to the core, so a task keyed on it restarts early and publishes
+    /// a load that scanned the old roots. The generation is bumped after the
+    /// setter returns.
+    @AppStorage(ClaudeExtraRoots.generationKey) private var extraRootsGeneration = 0
 
     /// Owns the attributed daily series. Mounted here for the reason its own
     /// doc comment gives: its timezone provenance is process-scoped, and the
@@ -296,7 +300,7 @@ struct PopoverView: View {
         // the shape the timezone case below is written for, which is why this
         // is declarative rather than a second notification: the raw list is
         // already persisted, so keying on it restarts the load by construction.
-        .task(id: "\(attributionRaw)|\(extraRootsRaw)") {
+        .task(id: "\(attributionRaw)|\(extraRootsGeneration)") {
             await series.load(
                 source: UsageDataSources.current,
                 confirmed: UsageAttribution.parseRaw(attributionRaw).records)

@@ -13,6 +13,10 @@ import TokenBarCore
 /// expect a split view that does not exist.
 enum ClaudeExtraRoots {
     static let storageKey = "tokenbar.claude.extraConfigDirs"
+    /// Incremented once the core has accepted a new root set. Views observe
+    /// THIS rather than `storageKey` when they need to reload against the new
+    /// roots — see `apply`.
+    static let generationKey = "tokenbar.claude.extraRootsGeneration"
 
     static func load() -> [String] {
         guard let raw = UserDefaults.standard.string(forKey: storageKey),
@@ -133,6 +137,15 @@ enum ClaudeExtraRoots {
                 // because whether a caller wants to hear about the result says
                 // nothing about whether the caches went stale.
                 DashboardModel.invalidateScanDerivedCaches()
+                // Bumped AFTER the setter returns, and this is what views key
+                // their reloads on — not the persisted list. The list changes
+                // the moment Settings saves, which is before this queue has
+                // installed anything, so a task keyed on it can restart, run,
+                // and publish while the engine is still scanning the old roots.
+                // A generation moved here cannot fire early by construction.
+                UserDefaults.standard.set(
+                    UserDefaults.standard.integer(forKey: generationKey) &+ 1,
+                    forKey: generationKey)
                 completion?(result)
             }
         }
