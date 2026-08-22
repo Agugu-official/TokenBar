@@ -350,7 +350,7 @@ private struct DashboardSnapshot {
                   let envelope = try? Self.snapshotDecoder.decode(SnapshotEnvelope.self, from: bytes),
                   SnapshotStore.validate(
                       envelope, expectedYear: initialYear, identity: identity,
-                      scanRoots: ClaudeExtraRoots.lastAppliedPayloadJSON)
+                      scanRoots: ClaudeExtraRoots.appliedPayloadJSON)
         {
             // The model report is never persisted (see SnapshotEnvelope's doc
             // comment), so a disk restore ALWAYS leaves modelReport/modelYear/
@@ -553,9 +553,9 @@ private struct DashboardSnapshot {
     private func gatedGraph(
         kind: RefreshKind,
         fetch: @escaping () async throws -> UsagePayload,
-        commit: @escaping (UsagePayload, String) -> ApplyResult
+        commit: @escaping (UsagePayload) -> ApplyResult
     ) async throws -> GraphFetchOutcome {
-        let requestRoots = Self.scanRootsProvider()
+        let requestRoots = ClaudeExtraRoots.appliedPayloadJSON
         graphFetchToken += 1
         let token = graphFetchToken
         // Ownership-cleared, exactly like `graphFetchFailed` below: an
@@ -580,7 +580,14 @@ private struct DashboardSnapshot {
                     self.fulfillRestoreGate()
                     return .superseded
                 }
-                let result = commit(payload, requestRoots)
+                // Assigned rather than passed through `commit`: the closure
+                // is the caller's, and threading a value it never mentions
+                // through three call sites bought nothing over setting it on
+                // the line before. Both statements are on the main actor with
+                // no suspension between them, so `apply` cannot observe a
+                // different fetch's value.
+                self.payloadScanRoots = requestRoots
+                let result = commit(payload)
                 self.clearBackgroundRefresh(owner: token)
                 self.fulfillRestoreGate()
                 return .committed(result)
@@ -675,15 +682,14 @@ private struct DashboardSnapshot {
             let year = self.year
             _ = try await gatedGraph(kind: .initial) { [source] in
                 try await source.graph(year: year, priority: .userInitiated)
-            } commit: { payload, scanRoots in
+            } commit: { payload in
                 // The year may have changed while we were off-actor (the user
                 // can open the year menu during the initial load); drop a stale
                 // slice so apply() never tags the new year — and the static
                 // snapshot — with the old year's payload. Mirrors
                 // reload()/pollGraph().
                 guard self.year == year else { return .rejected }
-                return self.apply(
-                    payload: payload, scanRoots: scanRoots, expectedYear: year)
+                return self.apply(payload: payload, expectedYear: year)
             }
         } catch {
             // Keep showing stale data over an error screen when a previous
@@ -702,6 +708,22 @@ private struct DashboardSnapshot {
         guard !refreshing else { return }
         refreshing = true
         defer { refreshing = false }
+        await reload(force: true, kind: .manual)
+    }
+
+    /// A scan-root change, which must supersede whatever is in flight.
+    ///
+    /// Deliberately NOT `refresh()`. That method returns at `guard !refreshing`
+    /// when a manual refresh or an earlier root apply is still running — and
+    /// then it never enters `gatedGraph`, never advances `graphFetchToken`, and
+    /// the older scan's old-root payload commits after the invalidation. The
+    /// case the guard exists for (a user pressing Refresh twice) is the case
+    /// this must not obey: two quick Settings edits are exactly when the
+    /// superseding matters.
+    ///
+    /// It also leaves `refreshing` alone rather than setting it, so it cannot
+    /// clear a flag a concurrent manual refresh owns.
+    func reloadForRootChange() async {
         await reload(force: true, kind: .manual)
     }
 
@@ -814,10 +836,9 @@ private struct DashboardSnapshot {
                 force
                     ? try await source.refreshGraph(year: year, priority: .userInitiated)
                     : try await source.graph(year: year, priority: .userInitiated)
-            } commit: { payload, scanRoots in
+            } commit: { payload in
                 guard self.year == year else { return .rejected }
-                return self.apply(
-                    payload: payload, scanRoots: scanRoots, expectedYear: year)
+                return self.apply(payload: payload, expectedYear: year)
             }
         } catch {
             // A model that has never reached `.ready` must still settle. apply()
@@ -887,9 +908,7 @@ private struct DashboardSnapshot {
     /// clears `restoredSnapshot`: a redirect or a rejection settles nothing,
     /// so restored data stays flagged as not-yet-confirmed.
     @discardableResult
-    private func apply(
-        payload: UsagePayload, scanRoots: String, expectedYear: String? = nil
-    ) -> ApplyResult {
+    private func apply(payload: UsagePayload, expectedYear: String? = nil) -> ApplyResult {
         guard expectedYear == nil || self.year == expectedYear else { return .rejected }
         // A year-filtered payload reports only the selected year (empty if that
         // year has no data). Validate the filter against THIS fresh payload —
@@ -913,7 +932,6 @@ private struct DashboardSnapshot {
             invalidateModel()
         }
         self.payload = payload
-        payloadScanRoots = scanRoots
         acceptedPayloadYear = Self.identityYear(year)
         graphFetchFailed = false
         stats = UsageStats(payload: payload, selectedClients: Set(payload.summary.clients))
@@ -936,13 +954,9 @@ private struct DashboardSnapshot {
     /// its request went out rather than when the snapshot is written. Seeded
     /// with the roots at construction so a capture that somehow precedes any
     /// apply() records this process's actual set rather than an empty one.
-    @ObservationIgnored private var payloadScanRoots = DashboardModel.scanRootsProvider()
-
-    /// How this type reads the installed scan roots. A closure so a self-test
-    /// can move them DURING a fetch — which is the whole property under test —
-    /// without writing the user's real `tokenbar.claude.extraConfigDirs`.
-    @ObservationIgnored nonisolated(unsafe) static var scanRootsProvider:
-        @Sendable () -> String = { ClaudeExtraRoots.appliedPayloadJSON }
+    /// The scan roots the CURRENT payload was fetched under, captured before
+    /// its request went out rather than when the snapshot is written.
+    @ObservationIgnored private var payloadScanRoots = ClaudeExtraRoots.appliedPayloadJSON
 
     /// The roots stamped into the snapshot for the committed payload.
     var payloadScanRootsForTesting: String { payloadScanRoots }
@@ -1045,12 +1059,11 @@ private struct DashboardSnapshot {
             let year = self.year
             let fetched = try? await gatedGraph(kind: .poll) { [source] in
                 try await source.graph(year: year, priority: .utility)
-            } commit: { payload, scanRoots in
+            } commit: { payload in
                 // The year may have changed while we were off-actor; drop a
                 // stale slice so the chart never flickers to the wrong year.
                 guard self.year == year else { return .rejected }
-                return self.apply(
-                    payload: payload, scanRoots: scanRoots, expectedYear: year)
+                return self.apply(payload: payload, expectedYear: year)
             }
             if Task.isCancelled { break }
             // Same rule as reload: a superseded poll settled nothing, so its

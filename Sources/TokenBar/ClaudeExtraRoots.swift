@@ -97,81 +97,54 @@ enum ClaudeExtraRoots {
         }
     }
 
-    /// The payload the Rust registry has actually ACCEPTED, as opposed to the
-    /// one the user has configured.
+    /// Which scan roots the engine is running — the registry it ACCEPTED, not
+    /// the list the user configured, and not two values that have to be kept
+    /// in step.
     ///
-    /// `apply` deliberately does not run the setter on the calling actor — the
-    /// core probes every path with `read_dir`, and an unmounted volume can
-    /// block that for a long time, which is the case this feature exists to
-    /// tolerate. So there is a real interval in which `load()` already names
-    /// the new roots and the engine is still scanning the previous registry.
-    /// Anything that records "which roots produced this data" must read THIS,
-    /// not the persisted list, or it labels a pre-change scan as post-change.
+    /// One persisted string. `apply` deliberately keeps the setter off the
+    /// calling actor (the core probes each path with `read_dir`, and an
+    /// unmounted volume can stall that — the case this feature exists to
+    /// tolerate), so `load()` names the new roots while the engine still scans
+    /// the old ones. And a call that SUCCEEDS can still refuse part of its
+    /// input: `rejected` names paths Rust left out of the registry, so
+    /// recording the request would claim roots no scan included. `unreadable`
+    /// is the opposite case and stays — those ARE registered and retried.
     ///
-    /// Starts at the empty payload because that is what the registry holds
-    /// before the launch-time apply installs anything — a truthful answer, not
-    /// a placeholder.
+    /// Persisted rather than held in memory, because the value a RESTORE needs
+    /// is the registry the file on disk was written under, and that restore
+    /// runs before this launch's apply has landed. Persisting one value answers
+    /// both questions with the same number instead of an in-memory copy for
+    /// stamping and a stored copy for validating.
     ///
-    /// The remaining window is fail-closed by construction: between the setter
-    /// returning on the utility queue and this being updated on the main actor,
-    /// a fetch reads the OLD value while the engine already scans the new
-    /// roots, so its snapshot is stamped older than it is and the next launch
-    /// REJECTS it. A false reject costs one cold start; a false accept shows
-    /// the wrong totals.
-    /// `nonisolated(unsafe)` for the same reason the rest of this type is
-    /// nonisolated: every read and write is on the main actor — `recordApplied`
-    /// from `apply`'s `Task { @MainActor }`, and the reads from `gatedGraph`,
-    /// which is main-actor isolated. The compiler cannot see that through the
-    /// `@Sendable` closure that performs the read.
-    nonisolated(unsafe) private(set) static var appliedPayloadJSON = payloadJSON([])
-
-    /// The last registry any run of this app installed, persisted.
-    ///
-    /// `appliedPayloadJSON` answers "what is the engine scanning right now",
-    /// which is the empty set until the launch-time apply lands. That is the
-    /// truth for STAMPING a snapshot and the wrong question for VALIDATING one:
-    /// a restore at `DashboardModel.init` happens before apply completes, so
-    /// comparing against the in-memory value would reject every snapshot on
-    /// every launch. This is the value to compare against — the registry the
-    /// snapshot on disk was written under.
-    ///
-    /// It moves the moment an apply succeeds, while the snapshot is only
-    /// rewritten by the next graph commit. So a root change followed by a quit
-    /// leaves the persisted value ahead of the file, and the file is rejected —
-    /// which is the intended direction.
+    /// It moves the moment an apply succeeds while the snapshot is only
+    /// rewritten by the next graph commit, so a root change followed by a quit
+    /// leaves this ahead of the file and the file is rejected. That direction
+    /// is the safe one: a false reject costs one cold start, a false accept
+    /// shows the wrong totals.
     static let appliedKey = "tokenbar.claude.extraRootsApplied"
 
-    static var lastAppliedPayloadJSON: String {
+    /// Overridable so a self-test can move the roots DURING a fetch — the
+    /// property under test — without writing the real defaults key.
+    nonisolated(unsafe) static var appliedProvider: @Sendable () -> String = {
         UserDefaults.standard.string(forKey: appliedKey) ?? payloadJSON([])
     }
 
-    /// Record what the setter actually installed.
-    ///
-    /// Two conditions, not one. A failed call leaves the registry holding
-    /// whatever it held before, so the previous value is still the true one.
-    /// And a call that SUCCEEDS can still have refused part of its input:
-    /// `rejected` names paths Rust deliberately left out of the registry — not
-    /// a directory, no extra-root support for that client, empty or relative —
-    /// so recording the whole request would claim roots the scan does not
-    /// include. `unreadable` is the opposite case and stays: those ARE
-    /// registered and retried on the next scan.
-    ///
-    /// The distinction has teeth. A rejected path that becomes a real directory
-    /// while the app is stopped would otherwise leave the next launch matching
-    /// a snapshot whose scan excluded it.
+    static var appliedPayloadJSON: String { appliedProvider() }
+
+    /// Record what the setter actually installed. A failed call leaves the
+    /// registry holding whatever it held, so the stored value must not move.
     static func recordApplied(_ requestedJSON: String, result: ExtraScanPathsResult?) {
         guard let result else { return }
-        let json = registeredJSON(requestedJSON, rejected: result.rejected)
-        appliedPayloadJSON = json
-        UserDefaults.standard.set(json, forKey: appliedKey)
+        UserDefaults.standard.set(
+            registeredJSON(requestedJSON, rejected: result.rejected), forKey: appliedKey)
     }
 
     /// `requestedJSON` minus the paths the setter refused, in the same shape.
     ///
     /// Returns the input untouched when nothing was refused, so the common case
     /// is byte-identical to `payloadJSON(load())` and no comparison drifts on
-    /// re-encoding. A payload this cannot parse is also returned untouched:
-    /// it came from `payloadJSON` one line earlier, so failing to parse it is
+    /// re-encoding. A payload this cannot parse is also returned untouched: it
+    /// came from `payloadJSON` one line earlier, so failing to parse it is
     /// impossible in practice, and guessing would be worse than recording the
     /// request.
     static func registeredJSON(_ requestedJSON: String, rejected: [ScanPathNote]) -> String {
@@ -187,9 +160,9 @@ enum ClaudeExtraRoots {
         return text
     }
 
-    /// Test seam only: back to the pre-apply state, in memory and on disk.
+    /// Test seam only: back to the pre-apply state.
     static func resetAppliedForTesting() {
-        appliedPayloadJSON = payloadJSON([])
+        appliedProvider = { UserDefaults.standard.string(forKey: appliedKey) ?? payloadJSON([]) }
         UserDefaults.standard.removeObject(forKey: appliedKey)
     }
 

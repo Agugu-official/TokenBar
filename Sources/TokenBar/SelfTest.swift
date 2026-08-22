@@ -9896,7 +9896,7 @@ enum SelfTest {
             savedAt: Date = Date(),
             payload: UsagePayload? = nil,
             knownYears: [String]? = nil,
-            scanRoots: String = ClaudeExtraRoots.lastAppliedPayloadJSON
+            scanRoots: String = ClaudeExtraRoots.appliedPayloadJSON
         ) -> SnapshotEnvelope {
             let p = payload ?? DemoData.payload(for: year)
             return SnapshotEnvelope(
@@ -9991,12 +9991,12 @@ enum SelfTest {
         // property is only about which side of the request the read happens on,
         // and the source's own hook puts the move exactly between them.
         let bindRoots = awaitMainActorValue { () -> String in
-            let previous = DashboardModel.scanRootsProvider
-            defer { DashboardModel.scanRootsProvider = previous }
+            let previous = ClaudeExtraRoots.appliedProvider
+            defer { ClaudeExtraRoots.appliedProvider = previous }
             let before = ClaudeExtraRoots.payloadJSON(["/tmp/tokenbar-bind-before"])
             let after = ClaudeExtraRoots.payloadJSON(["/tmp/tokenbar-bind-after"])
             nonisolated(unsafe) var installed = before
-            DashboardModel.scanRootsProvider = { installed }
+            ClaudeExtraRoots.appliedProvider = { installed }
             let source = AttributedSeriesTestSource(
                 graphPayload: DemoData.payload(for: nil),
                 refreshPayload: DemoData.payload(for: nil))
@@ -13216,7 +13216,7 @@ enum SelfTest {
         expect(ClaudeExtraRoots.appliedPayloadJSON == ceWanted,
                "CE-APPLIED and a setter that succeeded does move it, so the rule is "
                    + "a condition rather than a refusal to ever record")
-        expect(ClaudeExtraRoots.lastAppliedPayloadJSON == ceWanted,
+        expect(UserDefaults.standard.string(forKey: ClaudeExtraRoots.appliedKey) == ceWanted,
                "CE-APPLIED and it is persisted, because the snapshot a RESTORE has "
                    + "to judge was written by a previous run")
 
@@ -13268,11 +13268,13 @@ enum SelfTest {
                    && cePaths(ClaudeExtraRoots.appliedPayloadJSON).contains(ceKept),
                "CE-REJECTED the RECORDER stores the registered subset, so a "
                    + "snapshot is stamped with the roots the scan included")
-        expect(!cePaths(ClaudeExtraRoots.lastAppliedPayloadJSON).contains(ceRefused),
+        expect(!cePaths(
+                   UserDefaults.standard.string(forKey: ClaudeExtraRoots.appliedKey) ?? ""
+               ).contains(ceRefused),
                "CE-REJECTED and the persisted copy a restore judges against "
                    + "excludes it too")
         ClaudeExtraRoots.resetAppliedForTesting()
-        expect(ClaudeExtraRoots.lastAppliedPayloadJSON == ceEmpty,
+        expect(ClaudeExtraRoots.appliedPayloadJSON == ceEmpty,
                "CE-APPLIED a process that has never applied compares against the "
                    + "empty registry, which is what the engine holds then")
 

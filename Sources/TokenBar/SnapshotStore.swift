@@ -235,7 +235,7 @@ enum SnapshotStore {
         _ envelope: SnapshotEnvelope,
         expectedYear: String?,
         identity: BuildIdentity,
-        scanRoots: String = ClaudeExtraRoots.lastAppliedPayloadJSON,
+        scanRoots: String = ClaudeExtraRoots.appliedPayloadJSON,
         now: Date = Date()
     ) -> Bool {
         guard envelope.snapshotSchemaVersion == SnapshotEnvelope.schemaVersion,

@@ -376,7 +376,7 @@ struct PopoverView: View {
         // Not `initial: true`: the first value is the launch state, and
         // `load()` already covers t=0.
         .onChange(of: extraRootsGeneration) { _, _ in
-            Task { await model.refresh() }
+            Task { await model.reloadForRootChange() }
         }
         .onChange(of: model.stats?.presentClients, initial: true) { _, _ in
             resetTabIfHidden()
