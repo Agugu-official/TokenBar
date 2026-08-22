@@ -28,8 +28,12 @@ pub(crate) const HISTORY_LOCK_FILE_NAME: &str = "quota-pace-v3.lock";
 pub(crate) const LEGACY_V2_FILE_NAME: &str = "codex-weekly-history-v2.json";
 /// Floor for `phase_bucket_count`, and the count every window used to get.
 pub(crate) const PHASE_BUCKET_COUNT: usize = 48;
-/// Ceiling for `phase_bucket_count`: one bucket per hour of a 7-day window.
-pub(crate) const MAX_PHASE_BUCKET_COUNT: usize = 168;
+/// The only factor `phase_bucket_count` may apply to the floor. Whole, so the
+/// finer grid nests inside the coarser one and no existing sample can change
+/// which cell it shares — see `phase_bucket_count`.
+pub(crate) const PHASE_BUCKET_MULTIPLE: usize = 4;
+/// Ceiling for `phase_bucket_count`, and what a long window actually gets.
+pub(crate) const MAX_PHASE_BUCKET_COUNT: usize = PHASE_BUCKET_COUNT * PHASE_BUCKET_MULTIPLE;
 pub(crate) const GRID_POINT_COUNT: usize = 169;
 pub(crate) const MAX_SERIES: usize = 512;
 pub(crate) const MAX_SAMPLES: usize = 65_536;
@@ -1481,18 +1485,32 @@ fn phase(sample: &QuotaSample) -> f64 {
 /// the app polls, because a second sample in the same bucket replaces the
 /// first rather than joining it.
 ///
-/// One bucket per hour, floored at the previous 48 and capped at 168. The floor
-/// leaves short windows exactly as they were — a 5-hour window at 48 buckets is
-/// already finer than the 60-second poll can fill, so raising it would multiply
-/// stored samples for a curve nobody could see change. The cap is what a weekly
-/// window needs (168 hours), and it bounds a monthly one at 4.3 hours per
-/// bucket instead of letting it reach 720 samples per cycle.
+/// A WHOLE MULTIPLE of the floor, never an arbitrary hourly count. This is the
+/// part that cannot be relaxed, and it cost a real store to learn: bucket
+/// boundaries sit at `k / count` of the cycle, so a count that is not a
+/// multiple of the previous one produces a grid that does not NEST inside it,
+/// and two samples separated by the old grid can land in one new cell.
+///
+/// The first attempt was `duration / 1 hour`, which gives 168 for a weekly
+/// window — and 168/48 is 3.5. On this author's own store that merged three
+/// pairs of samples that 48 buckets had kept apart. `validate_series` treats a
+/// duplicate sample key as corruption, and the response to a corrupt store is
+/// quarantine, so a resolution change silently became a history wipe. The data
+/// survived in the `.corrupt-*` file, which is the only reason this is a story
+/// rather than a loss.
+///
+/// So: 48, or 4x that. A 7-day window at 192 buckets is 52.5 minutes each —
+/// past the "one per hour" this was asked for — and a monthly one lands at
+/// 3.75 hours. Short windows keep 48 and are byte-identical: five hours at 48
+/// is already finer than the 60-second poll can fill.
 pub(crate) fn phase_bucket_count(duration_seconds: i64) -> usize {
-    const HOUR_SECONDS: i64 = 3_600;
-    (duration_seconds.max(0) / HOUR_SECONDS).clamp(
-        PHASE_BUCKET_COUNT as i64,
-        MAX_PHASE_BUCKET_COUNT as i64,
-    ) as usize
+    // Above two days. A 48-hour window already buckets at one hour with the
+    // floor, so nothing shorter has anything to gain.
+    if duration_seconds > 2 * 86_400 {
+        PHASE_BUCKET_COUNT * PHASE_BUCKET_MULTIPLE
+    } else {
+        PHASE_BUCKET_COUNT
+    }
 }
 
 fn phase_bucket(reset_at: i64, duration_seconds: i64, sampled_at: i64) -> usize {
@@ -5863,8 +5881,23 @@ mod tests {
     #[test]
     fn long_windows_bucket_by_the_hour() {
         assert_eq!(phase_bucket_count(5 * HOUR), 48, "short windows unchanged");
-        assert_eq!(phase_bucket_count(7 * DAY), 168, "a weekly window is hourly");
-        assert_eq!(phase_bucket_count(30 * DAY), 168, "and a monthly one is capped");
+        assert_eq!(phase_bucket_count(7 * DAY), 192, "a weekly window is sub-hourly");
+        assert_eq!(phase_bucket_count(30 * DAY), 192, "and a monthly one is capped");
+        // The invariant that matters more than any of those numbers: every
+        // count is a whole multiple of the floor, so each grid NESTS inside the
+        // coarser one. A count that is not — 168, which is 3.5x — puts samples
+        // that 48 buckets separated into one cell, and `validate_series` reads
+        // a duplicate sample key as corruption, which quarantines the store.
+        // A resolution change then becomes a history wipe.
+        for seconds in [HOUR, 5 * HOUR, DAY, 2 * DAY, 7 * DAY, 30 * DAY, 400 * DAY] {
+            let count = phase_bucket_count(seconds);
+            assert_eq!(
+                count % PHASE_BUCKET_COUNT,
+                0,
+                "bucket count for {seconds}s must be a whole multiple of the floor"
+            );
+            assert!(count <= MAX_PHASE_BUCKET_COUNT);
+        }
 
         // The behaviour the count exists for: two readings an hour apart inside
         // a weekly cycle are two samples, not one replacing the other.
