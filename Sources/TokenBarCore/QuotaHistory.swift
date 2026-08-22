@@ -126,6 +126,15 @@ public struct QuotaHistoryRow: Equatable, Sendable, Identifiable {
     /// was unclassified. A presence flag cannot be fooled by which dimension a
     /// contribution happens to arrive in.
     public let otherHasAssigned: Bool
+    /// Declared EXCLUDED by the user, kept apart from never-classified.
+    ///
+    /// Both are "not this subscription's", so the fold sent them to one flag
+    /// and the card labelled the result "Unclassified usage" — telling the user
+    /// their own explicit exclusion was work they had not got round to
+    /// classifying. Excluding a source IS classifying it; the difference
+    /// between "I dealt with this" and "there is something here for you to
+    /// deal with" is the only thing this line is read for.
+    public let otherHasExcluded: Bool
     public let otherHasUnattributed: Bool
     /// This subscription's models, largest first.
     public let models: [QuotaHistoryModel]
@@ -294,8 +303,8 @@ public enum QuotaHistoryFold {
             let lo = lowerBound(stamps, cycle.evidenceStartMs)
             let hi = lowerBound(stamps, cycle.resetAtMs)
             var mine = (tokens: Int64(0), exCacheRead: Int64(0), cost: 0.0)
-            var other = (tokens: Int64(0), cost: 0.0,
-                         hasAssigned: false, hasUnattributed: false)
+            var other = (tokens: Int64(0), cost: 0.0, hasAssigned: false,
+                         hasExcluded: false, hasUnattributed: false)
             var byModel: [ModelKey: (tokens: Int64, cost: Double)] = [:]
 
             for message in sorted[lo..<max(lo, hi)] {
@@ -318,10 +327,14 @@ public enum QuotaHistoryFold {
                         current.tokens.saturatingAdding(message.tokens),
                         current.cost + message.cost)
                 } else {
-                    if case .assigned = state {
-                        other.hasAssigned = true
-                    } else {
-                        other.hasUnattributed = true
+                    // Three states reach here, and they mean three different
+                    // things to the person reading the line: someone else's
+                    // subscription, a source they excluded, and one they have
+                    // not classified. Only the last is an open question.
+                    switch state {
+                    case .assigned: other.hasAssigned = true
+                    case .excluded: other.hasExcluded = true
+                    case .unassigned: other.hasUnattributed = true
                     }
                     other.tokens = other.tokens.saturatingAdding(message.tokens)
                     other.cost += message.cost
@@ -335,6 +348,7 @@ public enum QuotaHistoryFold {
                 spanTokensExCacheRead: span.exCacheRead, spanCost: span.cost,
                 otherTokens: other.tokens, otherCost: other.cost,
                 otherHasAssigned: other.hasAssigned,
+                otherHasExcluded: other.hasExcluded,
                 otherHasUnattributed: other.hasUnattributed,
                 models: byModel
                     .map {

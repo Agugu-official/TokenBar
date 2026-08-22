@@ -515,4 +515,6 @@
 "Other subscriptions in the same hours:" = "同一時段的其他訂閱：";
 "Unclassified usage in the same hours:" = "同一時段的未分類用量：";
 "Other and unclassified usage in the same hours:" = "同一時段的其他與未分類用量：";
+"Excluded usage in the same hours:" = "同一時段的已排除用量：";
+"Other and excluded usage in the same hours:" = "同一時段的其他與已排除用量：";
 "%@ %@" = "%1$@%2$@";

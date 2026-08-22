@@ -247,7 +247,8 @@ struct SubscriptionTrendCard: View {
                                 Text(verbatim: metric == .cost
                                      ? Format.money(
                                         tokens: bucket.tokens, cost: bucket.cost)
-                                     : Format.compactTokens(bucket.tokens))
+                                     : Format.tokens(
+                                        tokens: bucket.tokens, cost: bucket.cost))
                                     .foregroundStyle(.secondary)
                             }
                             .font(.caption2)
@@ -257,10 +258,14 @@ struct SubscriptionTrendCard: View {
                     HStack {
                         Text("Total")
                         Spacer()
+                        // Both branches carry the same rule now. Only the
+                        // cost side had it, so flipping the toggle turned a
+                        // dash into a measured "0" for the same cost-only row.
                         Text(verbatim: metric == .cost
                              ? Format.money(
                                 tokens: day.totalTokens, cost: day.totalCost)
-                             : Format.compactTokens(day.totalTokens))
+                             : Format.tokens(
+                                tokens: day.totalTokens, cost: day.totalCost))
                     }
                     .font(.caption2.weight(.medium))
                 }

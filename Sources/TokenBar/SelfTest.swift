@@ -12029,6 +12029,44 @@ enum SelfTest {
                    + "tokens is still unclassified — the label cannot be decided by "
                    + "comparing token totals")
 
+        // QH-EXCL. `.excluded` is a decision the user made, `.unassigned` is one
+        // they have not. Folding both into one flag made the card report the
+        // user's own exclusion back to them as "Unclassified usage" — an
+        // outstanding question they had already answered.
+        let qhxRows = QuotaHistoryFold.rows(
+            cycles: qhsCycles, messages: qhoMessages, subscription: "c",
+            confirmed: [
+                UsageAttribution.Record(
+                    client: "z", provider: "p", state: .assigned("other")),
+                UsageAttribution.Record(
+                    client: "unknown", provider: "q", state: .excluded),
+            ])
+        expect(qhxRows.first?.otherHasExcluded == true
+                   && qhxRows.first?.otherHasUnattributed == false,
+               "QH-EXCL an excluded source is recorded as excluded and NOT as "
+                   + "unclassified, so the card does not call a decision an "
+                   + "open question")
+        // Both halves, or the flag is satisfied by never setting the other one.
+        expect(qhoRows.first?.otherHasExcluded == false
+                   && qhoRows.first?.otherHasUnattributed == true,
+               "QH-EXCL and an undeclared source is still unclassified, so the "
+                   + "split is a split rather than a rename")
+        // Excluded spend stays IN the bucket: the line answers what else was
+        // happening in these hours, and an excluded source was happening.
+        expect(qhxRows.first?.otherTokens == qhoRows.first?.otherTokens,
+               "QH-EXCL excluding a source changes what it is called, not "
+                   + "whether it counts")
+
+        // FMT-TOKENS. The mirror of the money rule. A supported cost-only
+        // source reports a price with no token counts, so the count column
+        // printed "0" for usage that certainly happened — beside an amount
+        // that had already learned to say "—" in the opposite case.
+        expect(Format.tokens(tokens: 0, cost: 4.10) == "—"
+                   && Format.tokens(tokens: 0, cost: 0) == "0"
+                   && Format.tokens(tokens: 2_100_000, cost: 0) == "2.1M",
+               "FMT-TOKENS an unmeasured count is a dash, a real zero is a zero, "
+                   + "and a measured count is itself")
+
         expect(qhspRows.first?.spanTokensExCacheRead == 100,
                "QH-SPAN the span counts only what the two readings bracket — the later "
                 + "message sits after the last sample, so no observed movement measures it")

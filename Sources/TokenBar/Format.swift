@@ -68,6 +68,23 @@ enum Format {
         return usdOrBelowCent(cost)
     }
 
+    /// A token count shown beside an amount — the mirror of `money`, and the
+    /// reason it is a function rather than a ternary at each site.
+    ///
+    /// A supported cost-only source reports a price with no token counts, so
+    /// `compactTokens` renders "0" for usage that certainly happened and simply
+    /// was not measured in tokens. The rule was first written inline beside one
+    /// column of the quota history and not the other, and the expanded per-model
+    /// rows went on printing "0 · $4.10" underneath a total that already said
+    /// "—". Stating it once is what keeps the two columns of one row from
+    /// disagreeing about whether a number exists.
+    ///
+    /// An exact zero beside no cost is a real total and keeps its "0".
+    static func tokens(tokens: Int64, cost: Double) -> String {
+        if tokens <= 0, cost > 0 { return "—" }
+        return compactTokens(tokens)
+    }
+
     /// Today's contribution-graph day key. tokscale-core buckets days in the
     /// local timezone as `%Y-%m-%d`, so we must match that exactly.
     /// `timeZone` is injectable so a test can pin one. It defaults to

@@ -515,7 +515,12 @@ private struct WindowHoverTooltip: View {
                                                 : AnyShapeStyle(.primary))
             }
             HStack {
-                Text("%@ tokens".localized(Format.compactTokens(total)))
+                // Paired with the amount beside it, so the same rule applies in
+                // both directions: an interval of cost-only usage has a real
+                // price and no token count, and "0 tokens · $4.10" reads as a
+                // measurement rather than an absence.
+                Text("%@ tokens".localized(Format.tokens(
+                    tokens: total, cost: messages.reduce(0) { $0 + $1.cost })))
                 Spacer()
                 // `money`: an all-unpriced interval sums to exactly zero,
                 // which `usdOrBelowCent` renders "$0.00" — it only covers the

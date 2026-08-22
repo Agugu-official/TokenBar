@@ -250,13 +250,24 @@ pub(crate) static WINDOW_USAGE_CACHE: LazyLock<
     Mutex<HashMap<window_usage::CacheKey, window_usage::CacheEntry>>,
 > = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Bumped every time the extra-scan-paths registry is replaced. A scan that
-/// started before the replace snapshots its roots at the top
-/// (`LocalSourceContext::current()`) and publishes minutes of work later, so
-/// clearing the caches is not enough on its own: the in-flight scan would
+/// Bumped every time the extra-scan-paths registry is replaced. A scan reads
+/// the root set when it builds its options — `report_options`/`parse_options`
+/// call `extra_scan_paths::snapshot()` — and publishes minutes of work later,
+/// so clearing the caches is not enough on its own: the in-flight scan would
 /// insert its old-root result *after* the clear and the next reader would
 /// serve it. Every publisher records the generation it started under and
 /// drops its result if the registry moved underneath it.
+///
+/// Where that snapshot is taken is load-bearing and this comment used to state
+/// it wrongly, saying the roots were captured with `LocalSourceContext::current()`
+/// at the top of the call. They are not: `LocalSourceContext` carries only
+/// `home_dir`, which no registry replace touches. A reviewer reading the old
+/// wording concluded that a caller queued behind `window_usage::COMPUTE` would
+/// scan with a stale root set while reading a fresh generation. It cannot: the
+/// generation is read after the lock and the roots after that, so a replace
+/// while queued is seen by both, and a replace between them moves the
+/// generation and `publish` refuses. The guard is fail-closed BECAUSE the
+/// snapshot is late, which is the opposite of what the old sentence implied.
 ///
 /// Checked inside the lock that guards the thing being published, and bumped
 /// before either clear, so "check the generation" and "publish" cannot be

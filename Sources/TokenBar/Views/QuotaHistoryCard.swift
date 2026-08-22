@@ -125,8 +125,7 @@ struct QuotaHistoryCard: View {
                     // The mirror of the money rule beside it: cost-only usage
                     // assigned here has no token count, and printing "0" states
                     // a measurement nobody took. Same dash, same reason.
-                    Text(row.mineTokens > 0 || row.mineCost <= 0
-                         ? Format.compactTokens(row.mineTokens) : "—")
+                    Text(Format.tokens(tokens: row.mineTokens, cost: row.mineCost))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                     // A dash, not "$0.00", when tokens were recorded and none
@@ -246,7 +245,10 @@ struct QuotaHistoryCard: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                         Spacer(minLength: 4)
-                        Text(Format.compactTokens(model.tokens))
+                        // The same pair rule as the collapsed row above. The
+                        // total learned the dash and these did not, so expanding
+                        // a cost-only model contradicted the line it expanded.
+                        Text(Format.tokens(tokens: model.tokens, cost: model.cost))
                             .foregroundStyle(.secondary)
                         Text(Format.money(tokens: model.tokens, cost: model.cost))
                             .frame(width: 54, alignment: .trailing)
@@ -279,11 +281,26 @@ struct QuotaHistoryCard: View {
                         // all of it "other subscriptions" is a claim the user
                         // never made. On a setup with no declarations at all it
                         // is a claim about every message on the machine.
-                        let lead = row.otherHasUnattributed
-                            ? (row.otherHasAssigned
+                        //
+                        // Excluded is its own state, not a shade of
+                        // unclassified. The user who excluded a source already
+                        // answered the question this line asks; calling it
+                        // unclassified reports their decision back to them as
+                        // an outstanding one. Exhaustive over the seven
+                        // non-empty combinations, so no combination is
+                        // described by a phrase that does not cover it.
+                        let lead: String
+                        if row.otherHasUnattributed {
+                            lead = row.otherHasAssigned || row.otherHasExcluded
                                 ? "Other and unclassified usage in the same hours:"
-                                : "Unclassified usage in the same hours:")
-                            : "Other subscriptions in the same hours:"
+                                : "Unclassified usage in the same hours:"
+                        } else if row.otherHasExcluded {
+                            lead = row.otherHasAssigned
+                                ? "Other and excluded usage in the same hours:"
+                                : "Excluded usage in the same hours:"
+                        } else {
+                            lead = "Other subscriptions in the same hours:"
+                        }
                         let value = row.otherTokens > 0 && row.otherCost > 0
                             ? "%@ · %@".localized(
                                 Format.compactTokens(row.otherTokens),
