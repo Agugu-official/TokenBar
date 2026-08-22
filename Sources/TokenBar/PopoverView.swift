@@ -68,6 +68,11 @@ struct PopoverView: View {
     /// split stale until something unrelated rebuilt the body. Same reasoning
     /// as `UsageAttributionBreakdownCard`, which learned it the hard way.
     @AppStorage(UsageAttribution.confirmedKey) private var attributionRaw = ""
+    /// Observed so a scan-root change restarts the loads that depend on it —
+    /// see the series task below. Reading it here is what makes it a view
+    /// dependency; `ClaudeExtraRoots.load()` is a plain `UserDefaults` read and
+    /// would not be.
+    @AppStorage(ClaudeExtraRoots.storageKey) private var extraRootsRaw = ""
 
     /// Owns the attributed daily series. Mounted here for the reason its own
     /// doc comment gives: its timezone provenance is process-scoped, and the
@@ -283,7 +288,15 @@ struct PopoverView: View {
         // Keyed on the declarations too: re-splitting the stack is the whole
         // point of the card, and a classification saved in Settings has to
         // reach it without waiting for a poll.
-        .task(id: attributionRaw) {
+        // Keyed on the scan roots as well as the declarations. Clearing the
+        // static cache and superseding in-flight loads does not touch the
+        // `points` this model has already published, and this task had no other
+        // reason to restart — so a root added or removed while the popover
+        // stayed open left the trend drawing the old set indefinitely. Exactly
+        // the shape the timezone case below is written for, which is why this
+        // is declarative rather than a second notification: the raw list is
+        // already persisted, so keying on it restarts the load by construction.
+        .task(id: "\(attributionRaw)|\(extraRootsRaw)") {
             await series.load(
                 source: UsageDataSources.current,
                 confirmed: UsageAttribution.parseRaw(attributionRaw).records)

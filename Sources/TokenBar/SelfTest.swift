@@ -11838,10 +11838,33 @@ enum SelfTest {
                 client: "z", provider: "p", state: .assigned("other"))])
         expect(qhoRows.first?.otherTokens == 1000,
                "QH-OTHER everything not mine still lands in one total")
-        expect(qhoRows.first?.otherAssignedTokens == 700,
-               "QH-OTHER but only the part the user declared against another "
-                   + "subscription counts as that — the rest is unclassified, and "
-                   + "the copy must not call it a subscription the user never named")
+        expect(qhoRows.first?.otherHasAssigned == true
+                   && qhoRows.first?.otherHasUnattributed == true,
+               "QH-OTHER and both states are recorded as present, so the copy can "
+                   + "avoid calling unclassified usage a subscription the user "
+                   + "never named")
+        // Presence, not a total: a count compares one dimension over data that
+        // has two. An unclassified row carrying cost and no tokens made the
+        // token totals equal, and the whole bucket read as "other
+        // subscriptions" while some of the spend was unclassified.
+        let qhoCostOnly = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":\((qhsReset - 500_000) * 1000),"client":"z","providerId":"p",
+              "modelId":"m","input":700,"output":0,"cacheRead":0,"cacheWrite":0,
+              "reasoning":0,"cost":1.0,"isTurnStart":true},
+             {"timestamp":\((qhsReset - 400_000) * 1000),"client":"unknown","providerId":"q",
+              "modelId":"m","input":0,"output":0,"cacheRead":0,"cacheWrite":0,
+              "reasoning":0,"cost":0.5,"isTurnStart":true}]
+            """.utf8))
+        let qhoCostRows = QuotaHistoryFold.rows(
+            cycles: qhsCycles, messages: qhoCostOnly, subscription: "c",
+            confirmed: [UsageAttribution.Record(
+                client: "z", provider: "p", state: .assigned("other"))])
+        expect(qhoCostRows.first?.otherHasUnattributed == true,
+               "QH-OTHER an unclassified contribution that arrives as cost with no "
+                   + "tokens is still unclassified — the label cannot be decided by "
+                   + "comparing token totals")
 
         expect(qhspRows.first?.spanTokensExCacheRead == 100,
                "QH-SPAN the span counts only what the two readings bracket — the later "

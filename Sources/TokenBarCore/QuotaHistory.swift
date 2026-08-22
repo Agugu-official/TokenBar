@@ -115,10 +115,18 @@ public struct QuotaHistoryRow: Equatable, Sendable, Identifiable {
     /// the part that claim is true of, so the copy can name what it knows.
     public let otherTokens: Int64
     public let otherCost: Double
-    /// The part of `otherTokens` the user actually declared against a different
-    /// subscription. `otherTokens - otherAssignedTokens` is unclassified or
-    /// explicitly excluded usage.
-    public let otherAssignedTokens: Int64
+    /// Which of those states are PRESENT in the bucket, as facts rather than
+    /// as totals.
+    ///
+    /// Deliberately not a token count. The first version carried
+    /// `otherAssignedTokens` and the label compared it against `otherTokens` —
+    /// which is a comparison in one dimension over data that has two, so an
+    /// unclassified row carrying cost and no tokens made the totals equal and
+    /// the whole bucket read as "other subscriptions" while some of the spend
+    /// was unclassified. A presence flag cannot be fooled by which dimension a
+    /// contribution happens to arrive in.
+    public let otherHasAssigned: Bool
+    public let otherHasUnattributed: Bool
     /// This subscription's models, largest first.
     public let models: [QuotaHistoryModel]
 
@@ -286,7 +294,8 @@ public enum QuotaHistoryFold {
             let lo = lowerBound(stamps, cycle.evidenceStartMs)
             let hi = lowerBound(stamps, cycle.resetAtMs)
             var mine = (tokens: Int64(0), exCacheRead: Int64(0), cost: 0.0)
-            var other = (tokens: Int64(0), cost: 0.0, assigned: Int64(0))
+            var other = (tokens: Int64(0), cost: 0.0,
+                         hasAssigned: false, hasUnattributed: false)
             var byModel: [ModelKey: (tokens: Int64, cost: Double)] = [:]
 
             for message in sorted[lo..<max(lo, hi)] {
@@ -310,7 +319,9 @@ public enum QuotaHistoryFold {
                         current.cost + message.cost)
                 } else {
                     if case .assigned = state {
-                        other.assigned = other.assigned.saturatingAdding(message.tokens)
+                        other.hasAssigned = true
+                    } else {
+                        other.hasUnattributed = true
                     }
                     other.tokens = other.tokens.saturatingAdding(message.tokens)
                     other.cost += message.cost
@@ -323,7 +334,8 @@ public enum QuotaHistoryFold {
                 mineCost: mine.cost,
                 spanTokensExCacheRead: span.exCacheRead, spanCost: span.cost,
                 otherTokens: other.tokens, otherCost: other.cost,
-                otherAssignedTokens: other.assigned,
+                otherHasAssigned: other.hasAssigned,
+                otherHasUnattributed: other.hasUnattributed,
                 models: byModel
                     .map {
                         QuotaHistoryModel(

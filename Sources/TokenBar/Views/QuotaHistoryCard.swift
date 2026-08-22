@@ -275,11 +275,11 @@ struct QuotaHistoryCard: View {
                         // all of it "other subscriptions" is a claim the user
                         // never made. On a setup with no declarations at all it
                         // is a claim about every message on the machine.
-                        let lead = row.otherAssignedTokens == row.otherTokens
-                            ? "Other subscriptions in the same hours:"
-                            : (row.otherAssignedTokens == 0
-                                ? "Unclassified usage in the same hours:"
-                                : "Other and unclassified usage in the same hours:")
+                        let lead = row.otherHasUnattributed
+                            ? (row.otherHasAssigned
+                                ? "Other and unclassified usage in the same hours:"
+                                : "Unclassified usage in the same hours:")
+                            : "Other subscriptions in the same hours:"
                         let value = row.otherTokens > 0 && row.otherCost > 0
                             ? "%@ · %@".localized(
                                 Format.compactTokens(row.otherTokens),
