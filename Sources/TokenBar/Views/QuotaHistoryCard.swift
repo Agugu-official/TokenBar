@@ -31,6 +31,10 @@ struct QuotaHistoryCard: View {
     /// window card makes: an expanded row with no usage half is either still
     /// scanning or done and failed, and only one of those is a spinner.
     var scanFailed = false
+    /// Whether the persisted curve could not be read. Distinct from having no
+    /// history: both leave `cycles` empty after the fetch has settled, and only
+    /// one of them is the card's fault to report as an absence.
+    var curveUnreadable = false
 
     /// Observed, not read once: `span` above is accumulated only for messages
     /// assigned to THIS subscription, so with nothing declared every cycle
@@ -65,6 +69,12 @@ struct QuotaHistoryCard: View {
         DashCard("Window history", subtitle: subtitle) {
             if cycles.isEmpty, !attempted {
                 LoadingLine(title: "Reading quota history…")
+            } else if cycles.isEmpty, curveUnreadable {
+                Text("Quota history could not be read. It will be retried.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else if cycles.isEmpty {
                 Text("No earlier windows recorded yet. They accumulate as TokenBar runs.")
                     .font(.caption)

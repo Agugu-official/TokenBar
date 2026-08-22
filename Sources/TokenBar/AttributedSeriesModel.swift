@@ -114,6 +114,15 @@ import TokenBarCore
     /// from.
     @ObservationIgnored private static var lastRows: [Contribution]?
 
+    /// Drop the reopen cache. Called with the other scan-derived caches when
+    /// the extra-scan-root registry is replaced — these rows come from the
+    /// graph, the graph comes from the roots, and `load` republishes them
+    /// immediately on the next open before awaiting the fresh one. Without
+    /// this, the subscription trend showed a removed root's usage, or omitted
+    /// an added one, for as long as the replacement scan took.
+    @MainActor
+    static func invalidateRowCache() { lastRows = nil }
+
     /// Identifies the newest load this model has started.
     ///
     /// `load` is `@MainActor` but suspends, so a second one — a declaration

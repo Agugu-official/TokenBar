@@ -667,6 +667,7 @@ struct PopoverView: View {
                     // one client, and a failure recorded against another is not
                     // an answer about this one.
                     scanFailed: singleClient.map(model.windowScanFailed(for:)) ?? false,
+                    curveUnreadable: model.quotaCurveUnreadable,
                     // Both lenses now. The gate here used to pass `[:]` on a
                     // client tab, because `@Observable` tracks per property and
                     // reading this on a lens that drew no sparkline would make

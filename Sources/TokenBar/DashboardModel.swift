@@ -215,6 +215,14 @@ private struct DashboardSnapshot {
         lastSnapshotOwner = nil
         hourlyCache = [:]
         hourlyCacheOrder = []
+        // The fourth one, and it does not live on this type. The first version
+        // of this function cleared the three statics it could see from here and
+        // missed the attributed series' own reopen cache, which republishes
+        // before awaiting a fresh graph — so the subscription trend kept
+        // showing a removed root. "Every process-wide cache holding
+        // scan-derived data" is the rule; being declared elsewhere is not an
+        // exemption from it.
+        AttributedSeriesModel.invalidateRowCache()
     }
     /// Whether this model participates in the shared `lastSnapshot` cache.
     /// The newest participating instance becomes its sole writer.
@@ -1229,18 +1237,30 @@ private struct DashboardSnapshot {
             {
                 quotaCycles = cycles
                 quotaCyclesCardId = selected
+                quotaCurveUnreadable = false
                 rebuildQuotaHistory()
-            } else if quotaCyclesCardId != selected || selected == nil {
-                // Could not read, and what we hold is about a different window
-                // — another client's, or another window of this one.
-                quotaCycles = []
-                quotaHistory = []
-                quotaCyclesCardId = nil
+            } else {
+                // The read failed. Whether this branch clears or retains is
+                // only about a window we already had — on a FIRST failure there
+                // is nothing to clear, and the two are indistinguishable in
+                // state. What the card needs is the fact that the read failed,
+                // which no amount of rearranging here provides: it decides on
+                // `cycles.isEmpty` and `attempted`, and an unread curve is
+                // empty-and-attempted exactly like a window with no history.
+                quotaCurveUnreadable = true
+                if quotaCyclesCardId != selected || selected == nil {
+                    // Could not read, and what we hold is about a different
+                    // window — another client's, or another window of this one.
+                    quotaCycles = []
+                    quotaHistory = []
+                    quotaCyclesCardId = nil
+                }
             }
         } else {
             quotaCycles = []
             quotaHistory = []
             quotaCyclesCardId = nil
+            quotaCurveUnreadable = false
         }
     }
 
@@ -1327,6 +1347,18 @@ private struct DashboardSnapshot {
     /// comparison could keep the previous window's history beneath the newly
     /// selected card. Nil when empty.
     @ObservationIgnored private var quotaCyclesCardId: String?
+
+    /// Whether the persisted curve could not be READ, as distinct from having
+    /// no history in it.
+    ///
+    /// `QuotaHistoryCard` decides on `cycles.isEmpty` and `attempted`, and an
+    /// unreadable curve is empty-and-attempted exactly like a window that has
+    /// simply not accumulated anything — so it stated "No earlier windows
+    /// recorded yet" about a curve it had failed to open, and kept stating it
+    /// until some later refresh happened to retry. The same distinction the
+    /// usage half already draws with `windowScanFailedClients`; the quota half
+    /// had no way to say it.
+    private(set) var quotaCurveUnreadable = false
 
     private(set) var quotaWindowSummaries: [QuotaWindowSummary] = []
     /// One weekday-by-hour grid per window, keyed as `QuotaWindowSummary.id`.

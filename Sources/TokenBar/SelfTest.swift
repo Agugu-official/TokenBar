@@ -431,13 +431,20 @@ private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendab
     /// Makes the quota fetch fail, so a case can drive the poll's failure path
     /// rather than reason about it.
     var failAgentUsage = false
+    /// Makes the curve read THROW, which is not the same as returning nil: nil
+    /// is "no history", a throw is "could not be read". Conflating them is the
+    /// defect the case using this drives.
+    var failCurveRead = false
     struct QuotaUnavailable: Error {}
 
     init(payload: AgentUsagePayload) { self.payload = payload }
 
     func quotaCurveSync(
         clientId: String, windowKey: String, generation: UInt64
-    ) throws -> QuotaCurve? { curve }
+    ) throws -> QuotaCurve? {
+        if failCurveRead { throw QuotaUnavailable() }
+        return curve
+    }
 
     var allowsQuotaCachePersistence: Bool { false }
     func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
@@ -11447,6 +11454,36 @@ enum SelfTest {
             return (summaries: m.quotaWindowSummaries.count,
                     heatmaps: m.quotaHeatmapWindows.count)
         }
+        // SS3. A curve read that THROWS on the very first refresh is not an
+        // absence. Nothing had been published yet, so `quotaCyclesCardId` was
+        // nil — and the retention branch read nil as "what we hold is about a
+        // different window" and answered by publishing empty. The quota fetch
+        // has settled by then, so the card stated "No earlier windows recorded
+        // yet" about a curve it could not read, and kept saying it until some
+        // later refresh happened to retry.
+        let firstReadThrows: (cycles: Int, unreadable: Int)? = awaitMainActorValue {
+            let src = WindowScanCountingSource(payload: wPayload)
+            src.failCurveRead = true
+            let m = DashboardModel(source: src, initialYear: nil)
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while m.agentUsage == nil, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            poll.cancel()
+            _ = await poll.value
+            m.windowCardClients = ["codex"]
+            m.windowUsageClient = "codex"
+            m.refreshWindowQuotaHalves()
+            return (cycles: m.quotaCycles.count,
+                    unreadable: m.quotaCurveUnreadable ? 1 : 0)
+        }
+        expect(firstReadThrows?.cycles == 0 && firstReadThrows?.unreadable == 1,
+               "SS3 a curve read that THROWS leaves no cycles AND says it was "
+                   + "unreadable — the card decides on emptiness plus settled, so "
+                   + "without the second fact it reports an absence it never checked")
+
         expect(activeOnly?.summaries == 0,
                "SS2 a window with only a running cycle has no completed history")
         expect((activeOnly?.heatmaps ?? 0) >= 1,
