@@ -26,7 +26,10 @@ pub(crate) const HISTORY_SCHEMA_VERSION: u32 = 3;
 pub(crate) const HISTORY_FILE_NAME: &str = "quota-pace-history-v3.json";
 pub(crate) const HISTORY_LOCK_FILE_NAME: &str = "quota-pace-v3.lock";
 pub(crate) const LEGACY_V2_FILE_NAME: &str = "codex-weekly-history-v2.json";
+/// Floor for `phase_bucket_count`, and the count every window used to get.
 pub(crate) const PHASE_BUCKET_COUNT: usize = 48;
+/// Ceiling for `phase_bucket_count`: one bucket per hour of a 7-day window.
+pub(crate) const MAX_PHASE_BUCKET_COUNT: usize = 168;
 pub(crate) const GRID_POINT_COUNT: usize = 169;
 pub(crate) const MAX_SERIES: usize = 512;
 pub(crate) const MAX_SAMPLES: usize = 65_536;
@@ -1381,7 +1384,7 @@ fn add_sample_if_new(
             normalize_reset(sample.reset_at, sample.duration_seconds) == normalized_reset
         })
         .count();
-    if cycle_count >= MAX_SAMPLES_PER_CYCLE {
+    if cycle_count >= phase_bucket_count(duration_seconds) {
         return false;
     }
     series.samples.push(candidate);
@@ -1468,10 +1471,35 @@ fn phase(sample: &QuotaSample) -> f64 {
     (1.0 - remaining as f64 / sample.duration_seconds as f64).clamp(0.0, 1.0)
 }
 
+/// How many phase buckets a cycle of this length is divided into.
+///
+/// Derived from the duration rather than fixed, because a fixed count divides
+/// every window into the same NUMBER of buckets and therefore gives long
+/// windows coarse ones: at 48, a 5-hour session window buckets every six
+/// minutes and a 7-day weekly window every 3.5 hours. A freshly reset weekly
+/// window then holds one sample for its first 3.5 hours no matter how often
+/// the app polls, because a second sample in the same bucket replaces the
+/// first rather than joining it.
+///
+/// One bucket per hour, floored at the previous 48 and capped at 168. The floor
+/// leaves short windows exactly as they were — a 5-hour window at 48 buckets is
+/// already finer than the 60-second poll can fill, so raising it would multiply
+/// stored samples for a curve nobody could see change. The cap is what a weekly
+/// window needs (168 hours), and it bounds a monthly one at 4.3 hours per
+/// bucket instead of letting it reach 720 samples per cycle.
+pub(crate) fn phase_bucket_count(duration_seconds: i64) -> usize {
+    const HOUR_SECONDS: i64 = 3_600;
+    (duration_seconds.max(0) / HOUR_SECONDS).clamp(
+        PHASE_BUCKET_COUNT as i64,
+        MAX_PHASE_BUCKET_COUNT as i64,
+    ) as usize
+}
+
 fn phase_bucket(reset_at: i64, duration_seconds: i64, sampled_at: i64) -> usize {
+    let count = phase_bucket_count(duration_seconds);
     let remaining = reset_at.saturating_sub(sampled_at);
     let u = (1.0 - remaining as f64 / duration_seconds.max(1) as f64).clamp(0.0, 1.0);
-    ((u * PHASE_BUCKET_COUNT as f64).floor() as usize).min(PHASE_BUCKET_COUNT - 1)
+    ((u * count as f64).floor() as usize).min(count - 1)
 }
 
 fn validate_sample(sample: &QuotaSample) -> bool {
@@ -1499,7 +1527,11 @@ fn validate_series(series: &SeriesState) -> bool {
         let reset = normalize_reset(sample.reset_at, sample.duration_seconds);
         let count = cycle_counts.entry(reset).or_default();
         *count += 1;
-        *count <= MAX_SAMPLES_PER_CYCLE
+        // Same duration-derived cap `admit` enforces. A fixed one here would
+        // call a store the writer legitimately produced corrupt — a weekly
+        // cycle now holds up to 168 samples — and quarantine would then delete
+        // the history this cap exists to bound.
+        *count <= phase_bucket_count(sample.duration_seconds)
     });
     let rollover_valid = series.rollover.as_ref().is_none_or(|rollover| {
         if !agent_quota_duration::validate_observed_state(rollover) {
@@ -5820,6 +5852,46 @@ mod tests {
             .map(|sample| sample.used_percent)
             .collect();
         assert!(used.contains(&0.0) && used.contains(&30.0));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A fixed bucket count gives long windows coarse buckets: at 48, a 7-day
+    /// cycle buckets every 3.5 hours, so readings an hour apart replaced each
+    /// other and a freshly reset weekly window held one sample for hours while
+    /// its headline moved. The count now follows the duration — one bucket per
+    /// hour, floored at 48 so short windows are untouched and capped at 168.
+    #[test]
+    fn long_windows_bucket_by_the_hour() {
+        assert_eq!(phase_bucket_count(5 * HOUR), 48, "short windows unchanged");
+        assert_eq!(phase_bucket_count(7 * DAY), 168, "a weekly window is hourly");
+        assert_eq!(phase_bucket_count(30 * DAY), 168, "and a monthly one is capped");
+
+        // The behaviour the count exists for: two readings an hour apart inside
+        // a weekly cycle are two samples, not one replacing the other.
+        let (directory, path) = temp_path("hourly-buckets");
+        let reset = 9_000_000 + 7 * DAY;
+        let provider = Some(DurationEvidence::provider(reset, 7 * DAY));
+        record(&path, "acct", Some(reset), 10.0, reset - 5 * DAY, provider, None);
+        record(
+            &path,
+            "acct",
+            Some(reset),
+            12.0,
+            // An hour and a minute, not exactly an hour: a bucket boundary
+            // falls on every hour here, and `1 - 428400/604800` evaluates to
+            // 48.99999999999999 rather than 49, so a sample landing exactly on
+            // one is a knife-edge that says nothing about the rule. Real polls
+            // are a minute apart and never sit on the boundary.
+            reset - 5 * DAY + HOUR + 60,
+            provider,
+            None,
+        );
+        let store = read_store(&path);
+        assert_eq!(
+            store.series[0].samples.len(),
+            2,
+            "an hour apart is two buckets in a weekly cycle"
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
