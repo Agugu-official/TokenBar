@@ -308,13 +308,36 @@ struct AgentLimitsCard: View {
     // The master `tokenbar.limits.enabled` gate lives at every call site
     // (OverviewView, SettingsWindowView) rather than inside `body`, so an
     // "off" card leaves no structural gap in its parent VStack.
+    /// Every client this restricted card was asked to draw is switched off.
+    ///
+    /// Read from the hidden set directly rather than inferred from an empty
+    /// `visibleClients`, because that set is also empty before the first
+    /// payload arrives. Hidden is a fact about settings and is true immediately;
+    /// unknown is a fact about the network and is not.
+    var allRestrictedClientsHidden: Bool {
+        guard restrict, !clients.isEmpty else { return false }
+        let hidden = ClientRegistry.parseIdSet(limitsHiddenRaw)
+        return clients.allSatisfy(hidden.contains)
+    }
+
     var body: some View {
         // A restricted card with nothing left to show is not a card. On a
-        // client tab the only reason the list can be empty once the fetch has
-        // settled is that the user switched this client's quota card off, and
-        // answering that with an empty shell saying "no supported agents" is a
-        // worse reply than the silence they asked for.
-        if restrict, visibleClients.isEmpty, usageAttempted {
+        // client tab the only reason the list can be empty is that the user
+        // switched this client's quota card off, and answering that with an
+        // empty shell saying "no supported agents" is a worse reply than the
+        // silence they asked for.
+        //
+        // Two ways a restricted card is empty, and only one of them waits.
+        // Switched off is knowable now, so it answers now: waiting for the
+        // fetch made a card the user had hidden sit there saying "Checking
+        // agent limits…" until the network answered. Empty because the payload
+        // has not arrived is NOT knowable yet, and still waits — a client with
+        // no placeholder rows (anything outside codex/claude/gemini/grok) is
+        // indistinguishable from a hidden one until then, and dropping its card
+        // on that basis would blank a loading card rather than a hidden one.
+        if allRestrictedClientsHidden {
+            EmptyView()
+        } else if restrict, visibleClients.isEmpty, usageAttempted {
             EmptyView()
         } else {
             card

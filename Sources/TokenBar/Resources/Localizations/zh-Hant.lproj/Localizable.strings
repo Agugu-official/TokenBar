@@ -510,3 +510,4 @@
 "Historically: lasts until reset" = "歷史：可撐到重置";
 "On average: lasts until reset" = "均速：可撐到重置";
 "Recently: runs out" = "近期：會用完";
+"%@ rows had no usable timestamp and are not in these totals" = "有 %@ 筆沒有可用的時間戳，未計入以上總計";

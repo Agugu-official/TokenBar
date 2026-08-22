@@ -113,6 +113,7 @@ struct WindowUsageCard: View {
                 headline(geo)
                 chart(geo).zIndex(1)
                 legend(geo).frame(height: Self.legendHeight)
+                undatedNote(usage)
                 Group {
                     if let usage {
                         equivalenceRow(
@@ -301,18 +302,24 @@ struct WindowUsageCard: View {
                      with: .color(.accentColor.opacity(hover == i ? 0.62 : 0.17)))
         }
 
-        guard geo.curve.count > 1 else { return }
-        var path = Path()
-        for (i, p) in geo.curve.enumerated() {
-            let pt = CGPoint(x: p.x * w, y: y(p.y, h: h))
-            i == 0 ? path.move(to: pt) : path.addLine(to: pt)
+        // Scoped to the LINE. This was a `guard … else { return }`, which also
+        // skipped the sample dots thirteen lines below — so a window with one
+        // reading drew nothing at all while the caption beside it said "1
+        // reading". `monotoneCurve` needs two points to interpolate between;
+        // that is a fact about the line, and it was applied to the dots.
+        if geo.curve.count > 1 {
+            var path = Path()
+            for (i, p) in geo.curve.enumerated() {
+                let pt = CGPoint(x: p.x * w, y: y(p.y, h: h))
+                i == 0 ? path.move(to: pt) : path.addLine(to: pt)
+            }
+            // A ground-coloured underlay keeps the line legible where it crosses
+            // a lit bar, so "the line is always in front" holds by construction.
+            ctx.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor).opacity(0.85)),
+                       style: StrokeStyle(lineWidth: 3.4, lineCap: .round, lineJoin: .round))
+            ctx.stroke(path, with: .color(.accentColor),
+                       style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round))
         }
-        // A ground-coloured underlay keeps the line legible where it crosses a
-        // lit bar, so "the line is always in front" holds by construction.
-        ctx.stroke(path, with: .color(Color(nsColor: .windowBackgroundColor).opacity(0.85)),
-                   style: StrokeStyle(lineWidth: 3.4, lineCap: .round, lineJoin: .round))
-        ctx.stroke(path, with: .color(.accentColor),
-                   style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round))
 
         for p in geo.samplePoints {
             let r = CGRect(x: p.x * w - 2, y: y(p.y, h: h) - 2, width: 4, height: 4)
@@ -395,6 +402,21 @@ struct WindowUsageCard: View {
                 .foregroundStyle(.tertiary)
         }
         .font(.caption2)
+    }
+
+    /// Stated, not swallowed. The engine counts rows it could not place in time
+    /// precisely so a consumer cannot present a window total as definitive
+    /// while omitting them; every production path dropped the count until now,
+    /// leaving `--window-probe` the only thing that ever mentioned it.
+    @ViewBuilder
+    private func undatedNote(_ usage: WindowUsageHalf?) -> some View {
+        if let usage, usage.undatedCount > 0 {
+            Text("%@ rows had no usable timestamp and are not in these totals"
+                .localized(String(usage.undatedCount)))
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private func key(_ color: Color, _ label: String, line: Bool = false) -> some View {

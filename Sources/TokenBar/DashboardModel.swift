@@ -1371,7 +1371,8 @@ private struct DashboardSnapshot {
             else { return }
             guard Self.windowScanToken == scanToken else { return }
             unionScan = UnionScan(
-                fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages)
+                fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages,
+                undatedCount: usage.undatedCount)
             rebuildQuotaEquivalences()
             return
         }
@@ -1419,7 +1420,8 @@ private struct DashboardSnapshot {
         windowScanFailedClients = Self.scanFailures(
             windowScanFailedClients, resolvedBy: client)
         unionScan = UnionScan(
-            fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages)
+            fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages,
+            undatedCount: usage.undatedCount)
         refreshWindowQuotaHalves()
         rebuildQuotaHistory()
         rebuildQuotaEquivalences()

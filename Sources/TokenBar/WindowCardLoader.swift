@@ -267,7 +267,9 @@ enum WindowCardLoader {
         let geo = WindowCardGeometry.usageGeometry(
             windowStartMs: start, windowEndMs: end, nowMs: min(quota.nowMs, end),
             samples: quota.samples, messages: mine)
-        return (settled, WindowUsageHalf(mine: mine, bars: geo.bars, hits: geo.hits))
+        return (settled, WindowUsageHalf(
+            mine: mine, bars: geo.bars, hits: geo.hits,
+            undatedCount: scan.undatedCount))
     }
 
     static func interval(_ s: WindowResolution) -> (start: Int64, end: Int64)? {

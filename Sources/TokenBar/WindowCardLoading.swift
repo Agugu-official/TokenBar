@@ -33,6 +33,10 @@ struct WindowUsageHalf: Sendable {
     let mine: [WindowMessage]
     let bars: [BarRect]
     let hits: [HitZone]
+    /// Rows the scan could not place in time. Carried alongside the totals they
+    /// are missing from, so the card can say the total is incomplete instead of
+    /// presenting it as definitive.
+    var undatedCount: Int = 0
 }
 
 /// What the card is, at any moment. Five cases, exhaustive by construction:
@@ -103,6 +107,14 @@ struct UnionScan: Sendable {
     let untilMs: Int64
     let capturedAt: Date
     let messages: [WindowMessage]
+    /// Rows the engine could not place in time, carried rather than dropped.
+    ///
+    /// `WindowUsage.undatedCount` exists so consumers cannot hide them — its
+    /// own doc says "counted, never silently dropped, a window total that
+    /// quietly omits rows is worse than one that says so" — and every
+    /// production path discarded it here, leaving `--window-probe` the only
+    /// thing that ever mentioned the omission.
+    var undatedCount: Int = 0
 
     /// Whether this scan can answer for a window starting at `start`. A scan
     /// that begins after the window did would silently under-count, which is

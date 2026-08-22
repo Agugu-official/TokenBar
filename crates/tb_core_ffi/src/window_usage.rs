@@ -73,12 +73,41 @@ pub(crate) fn cached(
     compute(context, from_ms, until_ms, key)
 }
 
+/// Held across a scan so overlapping callers share one, instead of each
+/// starting its own.
+///
+/// `PopoverView`'s keyed window task and `pollAgentUsage` can both reach
+/// `refreshWindowUsage`, and the Swift scan token only discards an overtaken
+/// RESULT — it does not stop the duplicate work. Two 4-to-67 second scans then
+/// run at once and contend for the same parser pool, which is the opposite of
+/// what a cache in front of them is for.
+///
+/// A plain mutex rather than a per-key future: the second caller waits, then
+/// re-checks the cache and finds what the first published. Scans are CPU-bound
+/// and already serialise on the parser pool, so making them queue costs nothing
+/// that running them concurrently was buying.
+static COMPUTE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn compute(
     context: &crate::LocalSourceContext,
     from_ms: i64,
     until_ms: i64,
     key: CacheKey,
 ) -> Result<Value, String> {
+    let _serialised = COMPUTE.lock().unwrap_or_else(|p| p.into_inner());
+    // Re-check under the lock. A caller that queued behind another's scan is
+    // asking a question that scan may have just answered; running a second one
+    // to produce the same bytes is the duplicate this lock exists to remove.
+    {
+        let cache = crate::WINDOW_USAGE_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((at, _, data)) = cache.get(&key) {
+            if at.elapsed() <= Duration::from_secs(crate::ONESHOT_MAX_AGE_SECS) {
+                return Ok(data.clone());
+            }
+        }
+    }
     let generation = crate::root_generation();
     let token =
         tokscale_core::local_source_change_token(&context.parse_options(None, None)).unwrap_or(0);
