@@ -1642,6 +1642,48 @@ fn rollover_activity_at(rollover: &ObservedState) -> i64 {
 /// that broke it could produce a clamped `last_activity_at` above the ceiling,
 /// which the post-body `validate_store_at` would reject, failing the whole
 /// transaction for every provider rather than just one series.
+/// Forget samples this build cannot place, keeping everything it can.
+///
+/// The three sample-level invariants `validate_series` enforces — each sample
+/// individually valid, no two sharing a `sample_key`, and no cycle over its
+/// bucket cap — are all statements about ONE sample being unusable. Failing the
+/// store on them means one unusable sample discards every usable one beside it,
+/// and the pace history's whole value is that it accumulates over weeks.
+///
+/// The newest sample wins a key collision, matching `admit`, which replaces
+/// within a bucket rather than appending. Order is preserved otherwise, so a
+/// store that needed no repair comes out byte-identical.
+fn drop_unplaceable_samples(mut store: Store) -> Store {
+    for series in &mut store.series {
+        let mut seen: BTreeMap<(i64, usize), usize> = BTreeMap::new();
+        let mut per_cycle: BTreeMap<i64, usize> = BTreeMap::new();
+        let mut kept: Vec<QuotaSample> = Vec::with_capacity(series.samples.len());
+        for sample in series.samples.drain(..) {
+            if !validate_sample(&sample) {
+                continue;
+            }
+            let key = sample_key(&sample);
+            if let Some(index) = seen.get(&key).copied() {
+                // Same bucket: keep the newer reading, as `admit` would.
+                if sample.sampled_at > kept[index].sampled_at {
+                    kept[index] = sample;
+                }
+                continue;
+            }
+            let reset = normalize_reset(sample.reset_at, sample.duration_seconds);
+            let count = per_cycle.entry(reset).or_default();
+            if *count >= phase_bucket_count(sample.duration_seconds) {
+                continue;
+            }
+            *count += 1;
+            seen.insert(key, kept.len());
+            kept.push(sample);
+        }
+        series.samples = kept;
+    }
+    store
+}
+
 fn repair_store_at(mut store: Store, upper_bound: i64, observation_now: i64) -> Store {
     debug_assert!(
         observation_now <= upper_bound,
@@ -3007,8 +3049,20 @@ fn load_store_at_with_mode(
         });
     };
 
+    // Drop offending SAMPLES before condemning the FILE. A duplicate sample key
+    // and a cycle over its bucket cap are per-sample facts, and quarantine is
+    // per-store: a resolution change once turned three bad keys out of 2,775
+    // samples into 31 series moved aside and every window back to "learning
+    // history". Nothing about that file was untrustworthy — 99.9% of it was the
+    // same data it had been a minute earlier.
+    //
+    // Quarantine stays for what it was for: bytes that will not parse, a
+    // schema version this build does not speak, series out of order — things
+    // that say the file did not come from here. A sample this build cannot
+    // place is a sample to forget, not a history to burn.
     let parsed = serde_json::from_slice::<Store>(&bytes)
         .ok()
+        .map(drop_unplaceable_samples)
         .filter(|store| validate_store(store));
     if let Some(store) = parsed {
         let store = if validate_store_at(&store, validation_now) {
@@ -5925,6 +5979,56 @@ mod tests {
             2,
             "an hour apart is two buckets in a weekly cycle"
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A duplicate sample key is one unusable SAMPLE, and quarantine discards
+    /// the whole FILE. Changing the bucket resolution once produced three
+    /// duplicates out of 2,775 samples and cost 31 series — every window back
+    /// to "learning history" — for data that was 99.9% intact.
+    #[test]
+    fn one_unplaceable_sample_does_not_discard_the_rest() {
+        let (directory, path) = temp_path("repair-not-quarantine");
+        let reset = 9_000_000 + 7 * DAY;
+        let duration = 7 * DAY;
+        let mut series = SeriesState::new(&key("acct"), reset - duration);
+        // Two readings the CURRENT bucket rule puts in one cell, which is what a
+        // resolution change produces from a store written under the old one.
+        // 0.100 and 0.101 of a 7-day cycle are ten minutes apart and share one
+        // 52.5-minute bucket, so they collide while still having an order —
+        // which is what makes "the newer one wins" testable at all.
+        series.samples = vec![
+            quota_sample(reset, duration, 0.100, 10.0, SampleOrigin::LiveV3),
+            quota_sample(reset, duration, 0.101, 11.0, SampleOrigin::LiveV3),
+            quota_sample(reset, duration, 0.500, 40.0, SampleOrigin::LiveV3),
+        ];
+        series.last_activity_at = reset - 60;
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series],
+        };
+        fs::write(&path, serde_json::to_vec(&store).unwrap()).unwrap();
+
+        let loaded = load_store_at_with_mode(
+            StorageMode::System,
+            &path,
+            reset,
+            reset,
+        )
+        .unwrap();
+        assert!(
+            !loaded.quarantined,
+            "one unplaceable sample must not condemn the file"
+        );
+        let kept = &loaded.store.series[0].samples;
+        assert_eq!(kept.len(), 2, "the collision is dropped, the rest survives");
+        assert!(
+            kept.iter().any(|sample| sample.used_percent == 40.0),
+            "the sample in its own bucket is untouched"
+        );
+        // The newer reading wins the collision, matching `admit`'s replacement.
+        assert!(kept.iter().any(|sample| sample.used_percent == 11.0));
+        assert!(!path.with_extension("corrupt").exists());
         fs::remove_dir_all(directory).unwrap();
     }
 
