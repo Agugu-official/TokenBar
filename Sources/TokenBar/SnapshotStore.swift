@@ -220,16 +220,22 @@ enum SnapshotStore {
     /// exactly: a snapshot built under a different input set is not this
     /// process's answer, whatever else about it still lines up.
     ///
-    /// Defaulted to THIS process's current roots rather than to the empty set,
-    /// so a call site that forgets the argument is conservative instead of
-    /// wrong — the empty default would have quietly accepted every snapshot on
-    /// a machine that has extra roots configured, which is the exact case the
+    /// Defaulted to the LAST APPLIED registry rather than to the empty set, so
+    /// a call site that forgets the argument is conservative instead of wrong —
+    /// the empty default would have quietly accepted every snapshot on a
+    /// machine that has extra roots configured, which is the exact case the
     /// field exists for.
+    ///
+    /// Last applied rather than currently applied: a restore runs before the
+    /// launch-time `ClaudeExtraRoots.apply` lands, so the in-memory value is
+    /// still empty and comparing against it would reject every snapshot on
+    /// every launch. Last applied rather than configured, because a path the
+    /// setter REFUSED is in the configured list and was never in the scan.
     static func validate(
         _ envelope: SnapshotEnvelope,
         expectedYear: String?,
         identity: BuildIdentity,
-        scanRoots: String = ClaudeExtraRoots.payloadJSON(ClaudeExtraRoots.load()),
+        scanRoots: String = ClaudeExtraRoots.lastAppliedPayloadJSON,
         now: Date = Date()
     ) -> Bool {
         guard envelope.snapshotSchemaVersion == SnapshotEnvelope.schemaVersion,

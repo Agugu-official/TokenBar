@@ -350,7 +350,7 @@ private struct DashboardSnapshot {
                   let envelope = try? Self.snapshotDecoder.decode(SnapshotEnvelope.self, from: bytes),
                   SnapshotStore.validate(
                       envelope, expectedYear: initialYear, identity: identity,
-                      scanRoots: ClaudeExtraRoots.payloadJSON(ClaudeExtraRoots.load()))
+                      scanRoots: ClaudeExtraRoots.lastAppliedPayloadJSON)
         {
             // The model report is never persisted (see SnapshotEnvelope's doc
             // comment), so a disk restore ALWAYS leaves modelReport/modelYear/

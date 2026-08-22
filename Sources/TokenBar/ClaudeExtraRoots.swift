@@ -125,16 +125,73 @@ enum ClaudeExtraRoots {
     /// `@Sendable` closure that performs the read.
     nonisolated(unsafe) private(set) static var appliedPayloadJSON = payloadJSON([])
 
-    /// Record what the setter installed. Only a successful call moves it: a
-    /// failure leaves the registry holding whatever it held before, so the
-    /// previous value is still the true one.
-    static func recordApplied(_ json: String, result: ExtraScanPathsResult?) {
-        guard result != nil else { return }
-        appliedPayloadJSON = json
+    /// The last registry any run of this app installed, persisted.
+    ///
+    /// `appliedPayloadJSON` answers "what is the engine scanning right now",
+    /// which is the empty set until the launch-time apply lands. That is the
+    /// truth for STAMPING a snapshot and the wrong question for VALIDATING one:
+    /// a restore at `DashboardModel.init` happens before apply completes, so
+    /// comparing against the in-memory value would reject every snapshot on
+    /// every launch. This is the value to compare against — the registry the
+    /// snapshot on disk was written under.
+    ///
+    /// It moves the moment an apply succeeds, while the snapshot is only
+    /// rewritten by the next graph commit. So a root change followed by a quit
+    /// leaves the persisted value ahead of the file, and the file is rejected —
+    /// which is the intended direction.
+    static let appliedKey = "tokenbar.claude.extraRootsApplied"
+
+    static var lastAppliedPayloadJSON: String {
+        UserDefaults.standard.string(forKey: appliedKey) ?? payloadJSON([])
     }
 
-    /// Test seam only: back to the pre-apply state.
-    static func resetAppliedForTesting() { appliedPayloadJSON = payloadJSON([]) }
+    /// Record what the setter actually installed.
+    ///
+    /// Two conditions, not one. A failed call leaves the registry holding
+    /// whatever it held before, so the previous value is still the true one.
+    /// And a call that SUCCEEDS can still have refused part of its input:
+    /// `rejected` names paths Rust deliberately left out of the registry — not
+    /// a directory, no extra-root support for that client, empty or relative —
+    /// so recording the whole request would claim roots the scan does not
+    /// include. `unreadable` is the opposite case and stays: those ARE
+    /// registered and retried on the next scan.
+    ///
+    /// The distinction has teeth. A rejected path that becomes a real directory
+    /// while the app is stopped would otherwise leave the next launch matching
+    /// a snapshot whose scan excluded it.
+    static func recordApplied(_ requestedJSON: String, result: ExtraScanPathsResult?) {
+        guard let result else { return }
+        let json = registeredJSON(requestedJSON, rejected: result.rejected)
+        appliedPayloadJSON = json
+        UserDefaults.standard.set(json, forKey: appliedKey)
+    }
+
+    /// `requestedJSON` minus the paths the setter refused, in the same shape.
+    ///
+    /// Returns the input untouched when nothing was refused, so the common case
+    /// is byte-identical to `payloadJSON(load())` and no comparison drifts on
+    /// re-encoding. A payload this cannot parse is also returned untouched:
+    /// it came from `payloadJSON` one line earlier, so failing to parse it is
+    /// impossible in practice, and guessing would be worse than recording the
+    /// request.
+    static func registeredJSON(_ requestedJSON: String, rejected: [ScanPathNote]) -> String {
+        let refused = Set(rejected.map(\.path))
+        guard !refused.isEmpty,
+              let data = requestedJSON.data(using: .utf8),
+              let object = try? JSONDecoder().decode([String: [String]].self, from: data)
+        else { return requestedJSON }
+        let kept = object.mapValues { paths in paths.filter { !refused.contains($0) } }
+        guard let encoded = try? JSONEncoder().encode(kept),
+              let text = String(data: encoded, encoding: .utf8)
+        else { return requestedJSON }
+        return text
+    }
+
+    /// Test seam only: back to the pre-apply state, in memory and on disk.
+    static func resetAppliedForTesting() {
+        appliedPayloadJSON = payloadJSON([])
+        UserDefaults.standard.removeObject(forKey: appliedKey)
+    }
 
     private static let applyQueue = DispatchQueue(
         label: "com.nyanako.tokenbar.claude-extra-roots", qos: .utility)

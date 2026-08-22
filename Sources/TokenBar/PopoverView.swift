@@ -367,6 +367,17 @@ struct PopoverView: View {
         //     displayClients is reactive state and deltas the instant the toggle
         //     lands. Without this, a live hide would strand the slice until
         //     reopen.
+        // The graph task is not keyed on the generation and `pollGraph` sleeps
+        // before fetching, so Overview and the model/hourly/agents lenses would
+        // keep drawing the old root set for up to a minute after an apply. This
+        // also supersedes an old-root fetch still in flight: `gatedGraph` bumps
+        // `graphFetchToken`, and a fetch that no longer owns it cannot commit.
+        //
+        // Not `initial: true`: the first value is the launch state, and
+        // `load()` already covers t=0.
+        .onChange(of: extraRootsGeneration) { _, _ in
+            Task { await model.refresh() }
+        }
         .onChange(of: model.stats?.presentClients, initial: true) { _, _ in
             resetTabIfHidden()
         }

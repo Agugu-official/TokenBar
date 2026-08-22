@@ -9896,7 +9896,7 @@ enum SelfTest {
             savedAt: Date = Date(),
             payload: UsagePayload? = nil,
             knownYears: [String]? = nil,
-            scanRoots: String = ClaudeExtraRoots.payloadJSON(ClaudeExtraRoots.load())
+            scanRoots: String = ClaudeExtraRoots.lastAppliedPayloadJSON
         ) -> SnapshotEnvelope {
             let p = payload ?? DemoData.payload(for: year)
             return SnapshotEnvelope(
@@ -13216,7 +13216,65 @@ enum SelfTest {
         expect(ClaudeExtraRoots.appliedPayloadJSON == ceWanted,
                "CE-APPLIED and a setter that succeeded does move it, so the rule is "
                    + "a condition rather than a refusal to ever record")
+        expect(ClaudeExtraRoots.lastAppliedPayloadJSON == ceWanted,
+               "CE-APPLIED and it is persisted, because the snapshot a RESTORE has "
+                   + "to judge was written by a previous run")
+
+        // CE-REJECTED. A successful call is not a fully accepted one.
+        // `rejected` names paths Rust deliberately left out of the registry, so
+        // recording the whole request claims roots the scan does not include —
+        // and a rejected path that becomes a real directory while the app is
+        // stopped would then let the next launch accept a snapshot whose scan
+        // excluded it. `unreadable` is the opposite case: those ARE registered
+        // and retried on the next scan, so they must stay.
+        // Paths through `expand` and membership through the DECODED payload.
+        // `JSONEncoder` escapes "/" as "\\/", so a `contains` on the raw JSON
+        // string never matches a plain path — and the case would then pass on a
+        // filter that removed nothing.
+        func cePaths(_ json: String) -> [String] {
+            (try? JSONDecoder().decode(
+                [String: [String]].self, from: Data(json.utf8)))?["claude"] ?? []
+        }
+        let ceKept = ClaudeExtraRoots.expand("/tmp/tokenbar-a")[0]
+        let ceRefused = ClaudeExtraRoots.expand("/tmp/tokenbar-b")[0]
+        let cePartialJSON = "{\"registeredCount\":1,"
+            + "\"unreadable\":[{\"client\":\"claude\",\"path\":\"\(ceKept)\","
+            + "\"reason\":\"unmounted\"}],"
+            + "\"rejected\":[{\"client\":\"claude\",\"path\":\"\(ceRefused)\","
+            + "\"reason\":\"not a directory\"}]}"
+        let cePartial = try! JSONDecoder().decode(
+            ExtraScanPathsResult.self, from: Data(cePartialJSON.utf8))
+        let ceTwo = ClaudeExtraRoots.payloadJSON(["/tmp/tokenbar-a", "/tmp/tokenbar-b"])
+        // The premise: both paths really are in the request, or "the refused
+        // one is absent" is true of a payload that never had it.
+        expect(cePaths(ceTwo).contains(ceKept) && cePaths(ceTwo).contains(ceRefused),
+               "CE-REJECTED the request really carries both roots")
+        let ceRegistered = ClaudeExtraRoots.registeredJSON(
+            ceTwo, rejected: cePartial.rejected)
+        expect(cePaths(ceRegistered).contains(ceKept)
+                   && !cePaths(ceRegistered).contains(ceRefused),
+               "CE-REJECTED a refused path leaves the recorded registry, and an "
+                   + "unreadable one — which IS registered and retried — stays in it")
+        expect(ClaudeExtraRoots.registeredJSON(ceTwo, rejected: []) == ceTwo,
+               "CE-REJECTED and with nothing refused the payload is returned "
+                   + "byte-identical, so the common case cannot drift on re-encoding")
+        // Through `recordApplied`, not just the helper beside it. Asserting the
+        // helper alone passes while the recorder stores the whole request —
+        // the same one-layer-short shape LP3-BIND'''s first version had, and it
+        // survived this exact mutation until this case was added.
         ClaudeExtraRoots.resetAppliedForTesting()
+        ClaudeExtraRoots.recordApplied(ceTwo, result: cePartial)
+        expect(!cePaths(ClaudeExtraRoots.appliedPayloadJSON).contains(ceRefused)
+                   && cePaths(ClaudeExtraRoots.appliedPayloadJSON).contains(ceKept),
+               "CE-REJECTED the RECORDER stores the registered subset, so a "
+                   + "snapshot is stamped with the roots the scan included")
+        expect(!cePaths(ClaudeExtraRoots.lastAppliedPayloadJSON).contains(ceRefused),
+               "CE-REJECTED and the persisted copy a restore judges against "
+                   + "excludes it too")
+        ClaudeExtraRoots.resetAppliedForTesting()
+        expect(ClaudeExtraRoots.lastAppliedPayloadJSON == ceEmpty,
+               "CE-APPLIED a process that has never applied compares against the "
+                   + "empty registry, which is what the engine holds then")
 
         // isRejectedRoot: home and root are refused; an ordinary subfolder is not.
         let ceHome = FileManager.default.homeDirectoryForCurrentUser.path
