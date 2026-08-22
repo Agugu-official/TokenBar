@@ -547,8 +547,25 @@ public enum TBCore {
                     sampledAt: 1_000, resetAt: 1_500,
                     durationSeconds: QuotaCurve.validDurationSeconds.upperBound + 1)]))
         rejects(
-            "a usedPercent outside (0, 100] is rejected",
-            curve(points: [point(usedPercent: "0.0")]))
+            "a usedPercent outside [0, 100] is rejected",
+            curve(points: [point(usedPercent: "-0.1")]))
+        rejects(
+            "a usedPercent above 100 is rejected",
+            curve(points: [point(usedPercent: "100.1")]))
+        // Zero is a READING, not an absence: a fresh window is 0% used, and
+        // rejecting it meant no cycle recorded its own start, so the span
+        // between the lowest and highest reading understated every cycle by
+        // whatever was spent before the app first saw a non-zero number. This
+        // guard mirrors the store's admission and had to widen with it.
+        do {
+            let zero = try JSONDecoder().decode(
+                QuotaCurve.self, from: curve(points: [point(usedPercent: "0.0")]))
+            check("a usedPercent of exactly 0 is accepted — a fresh window's own start",
+                  zero.points.first?.usedPercent == 0)
+        } catch {
+            check("a usedPercent of exactly 0 is accepted — a fresh window's own start",
+                  false)
+        }
         // Rejected by JSON number parsing rather than by the `isFinite` guard,
         // which no JSON input can reach. Kept because it pins that a payload
         // cannot smuggle an unrepresentable number past this boundary.

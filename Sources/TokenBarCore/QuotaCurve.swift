@@ -59,8 +59,13 @@ public struct QuotaCurvePoint: Decodable, Sendable, Equatable {
             throw QuotaCurve.corrupted(
                 decoder, "durationSeconds falls outside the storable window length")
         }
-        guard usedPercent.isFinite, usedPercent > 0, usedPercent <= 100 else {
-            throw QuotaCurve.corrupted(decoder, "usedPercent must fall in (0, 100]")
+        // `>= 0`, matching the store's widened admission: a fresh window reads
+        // 0% used, and rejecting that meant no cycle recorded its own start.
+        // This guard exists to detect a payload that did not come from the
+        // store, so it has to move with the store or it would reject the very
+        // samples the store now writes.
+        guard usedPercent.isFinite, usedPercent >= 0, usedPercent <= 100 else {
+            throw QuotaCurve.corrupted(decoder, "usedPercent must fall in [0, 100]")
         }
         let cycleStart = resetAt.subtractingReportingOverflow(durationSeconds)
         guard !cycleStart.overflow, (cycleStart.partialValue...resetAt).contains(sampledAt) else {

@@ -1327,9 +1327,20 @@ fn add_sample_if_new(
     used_percent: f64,
     sampled_at: i64,
 ) -> bool {
+    // `0.0 <=`, not `0.0 <`. A fresh window reads 0% used, and rejecting it
+    // meant no cycle ever recorded its own start: the first stored sample was
+    // always after some consumption, so `usedPercent` — the span between the
+    // lowest and highest reading — understated every cycle by whatever had been
+    // spent before the app first saw a non-zero number.
+    //
+    // Zero is not a "no data" sentinel here. By the time `enrich_snapshot_with`
+    // builds an observation it has already dropped `PaceState::Unavailable`,
+    // an unparseable reset and any non-finite reading, and its own range check
+    // is `(0.0..=100.0)` — inclusive. The store was the only layer treating a
+    // measured zero as an absence.
     if !(valid_duration(duration_seconds)
         && used_percent.is_finite()
-        && 0.0 < used_percent
+        && 0.0 <= used_percent
         && used_percent <= 100.0)
     {
         return false;
@@ -1471,7 +1482,10 @@ fn validate_sample(sample: &QuotaSample) -> bool {
         && cycle_started_at <= sample.sampled_at
         && sample.sampled_at <= sample.reset_at
         && sample.used_percent.is_finite()
-        && (0.0 < sample.used_percent && sample.used_percent <= 100.0)
+        // Inclusive of zero — see the admission rule in `admit`. `QuotaCurve`'s
+        // Swift decoder mirrors this function exactly and must widen with it,
+        // or a store containing a legitimate 0 would decode as corrupt.
+        && (0.0 <= sample.used_percent && sample.used_percent <= 100.0)
 }
 
 fn validate_series(series: &SeriesState) -> bool {
@@ -5770,6 +5784,42 @@ mod tests {
         assert_eq!(store.series[0].samples.len(), 1);
         assert_eq!(store.series[0].samples[0].reset_at, new);
         assert_eq!(store.series[0].samples[0].sampled_at, old + 10 * 60);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A fresh window reads 0% used, and the store used to reject it, so no
+    /// cycle ever recorded its own start: the first stored sample was always
+    /// after some consumption, and the span between the lowest and highest
+    /// reading understated every cycle by whatever had been spent before the
+    /// app first saw a non-zero number.
+    ///
+    /// Zero is a reading, not an absence. `enrich_snapshot_with` has already
+    /// dropped `PaceState::Unavailable`, an unparseable reset and any
+    /// non-finite value before it builds an observation, and its own range
+    /// check is inclusive — the store was the only layer disagreeing.
+    #[test]
+    fn a_fresh_window_records_its_own_zero() {
+        let (directory, path) = temp_path("zero-start");
+        let reset = 9_000_000 + 7 * DAY;
+        // Provider duration evidence, so the series is ready on the first poll
+        // rather than spending it learning the window length — which is the
+        // production case for every window that reports its own reset.
+        let provider = Some(DurationEvidence::provider(reset, 7 * DAY));
+        record(&path, "acct", Some(reset), 0.0, reset - 7 * DAY + 60, provider, None);
+        let store = read_store(&path);
+        assert_eq!(store.series[0].samples.len(), 1);
+        assert_eq!(store.series[0].samples[0].used_percent, 0.0);
+        // And the cycle's span now starts where the cycle did: a later reading
+        // makes the difference the full 30 points, not 30 minus whatever was
+        // spent before the first non-zero sample landed.
+        record(&path, "acct", Some(reset), 30.0, reset - 3 * DAY, provider, None);
+        let grown = read_store(&path);
+        let used: Vec<f64> = grown.series[0]
+            .samples
+            .iter()
+            .map(|sample| sample.used_percent)
+            .collect();
+        assert!(used.contains(&0.0) && used.contains(&30.0));
         fs::remove_dir_all(directory).unwrap();
     }
 
