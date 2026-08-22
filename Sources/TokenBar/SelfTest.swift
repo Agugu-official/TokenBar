@@ -15,6 +15,24 @@ private final class AsyncResultBox<Value: Sendable>: @unchecked Sendable {
 private actor ThrottleCallCounter {
     private(set) var count = 0
     func bump() { count += 1 }
+    func reset() { count = 0 }
+}
+
+/// Holds a fetch open so concurrent arrivals overlap deterministically.
+private actor ThrottleGate {
+    private var opened = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func open() {
+        opened = true
+        for waiter in waiters { waiter.resume() }
+        waiters = []
+    }
+
+    func wait() async {
+        if opened { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
 }
 
 private actor ControlledTurnUsageDataSource: UsageDataSource {
@@ -764,6 +782,26 @@ enum SelfTest {
                 await counter.bump()
                 return empty
             }
+            // Three callers arriving TOGETHER, before any of them has a result
+            // to cache. This is the case the actor alone does not cover: it is
+            // reentrant across `await`, so while the first is suspended in the
+            // fetch the others walk past the empty cache and open their own.
+            let gate = ThrottleGate()
+            let blocking: @Sendable () async throws -> AgentUsagePayload = {
+                await counter.bump()
+                await gate.wait()
+                return empty
+            }
+            let concurrent = (0..<3).map { _ in
+                Task { try await throttle.payload(now: base, fetch: blocking) }
+            }
+            while await counter.count < 1 { await Task.yield() }
+            await gate.open()
+            for task in concurrent { _ = try await task.value }
+            let concurrentCalls = await counter.count
+            await throttle.reset()
+            await counter.reset()
+
             _ = try await throttle.payload(now: base, fetch: fetch)
             // Nine reopens inside the floor.
             for i in 1...9 {
@@ -774,13 +812,34 @@ enum SelfTest {
             // The 60s poll tick is outside it and must still go through.
             _ = try await throttle.payload(
                 now: base.addingTimeInterval(60), fetch: fetch)
-            return [insideFloor, await counter.count]
+            return [insideFloor, await counter.count, concurrentCalls]
         }
         expect(throttleResult?.first == 1,
                "THROTTLE ten opens within the floor issue ONE request, not ten")
-        expect(throttleResult?.last == 2,
+        expect(throttleResult?.count == 3 && throttleResult?[1] == 2,
                "THROTTLE and the 60s poll tick still goes through, so the floor "
                    + "collapses reopens without slowing the cadence it protects")
+        // QT-FLOOR. A provider correction can make the recent samples fall
+        // steeply enough that the projection goes below zero — "-190% used",
+        // and a drop larger than the amount that exists. The mirror of the
+        // overshoot `runsOutEarly` names, with no state to name it.
+        let qtFall = QuotaTrendFold.trend(
+            usedPercent: 10, windowStartMs: 0, windowEndMs: 100_000, nowMs: 20_000,
+            samples: [QuotaSample(atMs: 10_000, usedPercent: 90),
+                      QuotaSample(atMs: 20_000, usedPercent: 10)])
+        expect(
+            (qtFall?.projectedUsedPercent ?? -1) >= 0,
+            "QT-FLOOR a steep fall cannot project below an empty meter")
+        expect(
+            qtFall.map { abs(($0.projectedUsedPercent - 10) - $0.projectedDeltaPercent) < 1e-9 }
+                == true,
+            "QT-FLOOR and the delta is derived from the clamped projection, so adding "
+                + "it to the current reading lands on the projection beside it")
+
+        expect(throttleResult?.last == 1,
+               "THROTTLE three callers arriving before any result exists share ONE "
+                   + "request — the actor is reentrant across await, so the cache "
+                   + "check alone does not coalesce them")
 
         expect(
             !AppLanguage.requiresRelaunch(from: "en", to: "en"),

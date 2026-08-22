@@ -115,8 +115,23 @@ public enum QuotaTrendFold {
 
         let windowElapsedFraction = min(1, max(0, Double(nowMs - windowStartMs) / Double(durationMs)))
         let remainingElapsedFraction = 1 - windowElapsedFraction
-        let delta = recentSlope * remainingElapsedFraction * 100
-        let projected = usedPercent + delta
+        let rawDelta = recentSlope * remainingElapsedFraction * 100
+        // Floor only, and deliberately not a ceiling. A provider correction can
+        // make the recent samples fall steeply enough that `rawDelta` is more
+        // negative than the meter has to give, projecting a window to "-190%
+        // used" and a drop larger than the amount that exists — the mirror of
+        // the overshoot `runsOutEarly` exists for, with no state to name.
+        //
+        // The ceiling is NOT clamped, because `runsOutEarly` is exactly
+        // `projectedUsedPercent > 100`: capping there would delete the signal
+        // the row uses to stop printing an impossible delta. The asymmetry is
+        // the point — one saturation has a name, the other does not.
+        //
+        // The delta is recomputed from the clamped projection rather than kept
+        // raw, so the two cannot disagree: a reader adding the delta to the
+        // current reading must land on the projection beside it.
+        let projected = max(0, usedPercent + rawDelta)
+        let delta = projected - usedPercent
 
         let direction: QuotaTrend.Direction = abs(recentSlope) <= flatThreshold
             ? .flat : (recentSlope > 0 ? .rising : .falling)

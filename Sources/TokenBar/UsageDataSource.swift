@@ -71,25 +71,39 @@ extension UsageDataSource {
 /// carrying the gate's own "retrying in ~Ns" message is cached like any other,
 /// so that countdown can read up to 50s stale.
 ///
-/// An actor rather than a lock, so concurrent callers coalesce: the second
-/// arrival waits for the first's fetch and is then served from it, instead of
-/// starting a second request against the same endpoint.
+/// Concurrent callers share one request, through a retained in-flight task.
+///
+/// The actor alone does NOT give that, which is what the first version of this
+/// claimed. Swift actors are reentrant across `await`: while the first caller
+/// is suspended inside the fetch, the actor is free to admit the second, which
+/// finds the cache still empty and starts its own request. Three callers
+/// arriving together would issue three — the burst this exists to prevent,
+/// surviving inside the thing built to prevent it. Holding the `Task` and
+/// awaiting it is what actually coalesces them.
 actor AgentUsageThrottle {
     static let shared = AgentUsageThrottle()
 
     static let minimumInterval: TimeInterval = 50
 
     private var last: (payload: AgentUsagePayload, at: Date)?
+    private var inFlight: Task<AgentUsagePayload, Error>?
 
     /// `now` is injectable so a test can drive the clock rather than sleep.
     func payload(
         now: Date = Date(),
-        fetch: @Sendable () async throws -> AgentUsagePayload
+        fetch: @Sendable @escaping () async throws -> AgentUsagePayload
     ) async throws -> AgentUsagePayload {
         if let last, now.timeIntervalSince(last.at) < Self.minimumInterval {
             return last.payload
         }
-        let fresh = try await fetch()
+        // A request is already out: wait for it rather than opening a second.
+        // Its result is this caller's answer — they asked inside one round trip
+        // of each other, and the endpoint cannot have moved between them.
+        if let inFlight { return try await inFlight.value }
+        let task = Task { try await fetch() }
+        inFlight = task
+        defer { inFlight = nil }
+        let fresh = try await task.value
         last = (fresh, now)
         return fresh
     }
