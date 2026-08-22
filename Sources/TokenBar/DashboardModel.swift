@@ -942,7 +942,7 @@ private struct DashboardSnapshot {
     /// can move them DURING a fetch — which is the whole property under test —
     /// without writing the user's real `tokenbar.claude.extraConfigDirs`.
     @ObservationIgnored nonisolated(unsafe) static var scanRootsProvider:
-        @Sendable () -> String = { ClaudeExtraRoots.payloadJSON(ClaudeExtraRoots.load()) }
+        @Sendable () -> String = { ClaudeExtraRoots.appliedPayloadJSON }
 
     /// The roots stamped into the snapshot for the committed payload.
     var payloadScanRootsForTesting: String { payloadScanRoots }

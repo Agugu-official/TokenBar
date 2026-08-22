@@ -97,6 +97,45 @@ enum ClaudeExtraRoots {
         }
     }
 
+    /// The payload the Rust registry has actually ACCEPTED, as opposed to the
+    /// one the user has configured.
+    ///
+    /// `apply` deliberately does not run the setter on the calling actor — the
+    /// core probes every path with `read_dir`, and an unmounted volume can
+    /// block that for a long time, which is the case this feature exists to
+    /// tolerate. So there is a real interval in which `load()` already names
+    /// the new roots and the engine is still scanning the previous registry.
+    /// Anything that records "which roots produced this data" must read THIS,
+    /// not the persisted list, or it labels a pre-change scan as post-change.
+    ///
+    /// Starts at the empty payload because that is what the registry holds
+    /// before the launch-time apply installs anything — a truthful answer, not
+    /// a placeholder.
+    ///
+    /// The remaining window is fail-closed by construction: between the setter
+    /// returning on the utility queue and this being updated on the main actor,
+    /// a fetch reads the OLD value while the engine already scans the new
+    /// roots, so its snapshot is stamped older than it is and the next launch
+    /// REJECTS it. A false reject costs one cold start; a false accept shows
+    /// the wrong totals.
+    /// `nonisolated(unsafe)` for the same reason the rest of this type is
+    /// nonisolated: every read and write is on the main actor — `recordApplied`
+    /// from `apply`'s `Task { @MainActor }`, and the reads from `gatedGraph`,
+    /// which is main-actor isolated. The compiler cannot see that through the
+    /// `@Sendable` closure that performs the read.
+    nonisolated(unsafe) private(set) static var appliedPayloadJSON = payloadJSON([])
+
+    /// Record what the setter installed. Only a successful call moves it: a
+    /// failure leaves the registry holding whatever it held before, so the
+    /// previous value is still the true one.
+    static func recordApplied(_ json: String, result: ExtraScanPathsResult?) {
+        guard result != nil else { return }
+        appliedPayloadJSON = json
+    }
+
+    /// Test seam only: back to the pre-apply state.
+    static func resetAppliedForTesting() { appliedPayloadJSON = payloadJSON([]) }
+
     private static let applyQueue = DispatchQueue(
         label: "com.nyanako.tokenbar.claude-extra-roots", qos: .utility)
 
@@ -131,6 +170,10 @@ enum ClaudeExtraRoots {
         applyQueue.async {
             let result = try? TBCore.setExtraScanPaths(json: json)
             Task { @MainActor in
+                // Before the invalidation and the generation bump, so anything
+                // they restart reads the registry that is now installed rather
+                // than the one it replaced.
+                recordApplied(json, result: result)
                 // The engine dropped its own caches inside the setter. These
                 // are the Swift ones, which answer without asking it — see
                 // `invalidateScanDerivedCaches`. Unconditional on `completion`,

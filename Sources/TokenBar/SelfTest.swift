@@ -13160,6 +13160,37 @@ enum SelfTest {
             ],
             "payloadJSON deduplicates repeated config dirs instead of doubling the path list")
 
+        // CE-APPLIED. What produced a scan is the registry the engine ACCEPTED,
+        // not the list the user configured. `apply` deliberately keeps the
+        // setter off the calling actor — the core probes each path with
+        // `read_dir`, which an unmounted volume can stall, and tolerating that
+        // is the whole feature — so there is a real interval in which `load()`
+        // already names the new roots while the engine still scans the old
+        // registry. Anything recording "which roots produced this data" that
+        // reads the persisted list labels a pre-change scan as post-change,
+        // and the snapshot check then accepts it on the next launch.
+        ClaudeExtraRoots.resetAppliedForTesting()
+        let ceEmpty = ClaudeExtraRoots.payloadJSON([])
+        expect(ClaudeExtraRoots.appliedPayloadJSON == ceEmpty,
+               "CE-APPLIED before any apply lands the engine holds no extra roots, "
+                   + "and that is what is reported — not the configured list")
+        let ceWanted = ClaudeExtraRoots.payloadJSON(["/tmp/tokenbar-applied"])
+        ClaudeExtraRoots.recordApplied(ceWanted, result: nil)
+        expect(ClaudeExtraRoots.appliedPayloadJSON == ceEmpty,
+               "CE-APPLIED a setter that failed leaves the registry holding what it "
+                   + "held, so the recorded value does not move either")
+        // Decoded rather than constructed: `ExtraScanPathsResult` has no public
+        // memberwise init, and going through the wire shape is what the real
+        // caller does anyway.
+        let ceResult = try! JSONDecoder().decode(
+            ExtraScanPathsResult.self,
+            from: Data(#"{"registeredCount":1,"unreadable":[],"rejected":[]}"#.utf8))
+        ClaudeExtraRoots.recordApplied(ceWanted, result: ceResult)
+        expect(ClaudeExtraRoots.appliedPayloadJSON == ceWanted,
+               "CE-APPLIED and a setter that succeeded does move it, so the rule is "
+                   + "a condition rather than a refusal to ever record")
+        ClaudeExtraRoots.resetAppliedForTesting()
+
         // isRejectedRoot: home and root are refused; an ordinary subfolder is not.
         let ceHome = FileManager.default.homeDirectoryForCurrentUser.path
         expect(

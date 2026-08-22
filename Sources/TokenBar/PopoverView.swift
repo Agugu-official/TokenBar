@@ -270,8 +270,16 @@ struct PopoverView: View {
         // classification saved in Settings would otherwise reach the daily
         // chart at once (its own task IS keyed on it) while these three kept
         // reporting the previous split until the next minute poll.
+        // And on the scan-root generation, for the reason the series task
+        // below is: `invalidateScanDerivedCaches` clears the static union scan
+        // but not the `windowCards`, `quotaHistory` and `quotaEquivalences`
+        // this model has already published, and nothing else in this identity
+        // moves when a root is added or removed — so every visible quota
+        // surface kept drawing the old root set until a poll happened to call
+        // `refreshWindowUsage` again, up to a minute later.
         .task(id: "\(windowSelectionRaw)|\(activeTab)|\(hiddenRaw)|\(attributionRaw)|"
-              + "\(effectiveView.rawValue)|" + displayClients.joined(separator: ",")) {
+              + "\(effectiveView.rawValue)|\(extraRootsGeneration)|"
+              + displayClients.joined(separator: ",")) {
             model.windowCardClients = displayClients
             // The scan follows what is on screen; the curves do not. See
             // `windowUsageClient`.
