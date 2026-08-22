@@ -18,6 +18,15 @@ private actor ThrottleCallCounter {
     func reset() { count = 0 }
 }
 
+/// A settable clock, so the test can move time across a fetch rather than
+/// sleep. The throttle reads it on the main actor and inside its own actor, and
+/// the fetch closures that advance it do so before returning, so there is no
+/// concurrent access to protect against — hence the plain class.
+private final class ThrottleClock: @unchecked Sendable {
+    var value: Date
+    init(_ value: Date) { self.value = value }
+}
+
 /// Holds a fetch open so concurrent arrivals overlap deterministically.
 private actor ThrottleGate {
     private var opened = false
@@ -498,9 +507,18 @@ private final class AttributedSeriesTestSource: UsageDataSource, @unchecked Send
     var failRefresh = false
     struct GraphUnavailable: Error {}
 
+    /// Holds `graph` open so a case can read what the model published BEFORE
+    /// the acquisition returned. That frame is not an implementation detail:
+    /// it is what the user looks at for the seconds a scan takes, and the only
+    /// place a stale attribution split is visible.
+    var graphGate: ThrottleGate?
+    var graphEntries: ThrottleCallCounter?
+
     func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
         _ = priority
         graphYears.append(year)
+        await graphEntries?.bump()
+        await graphGate?.wait()
         if failGraph { throw GraphUnavailable() }
         return graphPayload
     }
@@ -799,8 +817,9 @@ enum SelfTest {
                 await gate.wait()
                 return empty
             }
+            let clock = ThrottleClock(base)
             let concurrent = (0..<3).map { _ in
-                Task { try await throttle.payload(now: base, fetch: blocking) }
+                Task { try await throttle.payload(now: { clock.value }, fetch: blocking) }
             }
             while await counter.count < 1 { await Task.yield() }
             await gate.open()
@@ -809,23 +828,48 @@ enum SelfTest {
             await throttle.reset()
             await counter.reset()
 
-            _ = try await throttle.payload(now: base, fetch: fetch)
+            clock.value = base
+            _ = try await throttle.payload(now: { clock.value }, fetch: fetch)
             // Nine reopens inside the floor.
             for i in 1...9 {
-                _ = try await throttle.payload(
-                    now: base.addingTimeInterval(Double(i)), fetch: fetch)
+                clock.value = base.addingTimeInterval(Double(i))
+                _ = try await throttle.payload(now: { clock.value }, fetch: fetch)
             }
             let insideFloor = await counter.count
             // The 60s poll tick is outside it and must still go through.
-            _ = try await throttle.payload(
-                now: base.addingTimeInterval(60), fetch: fetch)
-            return [insideFloor, await counter.count, concurrentCalls]
+            clock.value = base.addingTimeInterval(60)
+            _ = try await throttle.payload(now: { clock.value }, fetch: fetch)
+            let afterTick = await counter.count
+
+            // A request that itself takes longer than the floor. Stamping the
+            // ASK time made its payload land already expired, so the next
+            // reopen fetched again — the floor dissolving exactly while the
+            // endpoint was slow, which is when it was doing the work.
+            await throttle.reset()
+            await counter.reset()
+            clock.value = base
+            let slow: @Sendable () async throws -> AgentUsagePayload = {
+                await counter.bump()
+                clock.value = base.addingTimeInterval(60)
+                return empty
+            }
+            _ = try await throttle.payload(now: { clock.value }, fetch: slow)
+            // One second after that request returned — deep inside the floor
+            // measured from completion, well outside it measured from the ask.
+            clock.value = base.addingTimeInterval(61)
+            _ = try await throttle.payload(now: { clock.value }, fetch: fetch)
+            let afterSlow = await counter.count
+            return [insideFloor, afterTick, concurrentCalls, afterSlow]
         }
         expect(throttleResult?.first == 1,
                "THROTTLE ten opens within the floor issue ONE request, not ten")
-        expect(throttleResult?.count == 3 && throttleResult?[1] == 2,
+        expect(throttleResult?.count == 4 && throttleResult?[1] == 2,
                "THROTTLE and the 60s poll tick still goes through, so the floor "
                    + "collapses reopens without slowing the cadence it protects")
+        expect(throttleResult?.count == 4 && throttleResult?[3] == 1,
+               "THROTTLE a request slower than the floor is stamped when it "
+                   + "returned, not when it was asked, so it does not land "
+                   + "already expired")
         // QT-FLOOR. A provider correction can make the recent samples fall
         // steeply enough that the projection goes below zero — "-190% used",
         // and a drop larger than the amount that exists. The mirror of the
@@ -843,7 +887,10 @@ enum SelfTest {
             "QT-FLOOR and the delta is derived from the clamped projection, so adding "
                 + "it to the current reading lands on the projection beside it")
 
-        expect(throttleResult?.last == 1,
+        // Indexed, not `.last`: appending a case to the returned array silently
+        // repointed this at a different measurement, and it kept passing only
+        // because both values happened to be 1.
+        expect(throttleResult?.count == 4 && throttleResult?[2] == 1,
                "THROTTLE three callers arriving before any result exists share ONE "
                    + "request — the actor is reentrant across await, so the cache "
                    + "check alone does not coalesce them")
@@ -2438,6 +2485,56 @@ enum SelfTest {
         expect(
             reopenPoints??.map(\.date) == ["2024-03-01"],
             "attributed series draws the previous open's rows instead of respinning")
+
+        // AS-REFOLD. The other thing that restarts this load is a declaration
+        // change — `PopoverView` keys its task on the attribution string — and
+        // then the model already HAS points: the split the user just moved away
+        // from. The pre-await publication used to be gated on `points == nil`,
+        // so the case it most needed to serve was the one it skipped, and the
+        // chart showed the old classification for the whole acquisition.
+        //
+        // Read mid-flight on purpose. Both the failure path and a remounted
+        // model re-fold correctly, so a case that waits for the load to settle
+        // passes either way and asserts nothing.
+        let refoldSource = AttributedSeriesTestSource(
+            graphPayload: payloadFixture([
+                contributionJSON(
+                    date: "2024-03-01",
+                    clients: [("claude", "timezone-model", "openai", 1, 0.1)],
+                    totalsTokens: 1,
+                    totalsCost: 0.1),
+            ]),
+            refreshPayload: payloadFixture([]))
+        let refoldStates = awaitMainActorValue { () -> [UsageAttribution.State]? in
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/A")
+            let model = AttributedSeriesModel()
+            await model.load(source: refoldSource, confirmed: [], timeZone: "Zone/A")
+            let gate = ThrottleGate()
+            let entries = ThrottleCallCounter()
+            refoldSource.graphGate = gate
+            refoldSource.graphEntries = entries
+            // The user declares that provider/model as this subscription's, and
+            // SwiftUI restarts the task on the SAME model instance.
+            let declared = [UsageAttribution.Record(
+                client: "claude", provider: "openai", model: "timezone-model",
+                state: .assigned("claude"))]
+            let second = Task {
+                await model.load(
+                    source: refoldSource, confirmed: declared, timeZone: "Zone/A")
+            }
+            while await entries.count < 1 { await Task.yield() }
+            let midFlight = model.points?.map(\.state)
+            await gate.open()
+            await second.value
+            return midFlight
+        }
+        expect(
+            refoldStates??.allSatisfy { $0 == .assigned("claude") } == true
+                && refoldStates??.isEmpty == false,
+            "AS-REFOLD a declaration change re-folds the retained rows before "
+                + "awaiting, so the chart is not left on the split the user "
+                + "just changed away from")
 
         // But only under provenance it can vouch for: a transition since that
         // load means those day keys may be misdated, and nothing may be shown.

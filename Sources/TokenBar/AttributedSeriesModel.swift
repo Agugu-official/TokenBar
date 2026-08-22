@@ -168,7 +168,21 @@ import TokenBarCore
         // declarations, so the card draws this frame instead of after the scan.
         // Gated on provenance: same zone, no transition pending, or the day
         // keys are not known to be datable and nothing may be shown.
-        if points == nil, !shouldRefresh, let rows = Self.lastRows {
+        //
+        // Deliberately NOT gated on `points == nil`. That guard read as "only
+        // when there is nothing on screen", but the second thing that restarts
+        // this load is a declaration change — `PopoverView`'s task is keyed on
+        // the attribution string — and then `points` holds the split the user
+        // just moved away from while the rows needed to correct it are already
+        // in hand. The guard therefore skipped the one case where the stale
+        // frame is the user's own edit, and left it up for the length of a full
+        // acquisition. Re-folding is one pass over rows already held.
+        //
+        // Still `lastRows` rather than this instance's `contributions`:
+        // `invalidateRowCache` clears the former and not the latter, so reading
+        // the instance copy would republish a removed scan root's usage — the
+        // exact thing that function exists to prevent.
+        if !shouldRefresh, let rows = Self.lastRows {
             contributions = rows
             points = AttributedDailySeries.points(
                 contributions: rows, confirmed: confirmed)

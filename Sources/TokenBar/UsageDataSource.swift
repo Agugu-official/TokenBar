@@ -88,12 +88,24 @@ actor AgentUsageThrottle {
     private var last: (payload: AgentUsagePayload, at: Date)?
     private var inFlight: Task<AgentUsagePayload, Error>?
 
-    /// `now` is injectable so a test can drive the clock rather than sleep.
+    /// `now` is a clock rather than an instant, and is read twice: once to
+    /// decide, and once to stamp the result.
+    ///
+    /// Stamping the DECISION time was wrong in exactly the case the floor is
+    /// there for. `oauth/usage` is the endpoint that rate-limits, so it is also
+    /// the endpoint that goes slow, and a request taking near or past the
+    /// 50-second floor returned a payload already older than the floor by the
+    /// time it landed. The next reopen — the loop is remounted by a `.task`, so
+    /// that is any reopen — then measured freshness from before the request and
+    /// issued another immediately. The protection dissolved precisely while the
+    /// endpoint was struggling, which is when it was carrying the load.
+    ///
+    /// Injectable so a test can drive both readings rather than sleep.
     func payload(
-        now: Date = Date(),
+        now: @Sendable () -> Date = { Date() },
         fetch: @Sendable @escaping () async throws -> AgentUsagePayload
     ) async throws -> AgentUsagePayload {
-        if let last, now.timeIntervalSince(last.at) < Self.minimumInterval {
+        if let last, now().timeIntervalSince(last.at) < Self.minimumInterval {
             return last.payload
         }
         // A request is already out: wait for it rather than opening a second.
@@ -104,7 +116,7 @@ actor AgentUsageThrottle {
         inFlight = task
         defer { inFlight = nil }
         let fresh = try await task.value
-        last = (fresh, now)
+        last = (fresh, now())
         return fresh
     }
 
