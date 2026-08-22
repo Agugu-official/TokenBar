@@ -11806,6 +11806,43 @@ enum SelfTest {
             confirmed: qhsRecords)
         expect(qhspRows.first?.mineTokensExCacheRead == 800,
                "QH-SPAN the cycle column counts everything charged to the window")
+        // AL-HIDDEN. Every exit from `baseClients` goes through one filter.
+        // The rule was got wrong three times — inside `reorderable`, then above
+        // only the restricted return, then above both while the opencode branch
+        // exited before either — and each fix moved a line without making "no
+        // hidden client leaves this function" checkable. Now it is.
+        expect(AgentLimitsCard.visible(["codex", "claude"], hiddenRaw: "claude")
+                   == ["codex"],
+               "AL-HIDDEN a hidden client is removed from a candidate list")
+        expect(AgentLimitsCard.visible(["codex", "claude"], hiddenRaw: "") ==
+                   ["codex", "claude"],
+               "AL-HIDDEN and an empty hide set removes nothing, so the check "
+                   + "above is not simply emptying the list")
+
+        // QH-OTHER. The other bucket mixes three attribution states, and the
+        // card called all of it "other subscriptions". On a setup with no
+        // declarations that is a claim about every message on the machine.
+        let qhoMessages = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":\((qhsReset - 500_000) * 1000),"client":"z","providerId":"p",
+              "modelId":"m","input":700,"output":0,"cacheRead":0,"cacheWrite":0,
+              "reasoning":0,"cost":1.0,"isTurnStart":true},
+             {"timestamp":\((qhsReset - 400_000) * 1000),"client":"unknown","providerId":"q",
+              "modelId":"m","input":300,"output":0,"cacheRead":0,"cacheWrite":0,
+              "reasoning":0,"cost":0.5,"isTurnStart":true}]
+            """.utf8))
+        let qhoRows = QuotaHistoryFold.rows(
+            cycles: qhsCycles, messages: qhoMessages, subscription: "c",
+            confirmed: [UsageAttribution.Record(
+                client: "z", provider: "p", state: .assigned("other"))])
+        expect(qhoRows.first?.otherTokens == 1000,
+               "QH-OTHER everything not mine still lands in one total")
+        expect(qhoRows.first?.otherAssignedTokens == 700,
+               "QH-OTHER but only the part the user declared against another "
+                   + "subscription counts as that — the rest is unclassified, and "
+                   + "the copy must not call it a subscription the user never named")
+
         expect(qhspRows.first?.spanTokensExCacheRead == 100,
                "QH-SPAN the span counts only what the two readings bracket — the later "
                 + "message sits after the last sample, so no observed movement measures it")

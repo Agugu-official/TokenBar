@@ -210,6 +210,14 @@ private struct DashboardSnapshot {
     /// applied.
     @MainActor
     static func invalidateScanDerivedCaches() {
+        // Supersede in-flight loads, not just completed values. A suspended
+        // `refreshWindowUsage` snapshotted its range before the roots changed
+        // and the FFI returns its pre-change result regardless, so clearing
+        // alone leaves the old task free to repopulate what was just cleared.
+        // Advancing the token makes its own `windowScanToken == scanToken`
+        // guard drop it — the guard already existed, it was simply never told
+        // that a root change also overtakes a scan.
+        windowScanToken &+= 1
         lastUnionScan = nil
         lastSnapshot = nil
         lastSnapshotOwner = nil

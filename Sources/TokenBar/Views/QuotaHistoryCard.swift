@@ -269,15 +269,25 @@ struct QuotaHistoryCard: View {
                     // this branch exists to avoid, surviving on the other side
                     // of its own condition.
                     Text({
-                        if row.otherTokens > 0, row.otherCost > 0 {
-                            return "Other subscriptions in the same hours: %@ · %@".localized(
+                        // The lead names what the bucket actually holds. It
+                        // mixes three attribution states — declared elsewhere,
+                        // declared excluded, and never classified — and calling
+                        // all of it "other subscriptions" is a claim the user
+                        // never made. On a setup with no declarations at all it
+                        // is a claim about every message on the machine.
+                        let lead = row.otherAssignedTokens == row.otherTokens
+                            ? "Other subscriptions in the same hours:"
+                            : (row.otherAssignedTokens == 0
+                                ? "Unclassified usage in the same hours:"
+                                : "Other and unclassified usage in the same hours:")
+                        let value = row.otherTokens > 0 && row.otherCost > 0
+                            ? "%@ · %@".localized(
                                 Format.compactTokens(row.otherTokens),
                                 Format.usdOrBelowCent(row.otherCost))
-                        }
-                        return "Other subscriptions in the same hours: %@".localized(
-                            row.otherTokens > 0
+                            : (row.otherTokens > 0
                                 ? Format.compactTokens(row.otherTokens)
                                 : Format.usdOrBelowCent(row.otherCost))
+                        return "%@ %@".localized(lead.localized, value)
                     }())
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)

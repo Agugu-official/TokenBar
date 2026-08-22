@@ -106,8 +106,19 @@ public struct QuotaHistoryRow: Equatable, Sendable, Identifiable {
     public let spanCost: Double
     /// Everything else recorded in the same interval, summed. Not noise: it is
     /// the answer to "the window barely moved, so where did the work go".
+    ///
+    /// THREE attribution states, not one. A message lands here when the user
+    /// declared it against another subscription, when they declared it excluded,
+    /// and when they have not classified it at all — and the card called the
+    /// whole bucket "other subscriptions", which on an undeclared setup is a
+    /// claim about every message this machine recorded. `otherAssigned` carries
+    /// the part that claim is true of, so the copy can name what it knows.
     public let otherTokens: Int64
     public let otherCost: Double
+    /// The part of `otherTokens` the user actually declared against a different
+    /// subscription. `otherTokens - otherAssignedTokens` is unclassified or
+    /// explicitly excluded usage.
+    public let otherAssignedTokens: Int64
     /// This subscription's models, largest first.
     public let models: [QuotaHistoryModel]
 
@@ -275,7 +286,7 @@ public enum QuotaHistoryFold {
             let lo = lowerBound(stamps, cycle.evidenceStartMs)
             let hi = lowerBound(stamps, cycle.resetAtMs)
             var mine = (tokens: Int64(0), exCacheRead: Int64(0), cost: 0.0)
-            var other = (tokens: Int64(0), cost: 0.0)
+            var other = (tokens: Int64(0), cost: 0.0, assigned: Int64(0))
             var byModel: [ModelKey: (tokens: Int64, cost: Double)] = [:]
 
             for message in sorted[lo..<max(lo, hi)] {
@@ -298,6 +309,9 @@ public enum QuotaHistoryFold {
                         current.tokens.saturatingAdding(message.tokens),
                         current.cost + message.cost)
                 } else {
+                    if case .assigned = state {
+                        other.assigned = other.assigned.saturatingAdding(message.tokens)
+                    }
                     other.tokens = other.tokens.saturatingAdding(message.tokens)
                     other.cost += message.cost
                 }
@@ -309,6 +323,7 @@ public enum QuotaHistoryFold {
                 mineCost: mine.cost,
                 spanTokensExCacheRead: span.exCacheRead, spanCost: span.cost,
                 otherTokens: other.tokens, otherCost: other.cost,
+                otherAssignedTokens: other.assigned,
                 models: byModel
                     .map {
                         QuotaHistoryModel(

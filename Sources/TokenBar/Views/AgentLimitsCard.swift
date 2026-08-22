@@ -256,16 +256,36 @@ struct AgentLimitsCard: View {
     /// shows the cards of the subscriptions it's authed against.
     private var opencodeView: Bool { restrict && clients.contains("opencode") }
 
+    /// The hide set applied to every candidate list this card can produce.
+    ///
+    /// Static and pure so the rule is assertable, because it is the rule this
+    /// file has got wrong three times: it lived inside `reorderable`, then
+    /// above only the restricted return, then above only the restricted AND
+    /// general ones while the opencode branch exited before either. Each fix
+    /// moved a line; none of them made "no hidden client leaves this function"
+    /// something a test could check. Every exit now ends here.
+    static func visible(_ candidates: [String], hiddenRaw: String) -> [String] {
+        let hidden = ClientRegistry.parseIdSet(hiddenRaw)
+        return candidates.filter { !hidden.contains($0) }
+    }
+
     private var baseClients: [String] {
         let snapshots = self.snapshots
+        // Hoisted above EVERY exit. This filter has now been moved twice — out
+        // of `reorderable`, then above the restricted return — and each time it
+        // was still below one more exit that reached it. The opencode branch is
+        // the third: opencode authed against a subscription whose toggle is off
+        // returned it on snapshot availability alone. A rule that has to sit
+        // ahead of every return is one binding, not a line to keep relocating.
         if opencodeView {
-            return opencodeSubs
+            return Self.visible(opencodeSubs
                 // The subscription-owner resolution, not the raw label mapper:
                 // `Xai` maps to `xai` there, while the quota snapshot is keyed
                 // `grok`, so the filter below would drop the very card opencode
                 // is authed against.
                 .compactMap(UsageAttributionSettings.subscriptionClient(forLabel:))
-                .filter { snapshots[$0] != nil }
+                .filter { snapshots[$0] != nil },
+                hiddenRaw: limitsHiddenRaw)
         }
         func known(_ id: String) -> Bool {
             Self.placeholderRows[id] != nil || snapshots[id] != nil
@@ -274,20 +294,13 @@ struct AgentLimitsCard: View {
         // the multi-agent one. Settings promises it "hides only that client's
         // quota card here and on its own tab".
         //
-        // Applied BEFORE the restricted return, not after. Moving it out of
-        // `reorderable` last round was necessary and not sufficient: the
-        // restricted path returns three lines above, so a client's own tab
-        // still reached that return and drew the card the user had switched
-        // off. The rule has to sit ahead of every exit, or it is only applied
-        // on the exits that happen to come later.
-        let limitsHidden = ClientRegistry.parseIdSet(limitsHiddenRaw)
         if restrict {
-            return clients.filter { known($0) && !limitsHidden.contains($0) }
+            return Self.visible(clients.filter(known), hiddenRaw: limitsHiddenRaw)
         }
         var seen = Set<String>()
         var base = (clients.filter(known) + (agentUsage?.agents.map(\.clientId) ?? []))
             .filter { seen.insert($0).inserted }
-        base = base.filter { !limitsHidden.contains($0) }
+        base = Self.visible(base, hiddenRaw: limitsHiddenRaw)
         // Tab visibility is a multi-agent concern only: a hidden tab cannot be
         // the tab you are on, and filtering by it in the restricted path would
         // depend on a state that path can never be in.

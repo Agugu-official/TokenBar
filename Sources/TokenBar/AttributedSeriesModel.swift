@@ -121,7 +121,17 @@ import TokenBarCore
     /// this, the subscription trend showed a removed root's usage, or omitted
     /// an added one, for as long as the replacement scan took.
     @MainActor
-    static func invalidateRowCache() { lastRows = nil }
+    static func invalidateRowCache() {
+        lastRows = nil
+        // Supersede any load already in flight. Clearing the cache alone loses
+        // to a suspended one: it snapshotted its inputs before the roots
+        // changed, and the FFI hands back its pre-change result even when the
+        // engine's own generation check refuses to cache it — so the old task
+        // resumes and republishes exactly what was just cleared. Advancing the
+        // token makes its `guard Self.loadToken == token` drop it, which is the
+        // same shape `ROOT_GENERATION` uses on the Rust side.
+        loadToken &+= 1
+    }
 
     /// Identifies the newest load this model has started.
     ///
