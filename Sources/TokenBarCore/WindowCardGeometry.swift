@@ -239,7 +239,17 @@ public enum WindowCardGeometry {
             d.append(h == 0 ? 0 : (p[i + 1].y - p[i].y) / h)
         }
         var m = [d[0]]
-        for i in 1..<(n - 1) { m.append((d[i - 1] + d[i]) / 2) }
+        for i in 1..<(n - 1) {
+            // Zero at a turn. Averaging adjacent secants unconditionally leaves
+            // a nonzero tangent at a local extremum, and the `α²+β²>9` clamp
+            // below bounds a tangent's MAGNITUDE without touching its sign — so
+            // a provider correction that reverses direction (80 → 90 → 89)
+            // interpolated above 90 between the last two points and drew quota
+            // levels nobody observed. This is the sign half of the monotone
+            // condition; the clamp is the magnitude half, and only one of them
+            // was here.
+            m.append(d[i - 1] * d[i] <= 0 ? 0 : (d[i - 1] + d[i]) / 2)
+        }
         m.append(d[n - 2])
         for i in 0..<(n - 1) {
             if d[i] == 0 { m[i] = 0; m[i + 1] = 0; continue }

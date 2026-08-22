@@ -122,7 +122,11 @@ struct QuotaHistoryCard: View {
                     .frame(width: 30, alignment: .trailing)
                 Spacer(minLength: 4)
                 if let row {
-                    Text(Format.compactTokens(row.mineTokens))
+                    // The mirror of the money rule beside it: cost-only usage
+                    // assigned here has no token count, and printing "0" states
+                    // a measurement nobody took. Same dash, same reason.
+                    Text(row.mineTokens > 0 || row.mineCost <= 0
+                         ? Format.compactTokens(row.mineTokens) : "—")
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                     // A dash, not "$0.00", when tokens were recorded and none

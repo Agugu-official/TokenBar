@@ -368,9 +368,16 @@ public enum WindowEquivalence {
                     ? max(1, Int((costError * 100).rounded())) : 0)
         }
 
-        // The error bar describes the COST estimate, so it is computed over the
-        // cycles that estimate is made of.
-        let relativeError = jackknifeRelative(priced) { $0.spanCost }
+        // BOTH estimates are jackknifed, and the row is only a `.ratio` if both
+        // hold. The cost error alone used to decide it, and the row then
+        // published a token figure under the cost's error bar: cycles with
+        // stable cost per point but differently priced models have unstable
+        // tokens per point, so "1% error" could sit beside a token number the
+        // cycles disagreed about wildly. The bar was measured on one quantity
+        // and printed beside two.
+        let costError = jackknifeRelative(priced) { $0.spanCost }
+        let tokenError = jackknifeRelative(tokenBearing) { Double($0.spanTokens) }
+        let relativeError = max(costError, tokenError)
 
         guard relativeError <= tolerance else {
             let ratios = priced.map { $0.spanCost / $0.deltaPercent * 10 }

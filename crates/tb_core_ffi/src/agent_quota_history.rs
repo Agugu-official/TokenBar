@@ -1371,6 +1371,22 @@ fn add_sample_if_new(
         .position(|sample| sample_key(sample) == candidate_key)
     {
         let existing = &series.samples[index];
+        // A cycle's own zero is never replaced. Admitting it (see the range
+        // check above) bought nothing while this path could overwrite it: a
+        // window that moves a point before its first bucket closes puts the
+        // later reading in the same bucket, and the replacement guards below
+        // all pass — later timestamp, larger value — so the stored cycle began
+        // at a nonzero minimum again and `usedPercent`, the span between the
+        // lowest and highest reading, understated it by exactly the amount the
+        // zero was recorded to capture.
+        //
+        // Only the zero. Every other bucket keeps "newest wins", because
+        // elsewhere the latest level is what the profile wants; at the start of
+        // a cycle the BASELINE is, and there is only one sample that can carry
+        // it.
+        if existing.used_percent == 0.0 && used_percent > 0.0 {
+            return false;
+        }
         if (used_percent - existing.used_percent).abs() < 1.0
             || sampled_at < existing.sampled_at
             || (sampled_at == existing.sampled_at && used_percent <= existing.used_percent)
@@ -5932,6 +5948,35 @@ mod tests {
     /// other and a freshly reset weekly window held one sample for hours while
     /// its headline moved. The count now follows the duration — one bucket per
     /// hour, floored at 48 so short windows are untouched and capped at 168.
+    /// Admitting the zero bought nothing while the in-bucket replacement could
+    /// overwrite it: a window that moves a point before its first bucket closes
+    /// puts the later reading in the same bucket, every replacement guard
+    /// passes, and the cycle starts at a nonzero minimum again — understating
+    /// `usedPercent` by exactly the amount the zero was recorded to capture.
+    #[test]
+    fn a_cycles_zero_survives_a_later_reading_in_its_bucket() {
+        let (directory, path) = temp_path("zero-not-replaced");
+        let reset = 9_000_000 + 5 * HOUR;
+        let provider = Some(DurationEvidence::provider(reset, 5 * HOUR));
+        let start = reset - 5 * HOUR;
+        record(&path, "acct", Some(reset), 0.0, start + 60, provider, None);
+        // Same bucket (5h / 48 = 6.25 minutes), later, and far enough above to
+        // clear the one-point replacement threshold.
+        record(&path, "acct", Some(reset), 4.0, start + 240, provider, None);
+        let store = read_store(&path);
+        let used: Vec<f64> = store.series[0]
+            .samples
+            .iter()
+            .map(|sample| sample.used_percent)
+            .collect();
+        assert_eq!(
+            used,
+            vec![0.0],
+            "the zero is kept, and the later reading in its bucket does not replace it"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn long_windows_bucket_by_the_hour() {
         assert_eq!(phase_bucket_count(5 * HOUR), 48, "short windows unchanged");

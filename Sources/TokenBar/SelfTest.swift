@@ -11819,6 +11819,35 @@ enum SelfTest {
                "AL-HIDDEN and an empty hide set removes nothing, so the check "
                    + "above is not simply emptying the list")
 
+        // GEO-TURN. Averaging adjacent secants leaves a nonzero tangent at a
+        // local extremum, and the `α²+β²>9` clamp bounds a tangent's magnitude
+        // without touching its sign — so a provider correction that reverses
+        // direction interpolated ABOVE the peak and drew quota levels nobody
+        // observed. The sign half of the monotone condition was missing.
+        let turn = WindowCardGeometry.monotoneCurve([
+            .init(x: 0.0, y: 80), .init(x: 0.5, y: 90), .init(x: 1.0, y: 89),
+        ])
+        expect((turn.map(\.y).max() ?? 0) <= 90 + 1e-9,
+               "GEO-TURN a reversal never interpolates past the peak it turns at")
+        // Control: a rising run still curves, so the fix is not a straight line
+        // through every series.
+        let rising = WindowCardGeometry.monotoneCurve([
+            .init(x: 0.0, y: 0), .init(x: 0.5, y: 40), .init(x: 1.0, y: 100),
+        ])
+        expect((rising.map(\.y).max() ?? 0) <= 100 + 1e-9 && rising.count > 3,
+               "GEO-TURN and a monotone run is still interpolated, not flattened")
+
+        // EQ-BOTH. The error bar was measured on the cost estimate and printed
+        // beside two numbers. Cycles with stable cost per point but differently
+        // priced models have unstable tokens per point, so a 1% bar could sit
+        // beside a token figure the cycles disagreed about wildly.
+        let eqSplit = WindowEquivalence.aggregate(cycles: [
+            aeCycle(50, 1_000, 10), aeCycle(50, 20_000, 10), aeCycle(50, 100_000, 10),
+        ])
+        expect({ if case .spread = eqSplit { return true }; return false }(),
+               "EQ-BOTH stable cost with wildly disagreeing tokens is a spread, not "
+                   + "a ratio wearing the cost's error bar")
+
         // QH-OTHER. The other bucket mixes three attribution states, and the
         // card called all of it "other subscriptions". On a setup with no
         // declarations that is a claim about every message on the machine.

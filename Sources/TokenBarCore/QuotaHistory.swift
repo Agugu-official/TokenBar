@@ -342,7 +342,18 @@ public enum QuotaHistoryFold {
                             providerId: $0.key.providerId, modelId: $0.key.modelId,
                             tokens: $0.value.tokens, cost: $0.value.cost)
                     }
-                    .sorted { $0.tokens > $1.tokens })
+                    // Tokens, then cost, then the model key. Ordering on
+                    // tokens alone leaves every cost-only model tied at zero,
+                    // so their order came from dictionary iteration while the
+                    // card renders `prefix(4)` — the four shown could reshuffle
+                    // between refreshes and omit the largest recorded spend.
+                    // The key breaks the remaining ties so the order is stable
+                    // rather than merely deterministic-per-run.
+                    .sorted {
+                        if $0.tokens != $1.tokens { return $0.tokens > $1.tokens }
+                        if $0.cost != $1.cost { return $0.cost > $1.cost }
+                        return ($0.providerId, $0.modelId) < ($1.providerId, $1.modelId)
+                    })
         }
     }
 

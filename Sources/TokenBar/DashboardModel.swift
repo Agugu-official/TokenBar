@@ -1103,7 +1103,14 @@ private struct DashboardSnapshot {
                 curve: readCurve, nowMs: now)
             // Fold in a usage half we already hold, so a stage-1 refresh does
             // not throw away a completed scan and blink back to loading.
+            // The scan's AGE, not just its existence. A covering scan that has
+            // aged past `unionScanMaxAge` and whose replacement then threw left
+            // this branch winning over the failure branch below, so the card
+            // returned to `.ready` with arbitrarily stale totals instead of
+            // saying the refresh failed. Freshness is what `.ready` claims.
             if case let .quotaOnly(q, _) = state, let scan = unionScan,
+               Date().timeIntervalSince(scan.capturedAt) < Self.unionScanMaxAge
+                   || !windowScanFailed(for: clientId),
                let (settled, usage) = WindowCardLoader.usageHalf(
                    quota: q, scan: scan, confirmed: UsageAttribution.confirmed().records) {
                 windowCards[clientId] = .ready(settled, usage)
