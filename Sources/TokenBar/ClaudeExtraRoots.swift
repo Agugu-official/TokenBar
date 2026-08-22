@@ -13,6 +13,10 @@ import TokenBarCore
 /// expect a split view that does not exist.
 enum ClaudeExtraRoots {
     static let storageKey = "tokenbar.claude.extraConfigDirs"
+    /// Incremented once the core has accepted a new root set. Views observe
+    /// THIS rather than `storageKey` when they need to reload against the new
+    /// roots — see `apply`.
+    static let generationKey = "tokenbar.claude.extraRootsGeneration"
 
     static func load() -> [String] {
         guard let raw = UserDefaults.standard.string(forKey: storageKey),
@@ -93,6 +97,75 @@ enum ClaudeExtraRoots {
         }
     }
 
+    /// Which scan roots the engine is running — the registry it ACCEPTED, not
+    /// the list the user configured, and not two values that have to be kept
+    /// in step.
+    ///
+    /// One persisted string. `apply` deliberately keeps the setter off the
+    /// calling actor (the core probes each path with `read_dir`, and an
+    /// unmounted volume can stall that — the case this feature exists to
+    /// tolerate), so `load()` names the new roots while the engine still scans
+    /// the old ones. And a call that SUCCEEDS can still refuse part of its
+    /// input: `rejected` names paths Rust left out of the registry, so
+    /// recording the request would claim roots no scan included. `unreadable`
+    /// is the opposite case and stays — those ARE registered and retried.
+    ///
+    /// Persisted rather than held in memory, because the value a RESTORE needs
+    /// is the registry the file on disk was written under, and that restore
+    /// runs before this launch's apply has landed. Persisting one value answers
+    /// both questions with the same number instead of an in-memory copy for
+    /// stamping and a stored copy for validating.
+    ///
+    /// It moves the moment an apply succeeds while the snapshot is only
+    /// rewritten by the next graph commit, so a root change followed by a quit
+    /// leaves this ahead of the file and the file is rejected. That direction
+    /// is the safe one: a false reject costs one cold start, a false accept
+    /// shows the wrong totals.
+    static let appliedKey = "tokenbar.claude.extraRootsApplied"
+
+    /// Overridable so a self-test can move the roots DURING a fetch — the
+    /// property under test — without writing the real defaults key.
+    nonisolated(unsafe) static var appliedProvider: @Sendable () -> String = {
+        UserDefaults.standard.string(forKey: appliedKey) ?? payloadJSON([])
+    }
+
+    static var appliedPayloadJSON: String { appliedProvider() }
+
+    /// Record what the setter actually installed. A failed call leaves the
+    /// registry holding whatever it held, so the stored value must not move.
+    static func recordApplied(_ requestedJSON: String, result: ExtraScanPathsResult?) {
+        guard let result else { return }
+        UserDefaults.standard.set(
+            registeredJSON(requestedJSON, rejected: result.rejected), forKey: appliedKey)
+    }
+
+    /// `requestedJSON` minus the paths the setter refused, in the same shape.
+    ///
+    /// Returns the input untouched when nothing was refused, so the common case
+    /// is byte-identical to `payloadJSON(load())` and no comparison drifts on
+    /// re-encoding. A payload this cannot parse is also returned untouched: it
+    /// came from `payloadJSON` one line earlier, so failing to parse it is
+    /// impossible in practice, and guessing would be worse than recording the
+    /// request.
+    static func registeredJSON(_ requestedJSON: String, rejected: [ScanPathNote]) -> String {
+        let refused = Set(rejected.map(\.path))
+        guard !refused.isEmpty,
+              let data = requestedJSON.data(using: .utf8),
+              let object = try? JSONDecoder().decode([String: [String]].self, from: data)
+        else { return requestedJSON }
+        let kept = object.mapValues { paths in paths.filter { !refused.contains($0) } }
+        guard let encoded = try? JSONEncoder().encode(kept),
+              let text = String(data: encoded, encoding: .utf8)
+        else { return requestedJSON }
+        return text
+    }
+
+    /// Test seam only: back to the pre-apply state.
+    static func resetAppliedForTesting() {
+        appliedProvider = { UserDefaults.standard.string(forKey: appliedKey) ?? payloadJSON([]) }
+        UserDefaults.standard.removeObject(forKey: appliedKey)
+    }
+
     private static let applyQueue = DispatchQueue(
         label: "com.nyanako.tokenbar.claude-extra-roots", qos: .utility)
 
@@ -126,8 +199,28 @@ enum ClaudeExtraRoots {
         let json = payloadJSON(load())
         applyQueue.async {
             let result = try? TBCore.setExtraScanPaths(json: json)
-            guard let completion else { return }
-            Task { @MainActor in completion(result) }
+            Task { @MainActor in
+                // Before the invalidation and the generation bump, so anything
+                // they restart reads the registry that is now installed rather
+                // than the one it replaced.
+                recordApplied(json, result: result)
+                // The engine dropped its own caches inside the setter. These
+                // are the Swift ones, which answer without asking it — see
+                // `invalidateScanDerivedCaches`. Unconditional on `completion`,
+                // because whether a caller wants to hear about the result says
+                // nothing about whether the caches went stale.
+                DashboardModel.invalidateScanDerivedCaches()
+                // Bumped AFTER the setter returns, and this is what views key
+                // their reloads on — not the persisted list. The list changes
+                // the moment Settings saves, which is before this queue has
+                // installed anything, so a task keyed on it can restart, run,
+                // and publish while the engine is still scanning the old roots.
+                // A generation moved here cannot fire early by construction.
+                UserDefaults.standard.set(
+                    UserDefaults.standard.integer(forKey: generationKey) &+ 1,
+                    forKey: generationKey)
+                completion?(result)
+            }
         }
     }
 }

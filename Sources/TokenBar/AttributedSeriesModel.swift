@@ -64,6 +64,7 @@ import TokenBarCore
     /// depending on when NotificationCenter chooses to deliver.
     static func invalidateTimeZoneProvenance() {
         acquiredTimeZone = nil
+        lastRows = nil
         timeZoneGeneration &+= 1
         cacheTrustLost = true
     }
@@ -92,11 +93,45 @@ import TokenBarCore
         timeZoneGeneration = 0
         didCaptureLaunch = false
         cacheTrustLost = false
+        lastRows = nil
     }
 
     /// Retained so a failed fetch can re-derive with current declarations
     /// instead of publishing the classification the user just changed away from.
     @ObservationIgnored private var contributions: [Contribution]?
+
+    /// The last rows any instance published under verified provenance.
+    ///
+    /// Process-scoped for the reason `acquiredTimeZone` is: this model is
+    /// rebuilt on every popover open, so an instance-scoped copy is nil again
+    /// each time and the card sits on its spinner for the length of a full
+    /// acquisition — every open, with nothing on screen, while the graph cache
+    /// upstairs already holds the answer.
+    ///
+    /// Rows, not points: the split depends on declarations the user can change
+    /// while the popover is closed, and re-folding them is one pass. Caching
+    /// the finished points would republish a classification they moved away
+    /// from.
+    @ObservationIgnored private static var lastRows: [Contribution]?
+
+    /// Drop the reopen cache. Called with the other scan-derived caches when
+    /// the extra-scan-root registry is replaced — these rows come from the
+    /// graph, the graph comes from the roots, and `load` republishes them
+    /// immediately on the next open before awaiting the fresh one. Without
+    /// this, the subscription trend showed a removed root's usage, or omitted
+    /// an added one, for as long as the replacement scan took.
+    @MainActor
+    static func invalidateRowCache() {
+        lastRows = nil
+        // Supersede any load already in flight. Clearing the cache alone loses
+        // to a suspended one: it snapshotted its inputs before the roots
+        // changed, and the FFI hands back its pre-change result even when the
+        // engine's own generation check refuses to cache it — so the old task
+        // resumes and republishes exactly what was just cleared. Advancing the
+        // token makes its `guard Self.loadToken == token` drop it, which is the
+        // same shape `ROOT_GENERATION` uses on the Rust side.
+        loadToken &+= 1
+    }
 
     /// Identifies the newest load this model has started.
     ///
@@ -106,7 +141,12 @@ import TokenBarCore
     /// and overwrites it with an older payload and the `confirmed` set it
     /// captured. Cancellation does not prevent this: `LiveUsageDataSource` hands
     /// the blocking FFI call to a detached task, so its result arrives regardless.
-    @ObservationIgnored private var loadToken = 0
+    /// Static for the same reason `lastRows` is: two popover instances can
+    /// overlap, and an instance-local counter gives each of them a token of 1,
+    /// so both pass their own check and the older one's result can overwrite
+    /// the newer rows in the shared cache. The next reopen then publishes those
+    /// stale rows immediately.
+    @ObservationIgnored private static var loadToken = 0
 
     func load(
         source: any UsageDataSource,
@@ -114,8 +154,8 @@ import TokenBarCore
         timeZone: String = TimeZone.current.identifier
     ) async {
         Self.installTimeZoneObserver()
-        loadToken &+= 1
-        let token = loadToken
+        Self.loadToken &+= 1
+        let token = Self.loadToken
         // A timezone change invalidates every day key, and the graph cache will
         // not notice: past its 30s window an unchanged source token makes it
         // re-stamp and serve the same entry indefinitely (tb_core_ffi/src/lib.rs
@@ -123,13 +163,37 @@ import TokenBarCore
         // that forces one.
         let generation = Self.timeZoneGeneration
         let shouldRefresh = Self.cacheTrustLost || Self.acquiredTimeZone != timeZone
+
+        // Publish the previous open's rows first, folded against the CURRENT
+        // declarations, so the card draws this frame instead of after the scan.
+        // Gated on provenance: same zone, no transition pending, or the day
+        // keys are not known to be datable and nothing may be shown.
+        //
+        // Deliberately NOT gated on `points == nil`. That guard read as "only
+        // when there is nothing on screen", but the second thing that restarts
+        // this load is a declaration change — `PopoverView`'s task is keyed on
+        // the attribution string — and then `points` holds the split the user
+        // just moved away from while the rows needed to correct it are already
+        // in hand. The guard therefore skipped the one case where the stale
+        // frame is the user's own edit, and left it up for the length of a full
+        // acquisition. Re-folding is one pass over rows already held.
+        //
+        // Still `lastRows` rather than this instance's `contributions`:
+        // `invalidateRowCache` clears the former and not the latter, so reading
+        // the instance copy would republish a removed scan root's usage — the
+        // exact thing that function exists to prevent.
+        if !shouldRefresh, let rows = Self.lastRows {
+            contributions = rows
+            points = AttributedDailySeries.points(
+                contributions: rows, confirmed: confirmed)
+        }
         let payload: UsagePayload
         do {
             payload = try await (shouldRefresh
                 ? source.refreshGraph(year: nil, priority: .userInitiated)
                 : source.graph(year: nil, priority: .userInitiated))
         } catch {
-            guard loadToken == token else { return }
+            guard Self.loadToken == token else { return }
             // Never keep publishing a series built from inputs that have moved
             // on. Classification can always be brought current from rows we
             // already hold; day keys cannot, so a failed recompute after a
@@ -142,6 +206,7 @@ import TokenBarCore
             guard !shouldRefresh, Self.timeZoneGeneration == generation else {
                 points = nil
                 contributions = nil
+                Self.lastRows = nil
                 return
             }
             points = contributions.map {
@@ -150,7 +215,7 @@ import TokenBarCore
             return
         }
 
-        guard loadToken == token else { return }
+        guard Self.loadToken == token else { return }
 
         // A transition landed while this acquisition was suspended, so nothing
         // it returned is known to have been built under the current zone.
@@ -162,6 +227,7 @@ import TokenBarCore
         guard Self.timeZoneGeneration == generation else {
             points = nil
             contributions = nil
+            Self.lastRows = nil
             return
         }
 
@@ -169,6 +235,7 @@ import TokenBarCore
         points = AttributedDailySeries.points(
             contributions: payload.contributions,
             confirmed: confirmed)
+        Self.lastRows = payload.contributions
         Self.acquiredTimeZone = timeZone
     }
 }

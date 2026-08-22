@@ -26,7 +26,14 @@ pub(crate) const HISTORY_SCHEMA_VERSION: u32 = 3;
 pub(crate) const HISTORY_FILE_NAME: &str = "quota-pace-history-v3.json";
 pub(crate) const HISTORY_LOCK_FILE_NAME: &str = "quota-pace-v3.lock";
 pub(crate) const LEGACY_V2_FILE_NAME: &str = "codex-weekly-history-v2.json";
+/// Floor for `phase_bucket_count`, and the count every window used to get.
 pub(crate) const PHASE_BUCKET_COUNT: usize = 48;
+/// The only factor `phase_bucket_count` may apply to the floor. Whole, so the
+/// finer grid nests inside the coarser one and no existing sample can change
+/// which cell it shares — see `phase_bucket_count`.
+pub(crate) const PHASE_BUCKET_MULTIPLE: usize = 4;
+/// Ceiling for `phase_bucket_count`, and what a long window actually gets.
+pub(crate) const MAX_PHASE_BUCKET_COUNT: usize = PHASE_BUCKET_COUNT * PHASE_BUCKET_MULTIPLE;
 pub(crate) const GRID_POINT_COUNT: usize = 169;
 pub(crate) const MAX_SERIES: usize = 512;
 pub(crate) const MAX_SAMPLES: usize = 65_536;
@@ -1327,9 +1334,20 @@ fn add_sample_if_new(
     used_percent: f64,
     sampled_at: i64,
 ) -> bool {
+    // `0.0 <=`, not `0.0 <`. A fresh window reads 0% used, and rejecting it
+    // meant no cycle ever recorded its own start: the first stored sample was
+    // always after some consumption, so `usedPercent` — the span between the
+    // lowest and highest reading — understated every cycle by whatever had been
+    // spent before the app first saw a non-zero number.
+    //
+    // Zero is not a "no data" sentinel here. By the time `enrich_snapshot_with`
+    // builds an observation it has already dropped `PaceState::Unavailable`,
+    // an unparseable reset and any non-finite reading, and its own range check
+    // is `(0.0..=100.0)` — inclusive. The store was the only layer treating a
+    // measured zero as an absence.
     if !(valid_duration(duration_seconds)
         && used_percent.is_finite()
-        && 0.0 < used_percent
+        && 0.0 <= used_percent
         && used_percent <= 100.0)
     {
         return false;
@@ -1353,6 +1371,22 @@ fn add_sample_if_new(
         .position(|sample| sample_key(sample) == candidate_key)
     {
         let existing = &series.samples[index];
+        // A cycle's own zero is never replaced. Admitting it (see the range
+        // check above) bought nothing while this path could overwrite it: a
+        // window that moves a point before its first bucket closes puts the
+        // later reading in the same bucket, and the replacement guards below
+        // all pass — later timestamp, larger value — so the stored cycle began
+        // at a nonzero minimum again and `usedPercent`, the span between the
+        // lowest and highest reading, understated it by exactly the amount the
+        // zero was recorded to capture.
+        //
+        // Only the zero. Every other bucket keeps "newest wins", because
+        // elsewhere the latest level is what the profile wants; at the start of
+        // a cycle the BASELINE is, and there is only one sample that can carry
+        // it.
+        if existing.used_percent == 0.0 && used_percent > 0.0 {
+            return false;
+        }
         if (used_percent - existing.used_percent).abs() < 1.0
             || sampled_at < existing.sampled_at
             || (sampled_at == existing.sampled_at && used_percent <= existing.used_percent)
@@ -1370,7 +1404,7 @@ fn add_sample_if_new(
             normalize_reset(sample.reset_at, sample.duration_seconds) == normalized_reset
         })
         .count();
-    if cycle_count >= MAX_SAMPLES_PER_CYCLE {
+    if cycle_count >= phase_bucket_count(duration_seconds) {
         return false;
     }
     series.samples.push(candidate);
@@ -1457,10 +1491,49 @@ fn phase(sample: &QuotaSample) -> f64 {
     (1.0 - remaining as f64 / sample.duration_seconds as f64).clamp(0.0, 1.0)
 }
 
+/// How many phase buckets a cycle of this length is divided into.
+///
+/// Derived from the duration rather than fixed, because a fixed count divides
+/// every window into the same NUMBER of buckets and therefore gives long
+/// windows coarse ones: at 48, a 5-hour session window buckets every six
+/// minutes and a 7-day weekly window every 3.5 hours. A freshly reset weekly
+/// window then holds one sample for its first 3.5 hours no matter how often
+/// the app polls, because a second sample in the same bucket replaces the
+/// first rather than joining it.
+///
+/// A WHOLE MULTIPLE of the floor, never an arbitrary hourly count. This is the
+/// part that cannot be relaxed, and it cost a real store to learn: bucket
+/// boundaries sit at `k / count` of the cycle, so a count that is not a
+/// multiple of the previous one produces a grid that does not NEST inside it,
+/// and two samples separated by the old grid can land in one new cell.
+///
+/// The first attempt was `duration / 1 hour`, which gives 168 for a weekly
+/// window — and 168/48 is 3.5. On this author's own store that merged three
+/// pairs of samples that 48 buckets had kept apart. `validate_series` treats a
+/// duplicate sample key as corruption, and the response to a corrupt store is
+/// quarantine, so a resolution change silently became a history wipe. The data
+/// survived in the `.corrupt-*` file, which is the only reason this is a story
+/// rather than a loss.
+///
+/// So: 48, or 4x that. A 7-day window at 192 buckets is 52.5 minutes each —
+/// past the "one per hour" this was asked for — and a monthly one lands at
+/// 3.75 hours. Short windows keep 48 and are byte-identical: five hours at 48
+/// is already finer than the 60-second poll can fill.
+pub(crate) fn phase_bucket_count(duration_seconds: i64) -> usize {
+    // Above two days. A 48-hour window already buckets at one hour with the
+    // floor, so nothing shorter has anything to gain.
+    if duration_seconds > 2 * 86_400 {
+        PHASE_BUCKET_COUNT * PHASE_BUCKET_MULTIPLE
+    } else {
+        PHASE_BUCKET_COUNT
+    }
+}
+
 fn phase_bucket(reset_at: i64, duration_seconds: i64, sampled_at: i64) -> usize {
+    let count = phase_bucket_count(duration_seconds);
     let remaining = reset_at.saturating_sub(sampled_at);
     let u = (1.0 - remaining as f64 / duration_seconds.max(1) as f64).clamp(0.0, 1.0);
-    ((u * PHASE_BUCKET_COUNT as f64).floor() as usize).min(PHASE_BUCKET_COUNT - 1)
+    ((u * count as f64).floor() as usize).min(count - 1)
 }
 
 fn validate_sample(sample: &QuotaSample) -> bool {
@@ -1471,7 +1544,10 @@ fn validate_sample(sample: &QuotaSample) -> bool {
         && cycle_started_at <= sample.sampled_at
         && sample.sampled_at <= sample.reset_at
         && sample.used_percent.is_finite()
-        && (0.0 < sample.used_percent && sample.used_percent <= 100.0)
+        // Inclusive of zero — see the admission rule in `admit`. `QuotaCurve`'s
+        // Swift decoder mirrors this function exactly and must widen with it,
+        // or a store containing a legitimate 0 would decode as corrupt.
+        && (0.0 <= sample.used_percent && sample.used_percent <= 100.0)
 }
 
 fn validate_series(series: &SeriesState) -> bool {
@@ -1485,7 +1561,11 @@ fn validate_series(series: &SeriesState) -> bool {
         let reset = normalize_reset(sample.reset_at, sample.duration_seconds);
         let count = cycle_counts.entry(reset).or_default();
         *count += 1;
-        *count <= MAX_SAMPLES_PER_CYCLE
+        // Same duration-derived cap `admit` enforces. A fixed one here would
+        // call a store the writer legitimately produced corrupt — a weekly
+        // cycle now holds up to 168 samples — and quarantine would then delete
+        // the history this cap exists to bound.
+        *count <= phase_bucket_count(sample.duration_seconds)
     });
     let rollover_valid = series.rollover.as_ref().is_none_or(|rollover| {
         if !agent_quota_duration::validate_observed_state(rollover) {
@@ -1578,6 +1658,48 @@ fn rollover_activity_at(rollover: &ObservedState) -> i64 {
 /// that broke it could produce a clamped `last_activity_at` above the ceiling,
 /// which the post-body `validate_store_at` would reject, failing the whole
 /// transaction for every provider rather than just one series.
+/// Forget samples this build cannot place, keeping everything it can.
+///
+/// The three sample-level invariants `validate_series` enforces — each sample
+/// individually valid, no two sharing a `sample_key`, and no cycle over its
+/// bucket cap — are all statements about ONE sample being unusable. Failing the
+/// store on them means one unusable sample discards every usable one beside it,
+/// and the pace history's whole value is that it accumulates over weeks.
+///
+/// The newest sample wins a key collision, matching `admit`, which replaces
+/// within a bucket rather than appending. Order is preserved otherwise, so a
+/// store that needed no repair comes out byte-identical.
+fn drop_unplaceable_samples(mut store: Store) -> Store {
+    for series in &mut store.series {
+        let mut seen: BTreeMap<(i64, usize), usize> = BTreeMap::new();
+        let mut per_cycle: BTreeMap<i64, usize> = BTreeMap::new();
+        let mut kept: Vec<QuotaSample> = Vec::with_capacity(series.samples.len());
+        for sample in series.samples.drain(..) {
+            if !validate_sample(&sample) {
+                continue;
+            }
+            let key = sample_key(&sample);
+            if let Some(index) = seen.get(&key).copied() {
+                // Same bucket: keep the newer reading, as `admit` would.
+                if sample.sampled_at > kept[index].sampled_at {
+                    kept[index] = sample;
+                }
+                continue;
+            }
+            let reset = normalize_reset(sample.reset_at, sample.duration_seconds);
+            let count = per_cycle.entry(reset).or_default();
+            if *count >= phase_bucket_count(sample.duration_seconds) {
+                continue;
+            }
+            *count += 1;
+            seen.insert(key, kept.len());
+            kept.push(sample);
+        }
+        series.samples = kept;
+    }
+    store
+}
+
 fn repair_store_at(mut store: Store, upper_bound: i64, observation_now: i64) -> Store {
     debug_assert!(
         observation_now <= upper_bound,
@@ -1796,7 +1918,16 @@ fn retention_cycles(series: &SeriesState, now: i64) -> Vec<RetentionCycleDescrip
         .collect()
 }
 
-fn is_active_group_sample(active_reset_at: i64, sample: &QuotaSample) -> bool {
+/// Whether a stored sample belongs to the cycle the window is still inside.
+///
+/// Both sides are normalized, and that is the whole point. `series.active_reset_at`
+/// holds the RAW provider value while every stored sample holds
+/// `normalize_sample_reset(...)`, so an exact comparison between them fails
+/// whenever the provider's reset is not already on the quantum — which is the
+/// ordinary case, not the exotic one (codex was off by 62s, grok by 19s). This
+/// predicate is the producer's own answer and is published per point so no
+/// consumer has to re-derive a quantization rule across the FFI boundary.
+pub(crate) fn is_active_group_sample(active_reset_at: i64, sample: &QuotaSample) -> bool {
     validate_sample(sample)
         && normalize_reset(sample.reset_at, sample.duration_seconds)
             == normalize_reset(active_reset_at, sample.duration_seconds)
@@ -2943,8 +3074,20 @@ fn load_store_at_with_mode(
         });
     };
 
+    // Drop offending SAMPLES before condemning the FILE. A duplicate sample key
+    // and a cycle over its bucket cap are per-sample facts, and quarantine is
+    // per-store: a resolution change once turned three bad keys out of 2,775
+    // samples into 31 series moved aside and every window back to "learning
+    // history". Nothing about that file was untrustworthy — 99.9% of it was the
+    // same data it had been a minute earlier.
+    //
+    // Quarantine stays for what it was for: bytes that will not parse, a
+    // schema version this build does not speak, series out of order — things
+    // that say the file did not come from here. A sample this build cannot
+    // place is a sample to forget, not a history to burn.
     let parsed = serde_json::from_slice::<Store>(&bytes)
         .ok()
+        .map(drop_unplaceable_samples)
         .filter(|store| validate_store(store));
     if let Some(store) = parsed {
         let store = if validate_store_at(&store, validation_now) {
@@ -5770,6 +5913,176 @@ mod tests {
         assert_eq!(store.series[0].samples.len(), 1);
         assert_eq!(store.series[0].samples[0].reset_at, new);
         assert_eq!(store.series[0].samples[0].sampled_at, old + 10 * 60);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A fresh window reads 0% used, and the store used to reject it, so no
+    /// cycle ever recorded its own start: the first stored sample was always
+    /// after some consumption, and the span between the lowest and highest
+    /// reading understated every cycle by whatever had been spent before the
+    /// app first saw a non-zero number.
+    ///
+    /// Zero is a reading, not an absence. `enrich_snapshot_with` has already
+    /// dropped `PaceState::Unavailable`, an unparseable reset and any
+    /// non-finite value before it builds an observation, and its own range
+    /// check is inclusive — the store was the only layer disagreeing.
+    #[test]
+    fn a_fresh_window_records_its_own_zero() {
+        let (directory, path) = temp_path("zero-start");
+        let reset = 9_000_000 + 7 * DAY;
+        // Provider duration evidence, so the series is ready on the first poll
+        // rather than spending it learning the window length — which is the
+        // production case for every window that reports its own reset.
+        let provider = Some(DurationEvidence::provider(reset, 7 * DAY));
+        record(&path, "acct", Some(reset), 0.0, reset - 7 * DAY + 60, provider, None);
+        let store = read_store(&path);
+        assert_eq!(store.series[0].samples.len(), 1);
+        assert_eq!(store.series[0].samples[0].used_percent, 0.0);
+        // And the cycle's span now starts where the cycle did: a later reading
+        // makes the difference the full 30 points, not 30 minus whatever was
+        // spent before the first non-zero sample landed.
+        record(&path, "acct", Some(reset), 30.0, reset - 3 * DAY, provider, None);
+        let grown = read_store(&path);
+        let used: Vec<f64> = grown.series[0]
+            .samples
+            .iter()
+            .map(|sample| sample.used_percent)
+            .collect();
+        assert!(used.contains(&0.0) && used.contains(&30.0));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A fixed bucket count gives long windows coarse buckets: at 48, a 7-day
+    /// cycle buckets every 3.5 hours, so readings an hour apart replaced each
+    /// other and a freshly reset weekly window held one sample for hours while
+    /// its headline moved. The count now follows the duration — one bucket per
+    /// hour, floored at 48 so short windows are untouched and capped at 168.
+    /// Admitting the zero bought nothing while the in-bucket replacement could
+    /// overwrite it: a window that moves a point before its first bucket closes
+    /// puts the later reading in the same bucket, every replacement guard
+    /// passes, and the cycle starts at a nonzero minimum again — understating
+    /// `usedPercent` by exactly the amount the zero was recorded to capture.
+    #[test]
+    fn a_cycles_zero_survives_a_later_reading_in_its_bucket() {
+        let (directory, path) = temp_path("zero-not-replaced");
+        let reset = 9_000_000 + 5 * HOUR;
+        let provider = Some(DurationEvidence::provider(reset, 5 * HOUR));
+        let start = reset - 5 * HOUR;
+        record(&path, "acct", Some(reset), 0.0, start + 60, provider, None);
+        // Same bucket (5h / 48 = 6.25 minutes), later, and far enough above to
+        // clear the one-point replacement threshold.
+        record(&path, "acct", Some(reset), 4.0, start + 240, provider, None);
+        let store = read_store(&path);
+        let used: Vec<f64> = store.series[0]
+            .samples
+            .iter()
+            .map(|sample| sample.used_percent)
+            .collect();
+        assert_eq!(
+            used,
+            vec![0.0],
+            "the zero is kept, and the later reading in its bucket does not replace it"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn long_windows_bucket_by_the_hour() {
+        assert_eq!(phase_bucket_count(5 * HOUR), 48, "short windows unchanged");
+        assert_eq!(phase_bucket_count(7 * DAY), 192, "a weekly window is sub-hourly");
+        assert_eq!(phase_bucket_count(30 * DAY), 192, "and a monthly one is capped");
+        // The invariant that matters more than any of those numbers: every
+        // count is a whole multiple of the floor, so each grid NESTS inside the
+        // coarser one. A count that is not — 168, which is 3.5x — puts samples
+        // that 48 buckets separated into one cell, and `validate_series` reads
+        // a duplicate sample key as corruption, which quarantines the store.
+        // A resolution change then becomes a history wipe.
+        for seconds in [HOUR, 5 * HOUR, DAY, 2 * DAY, 7 * DAY, 30 * DAY, 400 * DAY] {
+            let count = phase_bucket_count(seconds);
+            assert_eq!(
+                count % PHASE_BUCKET_COUNT,
+                0,
+                "bucket count for {seconds}s must be a whole multiple of the floor"
+            );
+            assert!(count <= MAX_PHASE_BUCKET_COUNT);
+        }
+
+        // The behaviour the count exists for: two readings an hour apart inside
+        // a weekly cycle are two samples, not one replacing the other.
+        let (directory, path) = temp_path("hourly-buckets");
+        let reset = 9_000_000 + 7 * DAY;
+        let provider = Some(DurationEvidence::provider(reset, 7 * DAY));
+        record(&path, "acct", Some(reset), 10.0, reset - 5 * DAY, provider, None);
+        record(
+            &path,
+            "acct",
+            Some(reset),
+            12.0,
+            // An hour and a minute, not exactly an hour: a bucket boundary
+            // falls on every hour here, and `1 - 428400/604800` evaluates to
+            // 48.99999999999999 rather than 49, so a sample landing exactly on
+            // one is a knife-edge that says nothing about the rule. Real polls
+            // are a minute apart and never sit on the boundary.
+            reset - 5 * DAY + HOUR + 60,
+            provider,
+            None,
+        );
+        let store = read_store(&path);
+        assert_eq!(
+            store.series[0].samples.len(),
+            2,
+            "an hour apart is two buckets in a weekly cycle"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A duplicate sample key is one unusable SAMPLE, and quarantine discards
+    /// the whole FILE. Changing the bucket resolution once produced three
+    /// duplicates out of 2,775 samples and cost 31 series — every window back
+    /// to "learning history" — for data that was 99.9% intact.
+    #[test]
+    fn one_unplaceable_sample_does_not_discard_the_rest() {
+        let (directory, path) = temp_path("repair-not-quarantine");
+        let reset = 9_000_000 + 7 * DAY;
+        let duration = 7 * DAY;
+        let mut series = SeriesState::new(&key("acct"), reset - duration);
+        // Two readings the CURRENT bucket rule puts in one cell, which is what a
+        // resolution change produces from a store written under the old one.
+        // 0.100 and 0.101 of a 7-day cycle are ten minutes apart and share one
+        // 52.5-minute bucket, so they collide while still having an order —
+        // which is what makes "the newer one wins" testable at all.
+        series.samples = vec![
+            quota_sample(reset, duration, 0.100, 10.0, SampleOrigin::LiveV3),
+            quota_sample(reset, duration, 0.101, 11.0, SampleOrigin::LiveV3),
+            quota_sample(reset, duration, 0.500, 40.0, SampleOrigin::LiveV3),
+        ];
+        series.last_activity_at = reset - 60;
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series],
+        };
+        fs::write(&path, serde_json::to_vec(&store).unwrap()).unwrap();
+
+        let loaded = load_store_at_with_mode(
+            StorageMode::System,
+            &path,
+            reset,
+            reset,
+        )
+        .unwrap();
+        assert!(
+            !loaded.quarantined,
+            "one unplaceable sample must not condemn the file"
+        );
+        let kept = &loaded.store.series[0].samples;
+        assert_eq!(kept.len(), 2, "the collision is dropped, the rest survives");
+        assert!(
+            kept.iter().any(|sample| sample.used_percent == 40.0),
+            "the sample in its own bucket is untouched"
+        );
+        // The newer reading wins the collision, matching `admit`'s replacement.
+        assert!(kept.iter().any(|sample| sample.used_percent == 11.0));
+        assert!(!path.with_extension("corrupt").exists());
         fs::remove_dir_all(directory).unwrap();
     }
 

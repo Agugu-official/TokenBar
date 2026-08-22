@@ -9,6 +9,12 @@ AppLanguage.prepareDirectRunResources()
 if CommandLine.arguments.contains("--smoke") {
     exit(Smoke.run())
 }
+// Measurement lane, not a prototype: prints the current quota window's
+// attributed totals and the scan timings the feature's performance comments
+// quote. See `WindowProbe`.
+if CommandLine.arguments.contains("--window-probe") {
+    WindowProbe.run()
+}
 if CommandLine.arguments.contains("--selftest") {
     // Some assertions compare against English UI copy, so on a non-English Mac
     // they would fail for the wrong reason. Say so instead of looking broken.

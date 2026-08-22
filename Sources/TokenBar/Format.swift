@@ -27,14 +27,92 @@ enum Format {
         String(format: "$%.2f", amount)
     }
 
+    /// `usd`, except that a real amount too small to show is said to be small
+    /// rather than rendered as nothing.
+    ///
+    /// `"$%.2f"` turns anything under half a cent into "$0.00", which reads as
+    /// "we measured zero" when the truth is "we measured something below the
+    /// resolution of this format". A single list-priced call at $0.003 is
+    /// ordinary, and a line reading "2.1M · $0.00" contradicts itself.
+    ///
+    /// The sub-cent case ONLY. An exact zero still renders "$0.00", which is
+    /// right for a total and wrong for a price nobody could compute — where a
+    /// token count sits beside the amount, use `money(tokens:cost:)` instead.
+    ///
+    /// Surfaces outside the quota lens still call `usd` directly and can print
+    /// the same false zero. Deliberately left alone: they predate this work and
+    /// changing them touches views nothing here tests. Deliberately not
+    /// enumerated either — a list of view names in a comment goes stale and
+    /// then misdescribes what it defers, which is worse than no list.
+    ///
+    /// `grep -rn 'Format\.usd(' Sources/` finds them, plus one result that is
+    /// not a surface at all and must keep calling `usd`: `CrossCheckHarness`,
+    /// which exists to check `usd` itself against the shared `format.json`
+    /// fixtures.
+    static func usdOrBelowCent(_ amount: Double) -> String {
+        // `amount == 0` catches -0.0 too, which `usd` alone renders "$-0.00".
+        if amount == 0 { return usd(0) }
+        return amount > 0 && amount < 0.005 ? "<$0.01" : usd(amount)
+    }
+
+    /// An amount shown beside a token count.
+    ///
+    /// `"$%.2f"` cannot distinguish "nothing" from "nothing we could price"
+    /// from "less than half a cent". All three render "$0.00" and only the
+    /// first is true, so a line reading "5.2M tokens · $0.00" states a price
+    /// nobody has. Usage with no price at all gets a dash; priced usage below
+    /// the format's resolution is said to be small; an exact zero beside no
+    /// tokens is a real total and keeps its "$0.00".
+    static func money(tokens: Int64, cost: Double) -> String {
+        if cost <= 0, tokens > 0 { return "—" }
+        return usdOrBelowCent(cost)
+    }
+
+    /// A token count shown beside an amount — the mirror of `money`, and the
+    /// reason it is a function rather than a ternary at each site.
+    ///
+    /// A supported cost-only source reports a price with no token counts, so
+    /// `compactTokens` renders "0" for usage that certainly happened and simply
+    /// was not measured in tokens. The rule was first written inline beside one
+    /// column of the quota history and not the other, and the expanded per-model
+    /// rows went on printing "0 · $4.10" underneath a total that already said
+    /// "—". Stating it once is what keeps the two columns of one row from
+    /// disagreeing about whether a number exists.
+    ///
+    /// An exact zero beside no cost is a real total and keeps its "0".
+    static func tokens(tokens: Int64, cost: Double) -> String {
+        if tokens <= 0, cost > 0 { return "—" }
+        return compactTokens(tokens)
+    }
+
     /// Today's contribution-graph day key. tokscale-core buckets days in the
     /// local timezone as `%Y-%m-%d`, so we must match that exactly.
-    static func todayKey(now: Date = Date()) -> String {
+    /// `timeZone` is injectable so a test can pin one. It defaults to
+    /// `.current`, which is what every caller wants and what made the day-key
+    /// assertions pass on the author's machine and fail on a UTC runner: an
+    /// instant expressed as "07:33 local" is only that in one zone.
+    static func todayKey(now: Date = Date(), timeZone: TimeZone = .current) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current
+        formatter.timeZone = timeZone
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter.string(from: now)
+    }
+
+    /// `todayKey` shifted back whole days, in the same `yyyy-MM-dd` shape the
+    /// contributions are keyed and ordered by.
+    ///
+    /// Counted in calendar days through `Calendar`, not by subtracting
+    /// `86_400 * n` seconds: a DST transition makes one of those days 23 or 25
+    /// hours long, and the arithmetic version silently lands on the wrong date
+    /// twice a year.
+    static func dayKey(
+        daysAgo: Int, now: Date = Date(), timeZone: TimeZone = .current
+    ) -> String {
+        var calendar = Calendar.current
+        calendar.timeZone = timeZone
+        let shifted = calendar.date(byAdding: .day, value: -daysAgo, to: now) ?? now
+        return todayKey(now: shifted, timeZone: timeZone)
     }
 
     private static let monthsShort = [
@@ -78,5 +156,75 @@ enum Format {
         if diff < 3600 { return "%lldm ago".localized(diff / 60) }
         if diff < 86400 { return "%lldh ago".localized(diff / 3600) }
         return "%lldd ago".localized(diff / 86400)
+    }
+}
+
+extension Format {
+    /// Coarse remaining-time, e.g. "54m", "3h 54m", "5d 14h". Answers "how
+    /// long have I got" and nothing finer; a window countdown that ticks
+    /// seconds would redraw the card for no information.
+    /// Through the localized templates, not interpolated literals. The four
+    /// keys already exist and are already translated — this formatter simply
+    /// did not use them, so a Traditional Chinese build rendered "3h 5m 後重置"
+    /// with the units in one language and the sentence around them in another.
+    static func duration(ms: Int64) -> String {
+        let (key, args) = durationTemplate(ms: ms)
+        return args.count == 2
+            ? key.localized(args[0], args[1])
+            : key.localized(args[0])
+    }
+
+    /// Which template a span uses, and with what numbers.
+    ///
+    /// Split out so the CHOICE can be asserted on. The rendering cannot: under
+    /// English every one of these templates is an identity, so a test that
+    /// compares the output string passes whether the code looks the key up or
+    /// interpolates it — which is how the interpolated version shipped and
+    /// rendered "3h 5m 後重置" in Traditional Chinese, units in one language
+    /// inside a sentence in another. Naming the key is the part a test can
+    /// still see when the translation is not loaded.
+    static func durationTemplate(ms: Int64) -> (key: String, args: [Int64]) {
+        let mins = max(ms / 60_000, 0)
+        if mins < 60 { return ("%lldm", [mins]) }
+        let hours = mins / 60
+        if hours < 24 {
+            let rest = mins % 60
+            return rest > 0 ? ("%lldh %lldm", [hours, rest]) : ("%lldh", [hours])
+        }
+        let rest = hours % 24
+        return rest > 0
+            ? ("%lldd %lldh", [hours / 24, rest])
+            : ("%lldd", [hours / 24])
+    }
+
+    /// Wall-clock span of a hovered interval. POSIX locale so the string is
+    /// stable under test, but the user's own time zone and calendar.
+    /// One instant, always the same width.
+    ///
+    /// `clockRange` drops the date when both ends share a day, which reads well
+    /// in a tooltip about one interval and badly in a list of them: a five-hour
+    /// window crosses midnight often enough that half the rows carried dates
+    /// and half did not, and the two-date form ran to 23 characters and
+    /// truncated. Every cycle of a window is the same length, so the end is
+    /// derivable and the start alone identifies the row.
+    static func windowStamp(ms: Int64) -> String {
+        let stamp = DateFormatter()
+        stamp.locale = Locale(identifier: "en_US_POSIX")
+        stamp.dateFormat = "MM-dd HH:mm"
+        return stamp.string(from: Date(timeIntervalSince1970: Double(ms) / 1000))
+    }
+
+    static func clockRange(fromMs: Int64, toMs: Int64) -> String {
+        let from = Date(timeIntervalSince1970: Double(fromMs) / 1000)
+        let to = Date(timeIntervalSince1970: Double(toMs) / 1000)
+        let time = DateFormatter()
+        time.locale = Locale(identifier: "en_US_POSIX")
+        time.dateFormat = "HH:mm"
+        let sameDay = Calendar.current.isDate(from, inSameDayAs: to)
+        if sameDay { return "\(time.string(from: from)) – \(time.string(from: to))" }
+        let stamp = DateFormatter()
+        stamp.locale = Locale(identifier: "en_US_POSIX")
+        stamp.dateFormat = "MM-dd HH:mm"
+        return "\(stamp.string(from: from)) – \(stamp.string(from: to))"
     }
 }

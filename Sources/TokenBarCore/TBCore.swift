@@ -249,6 +249,11 @@ public enum TBCore {
     /// serving a curve.
     ///
     /// Returns nil when the series exists but has no stored history yet.
+    /// PROTOTYPE — usage inside an absolute [from, until) window.
+    public static func windowUsage(from: Int64, until: Int64) throws -> WindowUsage {
+        try unwrap(tb_window_usage(from, until))
+    }
+
     public static func quotaCurve(
         clientId: String, windowKey: String, generation: UInt64
     ) throws -> QuotaCurve? {
@@ -453,11 +458,12 @@ public enum TBCore {
         func point(
             sampledAt: Int64 = 1_000, usedPercent: String = "10.0", resetAt: Int64 = 1_500,
             durationSeconds: Int64 = 1_000, durationSource: String = "contract",
-            origin: String = "liveV3"
+            origin: String = "liveV3", isActiveGroup: String? = "false"
         ) -> String {
-            #"{"sampledAt":\#(sampledAt),"usedPercent":\#(usedPercent),"resetAt":\#(resetAt),"#
+            let active = isActiveGroup.map { #","isActiveGroup":\#($0)"# } ?? ""
+            return #"{"sampledAt":\#(sampledAt),"usedPercent":\#(usedPercent),"resetAt":\#(resetAt),"#
                 + #""durationSeconds":\#(durationSeconds),"durationSource":"\#(durationSource)","#
-                + #""origin":"\#(origin)"}"#
+                + #""origin":"\#(origin)"\#(active)}"#
         }
 
         func curve(
@@ -542,8 +548,25 @@ public enum TBCore {
                     sampledAt: 1_000, resetAt: 1_500,
                     durationSeconds: QuotaCurve.validDurationSeconds.upperBound + 1)]))
         rejects(
-            "a usedPercent outside (0, 100] is rejected",
-            curve(points: [point(usedPercent: "0.0")]))
+            "a usedPercent outside [0, 100] is rejected",
+            curve(points: [point(usedPercent: "-0.1")]))
+        rejects(
+            "a usedPercent above 100 is rejected",
+            curve(points: [point(usedPercent: "100.1")]))
+        // Zero is a READING, not an absence: a fresh window is 0% used, and
+        // rejecting it meant no cycle recorded its own start, so the span
+        // between the lowest and highest reading understated every cycle by
+        // whatever was spent before the app first saw a non-zero number. This
+        // guard mirrors the store's admission and had to widen with it.
+        do {
+            let zero = try JSONDecoder().decode(
+                QuotaCurve.self, from: curve(points: [point(usedPercent: "0.0")]))
+            check("a usedPercent of exactly 0 is accepted — a fresh window's own start",
+                  zero.points.first?.usedPercent == 0)
+        } catch {
+            check("a usedPercent of exactly 0 is accepted — a fresh window's own start",
+                  false)
+        }
         // Rejected by JSON number parsing rather than by the `isFinite` guard,
         // which no JSON input can reach. Kept because it pins that a payload
         // cannot smuggle an unrepresentable number past this boundary.
@@ -565,6 +588,13 @@ public enum TBCore {
         rejects(
             "a curve missing the activeResetAt key is rejected",
             curve(points: [point()], activeResetAt: nil))
+        // Same rule, one level down. Rust always emits `isActiveGroup`, so an
+        // absent key is ABI drift; defaulting it to false would render every
+        // point as finished history — the exact misreading the field was added
+        // to remove, arriving silently rather than as a decode failure.
+        rejects(
+            "a curve point missing the isActiveGroup key is rejected",
+            curve(points: [point(isActiveGroup: nil)]))
 
         // The fixture's generation is 7, which is also what the payload claims,
         // so these two cases differ only in what the caller asked for.

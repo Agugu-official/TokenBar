@@ -136,6 +136,9 @@
 "Extra usage" = "額外用量";
 "%lld%% left" = "剩餘 %lld%%";
 "%lld%% used" = "已用 %lld%%";
+"%@ used" = "已用 %@";
+"%@ less left" = "剩餘少 %@";
+"%@ more left" = "剩餘多 %@";
 "Expected %lld%% used by now" = "依進度目前應已使用 %lld%%";
 "Set up" = "待設定";
 "Error" = "錯誤";
@@ -309,7 +312,6 @@
 "Keep the main TokenBar item. Optional client items show each client's selected quota window; Auto chooses the tightest healthy window for that client." = "主 TokenBar 項目會保留。可選的個別用戶端項目會顯示各自選定的額度時間窗；自動會在該用戶端內選擇最吃緊且健康的時間窗。";
 "Off hides the Agent-limits quota card everywhere — the Overview summary, every client's own tab, and this preview. Cost/token data is unaffected." = "關閉後會在所有位置隱藏 Agent 額度卡片 —— 包含總覽摘要、各用戶端分頁與此預覽。費用與 token 資料不受影響。";
 "On, bars count up as quota is used; off, they count down to what's left. The color always warns as quota runs low." = "開啟時長條隨用量往上累加，關閉時則往下遞減顯示剩餘。無論何者，額度偏低時顏色都會提出警示。";
-"Full is the wide card with the pace line; Classic is the original compact layout without pace." = "完整版是含步調線的寬版卡片，經典版則是不含步調的原始精簡版面。";
 "The deficit/reserve marker. Historical learns each quota window's usage pattern; during learning, the Linear estimate is labeled; Linear uses the exact reset duration; Off hides the marker." = "超前／保留量的標記。歷史模式會學習每個額度時間窗的使用模式，學習期間會標示為線性估算；線性模式使用確切的重置週期；關閉則隱藏標記。";
 "Hides only that client's quota card here and on its own tab — the tab and its cost/token data stay visible. Useful for accounts with no OAuth quota (e.g. Claude Console). Grayed out when the tab itself is hidden below, since a hidden tab always hides its quota card too." = "只隱藏該用戶端在此處與自身分頁的額度卡片 —— 分頁本身與費用／token 資料仍會顯示。適合沒有 OAuth 額度的帳號（例如 Claude Console）。當下方把該分頁整個隱藏時，這裡會變成灰色，因為隱藏分頁一定連帶隱藏它的額度卡片。";
 "Off removes a tab from the popover's tab row. Cost/token data is unaffected." = "關閉會將該分頁從彈出視窗的分頁列移除。費用與 token 資料不受影響。";
@@ -358,6 +360,161 @@
 "%lldd" = "%lld天";
 "%lldd %lldh" = "%1$lld天%2$lld小時";
 
+/* ===== 額度時間窗卡片 ===== */
+"Session window" = "工作階段時間窗";
+"Loading" = "載入中";
+"Waiting for quota…" = "正在等待額度…";
+"Waiting for quota" = "等待額度中";
+"%@ window" = "%@ 時間窗";
+"No quota history" = "沒有額度歷史紀錄";
+"This window has no recorded quota history, so there is no line to draw." = "這個時間窗沒有額度歷史紀錄，因此無法繪製曲線。";
+"Remaining" = "剩餘";
+"Used" = "已用";
+"Placing the window…" = "正在定位時間窗…";
+"Placing the window" = "正在定位時間窗";
+"Inferred window · resets in %@" = "推算時間窗 · %@ 後重置";
+"No window running" = "目前沒有執行中的時間窗";
+"Window unavailable" = "時間窗無法使用";
+"The last window ended and nothing has been used since — no window is running." = "上一個時間窗已結束，之後尚無用量——目前沒有執行中的時間窗。";
+"This subscription did not report a usable reset time, so the window cannot be placed." = "這個訂閱未回報可用的重置時間，因此無法定位時間窗。";
+"used" = "已用";
+"remaining" = "剩餘";
+"No quota reading in this window" = "這個時間窗內沒有額度讀數";
+"Reading local usage…" = "正在讀取本機用量…";
+"%@ readings" = "%@ 筆讀數";
+"Quota" = "額度";
+"Usage" = "用量";
+"No sample" = "無樣本";
+"No usage in this interval" = "這個區間沒有用量";
+"No quota reading in this interval" = "這個區間沒有額度讀數";
+"Quota %@%% %@" = "額度%2$@ %1$@%%";
+"%@%@%% this interval" = "此區間 %1$@%2$@%%";
+"10%% of quota ~ %@ · %@ API-equivalent, ±%@%%" = "額度 10%% ≈ %@ token · %@（API 等值，誤差 ±%@%%）";
+"Quota moved only %@%% — too little to estimate (±%@%%)" = "額度僅變動 %@%%，資料太少無法估算（±%@%%）";
+"Quota has not moved yet" = "額度尚未變動";
+"Quota moved %@%%, none of it recorded on this machine" = "額度變動了 %@%%，但這台機器上沒有記錄到";
+"Not enough quota readings yet" = "額度讀數還不夠";
+
 /* ===== 視窗 ===== */
 "TokenBar Settings" = "TokenBar 設定";
 "Sponsor" = "贊助";
+"The Agent limits card is turned off in Settings." = "Agent 額度卡片已在設定中關閉。";
+
+/* ===== 額度歷史 ===== */
+"Window history" = "時間窗歷史";
+"%@ windows" = "%@ 個窗";
+"No earlier windows recorded yet. They accumulate as TokenBar runs." = "尚未記錄到更早的時間窗。TokenBar 執行期間會逐步累積。";
+"TokenBar observed %@%% of this window, so its usage figure is a floor." = "TokenBar 只觀測到這個時間窗的 %@%%，因此用量是下限而非實際值。";
+"Nothing in this window was charged to this subscription." = "這個時間窗內沒有用量記在這個訂閱上。";
+"Other subscriptions in the same hours: %@ · %@" = "同一時段的其他訂閱：%@ · %@";
+"Amounts are API list-price equivalents for usage you declared as %@ — not what the subscription charged." = "金額是你歸類為 %@ 的用量按 API 定價換算的等值，不是訂閱實際收取的費用。";
+
+/* ===== 跨訂閱摘要 ===== */
+"Tightest right now: " = "目前最吃緊：";
+" at %lld%% left" = "，剩餘 %lld%%";
+"%lld other windows, all above %lld%%" = "另外 %1$lld 個時間窗，全部高於 %2$lld%%";
+"%lld of %lld other windows are below %lld%%" = "另外 %2$lld 個時間窗裡有 %1$lld 個低於 %3$lld%%";
+"No subscription is reporting a usage window right now." = "目前沒有任何訂閱回報使用時間窗。";
+"Burning fastest: " = "燒最快：";
+" · %lld%% ahead of pace" = " · 超前步調 %lld%%";
+"Today: %@ tokens · %@" = "今天：%@ tokens · %@";
+"Tightest" = "最吃緊";
+"Burning fastest" = "燒最快";
+"Today" = "今天";
+"%lld%% ahead of pace" = "超前步調 %lld%%";
+"Layout: Chart" = "版面：曲線";
+"Full is the wide card with the pace bar; Classic is the original compact layout without pace; Chart draws each window's quota over time, with the pace estimate as a second line. Chart needs recorded quota history and falls back to a bar for windows that have none." = "Full 是含步調長條的寬版卡片；Classic 是原本不含步調的精簡版面；Chart 把每個時間窗的額度畫成隨時間變化的曲線，步調估計是第二條線。Chart 需要已記錄的額度歷史，沒有歷史的時間窗會退回長條。";
+
+/* ===== 逐訂閱用量 ===== */
+
+/* ===== 逐訂閱每日趨勢 ===== */
+"Daily by subscription" = "每日・依訂閱";
+"since %@" = "自 %@";
+"No usage recorded in this range." = "這個範圍內沒有記錄到用量。";
+"Reading daily usage…" = "正在讀取每日用量…";
+"Unclassified" = "未分類";
+/* ===== 時間窗趨勢 ===== */
+"%lld%%" = "%lld%%";
+"Recent trend, projected %lld%% by reset" = "近期趨勢，預估重置時達 %lld%%";
+
+/* ===== 過去的時間窗 ===== */
+"Past windows" = "過去的時間窗";
+"never exhausted" = "從未用完";
+"No completed windows recorded yet. They accumulate as TokenBar runs." = "尚未記錄到完整的時間窗。TokenBar 執行期間會逐步累積。";
+"Reading quota history…" = "正在讀取額度歷史…";
+"Heaviest %@%% · never ran out" = "最多用到 %@%%，從未用完";
+"Heaviest %@%% · ran out at least once" = "最多用到 %@%%，至少用完過一次";
+"Pace" = "步調";
+"Every measured window is under its expected pace" = "量得到的時間窗都在預期步調之內";
+"10%% of quota ~ %@-%@ · %@-%@ API-equivalent" = "額度 10%% ≈ %@〜%@ token · %@〜%@（API 等值）";
+
+/* ===== 總覽卡片組裝 ===== */
+"Overview cards" = "總覽卡片";
+"Quota summary" = "額度摘要";
+"Limits" = "Agent 額度";
+"Chart" = "用量圖";
+"Trace" = "即時追蹤";
+"Which cards the Overview lens shows, in this order. The usage chart cannot be hidden — Overview is where every hidden lens falls back to, so it has to keep something. Cost and token data are unaffected." = "決定「總覽」分頁顯示哪些卡片，順序如上。用量圖無法隱藏——每個被隱藏的分頁都會退回總覽，所以它必須留下東西。花費與 token 資料不受影響。";
+"by reset %lld%%" = "重置時 %lld%%";
+"No usage this day" = "這天沒有用量";
+"Most recent window" = "最近一個時間窗";
+"%@ windows ago" = "%@ 個窗以前";
+"Consumed %@%% of the allowance" = "用掉了額度的 %@%%";
+"Ran out" = "已用完";
+"Consuming now · at this rate it runs out before reset (projected %lld%% used)" = "現在正在消耗・照這個速度會在重置前用完（預計已用 %lld%%）";
+"Consuming now · at this rate it reaches %lld%% used by reset" = "現在正在消耗・照這個速度重置時約已用 %lld%%";
+"Recent consumption" = "最近的消耗";
+"At this rate it runs out before reset · projected %lld%% used" = "照這個速度會在重置前用完・預計已用 %lld%%";
+"At this rate it reaches %lld%% used by reset" = "照這個速度，重置時約已用 %lld%%";
+"The pace line beside it compares you with your usual pattern instead." = "旁邊那行步調比的是「跟你平常相比」，兩者回答不同問題。";
+
+// Quota heatmap
+"When the allowance goes" = "額度花在什麼時候";
+"%@ days observed" = "觀察到 %@ 天";
+"No allowance movement recorded yet. It accumulates as TokenBar runs." = "還沒有記錄到額度變動。TokenBar 執行期間會逐步累積。";
+"%@%% consumed between readings too far apart to place" = "有 %@%% 落在間隔過長的兩次讀數之間，無法定位到時段";
+"No allowance consumed in this slot" = "這個時段沒有消耗額度";
+"%@ allowance-points spent here" = "這個時段累計花掉 %@ 個額度百分點";
+"~ %@ API-equivalent, ±%@%%" = "≈ %@（API 等值，誤差 ±%@%%）";
+"Not enough history to convert this window to a figure" = "這個窗的歷史還不足以換算成金額";
+"Mon" = "一";
+"Tue" = "二";
+"Wed" = "三";
+"Thu" = "四";
+"Fri" = "五";
+"Sat" = "六";
+"Sun" = "日";
+"Classify your usage in Settings to see what this window is worth" = "到設定裡分類用量，才能知道這個窗值多少";
+"Nothing is classified yet. Settings › Usage attribution splits this by subscription." = "還沒有分類過任何用量。設定 › 用量歸屬可以把這張圖拆成各個訂閱。";
+"%@ of %@ windows recorded — the estimate needs that many" = "已記錄 %@ 個時間窗，要 %@ 個才能給出估計";
+"runs out at this rate" = "照現速會用完";
+"Peaked at %@%% · never ran out" = "最高讀數 %@%%・從未用完";
+"Peaked at %@%% · ran out at least once" = "最高讀數 %@%%・至少用完過一次";
+"Quota could not be loaded." = "無法載入額度。";
+"This agent reported no quota windows." = "這個 agent 沒有回報任何額度時間窗。";
+"Not in the latest quota report." = "不在最近一次的額度回報裡。";
+"Quota unavailable" = "額度無法取得";
+"10%% of quota ~ %@, unpriced models, ±%@%%" = "額度 10%% ≈ %@ token（模型無定價，誤差 ±%@%%）";
+"unpriced models, ±%@%%" = "模型無定價，誤差 ±%@%%";
+"10%% of quota ~ %@ API-equivalent, tokens unavailable, ±%@%%" = "額度 10%% ≈ %@（API 等值，無 token 明細，誤差 ±%@%%）";
+"%@%% consumed, but every pair of readings was too far apart to place on the grid. It fills in as sampling gets denser." = "已消耗 %@%%，但每一組讀數的間隔都太遠，無法定位到格子上。取樣變密之後會逐步填上。";
+"Usage recorded, but none of it is priced." = "有記錄到用量，但都沒有定價。";
+"Usage recorded, but it carries no token counts." = "有記錄到用量，但沒有附帶 token 數。";
+"Other subscriptions in the same hours: %@" = "同一時段的其他訂閱：%@";
+"Local usage could not be read." = "無法讀取本機用量。";
+"tokens unavailable, ±%@%%" = "無 token 明細，誤差 ±%@%%";
+"~ %@ – %@ API-equivalent" = "≈ %@ – %@（API 等值）";
+"The allowance did not move in this window" = "這個時間窗內額度沒有變動";
+"The allowance moved too little to convert reliably" = "額度變動太小，無法可靠換算";
+"The allowance moved, but no usage was recorded on this machine" = "額度有變動，但這台機器上沒有記錄到用量";
+"Historically: lasts until reset" = "歷史：可撐到重置";
+"On average: lasts until reset" = "均速：可撐到重置";
+"Recently: runs out" = "近期：會用完";
+"%@ scanned rows have no usable timestamp, so no window can count them" = "掃描到 %@ 筆沒有可用的時間戳，任何視窗都無法計入";
+"Quota history could not be read. It will be retried." = "無法讀取額度歷史，稍後會重試。";
+"Other subscriptions in the same hours:" = "同一時段的其他訂閱：";
+"Unclassified usage in the same hours:" = "同一時段的未分類用量：";
+"Other and unclassified usage in the same hours:" = "同一時段的其他與未分類用量：";
+"Excluded usage in the same hours:" = "同一時段的已排除用量：";
+"Other and excluded usage in the same hours:" = "同一時段的其他與已排除用量：";
+"%@ %@" = "%1$@%2$@";

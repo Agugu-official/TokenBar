@@ -46,13 +46,11 @@ struct ModelBreakdownCard: View {
     private static let rowsSpace = "model-rows"
 
     /// Token-category palette (matches the Tauri .model-seg-* CSS classes).
-    private static let tokenKinds: [(label: String, color: String, pick: (ModelReportEntry) -> Int64)] = [
-        ("Input", "#3b82f6", { $0.input }),
-        ("Output", "#22c55e", { $0.output }),
-        ("Cache read", "#f59e0b", { $0.cacheRead }),
-        ("Cache write", "#a855f7", { $0.cacheWrite }),
-        ("Reasoning", "#ec4899", { $0.reasoning }),
+    private static let picks: [(ModelReportEntry) -> Int64] = [
+        { $0.input }, { $0.output }, { $0.cacheRead }, { $0.cacheWrite }, { $0.reasoning },
     ]
+    private static let tokenKinds: [(label: String, color: String, pick: (ModelReportEntry) -> Int64)] =
+        zip(TokenKindPalette.all, picks).map { ($0.label, $0.color, $1) }
 
     var body: some View {
         let allow = Set(clientIds)
@@ -256,14 +254,9 @@ struct ModelUsageTooltip: View {
     @Binding var measuredSize: CGSize
 
     private var kinds: [(label: String, color: String, value: Int64)] {
-        [
-            ("Input", "#3b82f6", input),
-            ("Output", "#22c55e", output),
-            ("Cache read", "#f59e0b", cacheRead),
-            ("Cache write", "#a855f7", cacheWrite),
-            ("Reasoning", "#ec4899", reasoning),
-        ]
-        .filter { $0.value > 0 }
+        zip(TokenKindPalette.all, [input, output, cacheRead, cacheWrite, reasoning])
+            .map { (label: $0.label, color: $0.color, value: $1) }
+            .filter { $0.value > 0 }
     }
 
     var body: some View {

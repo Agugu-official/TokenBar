@@ -36,6 +36,9 @@ struct PopoverView: View {
     @AppStorage("tokenbar.chart.view") private var chartViewRaw = ChartView.bars.rawValue
     @AppStorage(ClientTray.activeViewKey) private var activeViewRaw = AppView.overview.rawValue
     @AppStorage("tokenbar.views.hidden") private var hiddenViewsRaw = ""
+    /// The window card's own selection. Rebuilding on change is what makes the
+    /// buttons feel like buttons — the quota poll is a minute apart.
+    @AppStorage(WindowCardLoader.selectionKey) private var windowSelectionRaw = ""
     @AppStorage("tokenbar.bridge.dismissed") private var bridgeDismissed = false
     /// "overview" or a client id. Persisted so the selection survives the
     /// popover's rootView teardown/rebuild cycle (StatusItemController swaps
@@ -51,7 +54,39 @@ struct PopoverView: View {
     // on the next reopen. Reading these raws in `displayClients` establishes the
     // body dependency; the reactive overload does the parsing.
     @AppStorage(ClientRegistry.tabHiddenKey) private var hiddenRaw = ""
+    /// Observed, not read through `ClientRegistry.quotaExcludedClients()`: that
+    /// helper reads `UserDefaults` directly, and a computed read is not a view
+    /// dependency, so toggling a client's limits in Settings would leave the
+    /// Overview summary naming it until something unrelated rebuilt the body.
+    @AppStorage(ClientRegistry.limitsHiddenKey) private var limitsHiddenRaw = ""
     @AppStorage(ClientRegistry.tabOrderKey) private var orderRaw = ""
+    /// Observed so the Overview summary's projection follows the same setting
+    /// the Agent-limits card obeys, live rather than on the next reopen.
+    @AppStorage("tokenbar.limits.paceMode") private var paceModeRaw = PaceMode.historical.rawValue
+    /// Observed, not read: a computed `UserDefaults` read is not a view
+    /// dependency, so saving a classification in Settings would leave this
+    /// split stale until something unrelated rebuilt the body. Same reasoning
+    /// as `UsageAttributionBreakdownCard`, which learned it the hard way.
+    @AppStorage(UsageAttribution.confirmedKey) private var attributionRaw = ""
+    /// Observed so a scan-root change restarts the loads that depend on it —
+    /// see the series task below.
+    ///
+    /// The GENERATION, not the persisted list. The list changes the instant
+    /// Settings saves, which is before `ClaudeExtraRoots.apply` has handed the
+    /// new set to the core, so a task keyed on it restarts early and publishes
+    /// a load that scanned the old roots. The generation is bumped after the
+    /// setter returns.
+    @AppStorage(ClaudeExtraRoots.generationKey) private var extraRootsGeneration = 0
+
+    /// Owns the attributed daily series. Mounted here for the reason its own
+    /// doc comment gives: its timezone provenance is process-scoped, and the
+    /// model expects to be `@State` on this view.
+    @State private var series = AttributedSeriesModel()
+
+    /// How many calendar days the trend covers. Two weeks reads as a rhythm
+    /// without turning each column into a sliver at popover width.
+    private static let trendDays = 14
+
 
     private var activeView: Binding<AppView> {
         Binding(
@@ -220,8 +255,85 @@ struct PopoverView: View {
         // ≤10s). The loop fetches first, then sleeps.
         .task(id: hiddenRaw) { await pollTokensPerMin() }
         .task { await model.pollAgentUsage() }
+        // The card's own trigger, deliberately not inside the quota poll. The
+        // union range must cover every displayed client, not just the open tab,
+        // so one scan can serve a later switch without rescanning.
+        // `displayClients` is in the identity because the closure READS it, and
+        // it derives from `stats.presentClients` — graph data that arrives
+        // after this view first appears. Without it the first firing captures
+        // an empty client list, and since nothing else in the identity moves,
+        // the task never runs again: opening straight onto an agent tab left
+        // the card permanently absent until you switched tabs. Same trap the
+        // `.onChange` below documents for `presentClients`.
+        // Keyed on `attributionRaw` too: the window card, the history rows and
+        // the equivalence are all folded through the declaration set, and a
+        // classification saved in Settings would otherwise reach the daily
+        // chart at once (its own task IS keyed on it) while these three kept
+        // reporting the previous split until the next minute poll.
+        // And on the scan-root generation, for the reason the series task
+        // below is: `invalidateScanDerivedCaches` clears the static union scan
+        // but not the `windowCards`, `quotaHistory` and `quotaEquivalences`
+        // this model has already published, and nothing else in this identity
+        // moves when a root is added or removed — so every visible quota
+        // surface kept drawing the old root set until a poll happened to call
+        // `refreshWindowUsage` again, up to a minute later.
+        .task(id: "\(windowSelectionRaw)|\(activeTab)|\(hiddenRaw)|\(attributionRaw)|"
+              + "\(effectiveView.rawValue)|\(extraRootsGeneration)|"
+              + displayClients.joined(separator: ",")) {
+            model.windowCardClients = displayClients
+            // The scan follows what is on screen; the curves do not. See
+            // `windowUsageClient`.
+            // Gated on the lens too: the window card and its history live only
+            // here now, so no other lens can make the app pay for a scan.
+            model.windowUsageClient =
+                (effectiveView == .quota && activeTab != ClientTray.overviewTab
+                    && displayClients.contains(activeTab)) ? activeTab : nil
+            // The all-agent Quota lens is the only surface that wants the
+            // equivalence scan, and only while it is on screen.
+            model.quotaLensAllAgents =
+                effectiveView == .quota && activeTab == ClientTray.overviewTab
+            model.refreshWindowQuotaHalves()   // synchronous: lands this frame
+            await model.refreshWindowUsage()
+        }
         .task { await model.pollTrace() }
         .task { await model.pollGraph() }
+        // Keyed on the declarations too: re-splitting the stack is the whole
+        // point of the card, and a classification saved in Settings has to
+        // reach it without waiting for a poll.
+        // Keyed on the scan roots as well as the declarations. Clearing the
+        // static cache and superseding in-flight loads does not touch the
+        // `points` this model has already published, and this task had no other
+        // reason to restart — so a root added or removed while the popover
+        // stayed open left the trend drawing the old set indefinitely. Exactly
+        // the shape the timezone case below is written for, which is why this
+        // is declarative rather than a second notification: the raw list is
+        // already persisted, so keying on it restarts the load by construction.
+        .task(id: "\(attributionRaw)|\(extraRootsGeneration)") {
+            await series.load(
+                source: UsageDataSources.current,
+                confirmed: UsageAttribution.parseRaw(attributionRaw).records)
+        }
+        // A transition invalidates the model's provenance and its cached rows,
+        // but the `points` it already published are untouched and this task is
+        // keyed on the declarations alone, so nothing restarts it. The trend
+        // chart would keep drawing day buckets and axis labels from the zone
+        // the user just left until the popover was rebuilt.
+        .onReceive(NotificationCenter.default.publisher(
+            for: .NSSystemTimeZoneDidChange)) { _ in
+            // The grids bucket by the current zone too, and only
+            // `refreshWindowQuotaHalves` rebuilds them — so without this the
+            // weekday cells and the observed-day count stay in the zone the
+            // user left until a later successful quota poll, or for ever if
+            // those keep failing. Teaching this handler about one of the two
+            // timezone-dependent folds was the same half-applied rule as the
+            // rest of this round.
+            model.refreshWindowQuotaHalves()
+            Task {
+                await series.load(
+                    source: UsageDataSources.current,
+                    confirmed: UsageAttribution.parseRaw(attributionRaw).records)
+            }
+        }
         .onAppear {
             installKeyMonitors()
             // `--tab=` must win even after activeTab is persisted (@AppStorage
@@ -255,6 +367,17 @@ struct PopoverView: View {
         //     displayClients is reactive state and deltas the instant the toggle
         //     lands. Without this, a live hide would strand the slice until
         //     reopen.
+        // The graph task is not keyed on the generation and `pollGraph` sleeps
+        // before fetching, so Overview and the model/hourly/agents lenses would
+        // keep drawing the old root set for up to a minute after an apply. This
+        // also supersedes an old-root fetch still in flight: `gatedGraph` bumps
+        // `graphFetchToken`, and a fetch that no longer owns it cannot commit.
+        //
+        // Not `initial: true`: the first value is the launch state, and
+        // `load()` already covers t=0.
+        .onChange(of: extraRootsGeneration) { _, _ in
+            Task { await model.reloadForRootChange() }
+        }
         .onChange(of: model.stats?.presentClients, initial: true) { _, _ in
             resetTabIfHidden()
         }
@@ -539,10 +662,74 @@ struct PopoverView: View {
                     payload: payload, clientIds: clientIds, stats: activeStats,
                     modelReport: model.modelReport, modelLoading: model.modelLoading,
                     colors: model.colors,
+                    trace: model.trace,
+                    singleClient: singleClient, year: model.year,
+                    hidden: ClientRegistry.parseIdSet(hiddenRaw),
+                    // The user's own pace mode, not the fold's default. Leaving
+                    // it out meant the summary always projected Historically
+                    // while the card beside it obeyed the setting — and with
+                    // pace off, the card hid its marker while the summary kept
+                    // naming a fastest burner. `compute` returns nil for `.off`,
+                    // so passing the real mode suppresses the line too.
+                    // The same union `ClientRegistry.quotaExcludedClients()`
+                    // forms for the tray, built from observed values here. `QuotaSummaryFold` documents
+                    // that it reuses `QuotaResolver` so this sentence and the
+                    // menu bar can never name different subscriptions — but the
+                    // shared function was being handed different arguments, so
+                    // a client hidden only from Agent limits was excluded by
+                    // the tray and named by this line. Since the limits card
+                    // stopped drawing that client's row, the sentence pointed
+                    // at something no longer below it.
+                    quotaSummary: QuotaSummaryFold.build(
+                        payload: model.agentUsage,
+                        excluding: ClientRegistry.parseIdSet(hiddenRaw)
+                            .union(ClientRegistry.parseIdSet(limitsHiddenRaw)),
+                        paceMode: PaceMode(rawValue: paceModeRaw) ?? .historical),
+                    usageAttempted: model.agentUsageAttempted,
+                    // The FOURTH statement of this gate, and the one that made
+                    // the previous fix inert: the Overview lens is fed here, so
+                    // removing the gate at the Quota lens' call site below and
+                    // inside `OverviewView` left this one still handing a client
+                    // tab an empty map. The rule was written in four places and
+                    // reconciled in three.
+                    windowCurves: model.windowCurves,
+                    agentUsage: model.agentUsage)
+            case .quota:
+                QuotaView(
+                    singleClient: singleClient, clientIds: clientIds,
                     trace: model.trace, agentUsage: model.agentUsage,
                     usageAttempted: model.agentUsageAttempted,
-                    singleClient: singleClient, year: model.year,
-                    hidden: ClientRegistry.parseIdSet(hiddenRaw))
+                    // Scoped to the tab being drawn: the history card belongs to
+                    // one client, and a failure recorded against another is not
+                    // an answer about this one.
+                    scanFailed: singleClient.map(model.windowScanFailed(for:)) ?? false,
+                    curveUnreadable: model.quotaCurveUnreadable,
+                    // Both lenses now. The gate here used to pass `[:]` on a
+                    // client tab, because `@Observable` tracks per property and
+                    // reading this on a lens that drew no sparkline would make
+                    // every `refreshWindowQuotaHalves()` write invalidate this
+                    // body for nothing. That lens draws one: its Agent-limits
+                    // card has the same recent-consumption indicator as the
+                    // all-agent one, and the indicator is computed from these
+                    // curves — so the gate was not saving work, it was blanking
+                    // a feature.
+                    windowCurves: model.windowCurves,
+                    windowCard: singleClient.flatMap { model.windowCards[$0] },
+                    quotaCycles: model.quotaCycles, quotaHistory: model.quotaHistory,
+                    colors: model.colors,
+                    // Folded from the series model rather than from the raw
+                    // payload: that model refuses to publish day buckets built
+                    // under a timezone it cannot vouch for, and calling the
+                    // fold directly would silently skip that check.
+                    windowSummaries: model.quotaWindowSummaries,
+                    heatmaps: model.quotaHeatmaps,
+                    heatmapWindows: model.quotaHeatmapWindows,
+                    equivalences: model.quotaEquivalences,
+                    trend: series.points.map {
+                        SubscriptionTrendFold.build(
+                            points: $0, today: Format.todayKey(),
+                            days: Self.trendDays)
+                    })
             case .models:
                 ModelsView(
                     report: model.modelReport, clientIds: clientIds, colors: model.colors,

@@ -38,9 +38,26 @@ public struct QuotaCurvePoint: Decodable, Sendable, Equatable {
     public let durationSeconds: Int64
     public let durationSource: QuotaCurveDurationSource
     public let origin: QuotaCurveSampleOrigin
+    /// Whether this point belongs to the cycle still running — answered by the
+    /// producer, never re-derived here.
+    ///
+    /// The fold used to decide this by comparing `resetAt` against the curve's
+    /// `activeResetAt`. Those are not comparable: `activeResetAt` is the RAW
+    /// provider value and every stored `resetAt` has been through
+    /// `normalize_sample_reset`, so the comparison silently failed whenever the
+    /// provider's reset was not already on the quantum — the ordinary case, not
+    /// the exotic one. The running cycle was then listed under "past windows",
+    /// stood beside completed spans as though comparable, and counted toward
+    /// the three-cycle equivalence threshold while still filling.
+    ///
+    /// Reproducing the quantization on this side would put the same rule in two
+    /// languages, which is the arrangement that produced the bug. The engine
+    /// knows which group is active; it now says so.
+    public let isActiveGroup: Bool
 
     private enum CodingKeys: String, CodingKey {
         case sampledAt, usedPercent, resetAt, durationSeconds, durationSource, origin
+        case isActiveGroup
     }
 
     public init(from decoder: Decoder) throws {
@@ -51,6 +68,15 @@ public struct QuotaCurvePoint: Decodable, Sendable, Equatable {
         durationSeconds = try container.decode(Int64.self, forKey: .durationSeconds)
         durationSource = try container.decode(QuotaCurveDurationSource.self, forKey: .durationSource)
         origin = try container.decode(QuotaCurveSampleOrigin.self, forKey: .origin)
+        // Required, for the reason `activeResetAt` is: Rust always emits it, so
+        // an absent key is ABI drift. Defaulting it to false would render every
+        // point as finished history — the exact misreading this field exists to
+        // remove, arriving silently instead of as a decode failure.
+        guard container.contains(.isActiveGroup) else {
+            throw QuotaCurve.corrupted(
+                decoder, "the curve point is missing the isActiveGroup key")
+        }
+        isActiveGroup = try container.decode(Bool.self, forKey: .isActiveGroup)
 
         // Exactly `validate_sample` in agent_quota_history.rs: a sample that
         // fails any of these never enters the store, so seeing one here means
@@ -59,8 +85,13 @@ public struct QuotaCurvePoint: Decodable, Sendable, Equatable {
             throw QuotaCurve.corrupted(
                 decoder, "durationSeconds falls outside the storable window length")
         }
-        guard usedPercent.isFinite, usedPercent > 0, usedPercent <= 100 else {
-            throw QuotaCurve.corrupted(decoder, "usedPercent must fall in (0, 100]")
+        // `>= 0`, matching the store's widened admission: a fresh window reads
+        // 0% used, and rejecting that meant no cycle recorded its own start.
+        // This guard exists to detect a payload that did not come from the
+        // store, so it has to move with the store or it would reject the very
+        // samples the store now writes.
+        guard usedPercent.isFinite, usedPercent >= 0, usedPercent <= 100 else {
+            throw QuotaCurve.corrupted(decoder, "usedPercent must fall in [0, 100]")
         }
         let cycleStart = resetAt.subtractingReportingOverflow(durationSeconds)
         guard !cycleStart.overflow, (cycleStart.partialValue...resetAt).contains(sampledAt) else {

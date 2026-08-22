@@ -27,6 +27,7 @@ mod agents_report;
 mod extra_scan_paths;
 mod filter_parity_probe;
 mod hourly_report;
+mod window_usage;
 mod model_report;
 mod opencode_integrations;
 mod usage_graph;
@@ -245,14 +246,28 @@ static RAYON_INIT: LazyLock<()> = LazyLock::new(|| {
 type GraphCacheEntry = (Instant, u64, serde_json::Value);
 static GRAPH_CACHE: LazyLock<Mutex<HashMap<String, GraphCacheEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+pub(crate) static WINDOW_USAGE_CACHE: LazyLock<
+    Mutex<HashMap<window_usage::CacheKey, window_usage::CacheEntry>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Bumped every time the extra-scan-paths registry is replaced. A scan that
-/// started before the replace snapshots its roots at the top
-/// (`LocalSourceContext::current()`) and publishes minutes of work later, so
-/// clearing the caches is not enough on its own: the in-flight scan would
+/// Bumped every time the extra-scan-paths registry is replaced. A scan reads
+/// the root set when it builds its options — `report_options`/`parse_options`
+/// call `extra_scan_paths::snapshot()` — and publishes minutes of work later,
+/// so clearing the caches is not enough on its own: the in-flight scan would
 /// insert its old-root result *after* the clear and the next reader would
 /// serve it. Every publisher records the generation it started under and
 /// drops its result if the registry moved underneath it.
+///
+/// Where that snapshot is taken is load-bearing and this comment used to state
+/// it wrongly, saying the roots were captured with `LocalSourceContext::current()`
+/// at the top of the call. They are not: `LocalSourceContext` carries only
+/// `home_dir`, which no registry replace touches. A reviewer reading the old
+/// wording concluded that a caller queued behind `window_usage::COMPUTE` would
+/// scan with a stale root set while reading a fresh generation. It cannot: the
+/// generation is read after the lock and the roots after that, so a replace
+/// while queued is seen by both, and a replace between them moves the
+/// generation and `publish` refuses. The guard is fail-closed BECAUSE the
+/// snapshot is late, which is the opposite of what the old sentence implied.
 ///
 /// Checked inside the lock that guards the thing being published, and bumped
 /// before either clear, so "check the generation" and "publish" cannot be
@@ -327,6 +342,15 @@ struct QuotaCurvePoint {
     duration_seconds: i64,
     duration_source: agent_quota_duration::DurationSource,
     origin: agent_quota_history::SampleOrigin,
+    /// Whether this point belongs to the cycle still running.
+    ///
+    /// Answered here rather than left to the consumer. `active_reset_at` below
+    /// is the RAW provider value and every sample's `reset_at` is normalized,
+    /// so comparing the two exactly — which is what the Swift fold did — fails
+    /// to exclude the running cycle whenever the provider's reset is not
+    /// already on the quantum. That cycle was then drawn under "past windows"
+    /// and counted toward the equivalence threshold while still filling.
+    is_active_group: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -375,6 +399,12 @@ fn quota_curve_payload(
             duration_seconds: sample.duration_seconds,
             duration_source: sample.duration_source,
             origin: sample.origin,
+            // The store's own predicate, not a re-derivation: it normalizes
+            // both sides with the sample's own duration, which is the only
+            // comparison that identifies the group correctly.
+            is_active_group: series.active_reset_at.is_some_and(|active| {
+                agent_quota_history::is_active_group_sample(active, &sample)
+            }),
         })
         .collect::<Vec<_>>();
     serde_json::to_value(QuotaCurvePayload {
@@ -927,7 +957,7 @@ unsafe fn set_extra_scan_paths_from_c(json: *const c_char) -> Result<serde_json:
 /// changed. Called only after a successful registry replace.
 ///
 /// The setter's contract is that the next report picks up the new roots, and
-/// two caches sit in front of that. `graph_cached` returns any entry younger
+/// three caches sit in front of that. `graph_cached` returns any entry younger
 /// than `ONESHOT_MAX_AGE_SECS` outright — it only probes the source token
 /// *after* aging out — so a graph computed seconds before a Settings edit
 /// would keep reporting a removed account's usage, or keep omitting a
@@ -946,12 +976,25 @@ unsafe fn set_extra_scan_paths_from_c(json: *const c_char) -> Result<serde_json:
 /// and both publishers re-read it inside the same lock they publish under —
 /// so a scan that started earlier either publishes before the clear (and gets
 /// cleared) or sees the new generation and drops its result.
+/// The root-registry generation, for publishers outside this module.
+pub(crate) fn root_generation() -> u64 {
+    ROOT_GENERATION.load(Ordering::SeqCst)
+}
+
 fn invalidate_scan_caches() {
     // Bump first. Both clears below release their locks, and a publisher that
     // acquires one afterwards has to observe the new generation for its check
     // to mean anything.
     ROOT_GENERATION.fetch_add(1, Ordering::SeqCst);
     GRAPH_CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clear();
+    // Third cache, same reason as the graph: `window_usage::cached` serves any
+    // entry younger than `ONESHOT_MAX_AGE_SECS` without probing the token, so
+    // the quota lens would keep folding a removed root's messages for up to
+    // half a minute after the edit.
+    WINDOW_USAGE_CACHE
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .clear();
@@ -1024,6 +1067,21 @@ mod tests {
             "the old-root graph landed in the cache after the replace"
         );
         assert!(
+            !window_usage::publish(
+                (0, 60_000),
+                generation_at_scan_start,
+                (Instant::now(), 1234, serde_json::json!({"from": "old roots"})),
+            ),
+            "a window scanned under the old roots was cached anyway"
+        );
+        assert!(
+            WINDOW_USAGE_CACHE
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_empty(),
+            "the old-root window landed in the cache after the replace"
+        );
+        assert!(
             !stamp_tick_if_current(generation_at_scan_start),
             "a tick that parsed the old roots stamped the tail as fresh"
         );
@@ -1039,6 +1097,14 @@ mod tests {
         assert!(
             publish_graph("2026", current, (Instant::now(), 5678, serde_json::json!({"from": "new roots"}))),
             "a graph computed under the current roots was refused"
+        );
+        assert!(
+            window_usage::publish(
+                (0, 60_000),
+                current,
+                (Instant::now(), 5678, serde_json::json!({"from": "new roots"})),
+            ),
+            "a window scanned under the current roots was refused"
         );
         assert!(
             stamp_tick_if_current(current),
@@ -1075,6 +1141,13 @@ mod tests {
                 (Instant::now(), 1234, serde_json::json!({"from": "old roots"})),
             );
         lock_tick().last = Some(Instant::now());
+        WINDOW_USAGE_CACHE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                (0, 60_000),
+                (Instant::now(), 1234, serde_json::json!({"from": "old roots"})),
+            );
 
         let payload = CString::new("{}").expect("payload has no interior NUL");
         let raw = unsafe { tb_set_extra_scan_paths(payload.as_ptr()) };
@@ -1096,6 +1169,14 @@ mod tests {
         assert!(
             lock_tick().last.is_none(),
             "live tail is still stamped fresh, so the next tick would skip the reparse"
+        );
+        assert!(
+            WINDOW_USAGE_CACHE
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_empty(),
+            "window-usage cache still holds a scan of the old root set, and it is \
+             served without a token probe for ONESHOT_MAX_AGE_SECS"
         );
     }
 
@@ -1348,6 +1429,19 @@ mod tests {
 
         let value = quota_curve_payload(&series, 7).expect("serialize curve payload");
         let object = value.as_object().expect("curve payload object");
+        // The running group is marked on the POINT. `active_reset_at` here is
+        // 1_000_500 and the third sample's stored `reset_at` is exactly that, so
+        // this case alone would also pass under the equality the consumer used
+        // to do; the off-quantum case below is the one that separates them.
+        assert_eq!(
+            value["points"]
+                .as_array()
+                .expect("points array")
+                .iter()
+                .map(|point| point["isActiveGroup"].as_bool().expect("isActiveGroup"))
+                .collect::<Vec<_>>(),
+            vec![false, false, true]
+        );
         assert_eq!(
             object
                 .keys()
@@ -1402,6 +1496,7 @@ mod tests {
                 [
                     "durationSeconds",
                     "durationSource",
+                    "isActiveGroup",
                     "origin",
                     "resetAt",
                     "sampledAt",
@@ -1412,6 +1507,52 @@ mod tests {
                 .collect()
             );
         }
+    }
+
+    /// The case the consumer could not decide for itself.
+    ///
+    /// `active_reset_at` is the RAW provider value; every stored sample carries
+    /// `normalize_sample_reset(...)`. When the provider's reset is not already
+    /// on the quantum the two are DIFFERENT numbers for the same cycle, so an
+    /// equality between them — which is what the Swift fold did — leaves the
+    /// running cycle in the history: drawn under "past windows", standing
+    /// beside completed spans, and counting toward the equivalence threshold
+    /// while still filling.
+    #[test]
+    fn an_off_quantum_active_reset_still_marks_its_own_points() {
+        let _test_guard = quota_curve_test_guard();
+        // 604_800s window: quantum is clamp(6048, 60, 300) = 300. A reset 137s
+        // past a multiple of 300 normalizes DOWN to that multiple, so the
+        // stored `reset_at` and `active_reset_at` differ by 137.
+        let raw_reset = 1_767_600_000 + 137;
+        let normalized = 1_767_600_000;
+        let series = agent_quota_history::SeriesState {
+            provider_id: "codex".to_string(),
+            account_scope: "opaque-account".to_string(),
+            window_key: "weekly.v1".to_string(),
+            active_reset_at: Some(raw_reset),
+            last_activity_at: raw_reset - 1_000,
+            rollover: None,
+            samples: vec![agent_quota_history::QuotaSample {
+                reset_at: normalized,
+                duration_seconds: 604_800,
+                duration_source: agent_quota_duration::DurationSource::Provider,
+                used_percent: 40.0,
+                sampled_at: normalized - 1_000,
+                origin: agent_quota_history::SampleOrigin::LiveV3,
+            }],
+        };
+
+        // The premise, asserted rather than assumed: if these were equal the
+        // case would prove nothing, and a later change to the quantum could
+        // make them equal without failing anything else here.
+        assert_ne!(
+            series.samples[0].reset_at,
+            series.active_reset_at.unwrap(),
+            "the fixture must actually be off-quantum"
+        );
+        let value = quota_curve_payload(&series, 7).expect("serialize curve payload");
+        assert_eq!(value["points"][0]["isActiveGroup"], true);
     }
 
     #[test]
@@ -2137,4 +2278,18 @@ mod tests {
         // A pathological window must saturate, not panic/overflow.
         assert!(tail.trace(i64::MAX).is_empty());
     }
+}
+
+/// Usage inside an absolute [from_ms, until_ms) window.
+///
+/// `until_ms` is quantised to the minute by `window_usage::cache_key`, so the
+/// answer can be up to a minute short of the requested end when an earlier call
+/// in the same minute already scanned. See the header for why that is the
+/// deliberate trade.
+#[no_mangle]
+pub extern "C" fn tb_window_usage(from_ms: i64, until_ms: i64) -> *mut c_char {
+    guarded("tb_window_usage", || {
+        let context = LocalSourceContext::current();
+        envelope(window_usage::cached(&context, from_ms, until_ms))
+    })
 }

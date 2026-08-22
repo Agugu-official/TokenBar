@@ -6,7 +6,12 @@ import TokenBarCore
 /// (Overview/Claude/Codex…, later phase) filters *which* data; this picks
 /// *how* it is broken down. The two compose.
 enum AppView: String, CaseIterable {
-    case overview, models, monthly, daily, hourly, stats, agents
+    /// `quota` sits second because it answers the question `overview` raises:
+    /// the summary says which subscription is tightest, this lens is where that
+    /// subscription's window and its past windows live. Position is product
+    /// order, not an implementation detail — the tab row renders declaration
+    /// order, and `SelfTest` pins it.
+    case overview, quota, models, monthly, daily, hourly, stats, agents
 
     /// Title-cased id, then looked up: the English label doubles as the
     /// translation key, while `rawValue` stays the persisted id.
@@ -175,6 +180,15 @@ private struct DashboardSnapshot {
     /// may write it: an older instance can outlive its view while an FFI scan
     /// finishes, and must not roll back the next popover's fresher snapshot.
     private static var lastSnapshot: DashboardSnapshot?
+
+    /// The union scan, held across popover reopens like `lastSnapshot` is.
+    /// `@State` on PopoverView does not survive the view being rebuilt, so an
+    /// instance property here would make every reopen pay the full scan again
+    /// — which is exactly what the staging was meant to stop being visible.
+    ///
+    /// In memory only, never on disk: it holds local usage rows, and the disk
+    /// envelope structurally refuses that class of data.
+    private static var lastUnionScan: UnionScan?
     private static var lastSnapshotOwner: ObjectIdentifier?
     /// Reopen cache for the expensive hourly fold. Multiple slices coexist so
     /// Daily/Monthly's Codex+Claude report cannot evict Hourly's all-client one.
@@ -182,6 +196,49 @@ private struct DashboardSnapshot {
     private static let hourlyCacheLimit = 8
     private static var hourlyCache: [HourlyCacheKey: HourlyReport] = [:]
     private static var hourlyCacheOrder: [HourlyCacheKey] = []
+
+    /// Drop every process-wide cache holding scan-derived data.
+    ///
+    /// Called when the extra-scan-root registry is replaced. The engine clears
+    /// its own caches there and the setter's contract is that the next report
+    /// picks up the new roots — but these live on THIS side of the FFI, and
+    /// each serves its answer without asking the engine: the union scan for
+    /// `unionScanMaxAge`, the hourly fold and the reopen snapshot until
+    /// something evicts them. A root added in Settings would otherwise be
+    /// missing from the quota cards, or a removed one still counted, for as
+    /// long as the Swift copy outlived the change the engine had already
+    /// applied.
+    @MainActor
+    static func invalidateScanDerivedCaches() {
+        // Supersede in-flight loads, not just completed values. A suspended
+        // `refreshWindowUsage` snapshotted its range before the roots changed
+        // and the FFI returns its pre-change result regardless, so clearing
+        // alone leaves the old task free to repopulate what was just cleared.
+        // Advancing the token makes its own `windowScanToken == scanToken`
+        // guard drop it — the guard already existed, it was simply never told
+        // that a root change also overtakes a scan.
+        windowScanToken &+= 1
+        lastUnionScan = nil
+        lastSnapshot = nil
+        lastSnapshotOwner = nil
+        // The PERSISTED snapshot needs no clearing here, and deliberately gets
+        // none. It records the root set it was built under, so the restore in
+        // `init` rejects it by comparison — which also covers the routes a
+        // clear cannot reach: the process dying between the edit and the
+        // clear, and the registry being changed while the app is not running.
+        // Clearing it here as well would only turn a rejected restore into a
+        // missing one.
+        hourlyCache = [:]
+        hourlyCacheOrder = []
+        // The fourth one, and it does not live on this type. The first version
+        // of this function cleared the three statics it could see from here and
+        // missed the attributed series' own reopen cache, which republishes
+        // before awaiting a fresh graph — so the subscription trend kept
+        // showing a removed root. "Every process-wide cache holding
+        // scan-derived data" is the rule; being declared elsewhere is not an
+        // exemption from it.
+        AttributedSeriesModel.invalidateRowCache()
+    }
     /// Whether this model participates in the shared `lastSnapshot` cache.
     /// The newest participating instance becomes its sole writer.
     private let cachesSnapshot: Bool
@@ -291,7 +348,9 @@ private struct DashboardSnapshot {
                   let directory = resolvedSnapshotDirectory,
                   let bytes = SnapshotStore.readBytes(in: directory),
                   let envelope = try? Self.snapshotDecoder.decode(SnapshotEnvelope.self, from: bytes),
-                  SnapshotStore.validate(envelope, expectedYear: initialYear, identity: identity)
+                  SnapshotStore.validate(
+                      envelope, expectedYear: initialYear, identity: identity,
+                      scanRoots: ClaudeExtraRoots.appliedPayloadJSON)
         {
             // The model report is never persisted (see SnapshotEnvelope's doc
             // comment), so a disk restore ALWAYS leaves modelReport/modelYear/
@@ -480,11 +539,23 @@ private struct DashboardSnapshot {
     /// unstructured task no longer describes the caller. `apply()` re-checks
     /// the year itself, and a commit that lands after a popover close only
     /// leaves a fresher reopen snapshot behind.
+    /// `commit` receives the payload AND the scan roots that were installed
+    /// when this fetch was issued.
+    ///
+    /// The roots must travel with the request rather than be read at capture
+    /// time. The FFI returns a scan that started before a registry replace even
+    /// after the replace has landed, so stamping a snapshot with the roots
+    /// current at the moment of capture labels pre-change data as post-change —
+    /// and the persisted-snapshot check then accepts it on the next launch,
+    /// which is exactly the acceptance the fingerprint was added to withhold.
+    /// Reading it here, before the fetch, is the only point at which the value
+    /// is known to describe the scan.
     private func gatedGraph(
         kind: RefreshKind,
         fetch: @escaping () async throws -> UsagePayload,
         commit: @escaping (UsagePayload) -> ApplyResult
     ) async throws -> GraphFetchOutcome {
+        let requestRoots = ClaudeExtraRoots.appliedPayloadJSON
         graphFetchToken += 1
         let token = graphFetchToken
         // Ownership-cleared, exactly like `graphFetchFailed` below: an
@@ -509,6 +580,13 @@ private struct DashboardSnapshot {
                     self.fulfillRestoreGate()
                     return .superseded
                 }
+                // Assigned rather than passed through `commit`: the closure
+                // is the caller's, and threading a value it never mentions
+                // through three call sites bought nothing over setting it on
+                // the line before. Both statements are on the main actor with
+                // no suspension between them, so `apply` cannot observe a
+                // different fetch's value.
+                self.payloadScanRoots = requestRoots
                 let result = commit(payload)
                 self.clearBackgroundRefresh(owner: token)
                 self.fulfillRestoreGate()
@@ -630,6 +708,22 @@ private struct DashboardSnapshot {
         guard !refreshing else { return }
         refreshing = true
         defer { refreshing = false }
+        await reload(force: true, kind: .manual)
+    }
+
+    /// A scan-root change, which must supersede whatever is in flight.
+    ///
+    /// Deliberately NOT `refresh()`. That method returns at `guard !refreshing`
+    /// when a manual refresh or an earlier root apply is still running — and
+    /// then it never enters `gatedGraph`, never advances `graphFetchToken`, and
+    /// the older scan's old-root payload commits after the invalidation. The
+    /// case the guard exists for (a user pressing Refresh twice) is the case
+    /// this must not obey: two quick Settings edits are exactly when the
+    /// superseding matters.
+    ///
+    /// It also leaves `refreshing` alone rather than setting it, so it cannot
+    /// clear a flag a concurrent manual refresh owns.
+    func reloadForRootChange() async {
         await reload(force: true, kind: .manual)
     }
 
@@ -856,6 +950,17 @@ private struct DashboardSnapshot {
     /// the cache for reasons unrelated to the graph moving.
     @ObservationIgnored private var payloadCapturedAt = Date()
 
+    /// The scan roots the CURRENT payload was fetched under, captured before
+    /// its request went out rather than when the snapshot is written. Seeded
+    /// with the roots at construction so a capture that somehow precedes any
+    /// apply() records this process's actual set rather than an empty one.
+    /// The scan roots the CURRENT payload was fetched under, captured before
+    /// its request went out rather than when the snapshot is written.
+    @ObservationIgnored private var payloadScanRoots = ClaudeExtraRoots.appliedPayloadJSON
+
+    /// The roots stamped into the snapshot for the committed payload.
+    var payloadScanRootsForTesting: String { payloadScanRoots }
+
     private var ownsLastSnapshot: Bool {
         cachesSnapshot && Self.lastSnapshotOwner == ObjectIdentifier(self)
     }
@@ -885,12 +990,27 @@ private struct DashboardSnapshot {
     /// never triggers a disk write, and Settings' model (`cachesSnapshot ==
     /// false`) never resolves a directory to write to at all.
     private func submitDiskCapture() {
-        guard cachesSnapshot, let payload, let identity = buildIdentity,
-              let directory = resolvedSnapshotDirectory
+        guard cachesSnapshot, let identity = buildIdentity,
+              let directory = resolvedSnapshotDirectory,
+              let envelope = snapshotEnvelope(identity: identity)
         else { return }
         Self.nextCaptureSequence += 1
         let sequence = Self.nextCaptureSequence
-        let envelope = SnapshotEnvelope(
+        Task.detached(priority: .utility) {
+            await SnapshotWriter.shared.submit(sequence: sequence, envelope: envelope, directory: directory)
+        }
+    }
+
+    /// The envelope `submitDiskCapture` would write, built in one place so a
+    /// self-test asserts the value that actually reaches disk.
+    ///
+    /// Not merely a refactor: an assertion on `payloadScanRoots` passes while
+    /// the stamp beside it reads the CURRENT roots instead, which is the very
+    /// substitution this field exists to prevent. The property is about what is
+    /// written, so the test has to see what is written.
+    func snapshotEnvelope(identity: BuildIdentity) -> SnapshotEnvelope? {
+        guard let payload else { return nil }
+        return SnapshotEnvelope(
             snapshotSchemaVersion: SnapshotEnvelope.schemaVersion,
             bundleIdentifier: identity.bundleIdentifier,
             shortVersion: identity.shortVersion,
@@ -898,10 +1018,8 @@ private struct DashboardSnapshot {
             savedAt: Date(),
             selectedYear: year,
             payload: payload,
-            knownYears: knownYears)
-        Task.detached(priority: .utility) {
-            await SnapshotWriter.shared.submit(sequence: sequence, envelope: envelope, directory: directory)
-        }
+            knownYears: knownYears,
+            scanRoots: payloadScanRoots)
     }
 
     /// Refresh only the live, year-independent fields (agentUsage/trace) of the
@@ -993,6 +1111,511 @@ private struct DashboardSnapshot {
         }
     }
 
+    /// Card state per client. Never absent while an agent tab is open — the
+    /// loading case is a state, not a nil.
+    var windowCards: [String: WindowCardState] = [:]
+
+    /// The one scan that serves every card, restored from the shared cache so
+    /// a reopen renders bars immediately instead of spinning.
+    private var unionScan: UnionScan? {
+        get { Self.lastUnionScan }
+        set { Self.lastUnionScan = newValue }
+    }
+
+    /// How long a scan is served before being refreshed. Matched to the
+    /// engine's own oneshot age so the two layers do not disagree about what
+    /// counts as fresh.
+    private static let unionScanMaxAge: TimeInterval = 30
+
+    /// Which agent tabs may need a card. Drives the union range.
+    var windowCardClients: [String] = []
+
+    /// Quota readings for EVERY window each client offers, keyed
+    /// `"<clientId>|<cardId>"` — the same identity the card's candidates use.
+    ///
+    /// `windowCards` above holds only the selected window, which is all the
+    /// detail card needs. The Agent-limits sparkline draws one line per row, so
+    /// it needs the others too. Each entry is a ~2ms read of an already
+    /// persisted file, so filling all of them stays inside the "instant" half.
+    var windowCurves: [String: [QuotaSample]] = [:]
+
+    /// Stage 1. Synchronous and local: reads the in-memory payload and the
+    /// persisted quota curve. Deliberately NOT async and NOT driven from the
+    /// quota poll — the whole point is that it does not wait on the network.
+    func refreshWindowQuotaHalves() {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        // Deliberately NOT `try?`: swallowing the error here is what let a
+        // transient generation expiry be reported to the user as "this window
+        // has no recorded quota history".
+        let readCurve: (String, String, UInt64) throws -> QuotaCurve? = { [source] c, key, gen in
+            try source.quotaCurveSync(clientId: c, windowKey: key, generation: gen)
+        }
+        if let payload = agentUsage {
+            for agent in payload.agents where windowCardClients.contains(agent.clientId) {
+                for window in agent.uniqueCardWindows {
+                    // A failed read keeps whatever the row already had. Blanking
+                    // it would drop a drawn sparkline to a bar for one refresh
+                    // and put it back on the next — a flicker that says nothing.
+                    guard let samples = WindowCardLoader.curveSamples(
+                        payload: payload, clientId: agent.clientId, window: window,
+                        curve: readCurve, nowMs: now)
+                    else { continue }
+                    windowCurves["\(agent.clientId)|\(window.cardId)"] = samples
+                }
+            }
+        }
+        for clientId in windowCardClients {
+            let state = WindowCardLoader.quotaHalf(
+                payload: agentUsage, clientId: clientId,
+                attempted: agentUsageAttempted,
+                curve: readCurve, nowMs: now)
+            // Fold in a usage half we already hold, so a stage-1 refresh does
+            // not throw away a completed scan and blink back to loading.
+            // The scan's AGE, not just its existence. A covering scan that has
+            // aged past `unionScanMaxAge` and whose replacement then threw left
+            // this branch winning over the failure branch below, so the card
+            // returned to `.ready` with arbitrarily stale totals instead of
+            // saying the refresh failed. Freshness is what `.ready` claims.
+            if case let .quotaOnly(q, _) = state, let scan = unionScan,
+               Date().timeIntervalSince(scan.capturedAt) < Self.unionScanMaxAge
+                   || !windowScanFailed(for: clientId),
+               let (settled, usage) = WindowCardLoader.usageHalf(
+                   quota: q, scan: scan, confirmed: UsageAttribution.confirmed().records) {
+                windowCards[clientId] = .ready(settled, usage)
+            } else if case let .quotaOnly(q, _) = state,
+                      windowScanFailed(for: clientId) {
+                // The loader cannot know this — it never runs the scan. Carried
+                // in here so the card can say the scan failed instead of
+                // spinning under a chart that is already drawn.
+                windowCards[clientId] = .quotaOnly(q, scanFailed: true)
+            } else if case .loading = state,
+                      let held = windowCards[clientId]?.cardId,
+                      held == WindowCardLoader.selectedCardId(
+                          payload: agentUsage, clientId: clientId) {
+                // A curve read that throws is a transient generation expiry —
+                // `quotaHalf` answers `.loading`, which is right as an answer
+                // and wrong as a replacement. Overwriting sent a drawn card
+                // back to "Waiting for quota…" until a later refresh, which is
+                // the flicker the summaries block a few lines down already
+                // refuses to produce. Keep what the row had; the next refresh
+                // publishes the new state.
+                //
+                // Only when the held card is about the window now selected:
+                // two selections share a client, so retaining by client alone
+                // left the chart and totals on the window the user had just
+                // navigated away from while the picker highlighted the new one.
+                continue
+            } else {
+                windowCards[clientId] = state
+            }
+        }
+
+        // Strip summaries cover every displayed client. They read curves only,
+        // so the cost is `windowCardClients.count` file reads, not a scan.
+        //
+        // Skipped entirely when no client is on screen, for the same reason the
+        // curve loop above keeps what a failed read already had: `collected`
+        // would be empty because there was nothing to collect FROM, and
+        // publishing that empty as the answer makes the strip card state "no
+        // completed windows recorded yet". `windowCardClients` is assigned from
+        // `displayClients`, which arrives with graph data, so it is briefly
+        // empty whenever the top-level view changes — which is exactly when the
+        // card was seen blanking and coming back.
+        // An empty client set has two causes. `displayClients` arrives with
+        // graph data, so before that it is empty transiently — publishing then
+        // overwrote a populated strip with nothing on every top-level view
+        // change. But the user hiding their last visible client is ALSO an
+        // empty set, and a permanent one: skipping publication there left the
+        // strip and the grid showing a client that is no longer on screen.
+        // `stats` is the graph's own arrival signal, so it separates the two.
+        if windowCardClients.isEmpty, stats != nil {
+            quotaWindowSummaries = []
+            quotaHeatmaps = [:]
+            quotaHeatmapWindows = []
+            qualifyingCycles = [:]
+        }
+        if let payload = agentUsage, !windowCardClients.isEmpty {
+            var collected: [(clientId: String, cardId: String, label: String,
+                             cycles: [QuotaCycle])] = []
+            var heatmaps: [String: QuotaHeatmap] = [:]
+            var heatmapWindows: [QuotaHeatmapWindow] = []
+            // A THROWN read is a transient generation expiry, which happens
+            // when another publication lands while these synchronous reads run.
+            // Skipping that window and publishing the rest would drop it from
+            // the strip and the heatmap until some later refresh — the same
+            // "absent because we could not ask" mistake, arriving through a
+            // partial result rather than an empty one. A successful nil is
+            // still genuinely no history and still skips.
+            var readFailed = false
+            for agent in payload.agents where windowCardClients.contains(agent.clientId) {
+                for window in agent.uniqueCardWindows {
+                    guard let key = window.paceStatus.windowKey,
+                          let generation = payload.publicationGeneration
+                    else { continue }
+                    let attempt: QuotaCurve?
+                    do { attempt = try readCurve(agent.clientId, key, generation) }
+                    catch { readFailed = true; continue }
+                    guard let curve = attempt else { continue }
+                    let points = curve.points
+                    let grid = QuotaHeatmapFold.build(points: points)
+                    heatmaps["\(agent.clientId)|\(window.cardId)"] = grid
+                    // Unplaced-only windows stay in the picker. `total` is
+                    // zero when every reading pair straddles more than six
+                    // hours, but the allowance still moved; dropping the window
+                    // made the card report "nothing recorded yet" and put the
+                    // line that explains it out of reach.
+                    if grid.hasMovement {
+                        heatmapWindows.append(QuotaHeatmapWindow(
+                            clientId: agent.clientId, cardId: window.cardId,
+                            windowLabel: window.label, total: grid.total))
+                    }
+                    collected.append((
+                        clientId: agent.clientId, cardId: window.cardId,
+                        label: window.label,
+                        cycles: QuotaHistoryFold.cycles(
+                            points: points)))
+                }
+            }
+            // Skip this publication rather than replace a complete set with a
+            // partial one. Deliberately not an early `return`: the per-client
+            // cycles below are read through a different path and have their own
+            // error handling, and suppressing them here would trade one stale
+            // surface for another.
+            if !readFailed {
+                quotaWindowSummaries = QuotaOverviewFold.summaries(windows: collected)
+                quotaHeatmaps = heatmaps
+                quotaHeatmapWindows = heatmapWindows.sorted { $0.total > $1.total }
+                qualifyingCycles = Dictionary(
+                    uniqueKeysWithValues: collected.compactMap { window in
+                        // Capped BEFORE admitting, which is what the probe
+                        // sweep measured and what actually bounds the scan:
+                        // capping the admitted count instead would let 32
+                        // admitted cycles span a hundred recorded ones.
+                        // `collected` keeps the full list for the lifetime
+                        // summaries below.
+                        let admitted = QuotaHistoryFold.considered(window.cycles).filter {
+                            $0.usedPercent >= WindowEquivalence.minimumDelta
+                                && $0.observedFraction >= WindowEquivalence.minimumObservedFraction
+                        }
+                        guard admitted.count >= WindowEquivalence.minimumCycles else { return nil }
+                        return ("\(window.clientId)|\(window.cardId)", admitted)
+                    })
+            }
+        }
+
+        // Cycles follow the scan's client, not every displayed one: the history
+        // is a per-subscription list and only the open tab shows it.
+        //
+        // The client the published cycles belong to is tracked, because "keep
+        // what we had" is only safe while the question has not changed. A
+        // transient read failure on B used to leave A's cycles published, and
+        // `QuotaView` then drew them under B's name — one subscription's
+        // history labelled as another's, which is worse than an empty card and
+        // indistinguishable from a correct one.
+        if let client = windowUsageClient {
+            let selected = WindowCardLoader.selectedCardId(
+                payload: agentUsage, clientId: client)
+            if let cycles = WindowCardLoader.cycles(
+                payload: agentUsage, clientId: client, curve: readCurve)
+            {
+                quotaCycles = cycles
+                quotaCyclesCardId = selected
+                quotaCurveUnreadable = false
+                rebuildQuotaHistory()
+            } else {
+                // The read failed. Whether this branch clears or retains is
+                // only about a window we already had — on a FIRST failure there
+                // is nothing to clear, and the two are indistinguishable in
+                // state. What the card needs is the fact that the read failed,
+                // which no amount of rearranging here provides: it decides on
+                // `cycles.isEmpty` and `attempted`, and an unread curve is
+                // empty-and-attempted exactly like a window with no history.
+                quotaCurveUnreadable = true
+                if quotaCyclesCardId != selected || selected == nil {
+                    // Could not read, and what we hold is about a different
+                    // window — another client's, or another window of this one.
+                    quotaCycles = []
+                    quotaHistory = []
+                    quotaCyclesCardId = nil
+                }
+            }
+        } else {
+            quotaCycles = []
+            quotaHistory = []
+            quotaCyclesCardId = nil
+            quotaCurveUnreadable = false
+        }
+    }
+
+    /// Joins the cycles to the scan, whenever either changes. Cheap enough to
+    /// redo rather than track: the fold is one sorted pass over the scan.
+    /// Joins each qualifying window's admitted cycles to the scan.
+    ///
+    /// Numerators come from each cycle's OBSERVED span, not its whole window:
+    /// the delta only describes the interval between two readings, and counting
+    /// usage from a stretch nobody sampled against movement nobody saw is the
+    /// misalignment that cost 8 points of spread on live data.
+    private func rebuildQuotaEquivalences() {
+        guard let scan = unionScan else { return }
+        var built: [String: WindowEquivalence.Row] = [:]
+        let confirmed = UsageAttribution.confirmed().records
+        for (key, cycles) in qualifyingCycles {
+            guard let client = key.split(separator: "|").first.map(String.init),
+                  let oldest = cycles.last, scan.covers(start: oldest.evidenceStartMs)
+            else { continue }
+            // `declared` carries the empty-declaration case into the fold,
+            // which is where the difference between "nothing recorded" and
+            // "nothing classified" is defined.
+            // The span rule and its numerators come from the same fold the
+            // history card uses, sorted once and sliced per cycle. The filter
+            // that used to live here re-walked the whole scan per cycle on the
+            // main actor.
+            let spans = QuotaHistoryFold.spans(
+                cycles: cycles, messages: scan.messages, subscription: client,
+                confirmed: confirmed)
+            built[key] = WindowEquivalence.aggregate(
+                declared: !confirmed.isEmpty,
+                cycles: zip(cycles, spans).map { cycle, span in
+                    WindowEquivalence.Cycle(
+                        deltaPercent: cycle.usedPercent, spanTokens: span.exCacheRead,
+                        spanCost: span.cost, observedFraction: cycle.observedFraction)
+                })
+        }
+        quotaEquivalences = built
+    }
+
+    private func rebuildQuotaHistory() {
+        guard let client = windowUsageClient, let scan = unionScan,
+              let oldest = quotaCycles.last, scan.covers(start: oldest.evidenceStartMs)
+        else {
+            quotaHistory = []
+            return
+        }
+        quotaHistory = QuotaHistoryFold.rows(
+            cycles: quotaCycles, messages: scan.messages,
+            // The attribution target for a subscription's own quota is that
+            // subscription's client id: the window came from the provider that
+            // bills it. A row whose usage was declared elsewhere is exactly
+            // what the "other" column exists to show.
+            subscription: client,
+            confirmed: UsageAttribution.confirmed().records)
+    }
+
+    /// Whose usage bars are actually on screen, or nil on the all-agent
+    /// overview, which renders no window card at all.
+    ///
+    /// Deliberately NOT `windowCardClients`. That set drives the quota curves,
+    /// which are a ~2ms file read each and are wanted for every row. This one
+    /// drives the message scan, and scoping the two together was a measured
+    /// mistake: `copilot chat.v1` is a 31-day window, so unioning every
+    /// displayed client stretched the range to 14.93 days and 109,278 messages
+    /// — 67s cold — on a tab that displays none of it. The version before the
+    /// two-stage split returned early here whenever no agent tab was open;
+    /// this restores that bound without giving up the shared scan.
+    var windowUsageClient: String?
+
+    /// Recorded reset cycles of `windowUsageClient`'s selected window, newest
+    /// first. Derived from the persisted curve alone, so it lands with stage 1.
+    private(set) var quotaCycles: [QuotaCycle] = []
+    /// Those cycles joined to what was spent in them. Empty until the scan
+    /// lands; the card shows the cycles with a loading row in the meantime,
+    /// because the quota half is honest on its own and waiting for the usage
+    /// half would hide it for seconds.
+    private(set) var quotaHistory: [QuotaHistoryRow] = []
+    /// Recorded-cycle summaries for EVERY displayed client's windows, for the
+    /// all-agent lens. Curve reads only, so unlike `quotaHistory` this needs no
+    /// message scan and is safe on the landing view.
+    /// Which window's cycles `quotaCycles` currently holds — client AND card,
+    /// not client alone. Two window selections share a client, so a client-only
+    /// comparison could keep the previous window's history beneath the newly
+    /// selected card. Nil when empty.
+    @ObservationIgnored private var quotaCyclesCardId: String?
+
+    /// Whether the persisted curve could not be READ, as distinct from having
+    /// no history in it.
+    ///
+    /// `QuotaHistoryCard` decides on `cycles.isEmpty` and `attempted`, and an
+    /// unreadable curve is empty-and-attempted exactly like a window that has
+    /// simply not accumulated anything — so it stated "No earlier windows
+    /// recorded yet" about a curve it had failed to open, and kept stating it
+    /// until some later refresh happened to retry. The same distinction the
+    /// usage half already draws with `windowScanFailedClients`; the quota half
+    /// had no way to say it.
+    private(set) var quotaCurveUnreadable = false
+
+    private(set) var quotaWindowSummaries: [QuotaWindowSummary] = []
+    /// One weekday-by-hour grid per window, keyed as `QuotaWindowSummary.id`.
+    /// Written in the same guarded block as the summaries, so it cannot be
+    /// blanked by a refresh that saw no clients either.
+    private(set) var quotaHeatmaps: [String: QuotaHeatmap] = [:]
+    /// Every window that has a grid, heaviest first. Separate from the
+    /// summaries because a window can have movement in its running cycle and no
+    /// completed history at all.
+    private(set) var quotaHeatmapWindows: [QuotaHeatmapWindow] = []
+    /// Per-window quota equivalence, keyed `"<clientId>|<cardId>"`. Only windows
+    /// with enough admitted cycles appear. Empty until the scan lands — the
+    /// strips above it are free and must not wait for this.
+    private(set) var quotaEquivalences: [String: WindowEquivalence.Row] = [:]
+    /// Set when the Quota lens is open on the all-agent tab. Gates a scan that
+    /// serves one line about one window, measured at 6.3 days and 8.1s, so it
+    /// runs only when that line is actually on screen.
+    var quotaLensAllAgents = false
+    /// Cycles per qualifying window, kept from stage 1 so the scan can be
+    /// scoped to exactly what an estimate needs and no further.
+    @ObservationIgnored private var qualifyingCycles: [String: [QuotaCycle]] = [:]
+
+    /// Identifies the newest window scan any model has started.
+    ///
+    /// Static, because what it guards is static. `PopoverView` builds a new
+    /// `DashboardModel` on every reopen, so an instance-local counter gives the
+    /// abandoned model and its replacement the same value of 1 and the guard
+    /// passes for both — the token's scope has to match `lastUnionScan`'s, or
+    /// it protects nothing across a reopen, which is exactly when a scan is
+    /// most likely to be abandoned mid-flight.
+    ///
+    /// `LiveUsageDataSource.windowUsage` hands the blocking FFI call to a
+    /// detached task, so cancelling the SwiftUI task that awaits it does not
+    /// stop it — the result still arrives. Without this, switching tabs or
+    /// lenses mid-scan lets an older, narrower request land after a newer one
+    /// and overwrite `unionScan` with a stale message set stamped `capturedAt`
+    /// now, which then serves as fresh for the whole 30s window.
+    @ObservationIgnored private static var windowScanToken = 0
+
+    /// Stage 2. One scan for the open agent tab, which every card for that
+    /// client then filters from in memory.
+    func refreshWindowUsage() async {
+        Self.windowScanToken &+= 1
+        let scanToken = Self.windowScanToken
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        // Two callers, two scopes. An open agent tab needs its own window and
+        // its history; the all-agent Quota lens needs only the windows that can
+        // actually produce an estimate, which on live data is one of six.
+        let equivalenceStart = quotaLensAllAgents
+            ? qualifyingCycles.values.compactMap { $0.last?.evidenceStartMs }.min() : nil
+        guard let client = windowUsageClient else {
+            guard let from = equivalenceStart else { return }
+            if let cached = unionScan, cached.covers(start: from),
+               Date().timeIntervalSince(cached.capturedAt) < Self.unionScanMaxAge
+            { rebuildQuotaEquivalences(); return }
+            // Deliberately does NOT touch `windowScanFailedClients`: this branch
+            // serves the all-agent equivalence, which draws no window card. The
+            // first version set the shared flag here, so an equivalence scan
+            // failing on the lens made every client's card claim its own scan
+            // had failed the moment the user opened a tab.
+            guard let usage = try? await source.windowUsage(from: from, until: now)
+            else { return }
+            guard Self.windowScanToken == scanToken else { return }
+            unionScan = UnionScan(
+                fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages,
+                undatedCount: usage.undatedCount)
+            rebuildQuotaEquivalences()
+            return
+        }
+        guard let windowStart = WindowCardLoader.unionStart(
+            payload: agentUsage, clients: [client], nowMs: now)
+        else { return }
+        // The history's oldest cycle CONTAINS the active window, so this widens
+        // one scan rather than issuing a second. Measured 2026-08-16 on live
+        // data: 5.4 days, 45,844 messages, 4.6s — an order of magnitude below
+        // the 14.93-day union this replaced, and paid only on the Quota lens.
+        let from = min(windowStart, quotaCycles.last?.evidenceStartMs ?? windowStart)
+        // Serve the cached scan while it still covers the range and is fresh.
+        // Rescanning on every reopen was the whole complaint: the staging made
+        // the wait visible, it did not make it rare.
+        if let cached = unionScan, cached.covers(start: from),
+           Date().timeIntervalSince(cached.capturedAt) < Self.unionScanMaxAge {
+            // A fresh scan that covers this window IS an answer for it, whoever
+            // ran it. Returning without clearing left the card reporting a
+            // failure while the model held the very data that refutes it — and
+            // refusing to rescan for another 30 seconds.
+            if windowScanFailedClients.contains(client) {
+                windowScanFailedClients = Self.scanFailures(
+                    windowScanFailedClients, resolvedBy: client)
+                refreshWindowQuotaHalves()
+            }
+            return
+        }
+        // A throw here is a SETTLED answer, not a slow one. Returning silently
+        // left the card in `.quotaOnly` with "Reading local usage…" under a
+        // drawn chart for as long as the failure lasted, which is a spinner
+        // that will never stop. The token check keeps an overtaken scan's
+        // failure from settling a newer request, exactly as its success is.
+        guard let usage = try? await source.windowUsage(from: from, until: now) else {
+            guard Self.windowScanToken == scanToken else { return }
+            windowScanFailedClients.insert(client)
+            refreshWindowQuotaHalves()
+            return
+        }
+        guard Self.windowScanToken == scanToken else { return }
+        // Only THIS client's failure — not because the scan cannot answer for
+        // another (it becomes `unionScan` on the next line, and another
+        // client's own visit may then find it covering), but because coverage
+        // is not tested here. A bare `nil` cleared whichever client was
+        // recorded, which is neither of those things.
+        windowScanFailedClients = Self.scanFailures(
+            windowScanFailedClients, resolvedBy: client)
+        unionScan = UnionScan(
+            fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages,
+            undatedCount: usage.undatedCount)
+        refreshWindowQuotaHalves()
+        rebuildQuotaHistory()
+        rebuildQuotaEquivalences()
+    }
+
+    /// The clients whose stage-two scan settled with an error.
+    ///
+    /// Distinguishes "still scanning" from "asked and failed" — `.quotaOnly`
+    /// alone cannot, and both halves of the lens rendered the second as the
+    /// first. A per-client answer, not a shared flag: a single boolean says
+    /// "did the last scan fail", which is a different question from "did THIS
+    /// card's scan fail", and one transient failure on the all-agent lens made
+    /// the next tab the user opened claim its own scan had failed before that
+    /// scan had started.
+    ///
+    /// A SET, not one client, for the mirror of the same reason. The
+    /// single-slot version scoped its CLEAR to the client that succeeded but
+    /// let its SET overwrite whichever client was recorded, so two failures in
+    /// a row lost the first and its card went back to "Reading local usage…" —
+    /// the never-ending spinner this state exists to remove. Half a rule is not
+    /// a rule.
+    ///
+    /// Cleared at exactly two sites, both in `refreshWindowUsage`: the cached
+    /// branch and the success path. Their conditions are deliberately NOT
+    /// restated here. Four successive attempts to paraphrase them each read as
+    /// precise and each omitted a conjunct — the scan-token check, the
+    /// freshness bound, the fact that the cached branch tests coverage against
+    /// `from` rather than against the window. Read the two sites; a summary of
+    /// a conjunction is a place for one of its terms to go missing.
+    ///
+    /// One thing worth stating because it is counter-intuitive: `unionScan` is
+    /// cross-client in PROVENANCE, not in effect. A scan run for A can clear B,
+    /// but only when B itself visits, and only B.
+    ///
+    /// Deliberately not cleared when a retry STARTS: the card would then flip
+    /// failed → loading → failed on every poll, and the last settled answer is
+    /// more useful than a spinner that keeps restarting. During a retry the
+    /// card still says the last attempt failed, which is true and is the
+    /// intended reading.
+    private(set) var windowScanFailedClients: Set<String> = []
+
+    /// Whether the card currently shown for `clientId` should say the scan
+    /// failed rather than that it is still running.
+    func windowScanFailed(for clientId: String) -> Bool {
+        windowScanFailedClients.contains(clientId)
+    }
+
+    /// The recorded failures after a scan for `client` succeeds.
+    ///
+    /// Static and pure so the rule can be asserted on: an earlier version
+    /// assigned `nil` unconditionally, so a success on one client erased
+    /// another's recorded failure while the doc comment claimed the opposite.
+    /// Nothing in a view or an async method could catch that.
+    nonisolated static func scanFailures(
+        _ current: Set<String>, resolvedBy client: String
+    ) -> Set<String> {
+        current.subtracting([client])
+    }
+
     private func reconcileQuotaRemaining(with payload: AgentUsagePayload) {
         guard source.allowsQuotaCachePersistence else { return }
         let defaults = UserDefaults.standard
@@ -1017,12 +1640,27 @@ private struct DashboardSnapshot {
                 agentUsage = resolved
                 reconcileQuotaRemaining(with: resolved)
                 refreshSnapshotLiveData() // keep the reopen cache's quota cards current
+                // Stage 1 is synchronous and lands with the payload; stage 2
+                // is kicked off without being awaited, so the poll loop never
+                // holds the card behind a scan.
+                refreshWindowQuotaHalves()
+                Task { await refreshWindowUsage() }
             }
             // Set on failure too: `agentUsage == nil` alone cannot distinguish
             // "the first attempt is still in flight" from "the attempt finished
             // and produced nothing", and UI that waits on the payload would spin
             // forever against a persistent failure.
+            let firstSettlement = !agentUsageAttempted
             agentUsageAttempted = true
+            // And recompute the cards on that first failure, because
+            // `refreshWindowQuotaHalves` is the only writer of `windowCards`
+            // and it was called from the success branch alone. Teaching
+            // `quotaHalf` to answer `.blocked` once the attempt has settled did
+            // nothing on its own: with nothing else writing that state, the
+            // card kept the `.loading` it was built with until a tab change
+            // rebuilt it. Only on the transition, so a run of failures does not
+            // redo the same work every minute.
+            if payload == nil, firstSettlement { refreshWindowQuotaHalves() }
             try? await Task.sleep(for: .seconds(60))
         }
     }
