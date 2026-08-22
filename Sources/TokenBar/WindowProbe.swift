@@ -144,7 +144,7 @@ enum WindowProbe {
                           !curve.points.isEmpty
                     else { continue }
                     let full = QuotaHistoryFold.cycles(
-                        points: curve.points, activeResetAt: curve.activeResetAt)
+                        points: curve.points)
                     let capped = QuotaHistoryFold.considered(full)
                     guard let oldestUncapped = full.last?.evidenceStartMs,
                           let oldestCapped = capped.last?.evidenceStartMs

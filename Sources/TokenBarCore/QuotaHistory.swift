@@ -177,14 +177,20 @@ public enum QuotaHistoryFold {
     /// not by what it reported when sampling began.
     /// Completed cycles only.
     ///
-    /// `activeResetAt` names the group the window is still inside. Folding it
-    /// in put the running cycle in a strip captioned "past windows", let a
-    /// partially observed span stand beside completed ones, and let it count
-    /// toward the three-cycle threshold the equivalence needs — an estimate
-    /// that would then change under the reader as the cycle filled. Nil means
-    /// the caller does not know, and then everything present is treated as
-    /// finished, which is the old behaviour and the safe reading for a curve
-    /// with no active group.
+    /// The running cycle is excluded, and each point says for itself whether it
+    /// is in it. Folding it in put the running cycle in a strip captioned "past
+    /// windows", let a partially observed span stand beside completed ones, and
+    /// let it count toward the three-cycle threshold the equivalence needs — an
+    /// estimate that would then change under the reader as the cycle filled.
+    ///
+    /// The first version took the curve's `activeResetAt` and compared it to
+    /// each point's `resetAt`. Those are not comparable values: the engine
+    /// publishes the RAW provider reset there while every stored `resetAt` has
+    /// been through `normalize_sample_reset`, so the exclusion silently did
+    /// nothing whenever the provider's reset was off the quantum — which is
+    /// most of the time. `isActiveGroup` is the producer's own answer, so there
+    /// is no longer a parameter a caller can omit and no rule stated twice in
+    /// two languages.
     ///
     /// Returns EVERY recorded cycle. The cap that bounds the message scan is
     /// `considered(_:)`, applied by the consumers that pay for a scan — not
@@ -193,11 +199,9 @@ public enum QuotaHistoryFold {
     /// LIFETIME facts from this array — `peakPercent`, `neverExhausted`,
     /// `cycleCount` — and costs no scan at all. A capped fold made a window
     /// that ran out thirty-three cycles ago report that it never had.
-    public static func cycles(
-        points: [QuotaCurvePoint], activeResetAt: Int64? = nil
-    ) -> [QuotaCycle] {
+    public static func cycles(points: [QuotaCurvePoint]) -> [QuotaCycle] {
         var grouped: [Int64: [QuotaCurvePoint]] = [:]
-        for point in points where point.resetAt != activeResetAt {
+        for point in points where !point.isActiveGroup {
             grouped[point.resetAt, default: []].append(point)
         }
 

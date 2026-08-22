@@ -1918,7 +1918,16 @@ fn retention_cycles(series: &SeriesState, now: i64) -> Vec<RetentionCycleDescrip
         .collect()
 }
 
-fn is_active_group_sample(active_reset_at: i64, sample: &QuotaSample) -> bool {
+/// Whether a stored sample belongs to the cycle the window is still inside.
+///
+/// Both sides are normalized, and that is the whole point. `series.active_reset_at`
+/// holds the RAW provider value while every stored sample holds
+/// `normalize_sample_reset(...)`, so an exact comparison between them fails
+/// whenever the provider's reset is not already on the quantum — which is the
+/// ordinary case, not the exotic one (codex was off by 62s, grok by 19s). This
+/// predicate is the producer's own answer and is published per point so no
+/// consumer has to re-derive a quantization rule across the FFI boundary.
+pub(crate) fn is_active_group_sample(active_reset_at: i64, sample: &QuotaSample) -> bool {
     validate_sample(sample)
         && normalize_reset(sample.reset_at, sample.duration_seconds)
             == normalize_reset(active_reset_at, sample.duration_seconds)

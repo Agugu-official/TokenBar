@@ -458,11 +458,12 @@ public enum TBCore {
         func point(
             sampledAt: Int64 = 1_000, usedPercent: String = "10.0", resetAt: Int64 = 1_500,
             durationSeconds: Int64 = 1_000, durationSource: String = "contract",
-            origin: String = "liveV3"
+            origin: String = "liveV3", isActiveGroup: String? = "false"
         ) -> String {
-            #"{"sampledAt":\#(sampledAt),"usedPercent":\#(usedPercent),"resetAt":\#(resetAt),"#
+            let active = isActiveGroup.map { #","isActiveGroup":\#($0)"# } ?? ""
+            return #"{"sampledAt":\#(sampledAt),"usedPercent":\#(usedPercent),"resetAt":\#(resetAt),"#
                 + #""durationSeconds":\#(durationSeconds),"durationSource":"\#(durationSource)","#
-                + #""origin":"\#(origin)"}"#
+                + #""origin":"\#(origin)"\#(active)}"#
         }
 
         func curve(
@@ -587,6 +588,13 @@ public enum TBCore {
         rejects(
             "a curve missing the activeResetAt key is rejected",
             curve(points: [point()], activeResetAt: nil))
+        // Same rule, one level down. Rust always emits `isActiveGroup`, so an
+        // absent key is ABI drift; defaulting it to false would render every
+        // point as finished history — the exact misreading the field was added
+        // to remove, arriving silently rather than as a decode failure.
+        rejects(
+            "a curve point missing the isActiveGroup key is rejected",
+            curve(points: [point(isActiveGroup: nil)]))
 
         // The fixture's generation is 7, which is also what the payload claims,
         // so these two cases differ only in what the caller asked for.

@@ -342,6 +342,15 @@ struct QuotaCurvePoint {
     duration_seconds: i64,
     duration_source: agent_quota_duration::DurationSource,
     origin: agent_quota_history::SampleOrigin,
+    /// Whether this point belongs to the cycle still running.
+    ///
+    /// Answered here rather than left to the consumer. `active_reset_at` below
+    /// is the RAW provider value and every sample's `reset_at` is normalized,
+    /// so comparing the two exactly — which is what the Swift fold did — fails
+    /// to exclude the running cycle whenever the provider's reset is not
+    /// already on the quantum. That cycle was then drawn under "past windows"
+    /// and counted toward the equivalence threshold while still filling.
+    is_active_group: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -390,6 +399,12 @@ fn quota_curve_payload(
             duration_seconds: sample.duration_seconds,
             duration_source: sample.duration_source,
             origin: sample.origin,
+            // The store's own predicate, not a re-derivation: it normalizes
+            // both sides with the sample's own duration, which is the only
+            // comparison that identifies the group correctly.
+            is_active_group: series.active_reset_at.is_some_and(|active| {
+                agent_quota_history::is_active_group_sample(active, &sample)
+            }),
         })
         .collect::<Vec<_>>();
     serde_json::to_value(QuotaCurvePayload {
@@ -1414,6 +1429,19 @@ mod tests {
 
         let value = quota_curve_payload(&series, 7).expect("serialize curve payload");
         let object = value.as_object().expect("curve payload object");
+        // The running group is marked on the POINT. `active_reset_at` here is
+        // 1_000_500 and the third sample's stored `reset_at` is exactly that, so
+        // this case alone would also pass under the equality the consumer used
+        // to do; the off-quantum case below is the one that separates them.
+        assert_eq!(
+            value["points"]
+                .as_array()
+                .expect("points array")
+                .iter()
+                .map(|point| point["isActiveGroup"].as_bool().expect("isActiveGroup"))
+                .collect::<Vec<_>>(),
+            vec![false, false, true]
+        );
         assert_eq!(
             object
                 .keys()
@@ -1468,6 +1496,7 @@ mod tests {
                 [
                     "durationSeconds",
                     "durationSource",
+                    "isActiveGroup",
                     "origin",
                     "resetAt",
                     "sampledAt",
@@ -1478,6 +1507,52 @@ mod tests {
                 .collect()
             );
         }
+    }
+
+    /// The case the consumer could not decide for itself.
+    ///
+    /// `active_reset_at` is the RAW provider value; every stored sample carries
+    /// `normalize_sample_reset(...)`. When the provider's reset is not already
+    /// on the quantum the two are DIFFERENT numbers for the same cycle, so an
+    /// equality between them — which is what the Swift fold did — leaves the
+    /// running cycle in the history: drawn under "past windows", standing
+    /// beside completed spans, and counting toward the equivalence threshold
+    /// while still filling.
+    #[test]
+    fn an_off_quantum_active_reset_still_marks_its_own_points() {
+        let _test_guard = quota_curve_test_guard();
+        // 604_800s window: quantum is clamp(6048, 60, 300) = 300. A reset 137s
+        // past a multiple of 300 normalizes DOWN to that multiple, so the
+        // stored `reset_at` and `active_reset_at` differ by 137.
+        let raw_reset = 1_767_600_000 + 137;
+        let normalized = 1_767_600_000;
+        let series = agent_quota_history::SeriesState {
+            provider_id: "codex".to_string(),
+            account_scope: "opaque-account".to_string(),
+            window_key: "weekly.v1".to_string(),
+            active_reset_at: Some(raw_reset),
+            last_activity_at: raw_reset - 1_000,
+            rollover: None,
+            samples: vec![agent_quota_history::QuotaSample {
+                reset_at: normalized,
+                duration_seconds: 604_800,
+                duration_source: agent_quota_duration::DurationSource::Provider,
+                used_percent: 40.0,
+                sampled_at: normalized - 1_000,
+                origin: agent_quota_history::SampleOrigin::LiveV3,
+            }],
+        };
+
+        // The premise, asserted rather than assumed: if these were equal the
+        // case would prove nothing, and a later change to the quantum could
+        // make them equal without failing anything else here.
+        assert_ne!(
+            series.samples[0].reset_at,
+            series.active_reset_at.unwrap(),
+            "the fixture must actually be off-quantum"
+        );
+        let value = quota_curve_payload(&series, 7).expect("serialize curve payload");
+        assert_eq!(value["points"][0]["isActiveGroup"], true);
     }
 
     #[test]

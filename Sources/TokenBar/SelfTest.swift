@@ -2986,7 +2986,7 @@ enum SelfTest {
             case .failure: return nil
             }
         }
-        let curvePointJSON = #"{"sampledAt":10,"usedPercent":4.5,"resetAt":106,"durationSeconds":96,"durationSource":"provider","origin":"liveV3"}"#
+        let curvePointJSON = #"{"sampledAt":10,"usedPercent":4.5,"resetAt":106,"durationSeconds":96,"durationSource":"provider","origin":"liveV3","isActiveGroup":false}"#
         let curveCoverageJSON = #"{"oldestSampledAt":10,"newestSampledAt":10,"sampleCount":1}"#
         let curveDataJSON = #"{"points":["# + curvePointJSON + #"],"coverage":"# + curveCoverageJSON
             + #","activeResetAt":106,"generation":3}"#
@@ -11210,7 +11210,7 @@ enum SelfTest {
                 """
                 {"sampledAt":\(t),"usedPercent":\(pct),"resetAt":\(resetAtSecs),
                  "durationSeconds":\(durationSecs),"durationSource":"provider",
-                 "origin":"liveV3"}
+                 "origin":"liveV3","isActiveGroup":\(isActive)}
                 """
             }.joined(separator: ",")
             let json = """
@@ -11730,10 +11730,13 @@ enum SelfTest {
         //
         // Fixed to UTC and to a known Monday (2026-01-05) so the expected slots
         // are arithmetic rather than whatever the runner's calendar says.
-        func heatPoint(_ at: Int64, _ used: Double, reset: Int64) -> QuotaCurvePoint {
+        func heatPoint(
+            _ at: Int64, _ used: Double, reset: Int64, active: Bool = false
+        ) -> QuotaCurvePoint {
             try! JSONDecoder().decode(QuotaCurvePoint.self, from: Data("""
             {"sampledAt":\(at),"usedPercent":\(used),"resetAt":\(reset),
-             "durationSeconds":604800,"durationSource":"provider","origin":"liveV3"}
+             "durationSeconds":604800,"durationSource":"provider","origin":"liveV3",
+             "isActiveGroup":\(active)}
             """.utf8))
         }
         let utc = TimeZone(identifier: "UTC")!
@@ -11812,11 +11815,33 @@ enum SelfTest {
             heatPoint(1_767_616_200, 40, reset: otherReset),
         ]
         expect(QuotaHistoryFold.cycles(points: qhaPoints).count == 2,
-               "QH-A both groups are cycles when no active reset is named")
+               "QH-A both groups are cycles when no point is marked active")
+        let qhaActive = [
+            heatPoint(1_767_605_400, 10, reset: monReset),
+            heatPoint(1_767_612_600, 14, reset: monReset),
+            heatPoint(1_767_616_200, 40, reset: otherReset, active: true),
+        ]
         expect(
-            QuotaHistoryFold.cycles(points: qhaPoints, activeResetAt: otherReset)
-                .map(\.resetAtMs) == [monReset * 1000],
-            "QH-A naming the active reset leaves only the completed cycle")
+            QuotaHistoryFold.cycles(points: qhaActive).map(\.resetAtMs)
+                == [monReset * 1000],
+            "QH-A the running cycle's own points exclude it, leaving only the "
+                + "completed one")
+        // QH-A2. The exclusion must not depend on `resetAt` matching anything.
+        // It used to compare each point's NORMALIZED `resetAt` against the
+        // curve's RAW `activeResetAt`, so it silently did nothing whenever the
+        // provider's reset was off the quantum — most of the time. Here the
+        // active point's reset matches no other value on the curve and is not
+        // passed in anywhere: only the flag can exclude it.
+        let qhaOffQuantum = [
+            heatPoint(1_767_605_400, 10, reset: monReset),
+            heatPoint(1_767_616_200, 40, reset: otherReset + 137, active: true),
+        ]
+        expect(
+            QuotaHistoryFold.cycles(points: qhaOffQuantum).map(\.resetAtMs)
+                == [monReset * 1000],
+            "QH-A2 an active point whose reset matches no quantised value is "
+                + "still excluded, because the producer said so rather than the "
+                + "consumer inferring it")
 
         // QH-CAP. The fold used to return everything the engine retained (128
         // cycles per series). Nothing draws that many — the history card shows
@@ -11827,7 +11852,8 @@ enum SelfTest {
         func qhcPoint(_ at: Int64, _ used: Double, reset: Int64, duration: Int64) -> QuotaCurvePoint {
             try! JSONDecoder().decode(QuotaCurvePoint.self, from: Data("""
             {"sampledAt":\(at),"usedPercent":\(used),"resetAt":\(reset),
-             "durationSeconds":\(duration),"durationSource":"provider","origin":"liveV3"}
+             "durationSeconds":\(duration),"durationSource":"provider","origin":"liveV3",
+             "isActiveGroup":false}
             """.utf8))
         }
         let qhcWeek: Int64 = 604_800
@@ -12185,7 +12211,8 @@ enum SelfTest {
                         duration: Int64 = 18_000) -> QuotaCurvePoint {
             try! JSONDecoder().decode(QuotaCurvePoint.self, from: Data("""
             {"sampledAt":\(sampledAt),"usedPercent":\(used),"resetAt":\(resetAt),
-             "durationSeconds":\(duration),"durationSource":"provider","origin":"liveV3"}
+             "durationSeconds":\(duration),"durationSource":"provider","origin":"liveV3",
+             "isActiveGroup":false}
             """.utf8))
         }
         func attributedMessage(at t: Int64, client: String, provider: String,

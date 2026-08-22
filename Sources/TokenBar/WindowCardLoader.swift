@@ -329,7 +329,7 @@ enum WindowCardLoader {
         // Capped: this list is what the history card draws AND what bounds the
         // union scan, through its oldest entry's `evidenceStartMs`.
         return QuotaHistoryFold.considered(QuotaHistoryFold.cycles(
-            points: curve.points, activeResetAt: curve.activeResetAt))
+            points: curve.points))
     }
 
     /// The `"<clientId>|<cardId>"` the card is currently showing, or nil when

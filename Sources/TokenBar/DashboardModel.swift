@@ -1260,7 +1260,7 @@ private struct DashboardSnapshot {
                         clientId: agent.clientId, cardId: window.cardId,
                         label: window.label,
                         cycles: QuotaHistoryFold.cycles(
-                            points: points, activeResetAt: curve.activeResetAt)))
+                            points: points)))
                 }
             }
             // Skip this publication rather than replace a complete set with a
