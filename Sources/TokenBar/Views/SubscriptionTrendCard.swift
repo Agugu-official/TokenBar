@@ -44,6 +44,17 @@ struct SubscriptionTrendCard: View {
 
     private var metric: Metric { Metric(rawValue: metricRaw) ?? .cost }
 
+    /// The stacking and listing order for the SELECTED metric, resolved in one
+    /// place. Cost and tokens do not rank subscriptions the same way, and the
+    /// cost order was applied to both views — so under Tokens the largest token
+    /// consumer could sit behind smaller bands and fall outside the legend's
+    /// `prefix(4)`, under a tooltip that says largest-first. Four consumers
+    /// read this: the stacking loop, the tooltip list, the legend, and the
+    /// overflow count.
+    private func ordered(_ trend: SubscriptionTrend) -> [String] {
+        trend.targets(byTokens: metric == .tokens)
+    }
+
     private static let chartHeight: CGFloat = 78
     /// Wider than a hairline: whitespace between columns is what stops
     /// fourteen filled bars reading as one mass.
@@ -180,7 +191,7 @@ struct SubscriptionTrendCard: View {
                     let fullHeight = max(
                         Self.minimumInk, size.height * CGFloat(dayTotal / peak))
                     var cursor = size.height
-                    for target in trend.targets {
+                    for target in ordered(trend) {
                         guard let bucket = day.byTarget[target] else { continue }
                         let share = value(bucket) / dayTotal
                         let segment = fullHeight * CGFloat(share)
@@ -236,7 +247,7 @@ struct SubscriptionTrendCard: View {
                     // so this list is the reverse of the column's top-to-bottom
                     // order — consistency across tooltips wins over matching the
                     // one column being pointed at.
-                    ForEach(trend.targets, id: \.self) { target in
+                    ForEach(ordered(trend), id: \.self) { target in
                         if let bucket = day.byTarget[target] {
                             HStack(spacing: 4) {
                                 RoundedRectangle(cornerRadius: 1.5)
@@ -299,7 +310,7 @@ struct SubscriptionTrendCard: View {
 
     private func legend(_ trend: SubscriptionTrend) -> some View {
         HStack(spacing: 10) {
-            ForEach(trend.targets.prefix(4), id: \.self) { target in
+            ForEach(ordered(trend).prefix(4), id: \.self) { target in
                 HStack(spacing: 4) {
                     RoundedRectangle(cornerRadius: 1.5)
                         .fill(color(target))
@@ -309,8 +320,8 @@ struct SubscriptionTrendCard: View {
             }
             // Same overflow marker as `UsageChartCard`: without it a fifth
             // subscription draws a band no legend entry accounts for.
-            if trend.targets.count > 4 {
-                Text(verbatim: "+\(trend.targets.count - 4)")
+            if ordered(trend).count > 4 {
+                Text(verbatim: "+\(ordered(trend).count - 4)")
                     .foregroundStyle(.tertiary)
             }
             Spacer()

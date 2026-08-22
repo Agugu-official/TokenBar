@@ -30,13 +30,35 @@ public struct SubscriptionTrend: Equatable, Sendable {
     /// steady week and a burst-then-silence week identically.
     public let days: [Day]
     /// Targets present in the range, largest total cost first — the stacking
-    /// order, so the biggest payer is the base of every column.
+    /// order under the cost metric, so the biggest payer is the base of every
+    /// column.
     public let targets: [String]
+    /// The same targets ordered by token total.
+    ///
+    /// A separate order rather than a reuse. Cost and tokens do not rank the
+    /// same subscriptions the same way — an unpriced or partly priced source
+    /// can be the largest by tokens and near-last by cost — and the card
+    /// applied the cost order to both views. The legend draws
+    /// `targets.prefix(4)`, so under the Tokens metric the biggest token
+    /// consumer could be stacked behind smaller bands and left out of the
+    /// legend entirely, under a tooltip that says largest-first.
+    public let targetsByTokens: [String]
     public let peakCost: Double
     public let peakTokens: Int64
 
+    /// The order to stack and to list under the selected metric.
+    ///
+    /// A `Bool` rather than the view's `Metric`, which lives in the app module
+    /// and cannot be named from here. The card resolves it once into a single
+    /// property, so its four consumers — the stacking loop, the band loop, the
+    /// legend, and the overflow count — cannot disagree about which order they
+    /// are in.
+    public func targets(byTokens: Bool) -> [String] {
+        byTokens ? targetsByTokens : targets
+    }
+
     public static let empty = SubscriptionTrend(
-        days: [], targets: [], peakCost: 0, peakTokens: 0)
+        days: [], targets: [], targetsByTokens: [], peakCost: 0, peakTokens: 0)
 }
 
 public enum SubscriptionTrendFold {
@@ -60,6 +82,7 @@ public enum SubscriptionTrendFold {
 
         var byDate: [String: [String: SubscriptionTrend.Bucket]] = [:]
         var totals: [String: Double] = [:]
+        var tokenTotals: [String: Int64] = [:]
         for point in points where point.date >= first && point.date <= today {
             let target: String
             switch point.state {
@@ -77,6 +100,7 @@ public enum SubscriptionTrendFold {
             day[target] = bucket
             byDate[point.date] = day
             totals[target, default: 0] += point.cost
+            tokenTotals[target] = (tokenTotals[target] ?? 0).saturatingAdding(point.tokens)
         }
 
         let built = range.map { date -> SubscriptionTrend.Day in
@@ -94,6 +118,16 @@ public enum SubscriptionTrendFold {
             // for no reason the user can see.
             targets: totals.keys.sorted {
                 totals[$0] == totals[$1] ? $0 < $1 : totals[$0]! > totals[$1]!
+            },
+            // Same key set, same tie-break by name for the same reason: an
+            // unstable order reshuffles the bands for no reason the user can
+            // see. `totals` and `tokenTotals` gain their keys together, so
+            // ordering the second by the first's key set would be equivalent
+            // — it is written from `tokenTotals` anyway, because relying on
+            // that coincidence is how the two fall out of step later.
+            targetsByTokens: tokenTotals.keys.sorted {
+                tokenTotals[$0] == tokenTotals[$1]
+                    ? $0 < $1 : tokenTotals[$0]! > tokenTotals[$1]!
             },
             peakCost: built.map(\.totalCost).max() ?? 0,
             peakTokens: built.map(\.totalTokens).max() ?? 0)

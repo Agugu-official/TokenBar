@@ -513,10 +513,15 @@ private final class AttributedSeriesTestSource: UsageDataSource, @unchecked Send
     /// place a stale attribution split is visible.
     var graphGate: ThrottleGate?
     var graphEntries: ThrottleCallCounter?
+    /// Runs INSIDE the fetch, so a case can move process state while the
+    /// request is outstanding — the position a value read after the fetch
+    /// would see and a value read before it would not.
+    var onGraph: (@Sendable () -> Void)?
 
     func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
         _ = priority
         graphYears.append(year)
+        onGraph?()
         await graphEntries?.bump()
         await graphGate?.wait()
         if failGraph { throw GraphUnavailable() }
@@ -9974,6 +9979,40 @@ enum SelfTest {
                 expectedYear: "2033", identity: lp3Identity, scanRoots: lp3Roots),
             "LP3-ROOTS and a snapshot built under the SAME roots is still accepted, "
                 + "so the gate is a comparison rather than a refusal")
+
+        // LP3-BIND. The fingerprint has to describe the SCAN, not the moment
+        // the snapshot is written. The FFI returns a scan that started before a
+        // registry replace even after the replace lands, so a value read at
+        // capture time labels pre-change data as post-change — and the check
+        // above then accepts it on the next launch, which is the acceptance the
+        // field exists to withhold.
+        //
+        // The roots move INSIDE the fetch rather than through a gate: the
+        // property is only about which side of the request the read happens on,
+        // and the source's own hook puts the move exactly between them.
+        let bindRoots = awaitMainActorValue { () -> String in
+            let previous = DashboardModel.scanRootsProvider
+            defer { DashboardModel.scanRootsProvider = previous }
+            let before = ClaudeExtraRoots.payloadJSON(["/tmp/tokenbar-bind-before"])
+            let after = ClaudeExtraRoots.payloadJSON(["/tmp/tokenbar-bind-after"])
+            nonisolated(unsafe) var installed = before
+            DashboardModel.scanRootsProvider = { installed }
+            let source = AttributedSeriesTestSource(
+                graphPayload: DemoData.payload(for: nil),
+                refreshPayload: DemoData.payload(for: nil))
+            source.onGraph = { installed = after }
+            let model = DashboardModel(source: source, initialYear: nil)
+            await model.load()
+            // The envelope, not the stored property. An assertion on the
+            // property alone passes while the stamp beside it reads the CURRENT
+            // roots instead — which is the exact substitution being guarded,
+            // and it survived a mutation until this line went through the
+            // builder that actually writes to disk.
+            return model.snapshotEnvelope(identity: lp3Identity)?.scanRoots ?? ""
+        }
+        expect(bindRoots == ClaudeExtraRoots.payloadJSON(["/tmp/tokenbar-bind-before"]),
+               "LP3-BIND the snapshot records the roots the scan RAN under, not the "
+                   + "ones installed by the time it was captured")
         lp3ExpectRejected(
             "knownYears entry not four-digit ASCII",
             lp3Envelope(year: "2033", knownYears: ["abcd"]))
@@ -12784,6 +12823,34 @@ enum SelfTest {
                "ST5 stacking order is by total cost, so the biggest payer is the base")
         expect(stTrend.peakCost == 100,
                "ST6 the peak is a DAY total, not the range total")
+
+        // ST5b. Cost and tokens do not rank subscriptions the same way, and the
+        // cost order was applied to both views. The legend draws only
+        // `prefix(4)`, so under Tokens the largest token consumer could sit
+        // behind smaller bands and fall outside the legend entirely — beneath a
+        // tooltip that says largest-first.
+        //
+        // `bulk` is the biggest by tokens and the smallest by cost; `boutique`
+        // is the reverse. One fixture, two orders, opposite ends.
+        let stRank = SubscriptionTrendFold.build(
+            points: [
+                seriesPoint("2026-08-16", .assigned("bulk"), "unpriced", 9_000, 1),
+                seriesPoint("2026-08-16", .assigned("middle"), "m", 500, 50),
+                seriesPoint("2026-08-16", .assigned("boutique"), "opus", 10, 900),
+            ],
+            today: "2026-08-16", days: 1)
+        expect(stRank.targets == ["boutique", "middle", "bulk"],
+               "ST5b the cost order still ranks by cost")
+        expect(stRank.targetsByTokens == ["bulk", "middle", "boutique"],
+               "ST5b and the token order ranks by tokens, which is the opposite "
+                   + "order on this data — so reusing one for the other cannot be "
+                   + "hidden by a fixture where they agree")
+        expect(stRank.targets(byTokens: true) == stRank.targetsByTokens
+                   && stRank.targets(byTokens: false) == stRank.targets,
+               "ST5b and the accessor the card resolves once returns each of them, "
+                   + "so the stacking order and the legend cannot disagree")
+        expect(Set(stRank.targets) == Set(stRank.targetsByTokens),
+               "ST5b both orders cover the same subscriptions — an order, not a filter")
 
         // ST8. Which of the four things the card shows. The empty state is a
         // claim about the RANGE; only the copy is a claim about the toggle.
