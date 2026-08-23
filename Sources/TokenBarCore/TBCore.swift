@@ -77,6 +77,21 @@ public struct ExtraScanPathsResult: Decodable, Equatable, Sendable {
     public let rejected: [ScanPathNote]
 }
 
+/// One directory `tb_set_claude_config_dirs` refused, and why. Unlike an
+/// unreadable scan root, nothing here fixes itself by waiting: the path is
+/// empty, relative, the filesystem root, or a repeat of one already listed.
+public struct RejectedConfigDir: Decodable, Equatable, Sendable {
+    public let path: String
+    public let reason: String
+}
+
+/// Result of `tb_set_claude_config_dirs`.
+public struct ClaudeConfigDirsResult: Decodable, Equatable, Sendable {
+    /// Directories now fetched as their own Claude quota card.
+    public let registeredCount: Int
+    public let rejected: [RejectedConfigDir]
+}
+
 /// Thin Swift facade over the tb_core_ffi staticlib. All calls are blocking;
 /// invoke from a background thread/actor in app code. `agentUsage()` is also
 /// network-bound.
@@ -254,12 +269,32 @@ public enum TBCore {
         try unwrap(tb_window_usage(from, until))
     }
 
+    /// `accountKey` selects which account's series to read. `nil` is the
+    /// primary account, which is every account that exists today; an extra
+    /// Claude account passes the config directory its binding was published
+    /// under.
+    ///
+    /// It is a parameter rather than something the core infers, because the
+    /// failure it prevents is silent: with one account per client the binding
+    /// map used to be keyed on `(client, window)`, and a second account
+    /// publishing the same window would replace the first. The call would then
+    /// answer with the other account's curve under a generation that
+    /// validates — nothing on either side of the FFI could tell.
+    // No default: a caller that omits this reads the primary account's curve
+    // and nothing reports the mistake, so the argument is required.
     public static func quotaCurve(
-        clientId: String, windowKey: String, generation: UInt64
+        clientId: String, accountKey: String?, windowKey: String, generation: UInt64
     ) throws -> QuotaCurve? {
         let curve: QuotaCurve? = try clientId.withCString { client in
             try windowKey.withCString { window in
-                try unwrapOptional(tb_quota_curve(client, window, generation))
+                // `withCString` on an Optional would bind a temporary that dies
+                // before the call; the nil case has to pass a real NULL.
+                if let accountKey {
+                    return try accountKey.withCString { account in
+                        try unwrapOptional(tb_quota_curve(client, account, window, generation))
+                    }
+                }
+                return try unwrapOptional(tb_quota_curve(client, nil, window, generation))
             }
         }
         try requireAnswering(curve, request: generation)
@@ -298,6 +333,20 @@ public enum TBCore {
     /// an existing non-directory).
     public static func setExtraScanPaths(json: String) throws -> ExtraScanPathsResult {
         try unwrap(json.withCString { tb_set_extra_scan_paths($0) })
+    }
+
+    /// Replace the process-wide registry of extra Claude config directories.
+    /// `json` is an array of absolute directory paths; full-replace semantics
+    /// — `[]` clears it. Each registered directory is fetched as its own Claude
+    /// quota card, using the Keychain item that directory selects.
+    ///
+    /// Distinct from `setExtraScanPaths`, which takes the expanded
+    /// `<dir>/projects` and `<dir>/transcripts` sub-roots and answers which
+    /// directories the usage scanner walks. This one answers whose credential
+    /// a quota card is fetched with, so it takes the config directories the
+    /// user configured — not the scan subset the core accepted.
+    public static func setClaudeConfigDirs(json: String) throws -> ClaudeConfigDirsResult {
+        try unwrap(json.withCString { tb_set_claude_config_dirs($0) })
     }
 
     /// OAuth quota cards for codex/claude/antigravity/copilot/grok. Network-bound;

@@ -254,7 +254,19 @@ struct PopoverView: View {
         // re-fetches the filtered rate immediately (badge would otherwise lag
         // ≤10s). The loop fetches first, then sleeps.
         .task(id: hiddenRaw) { await pollTokensPerMin() }
-        .task { await model.pollAgentUsage() }
+        // Keyed on the account generation, not unkeyed. The quota cards come
+        // from this loop, and the loop sleeps 60s between fetches — so removing
+        // a Claude account cleared the registry immediately while its card sat
+        // on screen for up to a minute afterwards, describing an account the
+        // engine no longer fetches. Restarting cancels the in-flight fetch,
+        // which is correct rather than wasteful: that request was issued for
+        // the previous account set and its answer is about accounts that are
+        // no longer configured.
+        //
+        // Same shape as the Discord value gates in `AppDelegate`: published
+        // state and the thing that authorises it have to move in the same
+        // turn, or one outlives the other.
+        .task(id: extraRootsGeneration) { await model.pollAgentUsage() }
         // The card's own trigger, deliberately not inside the quota poll. The
         // union range must cover every displayed client, not just the open tab,
         // so one scan can serve a later switch without rescanning.

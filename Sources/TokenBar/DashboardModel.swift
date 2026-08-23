@@ -79,6 +79,20 @@ enum AgentUsagePublicationCoordinator {
     static func resolve(_ candidate: AgentUsagePayload) -> AgentUsagePayload {
         state.resolve(candidate)
     }
+
+    /// Test seam only: back to the state of a process that has published
+    /// nothing.
+    ///
+    /// This floor is process-wide and monotone, so a case that publishes a high
+    /// generation silently rejects every later case's payload and hands it the
+    /// earlier one instead — the later case then measures a fixture it never
+    /// built, and fails for a reason nothing in it points at. That is not
+    /// hypothetical: `M3-p` needs generations above every other fixture's to be
+    /// published at all, and without this reset it broke `M3-f`, two hundred
+    /// lines further down, by doing so.
+    static func resetForTesting() {
+        state = AgentUsagePublicationState()
+    }
 }
 
 /// What a graph commit actually did. `GraphFetchOutcome.committed` used to be
@@ -1147,8 +1161,10 @@ private struct DashboardSnapshot {
         // Deliberately NOT `try?`: swallowing the error here is what let a
         // transient generation expiry be reported to the user as "this window
         // has no recorded quota history".
-        let readCurve: (String, String, UInt64) throws -> QuotaCurve? = { [source] c, key, gen in
-            try source.quotaCurveSync(clientId: c, windowKey: key, generation: gen)
+        let readCurve: (String, String?, String, UInt64) throws -> QuotaCurve? = {
+            [source] c, account, key, gen in
+            try source.quotaCurveSync(
+                clientId: c, accountKey: account, windowKey: key, generation: gen)
         }
         if let payload = agentUsage {
             for agent in payload.agents where windowCardClients.contains(agent.clientId) {
@@ -1157,10 +1173,12 @@ private struct DashboardSnapshot {
                     // it would drop a drawn sparkline to a bar for one refresh
                     // and put it back on the next — a flicker that says nothing.
                     guard let samples = WindowCardLoader.curveSamples(
-                        payload: payload, clientId: agent.clientId, window: window,
-                        curve: readCurve, nowMs: now)
+                        payload: payload, clientId: agent.clientId, accountKey: agent.accountKey,
+                        window: window, curve: readCurve, nowMs: now)
                     else { continue }
-                    windowCurves["\(agent.clientId)|\(window.cardId)"] = samples
+                    windowCurves[WindowCardLoader.curveKey(
+                        clientId: agent.clientId, accountKey: agent.accountKey,
+                        cardId: window.cardId)] = samples
                 }
             }
         }
@@ -1235,7 +1253,7 @@ private struct DashboardSnapshot {
             qualifyingCycles = [:]
         }
         if let payload = agentUsage, !windowCardClients.isEmpty {
-            var collected: [(clientId: String, cardId: String, label: String,
+            var collected: [(clientId: String, accountKey: String?, cardId: String, label: String,
                              cycles: [QuotaCycle])] = []
             var heatmaps: [String: QuotaHeatmap] = [:]
             var heatmapWindows: [QuotaHeatmapWindow] = []
@@ -1253,12 +1271,18 @@ private struct DashboardSnapshot {
                           let generation = payload.publicationGeneration
                     else { continue }
                     let attempt: QuotaCurve?
-                    do { attempt = try readCurve(agent.clientId, key, generation) }
+                    do { attempt = try readCurve(agent.clientId, agent.accountKey, key, generation) }
                     catch { readFailed = true; continue }
                     guard let curve = attempt else { continue }
                     let points = curve.points
                     let grid = QuotaHeatmapFold.build(points: points)
-                    heatmaps["\(agent.clientId)|\(window.cardId)"] = grid
+                    // See `WindowCardLoader.curveKey`: two accounts of the
+                    // same client can offer identically-carded windows, so the
+                    // plain "clientId|cardId" key would let one overwrite the
+                    // other's grid.
+                    heatmaps[WindowCardLoader.curveKey(
+                        clientId: agent.clientId, accountKey: agent.accountKey,
+                        cardId: window.cardId)] = grid
                     // Unplaced-only windows stay in the picker. `total` is
                     // zero when every reading pair straddles more than six
                     // hours, but the allowance still moved; dropping the window
@@ -1266,11 +1290,13 @@ private struct DashboardSnapshot {
                     // line that explains it out of reach.
                     if grid.hasMovement {
                         heatmapWindows.append(QuotaHeatmapWindow(
-                            clientId: agent.clientId, cardId: window.cardId,
+                            clientId: agent.clientId, accountKey: agent.accountKey,
+                            cardId: window.cardId,
                             windowLabel: window.label, total: grid.total))
                     }
                     collected.append((
-                        clientId: agent.clientId, cardId: window.cardId,
+                        clientId: agent.clientId, accountKey: agent.accountKey,
+                        cardId: window.cardId,
                         label: window.label,
                         cycles: QuotaHistoryFold.cycles(
                             points: points)))
@@ -1286,7 +1312,8 @@ private struct DashboardSnapshot {
                 quotaHeatmaps = heatmaps
                 quotaHeatmapWindows = heatmapWindows.sorted { $0.total > $1.total }
                 qualifyingCycles = Dictionary(
-                    uniqueKeysWithValues: collected.compactMap { window in
+                    uniqueKeysWithValues: collected.compactMap {
+                        window -> (String, [QuotaCycle])? in
                         // Capped BEFORE admitting, which is what the probe
                         // sweep measured and what actually bounds the scan:
                         // capping the admitted count instead would let 32
@@ -1298,7 +1325,17 @@ private struct DashboardSnapshot {
                                 && $0.observedFraction >= WindowEquivalence.minimumObservedFraction
                         }
                         guard admitted.count >= WindowEquivalence.minimumCycles else { return nil }
-                        return ("\(window.clientId)|\(window.cardId)", admitted)
+                        // Same key as the grids and the row ids — see
+                        // `AccountIdentity.windowKey`. Two accounts of one
+                        // client offering the same window would otherwise
+                        // collide here, and `uniqueKeysWithValues` traps on a
+                        // duplicate key rather than reporting it.
+                        return (
+                            AccountIdentity(
+                                clientId: window.clientId, accountKey: window.accountKey
+                            ).windowKey(cardId: window.cardId),
+                            admitted
+                        )
                     })
             }
         }
@@ -1643,8 +1680,20 @@ private struct DashboardSnapshot {
     /// previous payload; per-provider errors live inside each snapshot.
     func pollAgentUsage() async {
         while !Task.isCancelled {
+            // Read BEFORE the fetch. The fetch is network-bound and owns most
+            // of the cycle, so a registry change lands during it far more often
+            // than during the sleep; carrying the epoch across is what stops
+            // that change being dropped.
+            let registryEpoch = ClaudeExtraRoots.RegistryChange.epoch
             let payload = try? await source.agentUsage()
             if Task.isCancelled { break }
+            // Same guard the tray poll carries, for the same reason and in the
+            // same shape: a payload built for the previous account set is not
+            // an answer to the question this registry asks. `continue` rather
+            // than falling through, so the immediate refetch happens now
+            // instead of after the sleep — and `agentUsageAttempted` stays
+            // where it was, because nothing about the new registry has settled.
+            if ClaudeExtraRoots.RegistryChange.epoch != registryEpoch { continue }
             if let payload {
                 let resolved = AgentUsagePublicationCoordinator.resolve(payload)
                 agentUsage = resolved
@@ -1671,7 +1720,9 @@ private struct DashboardSnapshot {
             // rebuilt it. Only on the transition, so a run of failures does not
             // redo the same work every minute.
             if payload == nil, firstSettlement { refreshWindowQuotaHalves() }
-            try? await Task.sleep(for: .seconds(60))
+            // Interruptible: adding or removing an account must take its card
+            // with it in the same turn, not at this loop's convenience.
+            await ClaudeExtraRoots.RegistryChange.sleep(upTo: 60, since: registryEpoch)
         }
     }
 

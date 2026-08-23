@@ -263,7 +263,13 @@ enum ClientTray {
         payload: AgentUsagePayload?, clientId: String, selection: String
     ) -> UsageWindow? {
         let quotaClientId = quotaClientID(for: clientId)
-        guard let agent = payload?.agents.first(where: { $0.clientId == quotaClientId }) else {
+        // Primary account only: each client tab is one status item with one
+        // stored selection and no account component, so it can only ever
+        // address the primary account's windows. An extra account has no tab
+        // of its own — it surfaces in the Agent-limits overview instead.
+        guard let agent = payload?.agents.first(where: {
+            $0.clientId == quotaClientId && $0.accountKey == nil
+        }) else {
             return nil
         }
         let windows = agent.uniqueCardWindows
@@ -309,7 +315,10 @@ enum ClientTray {
         return ids.map { clientId in
             let selection = selections[clientId] ?? autoSelection
             let quotaClientId = quotaClientID(for: clientId)
-            let snapshot = payload?.agents.first { $0.clientId == quotaClientId }
+            // Primary account only — see `resolveWindow`.
+            let snapshot = payload?.agents.first {
+                $0.clientId == quotaClientId && $0.accountKey == nil
+            }
             let windows = snapshot?.uniqueCardWindows ?? []
             let resolved = resolveWindow(
                 payload: payload, clientId: clientId, selection: selection)
@@ -386,8 +395,9 @@ enum ClientTray {
                 // window you picked no longer exists", which needs a Settings
                 // change rather than waiting. The message is fixed text; the raw
                 // cardId is never surfaced.
+                // Primary account only — see `resolveWindow`.
                 let snapshot = payload?.agents
-                    .first { $0.clientId == quotaClientID(for: clientId) }
+                    .first { $0.clientId == quotaClientID(for: clientId) && $0.accountKey == nil }
                 let windows = snapshot?.uniqueCardWindows ?? []
                 let selectionIsMissing = selection != autoSelection
                     && !windows.contains { $0.cardId == selection }

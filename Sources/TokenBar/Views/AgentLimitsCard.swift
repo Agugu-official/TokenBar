@@ -228,19 +228,61 @@ struct AgentLimitsCard: View {
             placeholders: Set(placeholderRows.keys))
     }
 
-    private var snapshots: [String: AgentUsageSnapshot] {
-        var dict = Dictionary(
-            (agentUsage?.agents ?? []).map { ($0.clientId, $0) },
-            uniquingKeysWith: { first, _ in first })
+    /// Keyed by the full (clientId, accountKey) pair, not clientId alone — a
+    /// second Claude account is a second snapshot sharing `clientId ==
+    /// "claude"`, and collapsing the dictionary to one entry per clientId
+    /// (the old `uniquingKeysWith: { first, _ in first }` over a
+    /// clientId-only key) silently dropped whichever account lost the
+    /// dictionary collision instead of losing nothing.
+    ///
+    /// A static, testable pure function (SelfTest asserts against this
+    /// symbol directly — the M3-a mutation target) — the instance property
+    /// below only adds the antigravity-cli alias, which needs `restrict`.
+    static func snapshotsByRow(
+        _ agents: [AgentUsageSnapshot]
+    ) -> [AccountIdentity: AgentUsageSnapshot] {
+        Dictionary(agents.map { ($0.accountIdentity, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    private var snapshotsByRow: [AccountIdentity: AgentUsageSnapshot] {
+        var dict = Self.snapshotsByRow(agentUsage?.agents ?? [])
         // Antigravity CLI shares the Antigravity IDE's account and quota, so it
         // gets no snapshot of its own. In its single-client view, surface the
         // Antigravity snapshot under its id so the card still shows the quota.
         // Only in `restrict` mode — the overview already renders Antigravity's
-        // own card, so aliasing there would duplicate it.
-        if restrict, dict["antigravity-cli"] == nil, let shared = dict["antigravity"] {
-            dict["antigravity-cli"] = shared
+        // own card, so aliasing there would duplicate it. Antigravity has no
+        // multi-account concept today, so this alias is primary-only.
+        let cliRow = AccountIdentity(clientId: "antigravity-cli", accountKey: nil)
+        let ideRow = AccountIdentity(clientId: "antigravity", accountKey: nil)
+        if restrict, dict[cliRow] == nil, let shared = dict[ideRow] {
+            dict[cliRow] = shared
         }
         return dict
+    }
+
+    /// Every OTHER account sharing `clientId`, in the order the payload lists
+    /// them — the extra rows a primary row expands into. Empty for every
+    /// client with only one account today. Static/testable for the same
+    /// reason as `snapshotsByRow(_:)`.
+    static func extraAccounts(
+        for clientId: String, in agents: [AgentUsageSnapshot]
+    ) -> [AccountIdentity] {
+        agents.filter { $0.clientId == clientId && $0.accountKey != nil }.map(\.accountIdentity)
+    }
+
+    private func extraAccounts(for clientId: String) -> [AccountIdentity] {
+        Self.extraAccounts(for: clientId, in: agentUsage?.agents ?? [])
+    }
+
+    private func hasExtraAccount(_ clientId: String) -> Bool {
+        !extraAccounts(for: clientId).isEmpty
+    }
+
+    /// A stable, non-persisted string key for this row's LOCAL UI state
+    /// (drag/hover/frame tracking) — never written to disk, so it carries no
+    /// D-3 format obligation.
+    private static func rowKey(_ row: AccountIdentity) -> String {
+        "\(row.clientId)#\(row.accountKey ?? "")"
     }
 
     /// Clients whose live tail shows activity right now.
@@ -264,13 +306,64 @@ struct AgentLimitsCard: View {
     /// general ones while the opencode branch exited before either. Each fix
     /// moved a line; none of them made "no hidden client leaves this function"
     /// something a test could check. Every exit now ends here.
-    static func visible(_ candidates: [String], hiddenRaw: String) -> [String] {
+    /// Generic over the row type so this ONE binding serves both a bare
+    /// clientId list (`AppView`, and every existing `[String]` caller, which
+    /// passes `clientId: { $0 }`) and a `[AccountIdentity]` row list — the
+    /// same "no hidden client leaves this function" assertion, now over
+    /// whatever identity the caller's candidates carry. `hiddenRaw` is still
+    /// a set of clientIds (D-1: nothing here compares an encoded id), so a
+    /// hidden clientId removes EVERY row sharing it — expected, since hiding
+    /// "claude" hides the client, not one specific account of it. An extra
+    /// account being exempt from this hide (see `expandedWithExtraAccounts`)
+    /// is a decision made in the row list this function is handed, not inside
+    /// this filter — `visible` itself stays the single, generic exit.
+    static func visible<T>(
+        _ candidates: [T], hiddenRaw: String, clientId: (T) -> String
+    ) -> [T] {
         let hidden = ClientRegistry.parseIdSet(hiddenRaw)
-        return candidates.filter { !hidden.contains($0) }
+        return candidates.filter { !hidden.contains(clientId($0)) }
     }
 
-    private var baseClients: [String] {
-        let snapshots = self.snapshots
+    /// Builds the final row list from a KNOWN clientId universe and the
+    /// subset of it whose primary survived the hide filter. An extra
+    /// account's row is added for every known clientId regardless of whether
+    /// `visiblePrimaries` contains it — an extra account has no hide toggle
+    /// of its own, so it is excluded from the hide feature entirely rather
+    /// than sharing the primary's (D-3), and hiding "claude" therefore
+    /// removes only the primary row, never the extra account's (D-4, M3-b).
+    ///
+    /// This is why the exemption cannot live inside `visible` itself: that
+    /// function only ever sees the candidates it is handed, so hiding would
+    /// have to run on the FULL known list with extras already excluded from
+    /// its input — which is exactly the split `known`/`visiblePrimaries`
+    /// keeps. Static/testable — SelfTest asserts against this symbol
+    /// directly (the M3-b mutation target).
+    static func expandedWithExtraAccounts(
+        known: [String], visiblePrimaries: Set<String>, agents: [AgentUsageSnapshot]
+    ) -> [AccountIdentity] {
+        var out: [AccountIdentity] = []
+        for id in known {
+            if visiblePrimaries.contains(id) {
+                out.append(AccountIdentity(clientId: id, accountKey: nil))
+            }
+            out.append(contentsOf: extraAccounts(for: id, in: agents))
+        }
+        return out
+    }
+
+    private func expandedWithExtraAccounts(
+        known: [String], visiblePrimaries: Set<String>
+    ) -> [AccountIdentity] {
+        Self.expandedWithExtraAccounts(
+            known: known, visiblePrimaries: visiblePrimaries, agents: agentUsage?.agents ?? [])
+    }
+
+    private var baseClients: [AccountIdentity] {
+        let snapshots = self.snapshotsByRow
+        func primary(_ id: String) -> AccountIdentity { AccountIdentity(clientId: id, accountKey: nil) }
+        func visiblePrimaries(of ids: [String]) -> Set<String> {
+            Set(Self.visible(ids.map(primary), hiddenRaw: limitsHiddenRaw) { $0.clientId }.map(\.clientId))
+        }
         // Hoisted above EVERY exit. This filter has now been moved twice — out
         // of `reorderable`, then above the restricted return — and each time it
         // was still below one more exit that reached it. The opencode branch is
@@ -278,44 +371,70 @@ struct AgentLimitsCard: View {
         // returned it on snapshot availability alone. A rule that has to sit
         // ahead of every return is one binding, not a line to keep relocating.
         if opencodeView {
-            return Self.visible(opencodeSubs
+            let ids = opencodeSubs
                 // The subscription-owner resolution, not the raw label mapper:
                 // `Xai` maps to `xai` there, while the quota snapshot is keyed
                 // `grok`, so the filter below would drop the very card opencode
                 // is authed against.
                 .compactMap(UsageAttributionSettings.subscriptionClient(forLabel:))
-                .filter { snapshots[$0] != nil },
-                hiddenRaw: limitsHiddenRaw)
+                .filter { snapshots[primary($0)] != nil }
+            return expandedWithExtraAccounts(known: ids, visiblePrimaries: visiblePrimaries(of: ids))
         }
         func known(_ id: String) -> Bool {
-            Self.placeholderRows[id] != nil || snapshots[id] != nil
+            Self.placeholderRows[id] != nil || snapshots[primary(id)] != nil
         }
         // The per-client Agent-limits toggle applies on every surface, not only
         // the multi-agent one. Settings promises it "hides only that client's
         // quota card here and on its own tab".
         //
         if restrict {
-            return Self.visible(clients.filter(known), hiddenRaw: limitsHiddenRaw)
+            let ids = clients.filter(known)
+            return expandedWithExtraAccounts(known: ids, visiblePrimaries: visiblePrimaries(of: ids))
         }
         var seen = Set<String>()
-        var base = (clients.filter(known) + (agentUsage?.agents.map(\.clientId) ?? []))
+        var ids = (clients.filter(known) + (agentUsage?.agents.map(\.clientId) ?? []))
             .filter { seen.insert($0).inserted }
-        base = Self.visible(base, hiddenRaw: limitsHiddenRaw)
         // Tab visibility is a multi-agent concern only: a hidden tab cannot be
         // the tab you are on, and filtering by it in the restricted path would
-        // depend on a state that path can never be in.
+        // depend on a state that path can never be in. Applied to the KNOWN
+        // set itself, unlike `limitsHiddenRaw`: there is no tab-level row for
+        // an extra account to keep showing once its client's tab is gone.
         if reorderable {
-            let hidden = ClientRegistry.hiddenClients()
-            base = base.filter { !hidden.contains($0) }
+            let hiddenTabs = ClientRegistry.hiddenClients()
+            ids = ids.filter { !hiddenTabs.contains($0) }
         }
-        return base
+        return expandedWithExtraAccounts(known: ids, visiblePrimaries: visiblePrimaries(of: ids))
     }
 
     /// Saved drag order applied; ids without a saved position keep their
     /// natural order at the end. Disabled in non-reorderable views. Reads the
     /// observed `orderRaw` so a drag re-sorts the cards reactively.
-    private var visibleClients: [String] {
-        reorderable ? ClientRegistry.orderedClients(baseClients, orderRaw: orderRaw) : baseClients
+    ///
+    /// Reorders the PRIMARY rows only — an extra account row is never part of
+    /// the saved order (D-3) — then re-attaches each primary's extras right
+    /// after it. An extra whose own primary is hidden (so `baseClients`
+    /// carries the extra with no adjacent primary) keeps its original
+    /// relative position at the end rather than being dropped.
+    private var visibleClients: [AccountIdentity] {
+        guard reorderable else { return baseClients }
+        let base = baseClients
+        let orderedPrimaryIds = ClientRegistry.orderedClients(
+            base.filter(\.isPrimary).map(\.clientId), orderRaw: orderRaw)
+        var extrasByClient: [String: [AccountIdentity]] = [:]
+        for row in base where !row.isPrimary {
+            extrasByClient[row.clientId, default: []].append(row)
+        }
+        var out: [AccountIdentity] = []
+        var handled = Set<String>()
+        for id in orderedPrimaryIds {
+            out.append(AccountIdentity(clientId: id, accountKey: nil))
+            out.append(contentsOf: extrasByClient[id] ?? [])
+            handled.insert(id)
+        }
+        for row in base where !row.isPrimary && !handled.contains(row.clientId) {
+            out.append(row)
+        }
+        return out
     }
 
     // The master `tokenbar.limits.enabled` gate lives at every call site
@@ -330,7 +449,11 @@ struct AgentLimitsCard: View {
     var allRestrictedClientsHidden: Bool {
         guard restrict, !clients.isEmpty else { return false }
         let hidden = ClientRegistry.parseIdSet(limitsHiddenRaw)
-        return clients.allSatisfy(hidden.contains)
+        guard clients.allSatisfy(hidden.contains) else { return false }
+        // An extra account is exempt from this hide (see
+        // `expandedWithExtraAccounts`), so its row still renders even while
+        // every primary this card was asked to draw is hidden.
+        return !clients.contains(where: hasExtraAccount)
     }
 
     var body: some View {
@@ -392,8 +515,8 @@ struct AgentLimitsCard: View {
                 .padding(.vertical, 8)
             } else {
                 VStack(spacing: 12) {
-                    ForEach(visible, id: \.self) { id in
-                        agentSection(id, visible: visible)
+                    ForEach(visible, id: \.self) { row in
+                        agentSection(row, visible: visible)
                     }
                 }
                 .coordinateSpace(name: Self.dragSpace)
@@ -481,7 +604,9 @@ struct AgentLimitsCard: View {
     }
 
     /// Which edge of a card the drop line sits on, matching the
-    /// direction-aware insert.
+    /// direction-aware insert. `visible` here is the PRIMARY-only clientId
+    /// order the drag actually persists — an extra account's row is never a
+    /// drag participant (see `expandedWithExtraAccounts`).
     private func dropEdge(_ id: String, in visible: [String]) -> VerticalEdge? {
         guard let dragId, overId == id, dragId != id,
               let fromI = visible.firstIndex(of: dragId), let toI = visible.firstIndex(of: id)
@@ -489,11 +614,24 @@ struct AgentLimitsCard: View {
         return fromI < toI ? .bottom : .top
     }
 
+    /// `cardFrames` is keyed by the full row key (see `agentSection`'s
+    /// background), so drag hit-testing — which only ever targets a PRIMARY
+    /// row, the only kind that participates in `orderRaw` — maps back down to
+    /// plain clientIds here rather than matching an extra account's frame
+    /// under its own, differently-shaped key.
+    private var primaryCardFrames: [String: CGRect] {
+        Dictionary(
+            cardFrames.compactMap { key, frame -> (String, CGRect)? in
+                key.hasSuffix("#") ? (String(key.dropLast()), frame) : nil
+            },
+            uniquingKeysWith: { first, _ in first })
+    }
+
     private func dragGesture(for id: String, visible: [String]) -> some Gesture {
         DragGesture(minimumDistance: 2, coordinateSpace: .named(Self.dragSpace))
             .onChanged { value in
                 dragId = id
-                let over = cardFrames.first { $0.value.contains(value.location) }?.key
+                let over = primaryCardFrames.first { $0.value.contains(value.location) }?.key
                 overId = (over != nil && over != id) ? over : nil
             }
             .onEnded { _ in
@@ -514,24 +652,38 @@ struct AgentLimitsCard: View {
 
     // MARK: - Per-agent section
 
-    @ViewBuilder private func agentSection(_ id: String, visible: [String]) -> some View {
+    @ViewBuilder private func agentSection(
+        _ row: AccountIdentity, visible: [AccountIdentity]
+    ) -> some View {
+        let id = row.clientId
+        let key = Self.rowKey(row)
         let style = ClientRegistry.style(id)
-        let snapshot = snapshots[id]
+        let snapshot = snapshotsByRow[row]
         let uniqueWindows = snapshot?.uniqueCardWindows ?? []
         let isLive = liveClients.contains(id)
-        let edge = dropEdge(id, in: visible)
+        // Primary-only order for drag participation — see `dropEdge`.
+        let primaryOrder = visible.filter(\.isPrimary).map(\.clientId)
+        let edge = row.isPrimary ? dropEdge(id, in: primaryOrder) : nil
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                if reorderable {
+                if reorderable, row.isPrimary {
                     Text("⠿")
                         .font(.caption)
                         .foregroundStyle(dragId == id ? .primary : .tertiary)
                         .help("Drag to reorder")
-                        .gesture(dragGesture(for: id, visible: visible))
+                        .gesture(dragGesture(for: id, visible: primaryOrder))
                 }
                 AgentIconView(clientId: id, size: 14)
                 Text(style.displayName)
                     .font(.caption.weight(.semibold))
+                if let account = row.accountLabel {
+                    Text(account)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(row.accountKey ?? account)
+                }
                 Spacer()
                 statusBadge(snapshot: snapshot, isLive: isLive)
             }
@@ -548,8 +700,8 @@ struct AgentLimitsCard: View {
                 VStack(spacing: 8) {
                     if !uniqueWindows.isEmpty {
                         ForEach(uniqueWindows, id: \.cardId) { window in
-                            windowRow(window, clientId: id, brand: style.color)
-                                .id("\(id):\(window.cardId)")
+                            windowRow(window, row: row, brand: style.color)
+                                .id("\(key):\(window.cardId)")
                         }
                     } else {
                         ForEach(Self.placeholderRows[id] ?? ["Limit"], id: \.self) { label in
@@ -570,9 +722,13 @@ struct AgentLimitsCard: View {
         }
         .background(
             GeometryReader { geo in
+                // Keyed by the full row key, not the bare clientId: two rows
+                // can share a clientId, and a shared key would let one row's
+                // frame silently overwrite the other's in `CardFramesKey`'s
+                // last-write-wins reduce.
                 Color.clear.preference(
                     key: CardFramesKey.self,
-                    value: [id: geo.frame(in: .named(Self.dragSpace))])
+                    value: [key: geo.frame(in: .named(Self.dragSpace))])
             })
     }
 
@@ -657,8 +813,10 @@ struct AgentLimitsCard: View {
     }
 
     @ViewBuilder private func windowRow(
-        _ window: UsageWindow, clientId: String, brand: String
+        _ window: UsageWindow, row: AccountIdentity, brand: String
     ) -> some View {
+        let curveKey = WindowCardLoader.curveKey(
+            clientId: row.clientId, accountKey: row.accountKey, cardId: window.cardId)
         let remaining = min(100, max(0, window.remainingPercent))
         let used = min(100, max(0, window.usedPercent))
         // Pace is suppressed entirely in the classic layout and when the user
@@ -682,7 +840,7 @@ struct AgentLimitsCard: View {
         // not a density option, and must appear in every layout even though
         // only `chart` also draws the line these samples feed.
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        let samples = curves["\(clientId)|\(window.cardId)"] ?? []
+        let samples = curves[curveKey] ?? []
         let trend = Self.trend(window: window, samples: samples, nowMs: nowMs)
 
         if classic {
@@ -692,7 +850,7 @@ struct AgentLimitsCard: View {
                     // so QuotaResolver's legacy-selection matching still works.
                     Text(window.label.localized)
                         .font(.caption2.weight(.medium))
-                    trendIndicator(trend, id: "\(clientId)|\(window.cardId)")
+                    trendIndicator(trend, id: curveKey)
                     Spacer()
                     Text(resetText ?? leftLabel)
                         .font(.caption2)
@@ -712,7 +870,7 @@ struct AgentLimitsCard: View {
                     // so QuotaResolver's legacy-selection matching still works.
                     Text(window.label.localized)
                         .font(.caption2.weight(.medium))
-                    trendIndicator(trend, id: "\(clientId)|\(window.cardId)")
+                    trendIndicator(trend, id: curveKey)
                     Spacer()
                     if let reset = resetText {
                         Text(reset)

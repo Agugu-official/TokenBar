@@ -135,7 +135,7 @@ Antigravity local IDE 的 email 來自 authenticated `GetUserStatus`，可走 au
 | Current provider route | Frozen account evidence |
 |---|---|
 | Codex | 成功 usage response 前實際送出的 `ChatGPT-Account-Id`，缺少時使用 lineage；ID-token email 只供 presentation |
-| Claude | Current payload沒有 bound owner ID；所有 login／setup-token paths使用 lineage |
+| Claude | Current payload沒有 bound owner ID；主 config directory 的所有 login／setup-token paths 仍使用 lineage。**例外(2026-08-23)**:以 `CLAUDE_CONFIG_DIR` 隔離的額外帳號走 authoritative route,identifier 為該目錄的絕對路徑。該路徑不是「與憑證無關的本機狀態」——它**選擇**憑證,因為讀取的 Keychain service 就是 `Claude Code-credentials-<sha256(path)[..8]>`。此綁定**僅在 Keychain 那條路徑成立**:`fetch_claude_inner` 另有四條來源(env token、login-shell harvest、`TOKENBAR_*`、主目錄檔案、固定 service),皆非由目錄選出,故額外帳號的憑證若來自其中任一,**不得寫入 durable history**(fail closed,卡片仍顯示)。主目錄的推導一個位元都沒有改變 |
 | Grok | Current billing response沒有 owner ID；`auth.x.ai` entry的 email只供 presentation，history使用 lineage |
 | Antigravity local IDE | Authenticated `GetUserStatus` email；缺席時 fail closed |
 | Antigravity remote OAuth | Google credential lineage；忽略 unbound active-email state |

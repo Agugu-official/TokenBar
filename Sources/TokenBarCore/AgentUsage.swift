@@ -503,6 +503,10 @@ public struct AgentUsageTransportDiagnostic: Decodable, Sendable {
 
 public struct AgentUsageSnapshot: Decodable, Sendable {
     public let clientId: String
+    /// Which account of `clientId` this card is. Absent from the payload — and
+    /// so `nil` here — for the primary, which is every account until an extra
+    /// Claude config directory is configured. The value is that directory.
+    public let accountKey: String?
     public let source: String
     public let updatedAt: String
     public let identity: AgentIdentity?
@@ -512,12 +516,14 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
     public let transportDiagnostic: AgentUsageTransportDiagnostic?
 
     private enum CodingKeys: String, CodingKey {
-        case clientId, source, updatedAt, identity, windows, credits, error, transportDiagnostic
+        case clientId, accountKey, source, updatedAt, identity, windows, credits, error,
+            transportDiagnostic
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.clientId = try container.decode(String.self, forKey: .clientId)
+        self.accountKey = try container.decodeIfPresent(String.self, forKey: .accountKey)
         self.source = try container.decode(String.self, forKey: .source)
         self.updatedAt = try container.decode(String.self, forKey: .updatedAt)
         self.identity = try container.decodeIfPresent(AgentIdentity.self, forKey: .identity)

@@ -19,7 +19,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{LazyLock, Mutex};
 use tower_service::Service;
 
@@ -71,7 +73,13 @@ impl AgentUsagePayload {
     /// an identity this run never confirmed. This mirrors the same three
     /// conditions the last-good cache uses to decide a snapshot is trustworthy
     /// (`cacheable` in `resolve_provider_outcome`).
-    pub(crate) fn quota_curve_series(&self) -> Vec<SeriesKey> {
+    ///
+    /// Each key is paired with the account that published it — `None` for the
+    /// primary. Two accounts of one client serve the same window keys, so the
+    /// binding table needs the account to tell their series apart; without it
+    /// the survivor is whichever was inserted last and `tb_quota_curve` answers
+    /// with the other account's curve under a generation that validates.
+    pub(crate) fn quota_curve_series(&self) -> Vec<(Option<String>, SeriesKey)> {
         self.agents
             .iter()
             .filter(|snapshot| snapshot.error.is_none() && snapshot.transport_diagnostic.is_none())
@@ -93,10 +101,13 @@ impl AgentUsagePayload {
             .flat_map(|(snapshot, history_scope)| {
                 snapshot.windows.iter().filter_map(move |window| {
                     window.window_key.as_ref().map(|window_key| {
-                        SeriesKey::new(
-                            snapshot.client_id.clone(),
-                            &history_scope,
-                            window_key.clone(),
+                        (
+                            snapshot.account_key.clone(),
+                            SeriesKey::new(
+                                snapshot.client_id.clone(),
+                                &history_scope,
+                                window_key.clone(),
+                            ),
                         )
                     })
                 })
@@ -109,6 +120,18 @@ impl AgentUsagePayload {
 #[serde(rename_all = "camelCase")]
 pub struct AgentUsageSnapshot {
     client_id: String,
+    /// Which account of `client_id` this card is. `None` is the primary, and
+    /// is omitted from the wire entirely, so a payload with no extra account
+    /// configured is byte-identical to one from before this field existed.
+    ///
+    /// The value is the extra account's `CLAUDE_CONFIG_DIR` — the same string
+    /// its durable history is keyed on. It is a separate field rather than an
+    /// encoding inside `client_id` because `ClientRegistry.parseIdSet`,
+    /// `style(_:)`, `quotaExcludedClients()` and `QuotaResolver` all compare
+    /// client ids for equality, and an encoded id would silently match none of
+    /// them without any of them reporting it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) account_key: Option<String>,
     source: String,
     updated_at: String,
     identity: Option<AgentIdentity>,
@@ -466,37 +489,55 @@ struct LastGoodEntry {
     snapshot: AgentUsageSnapshot,
 }
 
+/// One account's slot in a per-client cache.
+///
+/// `None` is the primary account, which is every account that exists today —
+/// the dimension is here so a second Claude account cannot land in the
+/// primary's slot when one arrives. Keyed on `client_id` alone, the second
+/// account would overwrite the primary's entry on every refresh, and the
+/// primary would then have no last-good to fall back to the next time its own
+/// fetch failed. That is not a value being wrong; it is one account's state
+/// stored under another's name, which nothing downstream can detect.
+type AccountSlot = (String, Option<String>);
+
+fn account_slot(client_id: &str, account: Option<&str>) -> AccountSlot {
+    (
+        client_id.to_string(),
+        account_key_component(account).map(str::to_string),
+    )
+}
+
 #[derive(Debug, Default)]
 struct ProviderLastGoodCache {
-    entries: HashMap<String, LastGoodEntry>,
+    entries: HashMap<AccountSlot, LastGoodEntry>,
 }
 
 impl ProviderLastGoodCache {
     fn clean_for(
         &self,
-        client_id: &str,
+        slot: &AccountSlot,
         binding: &ProviderCacheBinding,
     ) -> Option<AgentUsageSnapshot> {
         self.entries
-            .get(client_id)
+            .get(slot)
             .filter(|entry| &entry.binding == binding)
             .map(|entry| entry.snapshot.clone())
     }
 
     fn replace(
         &mut self,
-        client_id: &str,
+        slot: &AccountSlot,
         binding: ProviderCacheBinding,
         mut snapshot: AgentUsageSnapshot,
     ) {
         snapshot.error = None;
         snapshot.transport_diagnostic = None;
         self.entries
-            .insert(client_id.to_string(), LastGoodEntry { binding, snapshot });
+            .insert(slot.clone(), LastGoodEntry { binding, snapshot });
     }
 
-    fn clear(&mut self, client_id: &str) {
-        self.entries.remove(client_id);
+    fn clear(&mut self, slot: &AccountSlot) {
+        self.entries.remove(slot);
     }
 }
 
@@ -1264,8 +1305,23 @@ struct ClaudeProfileOrganization {
 // predates this cache. Fixing it needs an account identity stable across
 // external rotations, and the only authoritative source for one is the endpoint
 // that just failed.
-type ClaudeProfileCacheEntry = (DateTime<Utc>, String, Option<String>);
-static CLAUDE_PROFILE_CACHE: Mutex<Option<ClaudeProfileCacheEntry>> = Mutex::new(None);
+type ClaudeProfileCacheEntry = (DateTime<Utc>, Option<String>);
+/// Keyed by account scope, one entry per account.
+///
+/// A single slot compared against the caller's account was correct while one
+/// account existed. With two, alternating polls miss on every lookup: the
+/// hour-long TTL never applies, `/api/oauth/profile` is called on every poll
+/// instead of hourly against an endpoint this file already treats as
+/// rate-limit-sensitive, and the `last_known` fallback never survives long
+/// enough to be used, so a failed lookup drops to the stale credential
+/// snapshot instead of the last live answer.
+///
+/// It never returned the wrong account's plan — a mismatch failed to a
+/// refetch — so this is not a correctness fix. It is here because the second
+/// account is what breaks it, and a change that adds the second account owns
+/// what the second account breaks.
+static CLAUDE_PROFILE_CACHE: LazyLock<Mutex<HashMap<String, ClaudeProfileCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 /// A subscription changes far more slowly than the 60s/300s quota polls.
 const CLAUDE_PROFILE_TTL_SECS: i64 = 3600;
 /// Short next to the 30s usage timeout: a slow profile endpoint costs a stale
@@ -1282,12 +1338,17 @@ struct ClaudeRefreshResponse {
 
 fn empty_error_snapshot(
     client_id: &str,
+    account: Option<&str>,
     source: &str,
     now: DateTime<Utc>,
     display: String,
     transport_diagnostic: Option<SafeTransportDiagnostic>,
 ) -> AgentUsageSnapshot {
     AgentUsageSnapshot {
+        // An error card still belongs to the account that produced it: two
+        // accounts of one client are only distinguishable downstream by this
+        // field, so an error attributed to the primary would replace its card.
+        account_key: account.map(str::to_string),
         client_id: client_id.to_string(),
         source: source.to_string(),
         updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -1331,6 +1392,7 @@ fn lock_last_good(
 fn apply_provider_outcome_with<F>(
     cache: &Mutex<ProviderLastGoodCache>,
     client_id: &str,
+    account: Option<&str>,
     failure_source: &str,
     now: DateTime<Utc>,
     outcome: ProviderFetchOutcome,
@@ -1339,9 +1401,14 @@ fn apply_provider_outcome_with<F>(
 where
     F: FnMut(&mut AgentUsageSnapshot),
 {
+    // `None` is the primary account. Every provider but Claude has only that
+    // one; an extra Claude account passes its config directory, and every
+    // read, replace and clear below is then scoped to its own slot rather
+    // than overwriting the primary's entry on each refresh.
+    let slot = account_slot(client_id, account);
     match outcome {
         ProviderFetchOutcome::Absent => {
-            lock_last_good(cache).clear(client_id);
+            lock_last_good(cache).clear(&slot);
             None
         }
         ProviderFetchOutcome::Success {
@@ -1351,10 +1418,11 @@ where
             match snapshot.account_scope.as_ref() {
                 Ok(_) | Err(AccountScopeError::NoTrustedEvidence) => {}
                 Err(_) => {
-                    lock_last_good(cache).clear(client_id);
+                    lock_last_good(cache).clear(&slot);
                     let source = snapshot.source.clone();
                     return Some(empty_error_snapshot(
                         client_id,
+                        account,
                         &source,
                         now,
                         format!(
@@ -1373,15 +1441,16 @@ where
                 && usable_success(&snapshot);
             let mut cache = lock_last_good(cache);
             match (cacheable, cache_binding) {
-                (true, Some(binding)) => cache.replace(client_id, binding, snapshot.clone()),
-                _ => cache.clear(client_id),
+                (true, Some(binding)) => cache.replace(&slot, binding, snapshot.clone()),
+                _ => cache.clear(&slot),
             }
             Some(snapshot)
         }
         ProviderFetchOutcome::Failure(ProviderFetchFailure::Terminal { display }) => {
-            lock_last_good(cache).clear(client_id);
+            lock_last_good(cache).clear(&slot);
             Some(empty_error_snapshot(
                 client_id,
+                account,
                 failure_source,
                 now,
                 display,
@@ -1395,11 +1464,12 @@ where
         }) => {
             let fallback = attempt_binding
                 .as_ref()
-                .and_then(|binding| lock_last_good(cache).clean_for(client_id, binding));
+                .and_then(|binding| lock_last_good(cache).clean_for(&slot, binding));
             let Some(mut snapshot) = fallback else {
-                lock_last_good(cache).clear(client_id);
+                lock_last_good(cache).clear(&slot);
                 return Some(empty_error_snapshot(
                     client_id,
+                    account,
                     failure_source,
                     now,
                     display,
@@ -1416,6 +1486,7 @@ where
 
 fn apply_provider_outcome(
     client_id: &str,
+    account: Option<&str>,
     failure_source: &str,
     now: DateTime<Utc>,
     outcome: ProviderFetchOutcome,
@@ -1423,6 +1494,7 @@ fn apply_provider_outcome(
     apply_provider_outcome_with(
         &PROVIDER_LAST_GOOD,
         client_id,
+        account,
         failure_source,
         now,
         outcome,
@@ -1434,12 +1506,16 @@ pub async fn run(publication_generation: u64) -> AgentUsagePayload {
     let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
     let (codex, claude, antigravity, copilot, grok) = tokio::join!(
         fetch_codex(),
-        fetch_claude(),
+        fetch_claude_accounts(),
         fetch_antigravity(),
         fetch_copilot(),
         fetch_grok()
     );
-    let mut agents = vec![codex, claude, antigravity];
+    let mut agents = vec![codex];
+    // The primary first, then any extra config directories. With none
+    // configured this is the single Claude card it has always been.
+    agents.extend(claude);
+    agents.push(antigravity);
     // Copilot only appears when signed in (via opencode); skip a bare not-signed-in error card.
     if let Some(copilot) = copilot {
         agents.push(copilot);
@@ -1462,6 +1538,7 @@ async fn fetch_grok() -> Option<AgentUsageSnapshot> {
         Ok(Some(data)) => ProviderFetchOutcome::Success {
             cache_binding: data.cache_binding,
             snapshot: AgentUsageSnapshot {
+                account_key: None,
                 client_id: "grok".to_string(),
                 source: "oauth".to_string(),
                 updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -1478,7 +1555,7 @@ async fn fetch_grok() -> Option<AgentUsageSnapshot> {
         Ok(None) => ProviderFetchOutcome::Absent,
         Err(failure) => ProviderFetchOutcome::Failure(failure),
     };
-    apply_provider_outcome("grok", "oauth", now, outcome)
+    apply_provider_outcome("grok", None, "oauth", now, outcome)
 }
 
 async fn fetch_copilot() -> Option<AgentUsageSnapshot> {
@@ -1495,6 +1572,7 @@ async fn fetch_copilot() -> Option<AgentUsageSnapshot> {
                 Ok(data) => ProviderFetchOutcome::Success {
                     cache_binding: Some(data.cache_binding),
                     snapshot: AgentUsageSnapshot {
+                        account_key: None,
                         client_id: "copilot".to_string(),
                         source: "oauth".to_string(),
                         updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -1512,7 +1590,7 @@ async fn fetch_copilot() -> Option<AgentUsageSnapshot> {
             }
         }
     };
-    apply_provider_outcome("copilot", "oauth", now, outcome)
+    apply_provider_outcome("copilot", None, "oauth", now, outcome)
 }
 
 async fn fetch_antigravity() -> AgentUsageSnapshot {
@@ -1521,6 +1599,7 @@ async fn fetch_antigravity() -> AgentUsageSnapshot {
         Ok(fetched) => ProviderFetchOutcome::Success {
             cache_binding: fetched.cache_binding,
             snapshot: AgentUsageSnapshot {
+                account_key: None,
                 client_id: "antigravity".to_string(),
                 source: fetched.source,
                 updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -1535,13 +1614,13 @@ async fn fetch_antigravity() -> AgentUsageSnapshot {
         },
         Err(failure) => ProviderFetchOutcome::Failure(failure),
     };
-    apply_provider_outcome("antigravity", "oauth", now, outcome)
+    apply_provider_outcome("antigravity", None, "oauth", now, outcome)
         .expect("Antigravity is a required provider card")
 }
 
 async fn fetch_codex() -> AgentUsageSnapshot {
     let now = Utc::now();
-    apply_provider_outcome("codex", "oauth", now, fetch_codex_inner().await)
+    apply_provider_outcome("codex", None, "oauth", now, fetch_codex_inner().await)
         .expect("Codex is a required provider card")
 }
 
@@ -1596,15 +1675,24 @@ impl ClaudeUsageGate {
     }
 }
 
-static CLAUDE_USAGE_GATE: Mutex<ClaudeUsageGate> = Mutex::new(ClaudeUsageGate {
-    blocked_until: None,
-    binding: None,
-});
+/// One cooldown per account (`None` = the primary), not one per process.
+///
+/// The gate keys on the cache binding, and two accounts never share one. With
+/// a single slot, each account's poll would find the other's binding, clear it
+/// and proceed — so the account that was rate limited would send a request on
+/// every poll instead of waiting out its cooldown, against an endpoint whose
+/// aggressive rate limiting is the reason this gate exists. That is the same
+/// single-slot collision `PROVIDER_LAST_GOOD` and `QUOTA_CURVE_BINDINGS` were
+/// given an account dimension for.
+static CLAUDE_USAGE_GATES: LazyLock<Mutex<HashMap<Option<String>, ClaudeUsageGate>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn lock_gate() -> std::sync::MutexGuard<'static, ClaudeUsageGate> {
-    CLAUDE_USAGE_GATE
+/// Run `body` against one account's gate, creating it on first use.
+fn with_gate<T>(account: Option<&str>, body: impl FnOnce(&mut ClaudeUsageGate) -> T) -> T {
+    let mut gates = CLAUDE_USAGE_GATES
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    body(gates.entry(account.map(str::to_string)).or_default())
 }
 
 fn claude_gate_failure(
@@ -1638,8 +1726,158 @@ fn parse_retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option<Dat
 async fn fetch_claude() -> AgentUsageSnapshot {
     let now = Utc::now();
     let (failure_source, outcome) = fetch_claude_inner().await;
-    apply_provider_outcome("claude", failure_source, now, outcome)
+    apply_provider_outcome("claude", None, failure_source, now, outcome)
         .expect("Claude is a required provider card")
+}
+
+/// Every Claude card this publication carries: the primary config directory,
+/// then one per configured `CLAUDE_CONFIG_DIR`-isolated account.
+///
+/// With no extra directory configured the registry is empty, the loop body
+/// never runs, and this is the single `fetch_claude()` call it was before.
+async fn fetch_claude_accounts() -> Vec<AgentUsageSnapshot> {
+    let config_dirs = crate::claude_config_dirs::snapshot();
+    if config_dirs.is_empty() {
+        return vec![fetch_claude().await];
+    }
+    // Concurrent, not sequential. An earlier version ran these in a loop and
+    // justified it as "one extra account costs one more round trip on a 60s
+    // poll", which measures the wrong thing: each request owns a 30-second
+    // timeout, and the provider-wide `tokio::join!` above cannot return until
+    // this function does, so a slow Claude account holds back the already
+    // finished Codex, Copilot, Grok and Antigravity cards for as long as it
+    // takes — and Settings sets no limit on how many accounts there are, so
+    // the delay grows linearly with a number the user chooses.
+    //
+    // Bounded rather than fully parallel: N accounts firing at once is N
+    // simultaneous requests to one provider, which is how a refresh turns into
+    // a rate-limit. Four is above any realistic account count, so the bound
+    // costs nothing in practice and exists for the case that is not realistic.
+    let mut work: Vec<Pin<Box<dyn Future<Output = AgentUsageSnapshot>>>> =
+        vec![Box::pin(fetch_claude())];
+    for config_dir in config_dirs {
+        work.push(Box::pin(async move {
+            fetch_claude_extra_account(&config_dir).await
+        }));
+    }
+    join_local_ordered(work).await
+}
+
+/// Run every future concurrently, at most `MAX_ACCOUNT_FETCHES_IN_FLIGHT` at a
+/// time, and return the results in the order the futures were given rather than
+/// the order they finished.
+///
+/// Both halves of that sentence are load-bearing. **Ordered**, because the
+/// caller's order is the order the cards are laid out in and completion order
+/// is whichever account's provider answered first — a reordering nothing would
+/// report. **Bounded**, because N accounts firing at once is N simultaneous
+/// requests to one provider, which is how a refresh becomes a rate-limit.
+///
+/// `spawn_local` inside a `LocalSet` rather than `JoinSet::spawn`: a provider
+/// fetch holds non-`Send` state across its awaits, so moving one between
+/// threads does not compile. Nothing here wants a second thread anyway — the
+/// work is entirely network wait.
+const MAX_ACCOUNT_FETCHES_IN_FLIGHT: usize = 4;
+
+async fn join_local_ordered<T: 'static>(
+    futures: Vec<Pin<Box<dyn Future<Output = T>>>>,
+) -> Vec<T> {
+    tokio::task::LocalSet::new()
+        .run_until(async move {
+            let mut slots: Vec<Option<T>> = (0..futures.len()).map(|_| None).collect();
+            let mut tasks = tokio::task::JoinSet::new();
+            let mut pending = futures.into_iter().enumerate();
+            let mut queued = 0usize;
+            loop {
+                while queued < MAX_ACCOUNT_FETCHES_IN_FLIGHT {
+                    let Some((index, future)) = pending.next() else { break };
+                    tasks.spawn_local(async move { (index, future.await) });
+                    queued += 1;
+                }
+                let Some(joined) = tasks.join_next().await else { break };
+                queued -= 1;
+                // A panicking fetch drops that one result rather than taking
+                // the whole publication down. Every real provider failure
+                // already arrives as a `ProviderFetchOutcome`, so reaching this
+                // arm is a bug rather than a provider being unreachable.
+                if let Ok((index, value)) = joined {
+                    slots[index] = Some(value);
+                }
+            }
+            slots.into_iter().flatten().collect()
+        })
+        .await
+}
+
+async fn fetch_claude_extra_account(config_dir: &str) -> AgentUsageSnapshot {
+    let now = Utc::now();
+    let (failure_source, outcome) = fetch_claude_extra_inner(config_dir).await;
+    apply_provider_outcome("claude", Some(config_dir), failure_source, now, outcome)
+        .expect("an extra Claude account always produces a card")
+}
+
+async fn fetch_claude_extra_inner(config_dir: &str) -> (&'static str, ProviderFetchOutcome) {
+    let credentials = match load_claude_config_dir_credentials(config_dir) {
+        Ok(credentials) => credentials,
+        Err(display) => {
+            return (
+                "oauth",
+                ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(display)),
+            );
+        }
+    };
+    let verified = claude_cache_binding(&credentials).map_err(|_| {
+        ProviderFetchFailure::terminal("Claude account identity could not be verified.")
+    });
+    let config_dir = config_dir.to_string();
+    request_after_verified_binding(verified, |binding| async move {
+        Ok(fetch_claude_oauth_usage(credentials, binding, Some(config_dir)).await)
+    })
+    .await
+    .unwrap_or_else(|failure| ("oauth", ProviderFetchOutcome::Failure(failure)))
+}
+
+/// Load one isolated config directory's stored `/login` credentials, from the
+/// Keychain item that directory selects and from nothing else.
+///
+/// The fallback chain `fetch_claude_inner` walks — `CLAUDE_CODE_OAUTH_TOKEN`
+/// from the environment or a login shell, the `TOKENBAR_*` overrides, the
+/// hardcoded `~/.claude/.credentials.json`, the fixed-service setup-token item
+/// — is the primary account's in every case. Reaching for any of it here would
+/// put the primary's numbers on this account's card, which is why a missing
+/// item is an error rather than a fall-through.
+fn load_claude_config_dir_credentials(config_dir: &str) -> Result<ClaudeCredentials, String> {
+    load_claude_config_dir_credentials_with(config_dir, load_claude_credentials_from_keychain_for)
+}
+
+fn load_claude_config_dir_credentials_with<L>(
+    config_dir: &str,
+    load: L,
+) -> Result<ClaudeCredentials, String>
+where
+    L: FnOnce(Option<&str>) -> Result<Option<String>, String>,
+{
+    let raw = load(Some(config_dir))
+        .map_err(|_| CLAUDE_CREDENTIALS_LOAD_ERROR.to_string())?
+        .ok_or_else(|| CLAUDE_EXTRA_UNCONFIGURED_ERROR.to_string())?;
+    match resolve_stored_claude_login(&raw, ClaudeCredentialSource::Keychain) {
+        ClaudeLoginResolution::Ready(mut credentials) => {
+            // `claude_login_scope_slot` names the primary directory's fixed
+            // service for every Keychain credential. Re-point it at the item
+            // this one actually came from: the credential lineage and the
+            // durable-history gate both read this slot, and both would
+            // otherwise be told this is the primary's credential.
+            credentials.scope_slot = CredentialSlot {
+                semantic_source: CLAUDE_CONFIG_DIR_KEYCHAIN_SOURCE,
+                canonical_location: claude_keychain_service(Some(config_dir)),
+            };
+            Ok(credentials)
+        }
+        ClaudeLoginResolution::Absent | ClaudeLoginResolution::ExplicitLogout => {
+            Err(CLAUDE_EXTRA_UNCONFIGURED_ERROR.to_string())
+        }
+        ClaudeLoginResolution::Terminal => Err(CLAUDE_CREDENTIALS_LOAD_ERROR.to_string()),
+    }
 }
 
 async fn fetch_codex_inner() -> ProviderFetchOutcome {
@@ -1781,6 +2019,7 @@ async fn fetch_codex_inner() -> ProviderFetchOutcome {
 
     ProviderFetchOutcome::Success {
         snapshot: AgentUsageSnapshot {
+            account_key: None,
             client_id: "codex".to_string(),
             source: "oauth".to_string(),
             updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -1796,6 +2035,173 @@ async fn fetch_codex_inner() -> ProviderFetchOutcome {
             transport_diagnostic: None,
         },
         cache_binding: Some(cache_binding),
+    }
+}
+
+/// Claude's durable history identity.
+///
+/// The primary config directory resolves through the per-installation lineage
+/// constant — Claude's usage payload carries no owner ID on any route it
+/// serves, so there is nothing authoritative to key on. That is unchanged from
+/// before this seam existed, and it is what keeps every existing series
+/// addressable.
+///
+/// An account isolated with `CLAUDE_CONFIG_DIR` passes that directory's
+/// absolute path and resolves through the authoritative branch instead, so two
+/// accounts on one installation keep two series — the same outcome Codex
+/// already gets from `ChatGPT-Account-Id`.
+///
+/// **Why the directory path is admissible where other local state is not.**
+/// `agent_antigravity.rs` refuses `google_accounts.active` because it is
+/// unrelated local state that the credential fetching those quotas never
+/// authenticated. The config directory is not that: it *selects* the
+/// credential, because the Keychain service read for it is
+/// `Claude Code-credentials-<sha256(dir)[:8]>`. The identity and the credential
+/// come from the same choice.
+///
+/// That binding holds only for the Keychain route. `fetch_claude_inner` has
+/// four other credential sources — an OAuth token from the environment or a
+/// login shell, the `TOKENBAR_*` overrides, the hardcoded
+/// `~/.claude/.credentials.json`, and a fixed-service Keychain item — and none
+/// of them is chosen by the directory. A future caller that passes a directory
+/// while the credential came from one of those would be recording someone
+/// else's numbers under this directory's name. `claude_account_identity_with`
+/// is the one caller, and it refuses outright in that case rather than falling
+/// back to `None` — falling back would merge the samples into the primary's
+/// series instead.
+/// The identifier is the SHA-256 of the directory, not the directory. The
+/// shared `resolve_authoritative_with` trims an `OpaqueId` before hashing it,
+/// which would map `/x/dir ` and `/x/dir` to one scope — two accounts sharing
+/// one series, the contamination this whole path exists to prevent. Hex has no
+/// whitespace, so the shared trim is a no-op on it, and the digest is injective
+/// on the exact bytes.
+///
+/// The trim is not removed there instead, because Codex and Antigravity resolve
+/// through the same function against history that already exists on disk, and
+/// changing a durable derivation for them would orphan it with no error, no
+/// corrupt file and nothing to point at — a far worse outcome than the one
+/// being fixed. Claude's extra accounts have no history yet: they arrive with
+/// this branch.
+fn claude_history_scope_with<R>(
+    config_dir: Option<&str>,
+    resolve: R,
+) -> Result<HistoryScope, AccountScopeError>
+where
+    R: FnOnce(&str, Option<(AuthoritativeIdKind, &str)>) -> Result<HistoryScope, AccountScopeError>,
+{
+    let digest = account_key_component(config_dir).map(|dir| sha256_hex(dir.to_string()));
+    resolve(
+        "claude",
+        digest
+            .as_deref()
+            .map(|digest| (AuthoritativeIdKind::OpaqueId, digest)),
+    )
+}
+
+/// The one place an account argument becomes "which account is this": `None`
+/// or empty is the primary, and anything else is used **byte for byte**.
+///
+/// One function rather than the rule restated at each site. It was written
+/// three times — the Keychain service, the durable history scope, and the
+/// account key that reaches the wire — and each copy trimmed. Trimming looks
+/// harmless at every one of them and is not: Swift sends `standardizingPath`'s
+/// output, which keeps surrounding whitespace, so for a directory whose name
+/// really ends in a space the three derivations would each address a directory
+/// that does not exist while the scanner read the one that does. Fixing the
+/// registry's own normalization first and leaving these was exactly that
+/// failure — a correction that changed nothing, because the value it corrected
+/// was trimmed again one call later.
+///
+/// Emptiness is still the primary's marker, and it is checked without trimming
+/// so that a whitespace-only string is not silently promoted to "primary". No
+/// such string can arrive: `claude_config_dirs::normalize` refuses anything
+/// that is not an absolute path, and whitespace is not.
+pub(crate) fn account_key_component(account: Option<&str>) -> Option<&str> {
+    account.filter(|value| !value.is_empty())
+}
+
+/// `semantic_source` for a credential read out of the Keychain item a config
+/// directory selects (`Claude Code-credentials-<sha256(dir)[..8]>`).
+///
+/// It is deliberately not `claude-login-keychain`: that value belongs to the
+/// primary directory's fixed-service item, and the two must stay
+/// distinguishable both in the credential-lineage store and at the one place
+/// that decides whether this account may write durable history.
+const CLAUDE_CONFIG_DIR_KEYCHAIN_SOURCE: &str = "claude-config-dir-keychain";
+
+/// Who a Claude snapshot belongs to, and what it is allowed to record.
+///
+/// Both fields are decided in one place because they must agree: an account
+/// that publishes an `accountKey` and a history scope belonging to different
+/// accounts is exactly the silent cross-attribution this milestone exists to
+/// prevent, and nothing downstream can detect it.
+#[derive(Debug, Clone)]
+struct ClaudeAccountIdentity {
+    /// `None` for the primary directory; the config directory's absolute path
+    /// otherwise. Goes on the wire as `accountKey`.
+    account_key: Option<String>,
+    /// The durable pace-history identity, or `Err` when this account must not
+    /// record any. `Err` is not a degraded form of `Ok`: it is refusal.
+    history_scope: Result<HistoryScope, AccountScopeError>,
+}
+
+fn claude_account_identity(
+    config_dir: Option<&str>,
+    credentials: &ClaudeCredentials,
+) -> ClaudeAccountIdentity {
+    claude_account_identity_with(
+        config_dir,
+        credentials,
+        agent_account_scope::resolve_history_scope,
+    )
+}
+
+/// The single enforcement point for both fail-closed rules.
+///
+/// **Credential source.** A directory is admissible as a durable identity only
+/// because it selects the Keychain item the credential was read from. When the
+/// credential came from anywhere else — an OAuth token from the environment or
+/// a login shell, a `TOKENBAR_*`/`TOKCAT_*`/`CODEXBAR_*` override, the
+/// hardcoded `~/.claude/.credentials.json`, or the fixed-service setup-token
+/// item — the directory names an account that did not produce these numbers,
+/// and recording them under it stores someone else's usage under this
+/// account's name. It has to be decided here: the source travels on
+/// `ClaudeCredentials.scope_slot.semantic_source` and is not a field of
+/// `AgentUsageSnapshot`, so by the time `enrich_snapshot` writes, it is gone.
+///
+/// **Resolution failure.** When the scope cannot be resolved there is no
+/// fallback to take. Passing `None` instead would resolve to the primary's
+/// lineage constant and merge this account's samples into the primary's
+/// series, which nothing migrates, reconciles or separates afterwards.
+///
+/// Refusing is not the same as hiding: the card is still published with its
+/// windows, and only the durable samples are withheld (`enrich_snapshot`
+/// marks the pace unavailable for an unresolved history scope).
+fn claude_account_identity_with<R>(
+    config_dir: Option<&str>,
+    credentials: &ClaudeCredentials,
+    resolve: R,
+) -> ClaudeAccountIdentity
+where
+    R: FnOnce(&str, Option<(AuthoritativeIdKind, &str)>) -> Result<HistoryScope, AccountScopeError>,
+{
+    let Some(dir) = account_key_component(config_dir) else {
+        // The primary account. Its argument is `None` and stays `None`: that
+        // value addresses every series already on disk.
+        return ClaudeAccountIdentity {
+            account_key: None,
+            history_scope: claude_history_scope_with(None, resolve),
+        };
+    };
+    let history_scope = if credentials.scope_slot.semantic_source == CLAUDE_CONFIG_DIR_KEYCHAIN_SOURCE
+    {
+        claude_history_scope_with(Some(dir), resolve)
+    } else {
+        Err(AccountScopeError::NoTrustedEvidence)
+    };
+    ClaudeAccountIdentity {
+        account_key: Some(dir.to_string()),
+        history_scope,
     }
 }
 
@@ -1875,7 +2281,9 @@ async fn fetch_claude_inner() -> (&'static str, ProviderFetchOutcome) {
     }
 
     let login = load_claude_login_credentials();
-    clear_claude_gate_for_login_resolution(&login, &mut lock_gate());
+    with_gate(None, |gate| {
+        clear_claude_gate_for_login_resolution(&login, gate)
+    });
     fetch_claude_login_or_setup_with(
         login,
         |credentials| async move {
@@ -1883,7 +2291,10 @@ async fn fetch_claude_inner() -> (&'static str, ProviderFetchOutcome) {
                 ProviderFetchFailure::terminal("Claude account identity could not be verified.")
             });
             request_after_verified_binding(verified, |binding| async move {
-                Ok(fetch_claude_oauth_usage(credentials, binding).await)
+                // The primary config directory. None of the credential sources
+                // this function resolves is selected by a directory, so this is
+                // the only correct argument — see `claude_account_identity_with`.
+                Ok(fetch_claude_oauth_usage(credentials, binding, None).await)
             })
             .await
             .unwrap_or_else(|failure| ("oauth", ProviderFetchOutcome::Failure(failure)))
@@ -1902,8 +2313,12 @@ async fn fetch_claude_setup_token(
         ProviderFetchFailure::terminal("Claude setup-token account identity could not be verified.")
     });
     let outcome = request_after_verified_binding(verified, |binding| async move {
+        // Setup tokens are never selected by a config directory: they come from
+        // the environment, a login shell, or the fixed-service Keychain item.
+        let identity = claude_account_identity(None, &credentials);
         Ok(claude_header_snapshot(
             &credentials,
+            &identity,
             Utc::now(),
             Ok(binding.primary.clone()),
             Some(binding),
@@ -1956,25 +2371,52 @@ where
     }
 }
 
+/// `config_dir` is `None` for the primary directory and the account's own
+/// absolute path for a `CLAUDE_CONFIG_DIR`-isolated one. It selects the gate
+/// slot, the wire `accountKey`, and the durable history identity.
 async fn fetch_claude_oauth_usage(
     credentials: ClaudeCredentials,
     pre_binding: ProviderCacheBinding,
+    config_dir: Option<String>,
 ) -> (&'static str, ProviderFetchOutcome) {
+    let gate_dir = config_dir.clone();
+    let header_dir = config_dir.clone();
     fetch_claude_login_usage_with(
         credentials,
         pre_binding,
         Utc::now(),
-        |binding, now| {
-            let mut gate = lock_gate();
-            gate.blocked_until_for(binding, now)
+        move |binding, now| {
+            with_gate(gate_dir.as_deref(), |gate| {
+                gate.blocked_until_for(binding, now)
+            })
         },
-        |credentials| async move { refresh_claude_credentials(&credentials).await },
-        |credentials, account_scope, cache_binding| async move {
-            claude_header_snapshot(&credentials, Utc::now(), Ok(account_scope), cache_binding).await
+        |credentials| async move {
+            // `refresh_claude_credentials` reloads from, validates against and
+            // writes back to the PRIMARY directory's Keychain item and
+            // `~/.claude/.credentials.json` — both hardcoded. Running it for an
+            // isolated account would overwrite the primary's stored credential
+            // with this account's rotated tokens, logging the primary out.
+            if credentials.scope_slot.semantic_source == CLAUDE_CONFIG_DIR_KEYCHAIN_SOURCE {
+                return Err(ProviderFetchFailure::terminal(CLAUDE_EXTRA_EXPIRED_ERROR));
+            }
+            refresh_claude_credentials(&credentials).await
         },
-        |credentials, account_scope, cache_binding, gate_binding| async move {
+        move |credentials, account_scope, cache_binding| async move {
+            let identity = claude_account_identity(header_dir.as_deref(), &credentials);
+            claude_header_snapshot(
+                &credentials,
+                &identity,
+                Utc::now(),
+                Ok(account_scope),
+                cache_binding,
+            )
+            .await
+        },
+        move |credentials, account_scope, cache_binding, gate_binding| async move {
+            let identity = claude_account_identity(config_dir.as_deref(), &credentials);
             fetch_claude_oauth_usage_request(
                 &credentials,
+                &identity,
                 account_scope,
                 cache_binding,
                 gate_binding,
@@ -2062,6 +2504,7 @@ where
 
 async fn fetch_claude_oauth_usage_request(
     credentials: &ClaudeCredentials,
+    identity: &ClaudeAccountIdentity,
     account_scope: AccountScope,
     cache_binding: Option<ProviderCacheBinding>,
     gate_binding: ProviderCacheBinding,
@@ -2117,7 +2560,9 @@ async fn fetch_claude_oauth_usage_request(
         Ok(body) => body,
         Err(ResponseReadFailure::Transient(diagnostic)) => {
             if status == 429 {
-                lock_gate().record_rate_limit(gate_binding, retry_after, Utc::now());
+                with_gate(identity.account_key.as_deref(), |gate| {
+                    gate.record_rate_limit(gate_binding, retry_after, Utc::now())
+                });
             }
             return (
                 "oauth",
@@ -2158,8 +2603,14 @@ async fn fetch_claude_oauth_usage_request(
         if body.contains("user:profile") {
             return (
                 "setup-token",
-                claude_header_snapshot(credentials, Utc::now(), Ok(account_scope), cache_binding)
-                    .await,
+                claude_header_snapshot(
+                    credentials,
+                    identity,
+                    Utc::now(),
+                    Ok(account_scope),
+                    cache_binding,
+                )
+                .await,
             );
         }
         return (
@@ -2191,12 +2642,13 @@ async fn fetch_claude_oauth_usage_request(
             )),
         );
     }
-    lock_gate().clear();
+    with_gate(identity.account_key.as_deref(), ClaudeUsageGate::clear);
 
     (
         "oauth",
         ProviderFetchOutcome::Success {
             snapshot: AgentUsageSnapshot {
+                account_key: identity.account_key.clone(),
                 client_id: "claude".to_string(),
                 source: "oauth".to_string(),
                 updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -2213,8 +2665,7 @@ async fn fetch_claude_oauth_usage_request(
                         }),
                 }),
                 account_scope: Ok(account_scope),
-                // Claude exposes no stable owner ID on any route it serves today.
-                history_scope: agent_account_scope::resolve_history_scope("claude", None),
+                history_scope: identity.history_scope.clone(),
                 windows,
                 credits: claude_credits(usage.extra_usage.as_ref()),
                 error: None,
@@ -2258,10 +2709,10 @@ async fn claude_live_plan(
     .flatten();
     let plan = claude_plan_or_last_known(completed, last_known);
 
-    *CLAUDE_PROFILE_CACHE
+    CLAUDE_PROFILE_CACHE
         .lock()
-        .unwrap_or_else(|e| e.into_inner()) =
-        Some((now, account.as_str().to_string(), plan.clone()));
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(account.as_str().to_string(), (now, plan.clone()));
     plan
 }
 
@@ -2290,15 +2741,15 @@ fn claude_cached_plan(
     let guard = CLAUDE_PROFILE_CACHE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    match guard.as_ref() {
-        Some((fetched_at, cached_account, plan)) if cached_account == account.as_str() => {
+    match guard.get(account.as_str()) {
+        Some((fetched_at, plan)) => {
             if (now - *fetched_at).num_seconds() < CLAUDE_PROFILE_TTL_SECS {
                 Ok(plan.clone())
             } else {
                 Err(plan.clone())
             }
         }
-        _ => Err(None),
+        None => Err(None),
     }
 }
 
@@ -2470,6 +2921,7 @@ async fn fetch_claude_via_headers(
 
 async fn claude_header_snapshot(
     credentials: &ClaudeCredentials,
+    identity: &ClaudeAccountIdentity,
     now: DateTime<Utc>,
     account_scope: Result<AccountScope, AccountScopeError>,
     cache_binding: Option<ProviderCacheBinding>,
@@ -2481,6 +2933,7 @@ async fn claude_header_snapshot(
         };
     ProviderFetchOutcome::Success {
         snapshot: AgentUsageSnapshot {
+            account_key: identity.account_key.clone(),
             client_id: "claude".to_string(),
             source: "setup-token".to_string(),
             updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -2493,7 +2946,7 @@ async fn claude_header_snapshot(
                 .map(clean_plan),
             }),
             account_scope,
-            history_scope: agent_account_scope::resolve_history_scope("claude", None),
+            history_scope: identity.history_scope.clone(),
             windows,
             credits: None,
             error: None,
@@ -2562,6 +3015,14 @@ fn load_codex_credentials_from(auth_path: &Path) -> Result<CodexCredentials, Str
 /// red error.
 const CLAUDE_UNCONFIGURED_ERROR: &str = "Claude OAuth credentials not found. Run `claude` to authenticate, or set CLAUDE_CODE_OAUTH_TOKEN / add a `tokenbar-claude-oauth-token` Keychain item to use a setup-token.";
 const CLAUDE_CREDENTIALS_LOAD_ERROR: &str = "Claude credentials could not be loaded.";
+/// An extra config directory is configured but its Keychain item holds no
+/// usable login. Distinct from the primary's unconfigured message: there is no
+/// setup-token fallback for an isolated account, and naming one would send the
+/// user to a credential that belongs to the other account.
+const CLAUDE_EXTRA_UNCONFIGURED_ERROR: &str = "No Claude login found for this config directory. Run `claude` with CLAUDE_CONFIG_DIR set to it.";
+/// TokenBar refreshes only the primary directory's credential in place, so an
+/// isolated account's expired token has to be rotated by Claude Code itself.
+const CLAUDE_EXTRA_EXPIRED_ERROR: &str = "Claude credentials for this config directory have expired. Run `claude` with CLAUDE_CONFIG_DIR set to it.";
 
 /// Full-login credentials: structured `claudeAiOauth` blobs (Keychain
 /// `Claude Code-credentials`, then `~/.claude/.credentials.json`) plus the
@@ -2775,16 +3236,45 @@ fn keychain_item_not_found(status: &std::process::ExitStatus) -> bool {
     status.code() == Some(44)
 }
 
+/// Keychain service holding the credentials for one `CLAUDE_CONFIG_DIR`.
+///
+/// Claude Code derives this itself — the primary directory uses the bare
+/// service name, and every other directory gets the first eight hex digits of
+/// the SHA-256 of its absolute path appended. Verified against a live item:
+/// `sha256("/Users/nanako/.claude-work")[..8]` is `7d296157`, which is the
+/// service the real entry carries.
+///
+/// This derivation is also what makes the directory admissible as a durable
+/// identity (`claude_history_scope`): the directory does not merely sit
+/// alongside the credential, it selects which one is read.
+fn claude_keychain_service(config_dir: Option<&str>) -> String {
+    match account_key_component(config_dir) {
+        None => CLAUDE_KEYCHAIN_SERVICE.to_string(),
+        Some(dir) => format!(
+            "{CLAUDE_KEYCHAIN_SERVICE}-{}",
+            &sha256_hex(dir.to_string())[..8]
+        ),
+    }
+}
+
 fn load_claude_credentials_from_keychain() -> Result<Option<String>, String> {
-    load_claude_credentials_from_keychain_item(None)
+    load_claude_credentials_from_keychain_for(None)
+}
+
+/// Read one config directory's credentials. `None` is the primary directory.
+fn load_claude_credentials_from_keychain_for(
+    config_dir: Option<&str>,
+) -> Result<Option<String>, String> {
+    load_claude_credentials_from_keychain_item(&claude_keychain_service(config_dir), None)
 }
 
 #[cfg(target_os = "macos")]
 fn load_claude_credentials_from_keychain_item(
+    service: &str,
     account: Option<&str>,
 ) -> Result<Option<String>, String> {
     let mut command = std::process::Command::new("/usr/bin/security");
-    command.args(["find-generic-password", "-s", CLAUDE_KEYCHAIN_SERVICE]);
+    command.args(["find-generic-password", "-s", service]);
     if let Some(account) = account {
         command.args(["-a", account]);
     }
@@ -3387,13 +3877,23 @@ where
 }
 
 fn reload_claude_credentials(original: &ClaudeCredentials) -> Result<ClaudeCredentials, String> {
+    // Every arm below reads a location belonging to the primary directory. A
+    // credential from an isolated config directory carries `Keychain` as its
+    // source but lives in a different item, so it would silently be replaced
+    // by the primary's — and then written back under the primary's identity.
+    if original.scope_slot.semantic_source == CLAUDE_CONFIG_DIR_KEYCHAIN_SOURCE {
+        return Err(
+            "Claude credentials from an isolated config directory are not refreshed in place."
+                .to_string(),
+        );
+    }
     match original.source {
         ClaudeCredentialSource::Keychain => {
             let account = claude_keychain_account().ok_or_else(|| {
                 "Claude Keychain account could not be captured during refresh.".to_string()
             })?;
             let raw =
-                load_claude_credentials_from_keychain_item(Some(&account))?.ok_or_else(|| {
+                load_claude_credentials_from_keychain_item(CLAUDE_KEYCHAIN_SERVICE, Some(&account))?.ok_or_else(|| {
                     "Claude Keychain credentials disappeared during refresh.".to_string()
                 })?;
             let mut credentials =
@@ -3704,7 +4204,8 @@ fn validate_claude_keychain_target(
         credentials,
         || Ok(claude_keychain_account()),
         |captured_account| {
-            load_claude_credentials_from_keychain_item(Some(captured_account)).map_err(|_| ())
+            load_claude_credentials_from_keychain_item(CLAUDE_KEYCHAIN_SERVICE, Some(captured_account))
+                .map_err(|_| ())
         },
     )
     .map(|_| ())
@@ -3733,7 +4234,8 @@ fn save_claude_credentials_to_keychain(
         credentials,
         || Ok(claude_keychain_account()),
         |captured_account| {
-            load_claude_credentials_from_keychain_item(Some(captured_account)).map_err(|_| ())
+            load_claude_credentials_from_keychain_item(CLAUDE_KEYCHAIN_SERVICE, Some(captured_account))
+                .map_err(|_| ())
         },
     )?;
 
@@ -4704,8 +5206,16 @@ fn additional_limit_source(limit: &CodexAdditionalRateLimit) -> Option<String> {
     .map(str::to_string)
 }
 
+/// Hashes the value it is given, with nothing removed first.
+///
+/// It used to trim, which is the fourth place one config-directory identity was
+/// silently rewritten before being hashed and the one no reader of
+/// `claude_keychain_service` would have thought to open — the trim was two
+/// calls away, inside a general-purpose helper, serving neither of its two
+/// callers. A digest helper that edits its input is a digest of something the
+/// caller did not ask about.
 fn sha256_hex(value: String) -> String {
-    let digest = Sha256::digest(value.trim().as_bytes());
+    let digest = Sha256::digest(value.as_bytes());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
@@ -4957,6 +5467,63 @@ where
 mod tests {
     use super::*;
     use crate::agent_account_scope::test_support::TestRefreshScope;
+
+    /// The two properties `join_local_ordered` exists for, on futures that
+    /// finish in the opposite order to the one they were given in — which is
+    /// the case a version that pushed results as they arrived would pass by
+    /// accident if every future took the same time.
+    ///
+    /// Mutations, both verified red: returning results in completion order
+    /// (push instead of the indexed slot) reverses the sequence; removing the
+    /// `queued < MAX_ACCOUNT_FETCHES_IN_FLIGHT` bound lets all seven run at
+    /// once and the observed peak becomes 7.
+    #[test]
+    fn account_fetches_run_concurrently_bounded_and_return_in_input_order() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::time::Duration;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let live = Rc::new(Cell::new(0usize));
+        let peak = Rc::new(Cell::new(0usize));
+        let total = 7;
+        let (ordered, observed_peak) = runtime.block_on(async {
+            let mut work: Vec<Pin<Box<dyn Future<Output = usize>>>> = Vec::new();
+            for index in 0..total {
+                let live = Rc::clone(&live);
+                let peak = Rc::clone(&peak);
+                work.push(Box::pin(async move {
+                    live.set(live.get() + 1);
+                    peak.set(peak.get().max(live.get()));
+                    // Later entries finish FIRST, so input order and completion
+                    // order disagree for every pair.
+                    tokio::time::sleep(Duration::from_millis(
+                        ((total - index) * 10) as u64,
+                    ))
+                    .await;
+                    live.set(live.get() - 1);
+                    index
+                }));
+            }
+            let ordered = join_local_ordered(work).await;
+            (ordered, peak.get())
+        });
+
+        assert_eq!(
+            ordered,
+            (0..total).collect::<Vec<_>>(),
+            "results came back in completion order, so the cards would be laid \
+             out in whichever order the providers happened to answer"
+        );
+        assert_eq!(
+            observed_peak, MAX_ACCOUNT_FETCHES_IN_FLIGHT,
+            "the in-flight bound was not applied — {total} accounts would mean \
+             {total} simultaneous requests to one provider"
+        );
+    }
 
     #[test]
     fn claude_user_agent_uses_first_version_token() {
@@ -5285,6 +5852,7 @@ mod tests {
         now: DateTime<Utc>,
     ) -> AgentUsageSnapshot {
         AgentUsageSnapshot {
+            account_key: None,
             client_id: client_id.to_string(),
             source: "oauth".to_string(),
             updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -5352,10 +5920,14 @@ mod tests {
 
         assert_eq!(
             payload.quota_curve_series(),
-            vec![SeriesKey::new(
-                "codex",
-                &HistoryScope::for_test(trusted.as_str()),
-                "main.session.v1"
+            vec![(
+                // The primary account publishes under `None`.
+                None,
+                SeriesKey::new(
+                    "codex",
+                    &HistoryScope::for_test(trusted.as_str()),
+                    "main.session.v1"
+                )
             )]
         );
         scope.cleanup();
@@ -5399,6 +5971,7 @@ mod tests {
             generated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
             publication_generation: 1,
             agents: vec![AgentUsageSnapshot {
+                account_key: None,
                 windows,
                 ..cache_test_snapshot("claude", Ok(trusted.clone()), now)
             }],
@@ -5407,28 +5980,16 @@ mod tests {
 
         assert_eq!(
             payload.quota_curve_series(),
-            vec![
-                SeriesKey::new(
-                    "claude",
-                    &HistoryScope::for_test(trusted.as_str()),
-                    "session.v1"
-                ),
-                SeriesKey::new(
-                    "claude",
-                    &HistoryScope::for_test(trusted.as_str()),
-                    "weekly.v1"
-                ),
-                SeriesKey::new(
-                    "claude",
-                    &HistoryScope::for_test(trusted.as_str()),
-                    "sonnet.weekly.v1"
-                ),
-                SeriesKey::new(
-                    "claude",
-                    &HistoryScope::for_test(trusted.as_str()),
-                    "weekly_scoped.fable.v1"
-                ),
-            ]
+            ["session.v1", "weekly.v1", "sonnet.weekly.v1", "weekly_scoped.fable.v1"]
+                .map(|window_key| (
+                    None,
+                    SeriesKey::new(
+                        "claude",
+                        &HistoryScope::for_test(trusted.as_str()),
+                        window_key
+                    )
+                ))
+                .to_vec()
         );
         scope.cleanup();
     }
@@ -5783,6 +6344,7 @@ mod tests {
         apply_provider_outcome_with(
             &cache,
             "copilot",
+            None,
             "oauth",
             fresh_at,
             ProviderFetchOutcome::Success {
@@ -5810,6 +6372,7 @@ mod tests {
         let outcome = match decoded {
             Ok((plan, windows)) => ProviderFetchOutcome::Success {
                 snapshot: AgentUsageSnapshot {
+                    account_key: None,
                     client_id: "copilot".to_string(),
                     source: "oauth".to_string(),
                     updated_at: response_at.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -5826,14 +6389,14 @@ mod tests {
             Err(failure) => ProviderFetchOutcome::Failure(failure),
         };
         let snapshot =
-            apply_provider_outcome_with(&cache, "copilot", "oauth", response_at, outcome, |_| {})
+            apply_provider_outcome_with(&cache, "copilot", None, "oauth", response_at, outcome, |_| {})
                 .unwrap();
 
         assert!(snapshot.error.is_none());
         assert_eq!(snapshot.windows.len(), 1);
         assert!((snapshot.windows[0].remaining_percent - 60.0).abs() < 0.01);
         assert!(snapshot.windows[0].resets_at.is_none());
-        let cached = lock_last_good(&cache).entries["copilot"].snapshot.clone();
+        let cached = lock_last_good(&cache).entries[&account_slot("copilot", None)].snapshot.clone();
         assert_eq!(cached.updated_at, snapshot.updated_at);
         assert_eq!(cached.windows.len(), 1);
         assert!(cached.error.is_none());
@@ -5856,6 +6419,7 @@ mod tests {
         let fresh = apply_provider_outcome_with(
             &cache,
             "codex",
+            None,
             "oauth",
             fresh_at,
             ProviderFetchOutcome::Success {
@@ -5886,6 +6450,7 @@ mod tests {
         let fallback = apply_provider_outcome_with(
             &cache,
             "codex",
+            None,
             "oauth",
             failure_at,
             ProviderFetchOutcome::Failure(ProviderFetchFailure::transient(
@@ -5933,7 +6498,7 @@ mod tests {
 
         let cached = lock_last_good(&cache)
             .entries
-            .get("codex")
+            .get(&account_slot("codex", None))
             .unwrap()
             .snapshot
             .clone();
@@ -5944,6 +6509,7 @@ mod tests {
         let fallback_again = apply_provider_outcome_with(
             &cache,
             "codex",
+            None,
             "oauth",
             failure_at + chrono::Duration::minutes(1),
             ProviderFetchOutcome::Failure(ProviderFetchFailure::transient(
@@ -5961,6 +6527,7 @@ mod tests {
         let dns_fallback = apply_provider_outcome_with(
             &cache,
             "codex",
+            None,
             "oauth",
             failure_at + chrono::Duration::minutes(2),
             ProviderFetchOutcome::Failure(ProviderFetchFailure::transient(
@@ -6012,6 +6579,7 @@ mod tests {
             apply_provider_outcome_with(
                 &cache,
                 "codex",
+                None,
                 "oauth",
                 now,
                 ProviderFetchOutcome::Success {
@@ -6023,6 +6591,7 @@ mod tests {
             let result = apply_provider_outcome_with(
                 &cache,
                 "codex",
+                None,
                 "oauth",
                 now + chrono::Duration::seconds(1),
                 ProviderFetchOutcome::Failure(failure),
@@ -6030,13 +6599,14 @@ mod tests {
             )
             .unwrap();
             assert!(result.windows.is_empty());
-            assert!(!lock_last_good(&cache).entries.contains_key("codex"));
+            assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("codex", None)));
         }
 
         let cache = Mutex::new(ProviderLastGoodCache::default());
         apply_provider_outcome_with(
             &cache,
             "codex",
+            None,
             "oauth",
             now,
             ProviderFetchOutcome::Success {
@@ -6048,13 +6618,14 @@ mod tests {
         assert!(apply_provider_outcome_with(
             &cache,
             "codex",
+            None,
             "oauth",
             now,
             ProviderFetchOutcome::Absent,
             |_| panic!("absent must not enrich"),
         )
         .is_none());
-        assert!(!lock_last_good(&cache).entries.contains_key("codex"));
+        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("codex", None)));
         scope.cleanup();
     }
 
@@ -6071,6 +6642,7 @@ mod tests {
         apply_provider_outcome_with(
             &cache,
             "antigravity",
+            None,
             "oauth",
             now,
             ProviderFetchOutcome::Success {
@@ -6082,6 +6654,7 @@ mod tests {
         let anonymous = apply_provider_outcome_with(
             &cache,
             "antigravity",
+            None,
             "local",
             now,
             ProviderFetchOutcome::Success {
@@ -6096,11 +6669,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(anonymous.windows.len(), 1);
-        assert!(!lock_last_good(&cache).entries.contains_key("antigravity"));
+        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("antigravity", None)));
 
         apply_provider_outcome_with(
             &cache,
             "antigravity",
+            None,
             "oauth",
             now,
             ProviderFetchOutcome::Success {
@@ -6114,6 +6688,7 @@ mod tests {
         let live_empty = apply_provider_outcome_with(
             &cache,
             "antigravity",
+            None,
             "oauth",
             now,
             ProviderFetchOutcome::Success {
@@ -6124,11 +6699,12 @@ mod tests {
         )
         .unwrap();
         assert!(live_empty.windows.is_empty());
-        assert!(!lock_last_good(&cache).entries.contains_key("antigravity"));
+        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("antigravity", None)));
 
         apply_provider_outcome_with(
             &cache,
             "antigravity",
+            None,
             "oauth",
             now,
             ProviderFetchOutcome::Success {
@@ -6141,6 +6717,7 @@ mod tests {
         let invalid = apply_provider_outcome_with(
             &cache,
             "antigravity",
+            None,
             "oauth",
             now,
             ProviderFetchOutcome::Success {
@@ -6156,7 +6733,7 @@ mod tests {
         .unwrap();
         assert!(invalid.windows.is_empty());
         assert_eq!(enrich_calls.get(), 0);
-        assert!(!lock_last_good(&cache).entries.contains_key("antigravity"));
+        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("antigravity", None)));
         scope.cleanup();
     }
 
@@ -6927,6 +7504,7 @@ mod tests {
             .resolve_current("fixture", "unknown-windows", b"marker")
             .unwrap();
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
             client_id: "codex".to_string(),
             source: "fixture".to_string(),
             updated_at: String::new(),
@@ -7014,18 +7592,20 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let now = Utc::now();
-        let set = |entry| {
+        // Replaces the whole map, so each case below starts from exactly the
+        // entries it names — the assertions keep the meaning they had when this
+        // cache was a single slot.
+        let set = |entries: Vec<(&str, ClaudeProfileCacheEntry)>| {
             *CLAUDE_PROFILE_CACHE
                 .lock()
-                .unwrap_or_else(|e| e.into_inner()) = entry;
+                .unwrap_or_else(|e| e.into_inner()) = entries
+                .into_iter()
+                .map(|(account, entry)| (account.to_string(), entry))
+                .collect();
         };
 
         // Fresh: serve it without spending a request on the 60s/300s poll.
-        set(Some((
-            now,
-            "scope-a".to_string(),
-            Some("Max 5x".to_string()),
-        )));
+        set(vec![("scope-a", (now, Some("Max 5x".to_string())))]);
         assert_eq!(
             claude_cached_plan(now, &AccountScope::for_test("scope-a")),
             Ok(Some("Max 5x".into()))
@@ -7036,35 +7616,51 @@ mod tests {
         // account scope, so this survives the token refresh that happens far more
         // often than a plan change.
         let old = now - chrono::Duration::seconds(CLAUDE_PROFILE_TTL_SECS + 1);
-        set(Some((
-            old,
-            "scope-a".to_string(),
-            Some("Max 5x".to_string()),
-        )));
+        set(vec![("scope-a", (old, Some("Max 5x".to_string())))]);
         assert_eq!(
             claude_cached_plan(now, &AccountScope::for_test("scope-a")),
             Err(Some("Max 5x".into()))
         );
 
         // Another account's entry is never served or fallen back on.
-        set(Some((
-            now,
-            "scope-b".to_string(),
-            Some("Max 5x".to_string()),
-        )));
+        set(vec![("scope-b", (now, Some("Max 5x".to_string())))]);
         assert_eq!(
             claude_cached_plan(now, &AccountScope::for_test("scope-a")),
             Err(None)
         );
 
+        // Two accounts coexist and each hits its own entry. A single slot
+        // holding whichever polled last would make both of these miss on every
+        // alternating poll, defeating the hour-long TTL against an endpoint
+        // this file rate-limits elsewhere.
+        //
+        // This covers the lookup, not the writer: the entries are placed
+        // directly, so a regression that made the writer replace the map
+        // instead of inserting into it would not turn this red. The writer sits
+        // inside an HTTP request with no seam to drive it hermetically.
+        set(vec![
+            ("scope-a", (now, Some("Max 5x".to_string()))),
+            ("scope-b", (now, Some("Pro".to_string()))),
+        ]);
+        assert_eq!(
+            claude_cached_plan(now, &AccountScope::for_test("scope-a")),
+            Ok(Some("Max 5x".into())),
+            "the second account's entry displaced the first"
+        );
+        assert_eq!(
+            claude_cached_plan(now, &AccountScope::for_test("scope-b")),
+            Ok(Some("Pro".into())),
+            "the first account's entry displaced the second"
+        );
+
         // A cached failure is a real hit: it is what stops the retry every poll.
-        set(Some((now, "scope-a".to_string(), None)));
+        set(vec![("scope-a", (now, None))]);
         assert_eq!(
             claude_cached_plan(now, &AccountScope::for_test("scope-a")),
             Ok(None)
         );
 
-        set(None);
+        set(Vec::new());
         assert_eq!(
             claude_cached_plan(now, &AccountScope::for_test("scope-a")),
             Err(None)
@@ -7093,7 +7689,7 @@ mod tests {
         *CLAUDE_PROFILE_CACHE
             .lock()
             .unwrap_or_else(|e| e.into_inner()) =
-            Some((expired, "scope-a".to_string(), Some("Max 5x".to_string())));
+            HashMap::from([("scope-a".to_string(), (expired, Some("Max 5x".to_string())))]);
 
         let client = provider_http_client_builder()
             .no_proxy()
@@ -7144,9 +7740,10 @@ mod tests {
             Ok(None)
         );
 
-        *CLAUDE_PROFILE_CACHE
+        CLAUDE_PROFILE_CACHE
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     #[test]
@@ -8015,6 +8612,7 @@ mod tests {
             .unwrap();
         let expected_scope = account_scope.as_str().to_string();
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
             client_id: "claude".to_string(),
             source: "oauth".to_string(),
             updated_at: String::new(),
@@ -8135,6 +8733,7 @@ mod tests {
             Some(DurationEvidence::contract(86_400)),
         );
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
             client_id: "claude".to_string(),
             source: "oauth".to_string(),
             updated_at: String::new(),
@@ -10201,6 +10800,7 @@ mod tests {
             )
         };
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
             client_id: "fixture".to_string(),
             source: "fixture".to_string(),
             updated_at: String::new(),
@@ -10258,6 +10858,7 @@ mod tests {
             )
         };
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
             client_id: "fixture".to_string(),
             source: "fixture".to_string(),
             updated_at: String::new(),
@@ -10331,6 +10932,7 @@ mod tests {
         let now = 1_700_000_000;
         let reset = Utc.timestamp_opt(now + 86_400, 0).single().unwrap();
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
             client_id: "fixture".to_string(),
             source: "fixture".to_string(),
             updated_at: String::new(),
@@ -10418,6 +11020,7 @@ mod tests {
         let now = 1_700_000_000;
         let reset = Utc.timestamp_opt(now + 86_400, 0).single().unwrap();
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
             client_id: "fixture".to_string(),
             source: "fixture".to_string(),
             updated_at: String::new(),
@@ -10472,6 +11075,7 @@ mod tests {
         let now = 1_700_000_000;
         let reset = Utc.timestamp_opt(now + 86_400, 0).single().unwrap();
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
             client_id: "fixture".to_string(),
             source: "fixture".to_string(),
             updated_at: String::new(),
@@ -10594,6 +11198,7 @@ mod tests {
     fn stage4_scope_error_is_sticky_and_skips_history() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
             client_id: "fixture".to_string(),
             source: "fixture".to_string(),
             updated_at: String::new(),
@@ -10694,6 +11299,7 @@ mod tests {
             account_scopes.push(account_scope.as_str().to_string());
             let sampled_at = start + index as i64 * 900;
             let mut snapshot = AgentUsageSnapshot {
+                account_key: None,
                 client_id: "claude".to_string(),
                 source: "oauth".to_string(),
                 updated_at: String::new(),
@@ -10768,13 +11374,15 @@ mod tests {
 
         let now = Utc::now();
         for (index, account) in account_scopes.iter().enumerate() {
+            // Only this account is present for the round, so the misses below
+            // still mean "another account's plan is never served here" rather
+            // than "this account has not been polled yet".
             *CLAUDE_PROFILE_CACHE
                 .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some((
-                now,
+                .unwrap_or_else(|e| e.into_inner()) = HashMap::from([(
                 account.as_str().to_string(),
-                Some(format!("Plan {index}")),
-            ));
+                (now, Some(format!("Plan {index}"))),
+            )]);
             assert_eq!(
                 claude_cached_plan(now, account),
                 Ok(Some(format!("Plan {index}")))
@@ -10786,9 +11394,10 @@ mod tests {
                 assert_eq!(claude_cached_plan(now, other), Err(None));
             }
         }
-        *CLAUDE_PROFILE_CACHE
+        CLAUDE_PROFILE_CACHE
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         scope.cleanup();
     }
 
@@ -10802,6 +11411,7 @@ mod tests {
         let history_scope = scope.resolve_history("antigravity", None).unwrap();
         let start = 1_800_000_000_i64;
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
             client_id: "antigravity".to_string(),
             source: "cli".to_string(),
             updated_at: String::new(),
@@ -10878,6 +11488,796 @@ mod tests {
             assert_ne!(fallback.as_str(), one.as_str());
             assert_ne!(fallback.as_str(), two.as_str());
         }
+        scope.cleanup();
+    }
+
+    /// G6. The Keychain service name for an isolated config directory.
+    ///
+    /// The expected value is not computed by this test — it is the service a
+    /// real Keychain item on this machine carries for
+    /// `/Users/nanako/.claude-work`, read with `security find-generic-password`
+    /// before the code was written. A test that derived its own expectation
+    /// from the same function would agree with any derivation, including a
+    /// wrong one.
+    ///
+    /// Getting this wrong is not an error the user would see: the read simply
+    /// finds no item, the account falls back to another credential source, and
+    /// the card shows the primary's numbers under the second account's name.
+    #[test]
+    fn g6_keychain_service_matches_the_real_item_for_an_isolated_config_dir() {
+        assert_eq!(
+            claude_keychain_service(Some("/Users/nanako/.claude-work")),
+            "Claude Code-credentials-7d296157"
+        );
+
+        // The primary directory uses the bare service, and the blank forms a
+        // caller could produce must not invent a suffix.
+        // `Some("   ")` is deliberately NOT in this list, though it used to be.
+        // Whitespace-only is not the primary — it is an invalid extra
+        // directory, refused upstream by `claude_config_dirs::normalize`
+        // because it is not an absolute path. Treating it as the primary here
+        // required trimming, and trimming is what G6b exists to forbid.
+        for primary in [None, Some("")] {
+            assert_eq!(
+                claude_keychain_service(primary),
+                "Claude Code-credentials",
+                "the primary directory must read the unsuffixed item"
+            );
+        }
+
+        // Two directories must not share a service, or one account would read
+        // the other's credentials.
+        assert_ne!(
+            claude_keychain_service(Some("/Users/nanako/.claude-work")),
+            claude_keychain_service(Some("/Users/nanako/.claude-other"))
+        );
+    }
+
+    /// G6b. Every identity derived from a config directory must use the
+    /// directory's exact string, and all three of them must agree.
+    ///
+    /// One assertion covering three functions on purpose. The rule was written
+    /// three times — which Keychain item to read, which durable history series
+    /// to write, and which account key reaches the wire — and all three trimmed.
+    /// Correcting the registry's own normalization while these stood changed
+    /// nothing, because the preserved value was trimmed again one call later;
+    /// a per-function gate would have gone green on that non-fix.
+    ///
+    /// The failure has no error in it. A directory whose name really ends in a
+    /// space — legal, and reachable through the folder picker — would have its
+    /// transcripts scanned under the real path while all three identities
+    /// addressed a directory that does not exist. The card reports no login
+    /// found, forever, for an account that is logged in.
+    #[test]
+    fn g6b_every_config_dir_identity_uses_the_exact_path() {
+        let spaced = "/Users/someone/claude dir ";
+        let trimmed = "/Users/someone/claude dir";
+
+        assert_ne!(
+            claude_keychain_service(Some(spaced)),
+            claude_keychain_service(Some(trimmed)),
+            "the Keychain service was derived from the trimmed path, so this \
+             account reads an item that does not exist"
+        );
+
+        let scope = TestRefreshScope::new("claude", "g6b-claude");
+        let resolve = |provider: &str, authoritative: Option<(AuthoritativeIdKind, &str)>| {
+            scope.resolve_history(provider, authoritative)
+        };
+        assert_ne!(
+            claude_history_scope_with(Some(spaced), resolve)
+                .expect("spaced directory resolves")
+                .as_str(),
+            claude_history_scope_with(Some(trimmed), resolve)
+                .expect("trimmed directory resolves")
+                .as_str(),
+            "the durable history scope was derived from the trimmed path, so \
+             this account's samples land in another directory's series"
+        );
+
+        // And the account key that reaches the wire — the UI identity and the
+        // quota-curve binding key — is the directory verbatim.
+        let identity = claude_account_identity_with(
+            Some(spaced),
+            &claude_config_dir_test_credentials(spaced),
+            resolve,
+        );
+        assert_eq!(
+            identity.account_key.as_deref(),
+            Some(spaced),
+            "the account key was trimmed, so the card is addressed by a path \
+             the registry never stored"
+        );
+
+        // And the last-good cache slot, which is a fifth consumer of the same
+        // rule. Collapsed, the two accounts share one entry and each refresh
+        // overwrites the other's fallback — one account's state stored under
+        // another's name, which nothing downstream can detect.
+        assert_ne!(
+            account_slot("claude", Some(spaced)),
+            account_slot("claude", Some(trimmed)),
+            "the last-good cache slot was derived from the trimmed path"
+        );
+
+        // The primary is still addressed by absence, and an empty string is
+        // still the primary — that is what distinguishes "no account" from
+        // "an account whose name happens to be blank", and it is checked
+        // without trimming so a whitespace-only value is not promoted to
+        // primary.
+        assert_eq!(account_key_component(None), None);
+        assert_eq!(account_key_component(Some("")), None);
+        assert_eq!(account_key_component(Some("  ")), Some("  "));
+
+        scope.cleanup();
+    }
+
+    /// G9a. The primary's last-good entry must survive a second account of the
+    /// same client writing its own.
+    ///
+    /// Keyed on `client_id` alone, the second account's every refresh would
+    /// overwrite the primary's entry, and the primary would have nothing to
+    /// fall back to the next time its own fetch failed — it would drop straight
+    /// to an error card. Nothing reports that, because a cache returning
+    /// someone else's snapshot under the right key looks exactly like a cache
+    /// working.
+    ///
+    /// Asserted at the cache rather than through a refresh cycle: M1 assembles
+    /// no second snapshot, so the live three-round scenario cannot happen
+    /// inside it. That scenario is G9b, in M2.
+    #[test]
+    fn g9a_a_second_account_does_not_evict_the_primarys_last_good() {
+        let scope = TestRefreshScope::new("claude", "g9a-last-good");
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let scope_primary = scope
+            .resolve_current("fixture", "account-primary", b"marker-primary")
+            .unwrap();
+        let scope_second = scope
+            .resolve_current("fixture", "account-second", b"marker-second")
+            .unwrap();
+        let binding = ProviderCacheBinding::primary(scope_primary.clone());
+
+        let primary = account_slot("claude", None);
+        let second = account_slot("claude", Some("/Users/someone/.claude-work"));
+        assert_ne!(primary, second, "the account dimension collapsed");
+
+        let cache = Mutex::new(ProviderLastGoodCache::default());
+        lock_last_good(&cache).replace(
+            &primary,
+            binding.clone(),
+            cache_test_snapshot("claude", Ok(scope_primary.clone()), now),
+        );
+        lock_last_good(&cache).replace(
+            &second,
+            binding.clone(),
+            cache_test_snapshot("claude", Ok(scope_second.clone()), now),
+        );
+
+        let recovered = lock_last_good(&cache)
+            .clean_for(&primary, &binding)
+            .expect("the primary must still have a last-good");
+        assert_eq!(
+            recovered.account_scope.as_ref().unwrap().as_str(),
+            scope_primary.as_str(),
+            "the second account overwrote the primary's slot"
+        );
+        assert_eq!(
+            lock_last_good(&cache)
+                .clean_for(&second, &binding)
+                .expect("the second account must have its own")
+                .account_scope
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            scope_second.as_str()
+        );
+
+        // Clearing one account must not evict the other.
+        lock_last_good(&cache).clear(&second);
+        assert!(
+            lock_last_good(&cache).clean_for(&primary, &binding).is_some(),
+            "clearing the second account evicted the primary"
+        );
+        assert!(lock_last_good(&cache).clean_for(&second, &binding).is_none());
+        scope.cleanup();
+    }
+
+    /// G1b. The primary config directory must keep resolving through the
+    /// lineage constant — that value addresses every series already on disk,
+    /// and nothing migrates a series whose key stops matching.
+    ///
+    /// This pins the derivation, not the call sites. `claude_header_snapshot`
+    /// and `fetch_claude_oauth_usage_request` both resolve the scope after
+    /// their HTTP call, so no hermetic test can observe what they pass; that
+    /// half is covered by G1d, which runs the app and asserts the baseline
+    /// scope keeps growing.
+    #[test]
+    fn g1b_claude_history_scope_keeps_the_primary_on_the_lineage_constant() {
+        let scope = TestRefreshScope::new("claude", "g1b-claude");
+        let resolve = |provider: &str, authoritative: Option<(AuthoritativeIdKind, &str)>| {
+            scope.resolve_history(provider, authoritative)
+        };
+
+        let constant = scope.resolve_history("claude", None).unwrap();
+
+        // Primary: no directory, and the blank form a caller could produce.
+        // Whitespace-only is not here — see G6b; it is an invalid extra
+        // directory, not the primary, and calling it the primary took a trim.
+        for primary in [None, Some("")] {
+            let resolved = claude_history_scope_with(primary, resolve)
+                .expect("the primary directory must resolve, not error");
+            assert_eq!(
+                resolved.as_str(),
+                constant.as_str(),
+                "the primary account left the lineage constant, which orphans every existing series"
+            );
+        }
+
+        // An isolated directory resolves authoritatively, on the SHA-256 of the
+        // directory path rather than the path — see `claude_history_scope_with`
+        // for why the shared resolver's trim cannot be given the raw path.
+        let a = "/Users/someone/.claude-work";
+        let b = "/Users/someone/.claude-other";
+        let resolved_a = claude_history_scope_with(Some(a), resolve).expect("authoritative scope");
+        assert_eq!(
+            resolved_a.as_str(),
+            scope
+                .resolve_authoritative(
+                    "claude",
+                    AuthoritativeIdKind::OpaqueId,
+                    &sha256_hex(a.to_string())
+                )
+                .unwrap()
+                .as_str()
+        );
+        assert_ne!(
+            resolved_a.as_str(),
+            constant.as_str(),
+            "an extra account sharing the primary's scope is the contamination this exists to stop"
+        );
+
+        let resolved_b = claude_history_scope_with(Some(b), resolve).expect("second scope");
+        assert_ne!(
+            SeriesKey::new("claude", &resolved_a, "session.v1"),
+            SeriesKey::new("claude", &resolved_b, "session.v1"),
+            "two directories collapsed to one series key"
+        );
+
+        scope.cleanup();
+    }
+
+    /// A `CLAUDE_CONFIG_DIR`-isolated account's credential: the same login
+    /// blob, read from the Keychain item that directory selects.
+    fn claude_config_dir_test_credentials(config_dir: &str) -> ClaudeCredentials {
+        ClaudeCredentials {
+            scope_slot: CredentialSlot {
+                semantic_source: CLAUDE_CONFIG_DIR_KEYCHAIN_SOURCE,
+                canonical_location: claude_keychain_service(Some(config_dir)),
+            },
+            ..claude_test_login_credentials()
+        }
+    }
+
+    /// One recordable session window, so `enrich_snapshot_with` produces an
+    /// observation rather than skipping the snapshot for an unrelated reason.
+    fn claude_identity_test_snapshot(
+        identity: &ClaudeAccountIdentity,
+        account_scope: AccountScope,
+        used_percent: f64,
+        now: i64,
+    ) -> AgentUsageSnapshot {
+        let now_date = Utc.timestamp_opt(now, 0).single().unwrap();
+        let window = UsageWindow::from_provider_used_percent(
+            "Session".to_string(),
+            used_percent,
+            Some(now_date + chrono::Duration::hours(5)),
+            now_date,
+        )
+        .with_identity(
+            "session.v1",
+            Some("session.v1".to_string()),
+            None,
+            Some(DurationEvidence::contract(5 * 3600)),
+        );
+        AgentUsageSnapshot {
+            account_key: identity.account_key.clone(),
+            client_id: "claude".to_string(),
+            source: "oauth".to_string(),
+            updated_at: now_date.to_rfc3339_opts(SecondsFormat::Millis, true),
+            identity: None,
+            account_scope: Ok(account_scope),
+            history_scope: identity.history_scope.clone(),
+            windows: vec![window],
+            credits: None,
+            error: None,
+            transport_diagnostic: None,
+        }
+    }
+
+    /// The `claude` series in a v3 store, by the scope they are filed under.
+    fn claude_series_for(store: &Value, account_scope: &str) -> Vec<Value> {
+        store["series"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["providerId"] == "claude" && entry["accountScope"] == account_scope)
+            .cloned()
+            .collect()
+    }
+
+    const G_TEST_CONFIG_DIR: &str = "/Users/someone/.claude-work";
+
+    /// G2. The primary and an isolated config directory must resolve to
+    /// different durable identities.
+    ///
+    /// Sharing one is not a visible failure: both accounts' samples land in one
+    /// series, the pace estimate is fitted across two accounts' consumption,
+    /// and nothing separates them afterwards.
+    #[test]
+    fn g2_the_primary_and_an_extra_account_resolve_to_different_history_scopes() {
+        let scope = TestRefreshScope::new("claude", "g2-two-accounts");
+        let resolve = |provider: &str, authoritative: Option<(AuthoritativeIdKind, &str)>| {
+            scope.resolve_history(provider, authoritative)
+        };
+
+        let primary =
+            claude_account_identity_with(None, &claude_test_login_credentials(), resolve);
+        let extra = claude_account_identity_with(
+            Some(G_TEST_CONFIG_DIR),
+            &claude_config_dir_test_credentials(G_TEST_CONFIG_DIR),
+            resolve,
+        );
+
+        assert_eq!(primary.account_key, None, "the primary publishes no accountKey");
+        assert_eq!(extra.account_key.as_deref(), Some(G_TEST_CONFIG_DIR));
+
+        let primary_scope = primary
+            .history_scope
+            .expect("the primary must keep resolving");
+        let extra_scope = extra
+            .history_scope
+            .expect("a config-dir credential must resolve authoritatively");
+        assert_ne!(
+            primary_scope.as_str(),
+            extra_scope.as_str(),
+            "the extra account shares the primary's identity, which merges their history"
+        );
+        assert_eq!(
+            primary_scope.as_str(),
+            scope.resolve_history("claude", None).unwrap().as_str(),
+            "the primary left the lineage constant, which orphans every existing series"
+        );
+        assert_ne!(
+            SeriesKey::new("claude", &primary_scope, "session.v1"),
+            SeriesKey::new("claude", &extra_scope, "session.v1")
+        );
+        scope.cleanup();
+    }
+
+    /// G3. An extra account's samples go to its own series, and the primary's
+    /// series is untouched — same count, same content.
+    #[test]
+    fn g3_an_extra_accounts_samples_land_in_its_own_series() {
+        let scope = TestRefreshScope::new("claude", "g3-own-series");
+        let resolve = |provider: &str, authoritative: Option<(AuthoritativeIdKind, &str)>| {
+            scope.resolve_history(provider, authoritative)
+        };
+        let history_path = scope
+            .root()
+            .join(crate::agent_quota_history::HISTORY_FILE_NAME);
+        let account_scope = scope
+            .resolve_current("fixture", "g3-account", b"g3-marker")
+            .unwrap();
+
+        let primary =
+            claude_account_identity_with(None, &claude_test_login_credentials(), resolve);
+        let extra = claude_account_identity_with(
+            Some(G_TEST_CONFIG_DIR),
+            &claude_config_dir_test_credentials(G_TEST_CONFIG_DIR),
+            resolve,
+        );
+        let primary_scope = primary.history_scope.as_ref().unwrap().as_str().to_string();
+        let extra_scope = extra.history_scope.as_ref().unwrap().as_str().to_string();
+
+        let now = 1_800_000_000_i64;
+        let mut primary_snapshot =
+            claude_identity_test_snapshot(&primary, account_scope.clone(), 20.0, now);
+        enrich_snapshot_with(&mut primary_snapshot, now, |active, observations, at| {
+            crate::agent_quota_history::record_observations_at_path_and_evaluate(
+                active,
+                observations,
+                at,
+                &history_path,
+            )
+        });
+        let after_primary: Value = serde_json::from_slice(&fs::read(&history_path).unwrap()).unwrap();
+        let primary_series_before = claude_series_for(&after_primary, &primary_scope);
+        assert_eq!(
+            primary_series_before.len(),
+            1,
+            "the primary must have recorded one series to compare against"
+        );
+
+        let mut extra_snapshot =
+            claude_identity_test_snapshot(&extra, account_scope.clone(), 77.0, now + 600);
+        enrich_snapshot_with(&mut extra_snapshot, now + 600, |active, observations, at| {
+            crate::agent_quota_history::record_observations_at_path_and_evaluate(
+                active,
+                observations,
+                at,
+                &history_path,
+            )
+        });
+        let after_extra: Value = serde_json::from_slice(&fs::read(&history_path).unwrap()).unwrap();
+
+        assert_eq!(
+            claude_series_for(&after_extra, &primary_scope),
+            primary_series_before,
+            "the extra account's write changed the primary's series"
+        );
+        let extra_series = claude_series_for(&after_extra, &extra_scope);
+        assert_eq!(
+            extra_series.len(),
+            1,
+            "the extra account recorded no series of its own"
+        );
+        assert_eq!(extra_series[0]["windowKey"], "session.v1");
+        assert_ne!(
+            primary_scope, extra_scope,
+            "one scope for both accounts is the contamination this gate exists to catch"
+        );
+        scope.cleanup();
+    }
+
+    /// G4. When an extra account's scope cannot be resolved, it records
+    /// nothing — and in particular does not fall back to the primary's
+    /// identity, which would merge its samples into the primary's series with
+    /// no way to separate them afterwards.
+    #[test]
+    fn g4_an_unresolvable_extra_account_records_nothing_and_leaves_the_primary_alone() {
+        let scope = TestRefreshScope::new("claude", "g4-fail-closed");
+        // Only the authoritative branch fails: passing `None` would still
+        // succeed, so a fallback would be silent rather than an error.
+        let resolve = |provider: &str, authoritative: Option<(AuthoritativeIdKind, &str)>| {
+            if authoritative.is_some() {
+                Err(AccountScopeError::NoTrustedEvidence)
+            } else {
+                scope.resolve_history(provider, None)
+            }
+        };
+        let history_path = scope
+            .root()
+            .join(crate::agent_quota_history::HISTORY_FILE_NAME);
+        let account_scope = scope
+            .resolve_current("fixture", "g4-account", b"g4-marker")
+            .unwrap();
+
+        let now = 1_800_000_000_i64;
+        let primary =
+            claude_account_identity_with(None, &claude_test_login_credentials(), resolve);
+        let mut primary_snapshot =
+            claude_identity_test_snapshot(&primary, account_scope.clone(), 20.0, now);
+        enrich_snapshot_with(&mut primary_snapshot, now, |active, observations, at| {
+            crate::agent_quota_history::record_observations_at_path_and_evaluate(
+                active,
+                observations,
+                at,
+                &history_path,
+            )
+        });
+        let store_before = fs::read(&history_path).unwrap();
+
+        let extra = claude_account_identity_with(
+            Some(G_TEST_CONFIG_DIR),
+            &claude_config_dir_test_credentials(G_TEST_CONFIG_DIR),
+            resolve,
+        );
+        assert!(
+            extra.history_scope.is_err(),
+            "an unresolvable extra account must have no durable identity at all"
+        );
+        assert_eq!(
+            extra.account_key.as_deref(),
+            Some(G_TEST_CONFIG_DIR),
+            "it still publishes a card; only its history is withheld"
+        );
+
+        let writes = std::cell::Cell::new(0);
+        let mut extra_snapshot =
+            claude_identity_test_snapshot(&extra, account_scope, 77.0, now + 600);
+        enrich_snapshot_with(&mut extra_snapshot, now + 600, |active, observations, at| {
+            writes.set(writes.get() + 1);
+            crate::agent_quota_history::record_observations_at_path_and_evaluate(
+                active,
+                observations,
+                at,
+                &history_path,
+            )
+        });
+        assert_eq!(writes.get(), 0, "it opened a history transaction anyway");
+        assert_eq!(
+            fs::read(&history_path).unwrap(),
+            store_before,
+            "the store changed, so the samples went somewhere — the primary's series"
+        );
+        scope.cleanup();
+    }
+
+    /// G4b. A credential that the config directory did not select must not
+    /// record durable history under that directory's name.
+    ///
+    /// The directory is admissible as an identity only because it selects the
+    /// Keychain item the credential was read from. Any of the other five
+    /// sources — env token, login-shell harvest, `TOKENBAR_*` override, the
+    /// hardcoded credentials file, the fixed-service setup-token item — belongs
+    /// to whichever account happens to own it, and filing its numbers under
+    /// this directory stores one account's usage under another's name.
+    ///
+    /// The scope here resolves fine, which is the point: this is not the same
+    /// fail-closed rule as G4 and G4's gate cannot catch it.
+    #[test]
+    fn g4b_a_credential_from_another_source_records_no_history_for_an_extra_account() {
+        let scope = TestRefreshScope::new("claude", "g4b-credential-source");
+        let resolve = |provider: &str, authoritative: Option<(AuthoritativeIdKind, &str)>| {
+            scope.resolve_history(provider, authoritative)
+        };
+        let history_path = scope
+            .root()
+            .join(crate::agent_quota_history::HISTORY_FILE_NAME);
+        let account_scope = scope
+            .resolve_current("fixture", "g4b-account", b"g4b-marker")
+            .unwrap();
+
+        let now = 1_800_000_000_i64;
+        let primary =
+            claude_account_identity_with(None, &claude_test_login_credentials(), resolve);
+        let mut primary_snapshot =
+            claude_identity_test_snapshot(&primary, account_scope.clone(), 20.0, now);
+        enrich_snapshot_with(&mut primary_snapshot, now, |active, observations, at| {
+            crate::agent_quota_history::record_observations_at_path_and_evaluate(
+                active,
+                observations,
+                at,
+                &history_path,
+            )
+        });
+        let store_before = fs::read(&history_path).unwrap();
+
+        // Every source `fetch_claude_inner` can resolve that a directory does
+        // not choose.
+        for semantic_source in [
+            "claude-code-environment",
+            "claude-code-login-shell",
+            "claude-setup-keychain",
+            "claude-environment",
+            "claude-login-keychain",
+            "claude-login-file",
+        ] {
+            let credentials = ClaudeCredentials {
+                scope_slot: CredentialSlot {
+                    semantic_source,
+                    canonical_location: "unrelated".to_string(),
+                },
+                ..claude_test_login_credentials()
+            };
+            let extra =
+                claude_account_identity_with(Some(G_TEST_CONFIG_DIR), &credentials, resolve);
+            assert!(
+                extra.history_scope.is_err(),
+                "{semantic_source} was allowed to record under a directory that did not select it"
+            );
+
+            let writes = std::cell::Cell::new(0);
+            let mut snapshot =
+                claude_identity_test_snapshot(&extra, account_scope.clone(), 77.0, now + 600);
+            enrich_snapshot_with(&mut snapshot, now + 600, |active, observations, at| {
+                writes.set(writes.get() + 1);
+                crate::agent_quota_history::record_observations_at_path_and_evaluate(
+                    active,
+                    observations,
+                    at,
+                    &history_path,
+                )
+            });
+            assert_eq!(writes.get(), 0, "{semantic_source} opened a history transaction");
+        }
+
+        assert_eq!(
+            fs::read(&history_path).unwrap(),
+            store_before,
+            "the primary's series moved while an unselected credential was in play"
+        );
+
+        // And the one source a directory does select still records, so the gate
+        // above is a discriminator rather than a blanket refusal.
+        let allowed = claude_account_identity_with(
+            Some(G_TEST_CONFIG_DIR),
+            &claude_config_dir_test_credentials(G_TEST_CONFIG_DIR),
+            resolve,
+        );
+        assert!(allowed.history_scope.is_ok());
+        scope.cleanup();
+    }
+
+    /// G5. With no extra config directory set, nothing about this feature is
+    /// observable: no `accountKey` on the wire, and no additional Keychain
+    /// read.
+    #[test]
+    fn g5_an_unconfigured_process_adds_no_account_key_and_no_keychain_read() {
+        let _guard = crate::claude_config_dirs::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::claude_config_dirs::reset_for_test();
+
+        // Reads are one per configured directory...
+        let reads = std::cell::Cell::new(0);
+        let loaded = load_claude_config_dir_credentials_with(G_TEST_CONFIG_DIR, |dir| {
+            reads.set(reads.get() + 1);
+            assert_eq!(dir, Some(G_TEST_CONFIG_DIR), "it read another account's item");
+            Ok(None)
+        });
+        assert!(loaded.is_err(), "a missing item must not fall back to the primary's credential");
+        assert_eq!(reads.get(), 1, "one configured account costs exactly one read");
+        // ...and there are no configured directories until the setter is called.
+        assert!(crate::claude_config_dirs::snapshot().is_empty());
+
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let scope = TestRefreshScope::new("claude", "g5-wire");
+        let account_scope = scope
+            .resolve_current("fixture", "g5-account", b"g5-marker")
+            .unwrap();
+        let primary = cache_test_snapshot("claude", Ok(account_scope.clone()), now);
+        let json = serde_json::to_string(&primary).unwrap();
+        assert!(
+            !json.contains("accountKey"),
+            "the primary's payload gained a field: {json}"
+        );
+        assert!(
+            json.starts_with(r#"{"clientId":"claude","source":"#),
+            "something was inserted where accountKey would go: {json}"
+        );
+
+        // The field is not dead: an extra account does carry it.
+        let extra = AgentUsageSnapshot {
+            account_key: Some(G_TEST_CONFIG_DIR.to_string()),
+            ..cache_test_snapshot("claude", Ok(account_scope), now)
+        };
+        let extra_json = serde_json::to_string(&extra).unwrap();
+        assert!(
+            extra_json.contains(&format!(r#""accountKey":"{G_TEST_CONFIG_DIR}""#)),
+            "{extra_json}"
+        );
+        scope.cleanup();
+        crate::claude_config_dirs::reset_for_test();
+    }
+
+    /// G9b. The live three-round scenario M1 could not stage: the primary
+    /// succeeds, an extra account succeeds, and then the primary fails.
+    ///
+    /// Keyed on `client_id` alone the second round overwrites the primary's
+    /// last-good entry, and the third round finds a binding that does not match
+    /// — so the primary drops to an error card the moment one poll fails,
+    /// while its own good snapshot was discarded a round earlier.
+    #[test]
+    fn g9b_the_primary_recovers_its_own_last_good_after_an_extra_account_succeeds() {
+        let scope = TestRefreshScope::new("claude", "g9b-three-rounds");
+        let primary_scope = scope
+            .resolve_current("fixture", "g9b-primary", b"g9b-primary-marker")
+            .unwrap();
+        let extra_scope = scope
+            .resolve_current("fixture", "g9b-extra", b"g9b-extra-marker")
+            .unwrap();
+        let primary_binding = ProviderCacheBinding::primary(primary_scope.clone());
+        let extra_binding = ProviderCacheBinding::primary(extra_scope.clone());
+        let round_one = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let round_two = round_one + chrono::Duration::seconds(60);
+        let round_three = round_two + chrono::Duration::seconds(60);
+        let cache = Mutex::new(ProviderLastGoodCache::default());
+
+        let primary_snapshot = cache_test_snapshot("claude", Ok(primary_scope.clone()), round_one);
+        let primary_updated_at = primary_snapshot.updated_at.clone();
+        apply_provider_outcome_with(
+            &cache,
+            "claude",
+            None,
+            "oauth",
+            round_one,
+            ProviderFetchOutcome::Success {
+                snapshot: primary_snapshot,
+                cache_binding: Some(primary_binding.clone()),
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        apply_provider_outcome_with(
+            &cache,
+            "claude",
+            Some(G_TEST_CONFIG_DIR),
+            "oauth",
+            round_two,
+            ProviderFetchOutcome::Success {
+                snapshot: AgentUsageSnapshot {
+                    account_key: Some(G_TEST_CONFIG_DIR.to_string()),
+                    ..cache_test_snapshot("claude", Ok(extra_scope.clone()), round_two)
+                },
+                cache_binding: Some(extra_binding.clone()),
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        let recovered = apply_provider_outcome_with(
+            &cache,
+            "claude",
+            None,
+            "oauth",
+            round_three,
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::transient(
+                "Claude usage request failed. Retrying automatically.",
+                Some(primary_binding.clone()),
+                SafeTransportDiagnostic::server_error(503),
+            )),
+            |_| {},
+        )
+        .unwrap();
+
+        assert!(
+            !recovered.windows.is_empty(),
+            "the primary lost its last-good and fell back to an error card"
+        );
+        assert_eq!(
+            recovered.updated_at, primary_updated_at,
+            "the primary was served the extra account's snapshot"
+        );
+        assert_eq!(
+            recovered.account_key, None,
+            "the recovered card is not the primary's"
+        );
+        assert!(recovered.error.is_some(), "a failed round must still report the failure");
+
+        // The extra account kept its own entry through all three rounds.
+        assert!(
+            lock_last_good(&cache)
+                .clean_for(&account_slot("claude", Some(G_TEST_CONFIG_DIR)), &extra_binding)
+                .is_some()
+        );
+        scope.cleanup();
+    }
+
+    /// The 429 cooldown is per account, for the same reason the last-good cache
+    /// is. One slot and two accounts means each poll finds the other's binding,
+    /// clears it and sends a request — so a rate-limited account never waits out
+    /// its cooldown against an endpoint that rate-limits aggressively.
+    #[test]
+    fn two_claude_accounts_keep_independent_rate_limit_cooldowns() {
+        let scope = TestRefreshScope::new("claude", "gate-per-account");
+        let primary_binding = ProviderCacheBinding::primary(
+            scope
+                .resolve_current("fixture", "gate-primary", b"gate-primary-marker")
+                .unwrap(),
+        );
+        let extra_binding = ProviderCacheBinding::primary(
+            scope
+                .resolve_current("fixture", "gate-extra", b"gate-extra-marker")
+                .unwrap(),
+        );
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+
+        with_gate(None, |gate| {
+            gate.record_rate_limit(primary_binding.clone(), None, now)
+        });
+        // The extra account polls: it must neither be blocked by the primary's
+        // cooldown nor clear it.
+        assert!(with_gate(Some(G_TEST_CONFIG_DIR), |gate| gate
+            .blocked_until_for(&extra_binding, now))
+        .is_none());
+        assert!(
+            with_gate(None, |gate| gate.blocked_until_for(&primary_binding, now)).is_some(),
+            "the extra account's poll cleared the primary's cooldown"
+        );
+
+        with_gate(None, ClaudeUsageGate::clear);
+        with_gate(Some(G_TEST_CONFIG_DIR), ClaudeUsageGate::clear);
         scope.cleanup();
     }
 
@@ -10986,6 +12386,7 @@ mod tests {
             generated_at: "2026-07-10T12:00:00.000Z".to_string(),
             publication_generation: 1,
             agents: vec![AgentUsageSnapshot {
+                account_key: None,
                 client_id: "provider-fixture.invalid".to_string(),
                 source: "fixture.invalid".to_string(),
                 updated_at: "2026-07-10T12:00:00.000Z".to_string(),

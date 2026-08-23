@@ -27,7 +27,7 @@ enum QuotaSelectionPolicy {
         payload: AgentUsagePayload?,
         persistedSelection: String,
         excluding: Set<String>
-    ) -> (clientId: String, window: UsageWindow)? {
+    ) -> (clientId: String, accountKey: String?, window: UsageWindow)? {
         let selection = effectiveSelection(
             payload: payload,
             persistedSelection: persistedSelection,

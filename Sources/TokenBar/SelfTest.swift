@@ -448,10 +448,16 @@ private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendab
 
     init(payload: AgentUsagePayload) { self.payload = payload }
 
+    /// Per-account override, checked before the shared `curve` fallback: lets
+    /// a case give a second Claude account its own distinct curve so a test
+    /// can prove the two are not conflated.
+    var curveByAccount: [String?: QuotaCurve] = [:]
+
     func quotaCurveSync(
-        clientId: String, windowKey: String, generation: UInt64
+        clientId: String, accountKey: String?, windowKey: String, generation: UInt64
     ) throws -> QuotaCurve? {
         if failCurveRead { throw QuotaUnavailable() }
+        if let byAccount = curveByAccount[accountKey] { return byAccount }
         return curve
     }
 
@@ -486,6 +492,80 @@ private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendab
     func windowUsage(from: Int64, until: Int64) async throws -> WindowUsage {
         scans += 1
         return WindowUsage(messages: [], undatedCount: 0, processingTimeMs: 0)
+    }
+}
+
+/// Moves the account registry WHILE the quota fetch is in flight, which is the
+/// only moment the guard `M3-p` covers can be observed: the payload is already
+/// being built when the registry changes, so it answers the previous one.
+///
+/// The first fetch signals and returns the stale payload; every fetch after it
+/// returns the fresh one. A poll that applies the first has published the
+/// previous account set.
+private final class RegistryRaceSource: UsageDataSource, @unchecked Sendable {
+    private let inner = DashboardModelTestSource(failingGraphYear: "")
+    private let stale: AgentUsagePayload
+    private let fresh: AgentUsagePayload
+    private var pending: CheckedContinuation<Void, Never>?
+    var fetches = 0
+
+    init(stale: AgentUsagePayload, fresh: AgentUsagePayload) {
+        self.stale = stale
+        self.fresh = fresh
+    }
+
+    func quotaCurveSync(
+        clientId: String, accountKey: String?, windowKey: String, generation: UInt64
+    ) throws -> QuotaCurve? { nil }
+
+    var allowsQuotaCachePersistence: Bool { false }
+    func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        try await inner.graph(year: year, priority: priority)
+    }
+    func refreshGraph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        try await inner.refreshGraph(year: year, priority: priority)
+    }
+    func modelReport(year: String?, priority: TaskPriority) async throws -> ModelReport {
+        try await inner.modelReport(year: year, priority: priority)
+    }
+    func hourlyReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> HourlyReport {
+        try await inner.hourlyReport(year: year, clients: clients, priority: priority)
+    }
+    func agentsReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> AgentsReport {
+        try await inner.agentsReport(year: year, clients: clients, priority: priority)
+    }
+    /// Every fetch after the first SUSPENDS until `release()` — that pause is
+    /// what makes the property observable. Left running, the loop applies the
+    /// fresh payload a few milliseconds later and the final value is the same
+    /// whether or not the stale one was published on the way; the first version
+    /// of this source did that and its gate could not fail.
+    func agentUsage() async throws -> AgentUsagePayload {
+        fetches += 1
+        if fetches == 1 {
+            await MainActor.run { ClaudeExtraRoots.RegistryChange.signal() }
+            return stale
+        }
+        await withCheckedContinuation { pending = $0 }
+        return fresh
+    }
+
+    /// Lets the held fetch finish. A continuation rather than a semaphore: the
+    /// poll runs on the main actor, and blocking it would stop the very test
+    /// that is about to release this.
+    func release() {
+        pending?.resume()
+        pending = nil
+    }
+    func usageTrace(windowSecs: Int64) async throws -> [TraceBucket] {
+        try await inner.usageTrace(windowSecs: windowSecs)
+    }
+    func tokensPerMin() async throws -> Double { try await inner.tokensPerMin() }
+    func windowUsage(from: Int64, until: Int64) async throws -> WindowUsage {
+        WindowUsage(messages: [], undatedCount: 0, processingTimeMs: 0)
     }
 }
 
@@ -2954,7 +3034,7 @@ enum SelfTest {
         func quotaCurveFailure(client: String, window: String, generation: UInt64) -> String? {
             do {
                 _ = try TBCore.quotaCurve(
-                    clientId: client, windowKey: window, generation: generation)
+                    clientId: client, accountKey: nil, windowKey: window, generation: generation)
                 return nil
             } catch let TBCoreError.bridge(message) {
                 return message
@@ -7157,7 +7237,7 @@ enum SelfTest {
         // substitution visible rather than silent.
         do {
             let curve = try TBCore.quotaCurve(
-                clientId: "__selftest__", windowKey: "__selftest__", generation: 0)
+                clientId: "__selftest__", accountKey: nil, windowKey: "__selftest__", generation: 0)
             expect(false, "unbound quota curve fails closed (got \(curve == nil ? "null" : "a curve"))")
         } catch let TBCoreError.bridge(message) {
             expect(
@@ -11242,7 +11322,7 @@ enum SelfTest {
         // below is that it produces a placed window from memory alone.
         let stage1 = WindowCardLoader.quotaHalf(
             payload: wPayload, clientId: "codex", attempted: true,
-            curve: { _, _, _ in wCurve }, nowMs: wNow * 1000)
+            curve: { _, _, _, _ in wCurve }, nowMs: wNow * 1000)
         var stage1Placed = false
         var stage1Live = false
         if case let .quotaOnly(q, _) = stage1 {
@@ -11264,7 +11344,7 @@ enum SelfTest {
         var isLoading = false
         if case .loading = WindowCardLoader.quotaHalf(
             payload: nil, clientId: "codex", attempted: false,
-            curve: { _, _, _ in wCurve }, nowMs: wNow * 1000) { isLoading = true }
+            curve: { _, _, _, _ in wCurve }, nowMs: wNow * 1000) { isLoading = true }
         expect(isLoading, "L6a a payload that has not arrived yet is loading")
 
         // L6a (ii). Payload in, but this window has no recorded history: a
@@ -11273,7 +11353,7 @@ enum SelfTest {
         var noHistory = false
         if case .noQuotaHistory = WindowCardLoader.quotaHalf(
             payload: wPayload, clientId: "codex", attempted: true,
-            curve: { _, _, _ in nil }, nowMs: wNow * 1000) { noHistory = true }
+            curve: { _, _, _, _ in nil }, nowMs: wNow * 1000) { noHistory = true }
         expect(noHistory,
                "L6a a window with no quota history is terminal, not perpetually loading")
 
@@ -11288,7 +11368,7 @@ enum SelfTest {
         var transientIsLoading = false
         if case .loading = WindowCardLoader.quotaHalf(
             payload: wPayload, clientId: "codex", attempted: true,
-            curve: { _, _, _ in throw CurveReadFailed() }, nowMs: wNow * 1000)
+            curve: { _, _, _, _ in throw CurveReadFailed() }, nowMs: wNow * 1000)
         { transientIsLoading = true }
         expect(transientIsLoading,
                "L6b a failed curve read is transient, never a claim of no history")
@@ -11308,17 +11388,17 @@ enum SelfTest {
         expect(
             stateIsLoading(WindowCardLoader.quotaHalf(
                 payload: nil, clientId: "codex", attempted: false,
-                curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
+                curve: { _, _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d no payload and no attempt yet is still waiting")
         expect(
             stateIsBlocked(WindowCardLoader.quotaHalf(
                 payload: nil, clientId: "codex", attempted: true,
-                curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
+                curve: { _, _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d no payload after the attempt settled is a terminal answer")
         expect(
             stateIsBlocked(WindowCardLoader.quotaHalf(
                 payload: wPayload, clientId: "not-in-payload", attempted: true,
-                curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
+                curve: { _, _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d a client the settled payload does not carry is answered, not awaited")
         // The third guard, and the one the "no quota windows" wording was
         // written for: present, no error, and offering nothing to settle on.
@@ -11331,17 +11411,17 @@ enum SelfTest {
         expect(
             stateIsBlocked(WindowCardLoader.quotaHalf(
                 payload: emptyWindows, clientId: "codex", attempted: true,
-                curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
+                curve: { _, _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d an agent present with no windows is answered once the attempt has settled")
         expect(
             stateIsLoading(WindowCardLoader.quotaHalf(
                 payload: emptyWindows, clientId: "codex", attempted: false,
-                curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
+                curve: { _, _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d and is still a wait before it has")
         expect(
             stateIsLoading(WindowCardLoader.quotaHalf(
                 payload: wPayload, clientId: "not-in-payload", attempted: false,
-                curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
+                curve: { _, _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d a client missing from an unsettled payload is still a wait")
 
         // L6g. The picker's selection must be one of its own options. The
@@ -11378,12 +11458,12 @@ enum SelfTest {
         expect(
             WindowCardLoader.quotaHalf(
                 payload: wPayload, clientId: "codex", attempted: true,
-                curve: { _, _, _ in wCurve }, nowMs: wNow * 1000).cardId == wSelected,
+                curve: { _, _, _, _ in wCurve }, nowMs: wNow * 1000).cardId == wSelected,
             "L6f a resolved card reports the same identity the selection does")
         expect(
             WindowCardLoader.quotaHalf(
                 payload: nil, clientId: "codex", attempted: false,
-                curve: { _, _, _ in nil }, nowMs: wNow * 1000).cardId == nil,
+                curve: { _, _, _, _ in nil }, nowMs: wNow * 1000).cardId == nil,
             "L6f while a card about no window reports none, so it is never retained")
 
         // L6e. Teaching `quotaHalf` to answer is not the same as the answer
@@ -11418,15 +11498,15 @@ enum SelfTest {
         // check above is one `try?` away from silently reverting.
         expect(
             WindowCardLoader.curveSamples(
-                payload: wPayload, clientId: "codex",
+                payload: wPayload, clientId: "codex", accountKey: nil,
                 window: wPayload.agents[0].uniqueCardWindows[0],
-                curve: { _, _, _ in throw CurveReadFailed() }, nowMs: wNow * 1000) == nil,
+                curve: { _, _, _, _ in throw CurveReadFailed() }, nowMs: wNow * 1000) == nil,
             "L6b a throwing read yields nil, meaning unknown")
         expect(
             WindowCardLoader.curveSamples(
-                payload: wPayload, clientId: "codex",
+                payload: wPayload, clientId: "codex", accountKey: nil,
                 window: wPayload.agents[0].uniqueCardWindows[0],
-                curve: { _, _, _ in nil }, nowMs: wNow * 1000) == [],
+                curve: { _, _, _, _ in nil }, nowMs: wNow * 1000) == [],
             "L6b a read that succeeds with no curve yields empty, meaning none")
 
         // Same contract, same reason, one layer over: the history card reads
@@ -11436,12 +11516,12 @@ enum SelfTest {
         expect(
             WindowCardLoader.cycles(
                 payload: nil, clientId: "codex",
-                curve: { _, _, _ in nil }) == nil,
+                curve: { _, _, _, _ in nil }) == nil,
             "L6c no payload yet is unknown, not an empty history")
         expect(
             WindowCardLoader.cycles(
                 payload: wPayload, clientId: "codex",
-                curve: { _, _, _ in nil }) == [],
+                curve: { _, _, _, _ in nil }) == [],
             "L6c a payload whose curve holds nothing is an empty history")
 
         // L3a. The union starts at the earliest R - D across every client, so
@@ -11548,7 +11628,7 @@ enum SelfTest {
             capturedAt: Date(), messages: msMessages)
         let msStage1 = WindowCardLoader.quotaHalf(
             payload: msPayload, clientId: "codex", attempted: true,
-            curve: { _, _, _ in
+            curve: { _, _, _, _ in
                 windowCurve(resetAtSecs: wNow + 3_600, durationSecs: 604_800,
                             at: [(wNow - 2_000, 4), (wNow - 500, 9)])
             },
@@ -11575,7 +11655,7 @@ enum SelfTest {
         ])
         let msUnscopedStage1 = WindowCardLoader.quotaHalf(
             payload: msUnscoped, clientId: "codex", attempted: true,
-            curve: { _, _, _ in
+            curve: { _, _, _, _ in
                 windowCurve(resetAtSecs: wNow + 3_600, durationSecs: 604_800,
                             at: [(wNow - 2_000, 4), (wNow - 500, 9)])
             },
@@ -11621,7 +11701,7 @@ enum SelfTest {
         ], modelScope: "ghost")
         let msMissStage1 = WindowCardLoader.quotaHalf(
             payload: msMissPayload, clientId: "codex", attempted: true,
-            curve: { _, _, _ in
+            curve: { _, _, _, _ in
                 windowCurve(resetAtSecs: wNow + 3_600, durationSecs: 604_800,
                             at: [(wNow - 2_000, 4), (wNow - 500, 9)])
             },
@@ -12107,7 +12187,7 @@ enum SelfTest {
         // cap applied at the fold made a window that ran out forty cycles ago
         // report that it never had.
         let qhcSummary = QuotaOverviewFold.summaries(windows: [
-            (clientId: "c", cardId: "w", label: "W", cycles: qhcAll)
+            (clientId: "c", accountKey: nil, cardId: "w", label: "W", cycles: qhcAll)
         ]).first
         expect(qhcSummary?.neverExhausted == false && qhcSummary?.cycleCount == 40,
                "QH-CAP-LIFETIME exhaustion older than the cap is still visible to the "
@@ -12170,10 +12250,10 @@ enum SelfTest {
         // only the restricted return, then above both while the opencode branch
         // exited before either — and each fix moved a line without making "no
         // hidden client leaves this function" checkable. Now it is.
-        expect(AgentLimitsCard.visible(["codex", "claude"], hiddenRaw: "claude")
+        expect(AgentLimitsCard.visible(["codex", "claude"], hiddenRaw: "claude") { $0 }
                    == ["codex"],
                "AL-HIDDEN a hidden client is removed from a candidate list")
-        expect(AgentLimitsCard.visible(["codex", "claude"], hiddenRaw: "") ==
+        expect(AgentLimitsCard.visible(["codex", "claude"], hiddenRaw: "") { $0 } ==
                    ["codex", "claude"],
                "AL-HIDDEN and an empty hide set removes nothing, so the check "
                    + "above is not simply emptying the list")
@@ -12357,7 +12437,7 @@ enum SelfTest {
                "QH-B and the peak is the absolute reading, so the ceiling is knowable")
         expect(
             QuotaOverviewFold.summaries(windows: [
-                (clientId: "c", cardId: "w", label: "W", cycles: qhbCycles)
+                (clientId: "c", accountKey: nil, cardId: "w", label: "W", cycles: qhbCycles)
             ]).first?.neverExhausted == false,
             "QH-B a cycle that reached 100% is not reported as never having run out")
 
@@ -12667,11 +12747,11 @@ enum SelfTest {
         // `QuotaHistoryFold.cycles` hands back newest first; a strip is read in
         // time order, so the fold has to reverse it. 30 is the newest here.
         let qoSummaries = QuotaOverviewFold.summaries(windows: [
-            (clientId: "claude", cardId: "session.v1", label: "Session",
+            (clientId: "claude", accountKey: nil, cardId: "session.v1", label: "Session",
              cycles: [qoCycle(500, 30), qoCycle(400, 58), qoCycle(300, 10)]),
-            (clientId: "grok", cardId: "billing.v1", label: "Weekly",
+            (clientId: "grok", accountKey: nil, cardId: "billing.v1", label: "Weekly",
              cycles: [qoCycle(500, 99)]),
-            (clientId: "copilot", cardId: "chat.v1", label: "Chat", cycles: []),
+            (clientId: "copilot", accountKey: nil, cardId: "chat.v1", label: "Chat", cycles: []),
         ])
 
         expect(qoSummaries.map(\.clientId) == ["grok", "claude"],
@@ -12692,7 +12772,7 @@ enum SelfTest {
         // reassurance. The fixture above cannot reach this: three cycles all
         // fit, so the two readings coincide.
         let qoLong = QuotaOverviewFold.summaries(windows: [(
-            clientId: "claude", cardId: "session.v1", label: "Session",
+            clientId: "claude", accountKey: nil, cardId: "session.v1", label: "Session",
             // Newest first, so the 99 is the OLDEST of twenty and falls off a
             // sixteen-bar strip.
             cycles: (0..<19).map { qoCycle(Int64(1000 - $0 * 10), 5) }
@@ -13374,6 +13454,26 @@ enum SelfTest {
             ],
             "payloadJSON deduplicates repeated config dirs instead of doubling the path list")
 
+        // The OTHER payload built from the same list: the config dirs
+        // themselves, for `tb_set_claude_config_dirs`. It answers "whose
+        // credential is this quota card fetched with", where payloadJSON above
+        // answers "which directories does the scanner walk", so it must carry
+        // the dirs and not their sub-roots.
+        let configDirsPayload = ClaudeExtraRoots.configDirsPayloadJSON([
+            "/Users/x/.claude-work/", "/Users/x/.claude-work", "/Users/y/.claude-other",
+        ])
+        let decodedConfigDirs = try! JSONDecoder().decode(
+            [String].self, from: Data(configDirsPayload.utf8))
+        expect(
+            decodedConfigDirs == ["/Users/x/.claude-work", "/Users/y/.claude-other"],
+            "configDirsPayloadJSON standardizes and deduplicates the config dirs themselves "
+                + "(mutation: keeping the trailing slash derives a different Keychain service "
+                + "name, so the account's card would read no credential at all; emitting the "
+                + "expanded sub-roots would derive it from a directory that holds no item)")
+        expect(
+            ClaudeExtraRoots.configDirsPayloadJSON([]) == "[]",
+            "configDirsPayloadJSON([]) clears the registry rather than leaving it untouched")
+
         // CE-APPLIED. What produced a scan is the registry the engine ACCEPTED,
         // not the list the user configured. `apply` deliberately keeps the
         // setter off the calling actor — the core probes each path with
@@ -13484,6 +13584,608 @@ enum SelfTest {
                 + "(this is display-only — a missing path stays in the persisted list, "
                 + "matching how vendor's own scan silently skips nonexistent roots "
                 + "instead of dropping the user's configuration)")
+
+        // MARK: - M3: a Claude card is addressed by (clientId, accountKey)
+
+        // Two Claude accounts sharing `clientId == "claude"`, listed EXTRA
+        // account first — deliberately not primary-first, so a mutation that
+        // resolves "the first agent whose clientId matches" instead of "the
+        // agent whose (clientId, accountKey) pair matches" changes the
+        // answer rather than accidentally still passing by array order.
+        // Distinct remaining percentages (primary 90, extra 20) so the
+        // tighter one — the extra account — is never the one a naive
+        // first-match would already happen to return.
+        let m3ExtraKey = "/Users/x/.claude-extra"
+        let m3PayloadJSON = """
+        {"generatedAt":"now","publicationGeneration":9,"agents":[
+          {"clientId":"claude","accountKey":"\(m3ExtraKey)","source":"oauth","updatedAt":"now",
+           "windows":[{"cardId":"session.v1","label":"Session","usedPercent":80,"remainingPercent":20}]},
+          {"clientId":"claude","source":"oauth","updatedAt":"now",
+           "windows":[{"cardId":"session.v1","label":"Session","usedPercent":10,"remainingPercent":90}]}
+        ]}
+        """
+        let m3Payload = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(m3PayloadJSON.utf8))
+
+        // M3-a. Restore the historical `Dictionary(agents.map { ($0.clientId, $0) },
+        // uniquingKeysWith: { first, _ in first })` — keying by clientId alone — to
+        // watch this go red: the second account collapses into the first and the
+        // count drops from 2 to 1.
+        expect(
+            AgentLimitsCard.snapshotsByRow(m3Payload.agents).count == 2,
+            "M3-a two Claude agents with different accountKey both survive to the "
+                + "rendered list, rather than one collapsing onto the other under a "
+                + "clientId-only dictionary key")
+
+        // M3-b. Change `expandedWithExtraAccounts` to test `visiblePrimaries.contains`
+        // membership before deciding whether to emit the EXTRA row too (instead of
+        // unconditionally appending every known id's extras) to watch this go red.
+        let m3KnownIds = ["codex", "claude"]
+        let m3VisiblePrimaries = Set(
+            AgentLimitsCard.visible(
+                m3KnownIds.map { AccountIdentity(clientId: $0, accountKey: nil) },
+                hiddenRaw: "claude"
+            ) { $0.clientId }.map(\.clientId))
+        let m3Expanded = AgentLimitsCard.expandedWithExtraAccounts(
+            known: m3KnownIds, visiblePrimaries: m3VisiblePrimaries, agents: m3Payload.agents)
+        expect(
+            m3Expanded.contains(AccountIdentity(clientId: "claude", accountKey: m3ExtraKey))
+                && !m3Expanded.contains(AccountIdentity(clientId: "claude", accountKey: nil))
+                && m3Expanded.contains(AccountIdentity(clientId: "codex", accountKey: nil)),
+            "M3-b hiding the primary Claude account by clientId (\"claude\" in "
+                + "limitsHiddenRaw) removes only the primary row, leaving the extra "
+                + "account's row visible and codex untouched")
+
+        // M3-c. Change `agent.clientId == parsed.clientId && agent.accountKey ==
+        // accountKey` back to `agent.clientId == parsed.clientId` in both
+        // `canonicalSelection` and `resolve` to watch this go red.
+        let m3Auto = QuotaResolver.resolve(payload: m3Payload, selection: QuotaResolver.auto)
+        expect(
+            m3Auto?.clientId == "claude" && m3Auto?.accountKey == m3ExtraKey
+                && m3Auto?.window.remainingPercent == 20,
+            "M3-c auto mode can select the EXTRA account when it is the tighter of "
+                + "the two, not only ever the first snapshot in the payload")
+        let m3StoredSelection = QuotaResolver.selection(clientId: "claude", cardId: "session.v1")
+        let m3ResolvedPrimary = QuotaResolver.resolve(
+            payload: m3Payload, selection: m3StoredSelection, accountKey: nil)
+        let m3ResolvedExtra = QuotaResolver.resolve(
+            payload: m3Payload, selection: m3StoredSelection, accountKey: m3ExtraKey)
+        expect(
+            m3ResolvedPrimary?.accountKey == nil && m3ResolvedPrimary?.window.remainingPercent == 90
+                && m3ResolvedExtra?.accountKey == m3ExtraKey
+                && m3ResolvedExtra?.window.remainingPercent == 20,
+            "M3-c resolving the identical stored \"claude|session.v1\" selection for "
+                + "two different accountKey contexts returns the account each names, "
+                + "not the same arbitrary snapshot both times")
+
+        // M3-d. Drop the `agent.accountKey == tightest.accountKey` conjunct from the
+        // fold's identity check (back to `(clientId, cardId)` alone) to watch this
+        // go red: the primary's identically-carded window then matches the
+        // tightest's `(clientId, cardId)` and is skipped as if it were the same
+        // window, instead of being counted as an "other".
+        let m3Summary = QuotaSummaryFold.build(payload: m3Payload)
+        expect(
+            m3Summary?.tightestAccountKey == m3ExtraKey && m3Summary?.otherWindows == 1,
+            "M3-d QuotaSummary counts the primary account's identically-carded "
+                + "window as an OTHER window rather than folding it into the tightest")
+
+        // M3-e. Change `payload.agents.first(where: { $0.clientId == clientId &&
+        // $0.accountKey == nil })` back to `payload.agents.first(where: { $0.clientId
+        // == clientId })` in `WindowCardLoader.select` to watch this go red — the
+        // extra account is listed FIRST in `m3Payload`, so an accountKey-blind match
+        // resolves to its 20%-remaining window instead of the primary's 90%.
+        let m3Selected = WindowCardLoader.select(
+            payload: m3Payload, clientId: "claude", chosen: m3StoredSelection)
+        expect(
+            m3Selected?.window.remainingPercent == 90,
+            "M3-e an existing \"tokenbar.window.card.selection\" value written before "
+                + "a second account existed still resolves to the SAME primary window, "
+                + "not whichever account the payload happens to list first")
+
+        // M3-k. Two accounts' rows must be distinguishable.
+        //
+        // Both rows render `style.displayName` and nothing else, so two Claude
+        // accounts on the same plan — or two whose profile lookup failed —
+        // showed identical headings and identical detail text. The reader could
+        // not tell which quota, or which error, belonged to which directory.
+        //
+        // Basename rather than path: this heading is the part of the app that
+        // ends up in screenshots and the value is a directory under the user's
+        // home.
+        expect(
+            AccountIdentity(clientId: "claude", accountKey: nil).accountLabel == nil,
+            "M3-k the primary row acquired a qualifier it does not need")
+        expect(
+            AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-work").accountLabel
+                == ".claude-work",
+            "M3-k an extra row is not labelled with its account")
+        expect(
+            AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-work").accountLabel
+                != AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-other").accountLabel,
+            "M3-k two accounts produce the same label, so the rows stay indistinguishable")
+        expect(
+            !(AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-work").accountLabel?
+                .contains("/Users") ?? true),
+            "M3-k the label carries the home path into a heading that appears in screenshots")
+
+        // M3-l. And the Overview's one-line answer has to carry it too.
+        //
+        // `M3-k` covers the derivation; it cannot see a caller that has the
+        // label available and renders the bare client name anyway, which is
+        // what `QuotaSummaryLine.tightestRow` did. Auto picks the extra account
+        // in `m3Payload` (that is what M3-c asserts), so this is the exact
+        // sentence a user with two Claude subscriptions reads on the landing
+        // tab, and with the qualifier dropped it names neither of them.
+        //
+        // Delete the `account` term from `tightestName`'s join to watch it go
+        // red. The primary case is asserted beside it because a "fix" that
+        // always appends something would satisfy the first assertion alone.
+        let m3TightestName = m3Summary.map { QuotaSummaryLine.tightestName($0) }
+        expect(
+            m3TightestName?.contains(".claude-extra") == true,
+            "M3-l the Overview's tightest line names the client but not which of "
+                + "its two accounts the window belongs to")
+        let m3PrimaryOnly = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data("""
+            {"generatedAt":"now","publicationGeneration":9,"agents":[
+              {"clientId":"claude","source":"oauth","updatedAt":"now",
+               "windows":[{"cardId":"session.v1","label":"Session","usedPercent":10,
+                           "remainingPercent":90}]}
+            ]}
+            """.utf8))
+        expect(
+            QuotaSummaryFold.build(payload: m3PrimaryOnly)
+                .map { QuotaSummaryLine.tightestName($0) }
+                == ClientRegistry.style("claude").displayName,
+            "M3-l a single-account install gained a qualifier on the tightest line")
+
+        // M3-m. One Settings save must invalidate once, not twice.
+        //
+        // `commitClaudeExtraRoots` calls `apply` and its `UserDefaults` write
+        // trips `AppDelegate`'s observer, which calls it again — the observer's
+        // gate compares against a value only the observer updates, so it cannot
+        // see the direct call. That was harmless while an apply merely
+        // re-registered an identical list. It stopped being harmless once apply
+        // began dropping the throttled payload and waking every poller: two of
+        // those means one edit can issue two full provider rounds, each able to
+        // spend 30 seconds on one account, against a provider that rate-limits.
+        //
+        // Asserted on the claim rather than through `apply`, which needs the
+        // FFI and a real registry. Three properties, and the third is the one a
+        // plausible wrong implementation gets wrong: a membership test over
+        // everything ever applied would swallow the re-add below, leaving the
+        // core scanning what the removal installed while Settings showed the
+        // directory present.
+        let m3mClaims: [Bool]? = awaitMainActorValue {
+            ClaudeExtraRoots.resetApplyClaimForTesting()
+            let claim = ClaudeExtraRoots.claimApplyForTesting
+            let claims = [
+                claim("A", "a"), // first
+                claim("A", "a"), // the duplicate one save produces
+                claim("B", "b"), // a genuinely different list
+                claim("A", "a"), // removed, then added back
+                claim("A", "different"), // only the account registry changed
+            ]
+            ClaudeExtraRoots.resetApplyClaimForTesting()
+            return claims
+        }
+        expect(
+            m3mClaims?[0] == true && m3mClaims?[1] == false,
+            "M3-m the second apply for one save was not coalesced, so an edit "
+                + "issues two provider rounds")
+        expect(
+            m3mClaims?[2] == true,
+            "M3-m a genuinely different list was coalesced away, so the change "
+                + "never reached the core")
+        expect(
+            m3mClaims?[3] == true,
+            "M3-m removing a directory and adding it back was treated as a "
+                + "duplicate, so the re-add never reached the core")
+        // Either payload differing on its own is still a change: the scan roots
+        // and the account registry are separate registries.
+        expect(
+            m3mClaims?[4] == true,
+            "M3-m only one of the two payloads is compared, so a change to the "
+                + "other is coalesced away")
+
+        // M3-n. Two more Overview surfaces render only the client name, so two
+        // accounts of one client read identically there too.
+        //
+        // Task A: `QuotaHistoryStripCard.row`/`tooltipLayer` and
+        // `QuotaHeatmapCard.label`/picker compose the row text inline in a
+        // `some View` body, which cannot be asserted directly — pulled out
+        // into `QuotaHistoryStripCard.rowLabel` and the now-`static`
+        // `QuotaHeatmapCard.label`, the same move `tightestName`'s doc
+        // comment already explains for this exact reason.
+        let m3nSummary = QuotaOverviewFold.summaries(windows: [
+            (clientId: "claude", accountKey: m3ExtraKey, cardId: "session.v1",
+             label: "Session", cycles: [
+                QuotaCycle(
+                    resetAtMs: 500_000, startMs: 400_000, usedPercent: 30,
+                    sampleCount: 40, observedFraction: 0.9)]),
+        ])[0]
+        expect(
+            QuotaHistoryStripCard.rowLabel(m3nSummary).contains(".claude-extra")
+                && QuotaHistoryStripCard.rowLabel(m3nSummary).contains("Session"),
+            "M3-n the history strip's row names the client and window but not "
+                + "which of its two accounts the history belongs to")
+        let m3nHeatmapWindow = QuotaHeatmapWindow(
+            clientId: "claude", accountKey: m3ExtraKey, cardId: "session.v1",
+            windowLabel: "Session", total: 30)
+        expect(
+            QuotaHeatmapCard.label(m3nHeatmapWindow).contains(".claude-extra")
+                && QuotaHeatmapCard.label(m3nHeatmapWindow).contains("Session"),
+            "M3-n the heatmap's picker names the client and window but not "
+                + "which of its two accounts the grid belongs to")
+
+        // Task B: `BurnWarning` carried only `clientId`, so `burnRow` rendered
+        // the same text for either account. Two Claude agents, linear pace so
+        // the expectation is arithmetic: both half elapsed, the EXTRA
+        // account far ahead of its line (90 used against 50 expected) and the
+        // primary only slightly ahead (55 against 50) — the extra account's
+        // deficit must win, and the rendered label must name it.
+        //
+        // Delete the `account` term from `burnName`'s join (or drop
+        // `accountKey` from the `BurnWarning` the fold builds) to watch this
+        // go red.
+        let m3nDuration: Int64 = 18_000
+        func m3nWindowJSON(clientId: String, accountKey: String?, used: Double) -> String {
+            let reset = burnNow.addingTimeInterval(Double(m3nDuration) * 0.5)
+            let iso = ISO8601DateFormatter().string(from: reset)
+            let account = accountKey.map { "\"accountKey\":\"\($0)\"," } ?? ""
+            return """
+            {"clientId":"\(clientId)",\(account)"source":"oauth","updatedAt":"t","windows":[
+             {"cardId":"session.v1","label":"Session","usedPercent":\(used),
+              "remainingPercent":\(100 - used),"resetsAt":"\(iso)",
+              "durationSeconds":\(m3nDuration),"windowMinutes":\(m3nDuration / 60),
+              "paceStatus":{"state":"learningHistory","windowKey":"session.v1",
+                            "durationSeconds":\(m3nDuration),"durationSource":"provider",
+                            "completeCycles":1}}]}
+            """
+        }
+        let m3nBurnPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data("""
+            {"generatedAt":"t","publicationGeneration":1,"agents":[
+              \(m3nWindowJSON(clientId: "claude", accountKey: m3ExtraKey, used: 90)),
+              \(m3nWindowJSON(clientId: "claude", accountKey: nil, used: 55))
+            ]}
+            """.utf8))
+        let m3nBurn = QuotaSummaryFold.build(
+            payload: m3nBurnPayload, paceMode: .linear, now: burnNow)
+        expect(
+            m3nBurn?.burning?.accountKey == m3ExtraKey,
+            "M3-n the fastest-burning window belongs to the EXTRA account, but "
+                + "the warning does not record which account it came from")
+        let m3nBurnLabel = m3nBurn?.burning.map { QuotaSummaryLine.burnName($0) }
+        expect(
+            m3nBurnLabel?.contains(".claude-extra") == true,
+            "M3-n the burn-fastest line names the client but not which of its "
+                + "two accounts is burning")
+        // Single-account case, asserted separately: a "fix" that always
+        // appends a qualifier would satisfy the assertion above alone.
+        let m3nPrimaryBurn = QuotaSummaryFold.build(
+            payload: burnPayload([(client: "claude", used: 80, elapsedFraction: 0.5)]),
+            paceMode: .linear, now: burnNow)
+        expect(
+            m3nPrimaryBurn?.burning.map { QuotaSummaryLine.burnName($0) }
+                == ClientRegistry.style("claude").displayName,
+            "M3-n a single-account install gained a qualifier on the burn-fastest line")
+
+        // M3-o. The quota side must be woken between the two setters, not after
+        // both of them.
+        //
+        // `apply` installs two registries. `setClaudeConfigDirs` hands over a
+        // list of strings; `setExtraScanPaths` probes every path with
+        // `read_dir`, and a stalled network or external mount holds that for
+        // the whole mount timeout — the case this feature exists to tolerate.
+        // With the throttle drop and the wake behind BOTH setters, the quota
+        // cards kept describing the previous account set for that entire
+        // timeout, waiting on a probe whose answer they never consume.
+        //
+        // Observing an order means holding one side still, which is why
+        // `install` takes its two setters as parameters: the scan setter here
+        // blocks on a semaphore and never returns until the assertion is made.
+        // It blocks `applyQueue`, never the main actor, or the wake it is
+        // waiting for could not run and this would deadlock rather than fail.
+        let m3oWokeBeforeScan: Bool? = awaitMainActorValue {
+            let gate = DispatchSemaphore(value: 0)
+            let before = ClaudeExtraRoots.RegistryChange.epoch
+            ClaudeExtraRoots.installForTesting(
+                json: "{}", configDirsJSON: "[]",
+                setConfigDirs: { _ in },
+                setScanPaths: { _ in
+                    gate.wait()
+                    return nil
+                },
+                then: nil)
+            var woke = false
+            for _ in 0..<200 where !woke {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+                woke = ClaudeExtraRoots.RegistryChange.epoch != before
+            }
+            gate.signal()
+            ClaudeExtraRoots.resetApplyClaimForTesting()
+            return woke
+        }
+        expect(
+            m3oWokeBeforeScan == true,
+            "M3-o the quota pollers were not woken until the scan-root probe "
+                + "returned, so a stalled mount leaves the cards on the previous "
+                + "account set for the whole filesystem timeout")
+
+        // M3-p. A payload fetched under the previous registry must not be
+        // applied, only dropped.
+        //
+        // `AgentUsageThrottle.invalidate()` deliberately hands an in-flight
+        // result to the waiter that asked for it — the caller asked a question
+        // and gets an answer — so the poll receives a payload built for the
+        // account set that has since changed. Applying it publishes the old set
+        // to the cards, the Auto gauge and a persisted scalar, and the
+        // correction is a whole network round away.
+        //
+        // Driven through the real `pollAgentUsage` rather than asserting the
+        // comparison, because the comparison is `==` and the defect was never
+        // in the comparison — it was in applying before making it.
+        //
+        // The generations are deliberately far above every other fixture's.
+        // `AgentUsagePublicationState.resolve` returns the PREVIOUSLY published
+        // payload for any candidate whose generation is lower than the highest
+        // this process has seen, and other cases publish generation 9 — so a
+        // low-numbered fixture here is silently replaced and the assertion
+        // measures another case's payload rather than this one's. The first
+        // version of this check did exactly that and failed against correct
+        // code.
+        let m3pApplied: String? = awaitMainActorValue {
+            let staleJSON = """
+            {"generatedAt":"stale","publicationGeneration":90001,"agents":[
+              {"clientId":"claude","source":"oauth","updatedAt":"stale","windows":[]}
+            ]}
+            """
+            let freshJSON = """
+            {"generatedAt":"fresh","publicationGeneration":90002,"agents":[
+              {"clientId":"claude","source":"oauth","updatedAt":"fresh","windows":[]}
+            ]}
+            """
+            let decoder = JSONDecoder()
+            let source = RegistryRaceSource(
+                stale: try! decoder.decode(
+                    AgentUsagePayload.self, from: Data(staleJSON.utf8)),
+                fresh: try! decoder.decode(
+                    AgentUsagePayload.self, from: Data(freshJSON.utf8)))
+            let model = DashboardModel(source: source, initialYear: nil)
+            let poll = Task { await model.pollAgentUsage() }
+            // Wait for the SECOND fetch to start and then look, while it is
+            // still held. Looking after it finishes measures nothing: the fresh
+            // payload lands either way, and the question is whether the stale
+            // one was published before it.
+            for _ in 0..<200 {
+                if source.fetches >= 2 { break }
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            let published = model.agentUsage?.generatedAt
+            let fetches = source.fetches
+            source.release()
+            poll.cancel()
+            // Put the process-wide publication floor back where it was, or
+            // these generations reject every later case's payload and hand it
+            // this one instead — see `resetForTesting`.
+            AgentUsagePublicationCoordinator.resetForTesting()
+            // Two values in one, so neither can pass vacuously: `nil` published
+            // is only meaningful if the loop actually got as far as a second
+            // fetch, and a second fetch is only meaningful if nothing was
+            // published before it.
+            guard fetches >= 2 else { return "never-refetched" }
+            return published ?? "dropped"
+        } ?? nil
+        expect(
+            m3pApplied == "dropped",
+            "M3-p the poll published a payload built for the previous account "
+                + "set instead of dropping it and refetching")
+
+        // M3-j. An account change must invalidate the throttled payload.
+        //
+        // This is the layer the three previous attempts at "the card outlives
+        // its account" all missed. Waking the poll immediately achieves nothing
+        // while `AgentUsageThrottle` answers the woken fetch from a payload it
+        // cached before the change: the floor is 50 seconds, which is exactly
+        // the delay the user reported as "it does update, but only after a
+        // while".
+        //
+        // The floor is right and stays — it protects an endpoint that
+        // rate-limits from repeated identical questions. An account being added
+        // or removed is a DIFFERENT question, and the cached answer describes a
+        // set of accounts that no longer exists.
+        let m3jRefetched: Bool? = awaitMainActorValue { () async throws -> Bool in
+            let throttle = AgentUsageThrottle()
+            let clock = ThrottleClock(Date(timeIntervalSince1970: 2_000_000))
+            let counter = ThrottleCallCounter()
+            let empty = try JSONDecoder().decode(
+                AgentUsagePayload.self,
+                from: Data(#"{"generatedAt":"2026-08-23T00:00:00Z","agents":[]}"#.utf8))
+            let fetch: @Sendable () async throws -> AgentUsagePayload = {
+                await counter.bump()
+                return empty
+            }
+            _ = try await throttle.payload(now: { clock.value }, fetch: fetch)
+            // Well inside the floor: without an invalidation this is served
+            // from cache and the counter does not move.
+            _ = try await throttle.payload(now: { clock.value }, fetch: fetch)
+            let cachedCalls = await counter.count
+            await throttle.invalidate()
+            _ = try await throttle.payload(now: { clock.value }, fetch: fetch)
+            let afterInvalidate = await counter.count
+            return cachedCalls == 1 && afterInvalidate == 2
+        }
+        expect(
+            m3jRefetched == true,
+            "M3-j an account change did not force a fresh fetch, so the cards keep the old set "
+                + "for the rest of the throttle floor")
+
+        // M3-h. A registry change must wake the quota poll, not wait it out.
+        //
+        // The mirror of every other M3 gate: those assert that state is
+        // ESTABLISHED — two accounts appear, both survive, each resolves to its
+        // own series. None asserted what happens when an account goes away, and
+        // that is exactly the case that shipped broken: the card stayed for up
+        // to a minute describing an account the engine no longer fetched.
+        //
+        // Keying a view's `.task` on the generation was not enough, because it
+        // only holds while that view is alive — popover closed, or the separate
+        // Settings window in use, and nobody was observing. This asserts the
+        // mechanism that does not depend on a view: the sleep itself returns
+        // early when the registry moves.
+        let m3hWoken: Bool? = awaitMainActorValue {
+            let epoch = ClaudeExtraRoots.RegistryChange.epoch
+            let start = Date()
+            let slept = Task { @MainActor in
+                await ClaudeExtraRoots.RegistryChange.sleep(upTo: 60, since: epoch)
+                return Date().timeIntervalSince(start)
+            }
+            // Let the sleeper register before signalling, or the signal lands
+            // with no waiter and this measures nothing.
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            ClaudeExtraRoots.RegistryChange.signal()
+            return await slept.value < 5
+        }
+        expect(
+            m3hWoken == true,
+            "M3-h a registry change did not wake the quota poll before its 60s timeout")
+
+        // M3-i. The signal must be STICKY. The quota poll spends most of each
+        // cycle inside a network fetch, so a removal signals while the loop is
+        // busy far more often than while it sleeps. A fire-and-forget wake-up
+        // drops that one, and the card stays for the full sixty seconds — which
+        // is exactly what shipped and what the user saw: "it does go away, but
+        // only after a while".
+        let m3iSticky: Bool? = awaitMainActorValue {
+            // Observed BEFORE the change, the way the poll reads it before its
+            // fetch.
+            let epoch = ClaudeExtraRoots.RegistryChange.epoch
+            ClaudeExtraRoots.RegistryChange.signal()
+            let start = Date()
+            await ClaudeExtraRoots.RegistryChange.sleep(upTo: 60, since: epoch)
+            return Date().timeIntervalSince(start) < 1
+        }
+        expect(
+            m3iSticky == true,
+            "M3-i a change that landed before the sleep was dropped, so the poll waited it out")
+
+        // And the timeout still applies when nothing signals, so a missed
+        // signal degrades to the old cadence rather than hanging the loop.
+        let m3hTimedOut: Bool? = awaitMainActorValue {
+            let start = Date()
+            await ClaudeExtraRoots.RegistryChange.sleep(
+                upTo: 0.2, since: ClaudeExtraRoots.RegistryChange.epoch)
+            return Date().timeIntervalSince(start) >= 0.15
+        }
+        expect(
+            m3hTimedOut == true,
+            "M3-h the sleep returned before its timeout with nothing signalling")
+
+        // M3-g. The quota lens's row ids must use the same key as the grids
+        // they select into. `QuotaHeatmapCard` looks up `heatmaps[$0.id]`, so a
+        // two-part id against a three-part grid key finds nothing: the extra
+        // account's heatmap would be blank, and both accounts' picker entries
+        // would carry the same id in an `Identifiable` list.
+        //
+        // The primary's id must stay byte-identical to the two-part form every
+        // stored and in-memory key has always used, or the same lookup breaks
+        // for users who have no second account at all.
+        let m3gPrimary = AccountIdentity(clientId: "claude", accountKey: nil)
+        let m3gExtra = AccountIdentity(
+            clientId: "claude", accountKey: "/Users/someone/.claude-work")
+        expect(
+            m3gPrimary.windowKey(cardId: "session.v1") == "claude|session.v1",
+            "M3-g the primary's window key keeps the two-part shape everything already stores")
+        expect(
+            m3gExtra.windowKey(cardId: "session.v1") != m3gPrimary.windowKey(cardId: "session.v1"),
+            "M3-g two accounts offering the same window collapse onto one key")
+
+        let m3gSummaries = QuotaOverviewFold.summaries(windows: [
+            (clientId: "claude", accountKey: nil, cardId: "session.v1", label: "Session",
+             cycles: [qoCycle(1_000, 40)]),
+            (clientId: "claude", accountKey: "/Users/someone/.claude-work",
+             cardId: "session.v1", label: "Session", cycles: [qoCycle(1_000, 70)]),
+        ])
+        expect(
+            Set(m3gSummaries.map(\.id)).count == 2,
+            "M3-g two accounts' summaries share one id, so a list keyed on it renders one")
+        expect(
+            m3gSummaries.first(where: { $0.accountKey == nil })?.id == "claude|session.v1",
+            "M3-g the primary's summary id drifted from the shape the grids are stored under")
+
+        let m3gHeatmapIds = Set([
+            QuotaHeatmapWindow(
+                clientId: "claude", cardId: "session.v1", windowLabel: "Session", total: 1
+            ).id,
+            QuotaHeatmapWindow(
+                clientId: "claude", accountKey: "/Users/someone/.claude-work",
+                cardId: "session.v1", windowLabel: "Session", total: 1
+            ).id,
+        ])
+        expect(
+            m3gHeatmapIds.count == 2,
+            "M3-g two accounts' heatmap picker entries share one id")
+
+        // M3-f. Change `windowCurves`/`quotaHeatmaps` back to a bare
+        // "clientId|cardId" key (dropping `accountKey`) to watch this go red: the
+        // second write silently overwrites the first, so both dictionaries end up
+        // with one entry instead of two.
+        let m3fNow = Int64(Date().timeIntervalSince1970)
+        let m3fReset = m3fNow + 3_600
+        let m3fResetIso = ISO8601DateFormatter().string(
+            from: Date(timeIntervalSince1970: Double(m3fReset)))
+        func m3fAgentJSON(accountKey: String?, usedPercent: Int) -> String {
+            let window = """
+                {"cardId":"session.v1","label":"Session","usedPercent":\(usedPercent),
+                 "remainingPercent":\(100 - usedPercent),"resetsAt":"\(m3fResetIso)",
+                 "durationSeconds":18000,"windowMinutes":300,
+                 "paceStatus":{"state":"learningHistory","windowKey":"session.v1",
+                               "durationSeconds":18000,"durationSource":"provider","completeCycles":1}}
+                """
+            let accountField = accountKey.map { "\"accountKey\":\"\($0)\"," } ?? ""
+            return """
+                {"clientId":"claude",\(accountField)"source":"oauth","updatedAt":"now","windows":[\(window)]}
+                """
+        }
+        let m3fPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data("""
+                {"generatedAt":"now","publicationGeneration":11,"agents":[
+                  \(m3fAgentJSON(accountKey: m3ExtraKey, usedPercent: 80)),
+                  \(m3fAgentJSON(accountKey: nil, usedPercent: 10))
+                ]}
+                """.utf8))
+        let m3fPrimaryCurve = windowCurve(
+            resetAtSecs: m3fReset, durationSecs: 18_000, at: [(m3fNow - 3_000, 4)])
+        let m3fExtraCurve = windowCurve(
+            resetAtSecs: m3fReset, durationSecs: 18_000, at: [(m3fNow - 3_000, 77)])
+        let m3fResult: (curveKeys: Int, curvesDiffer: Bool, heatmapKeys: Int)? = awaitMainActorValue {
+            let src = WindowScanCountingSource(payload: m3fPayload)
+            src.curveByAccount = [nil: m3fPrimaryCurve, m3ExtraKey: m3fExtraCurve]
+            let m = DashboardModel(source: src, initialYear: nil)
+            m.windowCardClients = ["claude"]
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while !m.agentUsageAttempted, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            poll.cancel()
+            _ = await poll.value
+            let curveValues = Set(m.windowCurves.values.map { $0.map(\.usedPercent) })
+            return (m.windowCurves.count, curveValues.count == 2, m.quotaHeatmaps.count)
+        }
+        expect(
+            m3fResult?.curveKeys == 2 && m3fResult?.curvesDiffer == true
+                && m3fResult?.heatmapKeys == 2,
+            "M3-f two accounts' window curves and heatmaps land under two distinct "
+                + "keys with two distinct sets of readings, rather than one account's "
+                + "data silently overwriting the other's under a shared "
+                + "\"clientId|cardId\" key")
 
         if failures > 0 {
             print("\(failures) selftest check(s) failed")

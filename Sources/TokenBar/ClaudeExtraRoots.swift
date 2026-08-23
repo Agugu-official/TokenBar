@@ -77,6 +77,29 @@ enum ClaudeExtraRoots {
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
+    /// The `tb_set_claude_config_dirs` payload: the configured directories
+    /// themselves, standardized, as a JSON array.
+    ///
+    /// Deliberately built from `load()` — the list the user configured — and
+    /// not from `appliedPayloadJSON`, the scan subset the core accepted. They
+    /// answer different questions: a directory the scanner refuses is still a
+    /// perfectly valid account whose Keychain item holds real credentials, and
+    /// `appliedKey` is empty until the launch-time apply lands, which is an
+    /// honest answer about scanning and a wrong one about identity.
+    ///
+    /// Standardized with the same `standardizingPath` `expand` uses, because
+    /// the Keychain service the core derives is the SHA-256 of this exact
+    /// string: `/x/.claude-work/` and `/x/.claude-work` would read different
+    /// items, and only one of them exists.
+    static func configDirsPayloadJSON(_ configDirs: [String]) -> String {
+        var seen = Set<String>()
+        let standardized = configDirs
+            .map { ($0 as NSString).standardizingPath }
+            .filter { seen.insert($0).inserted }
+        let data = (try? JSONEncoder().encode(standardized)) ?? Data("[]".utf8)
+        return String(data: data, encoding: .utf8) ?? "[]"
+    }
+
     /// Which of `paths` are missing right now, resolved off the calling actor.
     ///
     /// Settings renders a warning icon per row, and doing that from `isMissing`
@@ -166,8 +189,125 @@ enum ClaudeExtraRoots {
         UserDefaults.standard.removeObject(forKey: appliedKey)
     }
 
+    /// Test seam only: forget the coalescing claim, or a test that applies the
+    /// same list a second time silently measures the skip path.
+    @MainActor
+    static func resetApplyClaimForTesting() {
+        lastApplied = nil
+    }
+
+    /// Wakes anything sleeping between polls when the installed account
+    /// registry moves.
+    ///
+    /// The quota cards come from a 60-second poll loop, so adding or removing
+    /// an account left the cards describing the previous set until that loop
+    /// happened to come round. Keying a view's `.task` on the generation fixed
+    /// it only while that view was alive — with the popover closed, or the
+    /// separate Settings window in use, nothing was observing. The registry is
+    /// process-wide state, so what waits on it has to be too.
+    @MainActor
+    enum RegistryChange {
+        /// Advanced by every `signal()`. A caller records it BEFORE the work it
+        /// might be interrupted during, and passes it back to `sleep` — so a
+        /// change that lands while that caller was busy is not lost.
+        ///
+        /// The first version had no epoch and dropped a signal that arrived
+        /// with nobody waiting, which its own comment described as harmless.
+        /// It is not: the quota poll spends most of each cycle inside a network
+        /// fetch, so removing an account almost always signalled while the loop
+        /// was busy. The signal went nowhere, the in-flight fetch published a
+        /// payload built from the registry as it was before the removal, and
+        /// the card stayed for the full sixty seconds — the exact symptom this
+        /// was written to fix.
+        private(set) static var epoch = 0
+        private static var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+
+        /// Sleeps for `seconds`, or until the registry moves, whichever first.
+        ///
+        /// The timeout resumes ITS OWN waiter rather than calling `signal()`.
+        /// Routing it through `signal()` read as economical and made the
+        /// timeout depend on the wake-up path working: a mutation that stopped
+        /// `signal()` resuming anyone did not fail the test, it hung the sleep
+        /// forever — a worse outcome than the sixty-second wait this exists to
+        /// remove, and in the poll loop that owns the quota cards.
+        ///
+        /// Registration cannot lose a race with the timeout. Both run on the
+        /// MainActor, and `withCheckedContinuation`'s body runs synchronously
+        /// before the suspension, so the entry is in the map before the timeout
+        /// task can get a turn.
+        static func sleep(upTo seconds: Double, since observed: Int) async {
+            // Already stale: the registry moved while the caller was working,
+            // so there is nothing to wait for and the next fetch is owed now.
+            guard observed == epoch else { return }
+            let id = UUID()
+            let timeout = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(seconds))
+                guard !Task.isCancelled else { return }
+                resume(id)
+            }
+            await withCheckedContinuation { waiters[id] = $0 }
+            timeout.cancel()
+        }
+
+        private static func resume(_ id: UUID) {
+            waiters.removeValue(forKey: id)?.resume()
+        }
+
+        /// Releases every waiter. Idempotent: a change with nobody waiting is
+        /// not an error, and a second call before anyone sleeps again is a
+        /// no-op rather than a queued wake-up that would fire spuriously.
+        static func signal() {
+            epoch &+= 1
+            let pending = waiters
+            waiters.removeAll()
+            for (_, waiter) in pending { waiter.resume() }
+        }
+    }
+
     private static let applyQueue = DispatchQueue(
         label: "com.nyanako.tokenbar.claude-extra-roots", qos: .utility)
+
+    /// The payloads the most recent apply claimed, and what it answered.
+    ///
+    /// One Settings save reaches `apply` twice: `commitClaudeExtraRoots` calls
+    /// it, and the `UserDefaults` write that call makes also trips
+    /// `AppDelegate`'s observer, whose gate compares against a value only the
+    /// observer updates. That was harmless when an apply merely re-registered
+    /// an identical list. It stopped being harmless when apply started dropping
+    /// the throttled payload and waking every poller: two of those means one
+    /// edit can issue two full provider rounds, each able to spend 30 seconds
+    /// on a single account, against a provider that rate-limits.
+    @MainActor private static var lastApplied: (
+        roots: String, configDirs: String, result: ExtraScanPathsResult?
+    )?
+
+    /// Whether this apply has work to do, claiming these payloads if so.
+    ///
+    /// Claimed at the top rather than recorded at the bottom: both calls for
+    /// one save are made from the main actor before either has finished its
+    /// trip through `applyQueue`, so a claim taken at the end would still let
+    /// them both through.
+    ///
+    /// Compared against the LAST apply, not against every apply ever made.
+    /// Removing a directory and adding it back is a real change both times,
+    /// and a membership test would swallow the second one — the registry would
+    /// keep whatever the removal installed while Settings showed the directory
+    /// present.
+    /// Test seam. `apply` itself needs the FFI and a real registry, so the
+    /// decision is asserted where it is made.
+    @MainActor
+    static func claimApplyForTesting(roots: String, configDirs: String) -> Bool {
+        claimApply(roots: roots, configDirs: configDirs)
+    }
+
+    @MainActor
+    private static func claimApply(roots: String, configDirs: String) -> Bool {
+        if let lastApplied, lastApplied.roots == roots, lastApplied.configDirs == configDirs {
+            return false
+        }
+        lastApplied = (roots, configDirs, nil)
+        return true
+    }
 
     /// Push the persisted config dirs to the Rust registry. Call at launch
     /// and after every add/remove so the change takes effect without an app
@@ -196,9 +336,75 @@ enum ClaudeExtraRoots {
     static func apply(
         then completion: (@Sendable @MainActor (ExtraScanPathsResult?) -> Void)? = nil
     ) {
-        let json = payloadJSON(load())
+        Task { @MainActor in
+            let configDirs = load()
+            let json = payloadJSON(configDirs)
+            let configDirsJSON = configDirsPayloadJSON(configDirs)
+            // Both applies for one save are enqueued here before either
+            // reaches the queue below, and the main actor runs them in order,
+            // so the second finds the payloads already claimed. It still
+            // answers its caller — with the first apply's result once that
+            // lands, or nil while it is still in flight, which is what the
+            // Settings row would have shown anyway.
+            guard claimApply(roots: json, configDirs: configDirsJSON) else {
+                completion?(lastApplied?.result)
+                return
+            }
+            install(json: json, configDirsJSON: configDirsJSON, then: completion)
+        }
+    }
+
+    /// The half of `apply` that actually talks to the core, split out so the
+    /// coalescing decision above is not buried in it.
+    ///
+    /// The two setters are parameters with the real ones as defaults, because
+    /// the property that matters here is an ORDER between them and the only way
+    /// to observe an order is to hold one of them still. `M3-o` passes a scan
+    /// setter that blocks and asserts the quota wake has already happened.
+    @MainActor
+    private static func install(
+        json: String,
+        configDirsJSON: String,
+        setConfigDirs: @escaping @Sendable (String) -> Void = {
+            _ = try? TBCore.setClaudeConfigDirs(json: $0)
+        },
+        setScanPaths: @escaping @Sendable (String) -> ExtraScanPathsResult? = {
+            try? TBCore.setExtraScanPaths(json: $0)
+        },
+        then completion: (@Sendable @MainActor (ExtraScanPathsResult?) -> Void)?
+    ) {
         applyQueue.async {
-            let result = try? TBCore.setExtraScanPaths(json: json)
+            // The quota-card registry, from the configured list. Separate call
+            // and separate registry from the scan roots below: this one decides
+            // whose credential each Claude card is fetched with, and a failure
+            // in either must not stop the other from being installed.
+            setConfigDirs(configDirsJSON)
+            // Wake the quota side HERE, between the two setters, not after
+            // both.
+            //
+            // The two registries have two sets of consumers and only one of the
+            // setters can block. `setClaudeConfigDirs` installs a list of
+            // strings; `setExtraScanPaths` probes every path with `read_dir`,
+            // and a stalled network or external mount can hold that for the
+            // whole mount timeout — the case this feature exists to tolerate.
+            // With both notifications behind both setters, the quota cards kept
+            // describing the previous account set for that entire timeout,
+            // waiting on a probe whose answer they do not consume.
+            //
+            // Only the quota side moves. `recordApplied`, the scan-derived
+            // caches and the generation stay behind `setExtraScanPaths`,
+            // because those ARE about scan roots: a generation bumped early
+            // would restart a load that then scans the roots this call has not
+            // installed yet, which is the reason it was placed after the setter
+            // in the first place.
+            Task { @MainActor in
+                // Same order as below and for the same reason: a poll woken
+                // before the throttle is dropped is answered from the payload
+                // built for the account set that just changed.
+                await AgentUsageThrottle.shared.invalidate()
+                RegistryChange.signal()
+            }
+            let result = setScanPaths(json)
             Task { @MainActor in
                 // Before the invalidation and the generation bump, so anything
                 // they restart reads the registry that is now installed rather
@@ -211,16 +417,49 @@ enum ClaudeExtraRoots {
                 // nothing about whether the caches went stale.
                 DashboardModel.invalidateScanDerivedCaches()
                 // Bumped AFTER the setter returns, and this is what views key
-                // their reloads on — not the persisted list. The list changes
-                // the moment Settings saves, which is before this queue has
-                // installed anything, so a task keyed on it can restart, run,
-                // and publish while the engine is still scanning the old roots.
-                // A generation moved here cannot fire early by construction.
+                // their scan-derived reloads on — not the persisted list. The
+                // list changes the moment Settings saves, which is before this
+                // queue has installed anything, so a task keyed on it can
+                // restart, run, and publish while the engine is still scanning
+                // the old roots. A generation moved here cannot fire early by
+                // construction.
                 UserDefaults.standard.set(
                     UserDefaults.standard.integer(forKey: generationKey) &+ 1,
                     forKey: generationKey)
+                // The throttle drop and the poll wake are NOT repeated here.
+                // They belong to the quota registry, which was installed before
+                // the scan probe, and they ran there; doing them again would
+                // spend a second wake on an account set that has not moved
+                // since — which is the cost the apply-level coalescing exists
+                // to avoid, reintroduced one layer down.
+                //
+                // Kept so a coalesced apply can answer its caller with what
+                // this one installed rather than with nothing. Guarded, because
+                // a later save may have claimed different payloads while this
+                // one was in the queue: overwriting that claim with these older
+                // ones would let a duplicate of the newer save through.
+                if lastApplied?.roots == json, lastApplied?.configDirs == configDirsJSON {
+                    lastApplied = (json, configDirsJSON, result)
+                }
                 completion?(result)
             }
         }
+    }
+
+    /// Test seam. Drives `install` with substituted setters so the order
+    /// between installing the quota registry and probing the scan roots is
+    /// observable — see `install`'s doc comment.
+    @MainActor
+    static func installForTesting(
+        json: String,
+        configDirsJSON: String,
+        setConfigDirs: @escaping @Sendable (String) -> Void,
+        setScanPaths: @escaping @Sendable (String) -> ExtraScanPathsResult?,
+        then completion: (@Sendable @MainActor (ExtraScanPathsResult?) -> Void)?
+    ) {
+        install(
+            json: json, configDirsJSON: configDirsJSON,
+            setConfigDirs: setConfigDirs, setScanPaths: setScanPaths,
+            then: completion)
     }
 }

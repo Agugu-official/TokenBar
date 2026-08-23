@@ -391,7 +391,16 @@ final class StatusItemController: NSObject {
         add("Auto (tightest window)".localized, selection: QuotaResolver.auto)
 
         if let payload {
-            for agent in payload.agents where agent.error == nil {
+            // Primary account only: the persisted selection is one global
+            // string with no account component (`QuotaResolver.selection`
+            // encodes `clientId|cardId`, never an account), and two accounts
+            // of the same client can offer identically-carded windows (both a
+            // "session.v1"), so listing an extra account's window here would
+            // draw a second, indistinguishable "Claude Code" section whose
+            // checkmark and pick could not be told apart from the primary's.
+            // An extra account's windows remain visible and selectable in the
+            // Agent-limits overview; this menu targets the primary only.
+            for agent in payload.agents where agent.error == nil && agent.accountKey == nil {
                 let windows = agent.uniqueCardWindows
                 guard !windows.isEmpty else { continue }
                 menu.addItem(.separator())

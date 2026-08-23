@@ -106,8 +106,28 @@ struct QuotaSummaryLine: View {
         }
     }
 
+    /// Who the tightest window belongs to, qualified by account when the client
+    /// has more than one.
+    ///
+    /// This line answers "of everything you are subscribed to, what is closest
+    /// to running out". With two accounts of one client, the client's display
+    /// name alone cannot answer it — two subscriptions offering the same card,
+    /// or sitting on the same plan, rendered an identical line, so the reader
+    /// learned which client is about to run out but not which subscription.
+    ///
+    /// A named function rather than a `let` inside the body so the composed
+    /// string is assertable: `M3-k` covers the label's derivation, but a gate
+    /// that stops at the derivation cannot see this line drop it again.
+    static func tightestName(_ summary: QuotaSummary) -> String {
+        let style = ClientRegistry.style(summary.tightestClient)
+        let account = AccountIdentity(
+            clientId: summary.tightestClient, accountKey: summary.tightestAccountKey
+        ).accountLabel
+        return [style.displayName, account].compactMap(\.self).joined(separator: " ")
+    }
+
     private func tightestRow(_ summary: QuotaSummary) -> some View {
-        let name = ClientRegistry.style(summary.tightestClient).displayName
+        let name = Self.tightestName(summary)
         // Reset text comes from the same helper the quota cards use, so the
         // countdown here cannot drift from the one shown next to the bar.
         let reset = summary.resetsAt.flatMap { UsagePace.resetText(for: $0) }
@@ -130,11 +150,25 @@ struct QuotaSummaryLine: View {
         }
     }
 
+    /// Who is burning fastest, qualified by account the same way
+    /// `tightestName` is — see that function's doc comment for why a bare
+    /// client name cannot answer this with two accounts of one client.
+    ///
+    /// A named function for the same reason `tightestName` is one: `M3-n`
+    /// asserts the composed string directly rather than only the view body.
+    static func burnName(_ burning: BurnWarning) -> String {
+        let style = ClientRegistry.style(burning.clientId)
+        let account = AccountIdentity(
+            clientId: burning.clientId, accountKey: burning.accountKey
+        ).accountLabel
+        return [style.displayName, account].compactMap(\.self).joined(separator: " ")
+    }
+
     /// The rate line. Amber rather than red: being ahead of schedule is worth
     /// naming, but it is a projection, and `AgentLimitsCard` owns the actual
     /// warning thresholds.
     private func burnRow(_ burning: BurnWarning) -> some View {
-        let name = ClientRegistry.style(burning.clientId).displayName
+        let name = Self.burnName(burning)
         let tail = [burning.riskText, burning.etaText].compactMap(\.self).first
         return row(label: "Burning fastest", tint: .secondary) {
             Text(verbatim: "\(name) · \(burning.label.localized)")

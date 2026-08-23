@@ -92,7 +92,12 @@ char *tb_agent_usage(void);
 // Read-only quota curve snapshot for one series selected by the latest
 // successful agent-usage publication generation. This call performs no network
 // request; the returned JSON is released with tb_free.
-char *tb_quota_curve(const char *client_id, const char *window_key, uint64_t generation);
+// `account_key` selects which account's series to read: NULL or empty is the
+// primary account, which is every account that exists today. Passing the wrong
+// one returns another account's curve under a generation that validates, so it
+// is a parameter rather than something inferred here.
+char *tb_quota_curve(const char *client_id, const char *account_key, const char *window_key,
+                     uint64_t generation);
 
 /* PROTOTYPE - usage inside an absolute [from_ms, until_ms) window.
  *
@@ -119,6 +124,21 @@ char *tb_window_usage(int64_t from_ms, int64_t until_ms);
 // unreadable. Malformed JSON returns the normal error envelope and leaves the
 // registry untouched.
 char *tb_set_extra_scan_paths(const char *json);
+// Replace the process-wide registry of extra Claude config directories — the
+// `CLAUDE_CONFIG_DIR`-isolated accounts that each get their own quota card.
+// `json` is an array of absolute directory paths, e.g.
+// `["/Users/x/.claude-work"]`, full-replace semantics ([] clears it). Success
+// data is `{"registeredCount":N,"rejected":[{"path","reason"}]}`; a path is
+// rejected when it is empty, relative, the filesystem root, or a repeat.
+// Existence is NOT probed: whether a directory is readable right now says
+// nothing about which account its credential belongs to.
+//
+// This is not `tb_set_extra_scan_paths`. That one takes the expanded
+// `<dir>/projects` and `<dir>/transcripts` sub-roots and decides which
+// directories the usage scanner walks; this one takes the config directories
+// themselves and decides whose credential each quota card is fetched with.
+// Passing one where the other is expected fails silently in both directions.
+char *tb_set_claude_config_dirs(const char *json);
 
 // Release a string returned by any tb_* entry point.
 void tb_free(char *p);

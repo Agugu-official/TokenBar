@@ -24,6 +24,7 @@ mod agent_quota_history;
 mod agent_storage_windows;
 mod agent_usage;
 mod agents_report;
+mod claude_config_dirs;
 mod extra_scan_paths;
 mod filter_parity_probe;
 mod hourly_report;
@@ -153,10 +154,20 @@ struct PublicationGenerationExhausted;
 static AGENT_USAGE_PUBLICATION_GATE: LazyLock<Mutex<PublicationGate>> =
     LazyLock::new(|| Mutex::new(PublicationGate::default()));
 
+/// Binding lookup key. The middle element is the account, `None` for the
+/// primary — which is every account that exists today.
+///
+/// Without it two accounts of one client publishing the same window collide on
+/// `(provider, window)`, and the survivor is whichever was inserted last.
+/// `tb_quota_curve` would then answer with the other account's curve under a
+/// generation that validates, so nothing on either side of the FFI can tell
+/// the answer is the wrong account's.
+type QuotaCurveBindingKey = (String, Option<String>, String);
+
 #[derive(Debug, Clone, Default)]
 struct QuotaCurveBindingState {
     generation: u64,
-    series: BTreeMap<(String, String), agent_quota_history::SeriesKey>,
+    series: BTreeMap<QuotaCurveBindingKey, agent_quota_history::SeriesKey>,
 }
 
 static QUOTA_CURVE_BINDINGS: LazyLock<RwLock<QuotaCurveBindingState>> =
@@ -188,13 +199,25 @@ fn with_agent_usage_publication_gate<T>(
     with_publication_gate(&AGENT_USAGE_PUBLICATION_GATE, body)
 }
 
+/// `series` pairs each key with the account it belongs to — `None` for the
+/// primary, an extra Claude account's config directory for its own keys.
 fn replace_quota_curve_bindings(
     generation: u64,
-    series: impl IntoIterator<Item = agent_quota_history::SeriesKey>,
+    series: impl IntoIterator<Item = (Option<String>, agent_quota_history::SeriesKey)>,
 ) {
     let series = series
         .into_iter()
-        .map(|key| ((key.provider_id.clone(), key.window_key.clone()), key))
+        .map(|(account, key)| {
+            (
+                (
+                    key.provider_id.clone(),
+                    crate::agent_usage::account_key_component(account.as_deref())
+                        .map(str::to_string),
+                    key.window_key.clone(),
+                ),
+                key,
+            )
+        })
         .collect();
     let mut state = QUOTA_CURVE_BINDINGS
         .write()
@@ -204,13 +227,15 @@ fn replace_quota_curve_bindings(
 
 fn serialize_agent_usage_with_bindings<F>(
     generation: u64,
-    bindings: Vec<agent_quota_history::SeriesKey>,
+    bindings: Vec<(Option<String>, agent_quota_history::SeriesKey)>,
     serialize: F,
 ) -> Result<serde_json::Value, String>
 where
     F: FnOnce() -> Result<serde_json::Value, String>,
 {
     let value = serialize()?;
+    // The account each key was published under travels with it, so two Claude
+    // accounts serving the same window keys keep separate bindings.
     replace_quota_curve_bindings(generation, bindings);
     Ok(value)
 }
@@ -430,6 +455,7 @@ fn history_error_message(error: agent_quota_history::HistoryError) -> String {
 /// serialization blocks, and only something running in there can observe it.
 fn quota_curve_result_with_reader<R, H, S>(
     client_id: &str,
+    account_key: Option<&str>,
     window_key: &str,
     generation: u64,
     before_history: H,
@@ -462,7 +488,11 @@ where
         }
         state
             .series
-            .get(&(client_id.to_string(), window_key.to_string()))
+            .get(&(
+                client_id.to_string(),
+                crate::agent_usage::account_key_component(account_key).map(str::to_string),
+                window_key.to_string(),
+            ))
             .cloned()
             .ok_or_else(|| "quota curve binding is unavailable".to_string())
     };
@@ -492,10 +522,11 @@ where
     if state.generation != 0 && state.generation != generation {
         return Err("quota curve generation is expired".to_string());
     }
-    if state
-        .series
-        .get(&(client_id.to_string(), window_key.to_string()))
-        != Some(&key)
+    if state.series.get(&(
+        client_id.to_string(),
+        crate::agent_usage::account_key_component(account_key).map(str::to_string),
+        window_key.to_string(),
+    )) != Some(&key)
     {
         return Err("quota curve generation is expired".to_string());
     }
@@ -513,6 +544,7 @@ where
 
 fn quota_curve_result(
     client_id: &str,
+    account_key: Option<&str>,
     window_key: &str,
     generation: u64,
 ) -> Result<serde_json::Value, String> {
@@ -524,6 +556,7 @@ fn quota_curve_result(
     {
         return quota_curve_result_with_reader(
             client_id,
+            account_key,
             window_key,
             generation,
             || {},
@@ -536,12 +569,25 @@ fn quota_curve_result(
 
     quota_curve_result_with_reader(
         client_id,
+        account_key,
         window_key,
         generation,
         || {},
         || {},
         |key| agent_quota_history::read_series(key, chrono::Utc::now().timestamp()),
     )
+}
+
+/// NULL is a legitimate value meaning "not supplied", unlike
+/// `required_string_from` where NULL is a caller error.
+unsafe fn optional_string_from(value: *const c_char) -> Result<Option<String>, String> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    unsafe { CStr::from_ptr(value) }
+        .to_str()
+        .map(|value| Some(value.to_string()))
+        .map_err(|_| "account_key is not valid UTF-8".to_string())
 }
 
 unsafe fn required_string_from(value: *const c_char, name: &str) -> Result<String, String> {
@@ -902,13 +948,22 @@ pub extern "C" fn tb_agent_usage() -> *mut c_char {
 #[no_mangle]
 pub unsafe extern "C" fn tb_quota_curve(
     client_id: *const c_char,
+    account_key: *const c_char,
     window_key: *const c_char,
     generation: u64,
 ) -> *mut c_char {
     guarded("tb_quota_curve", || {
+        // NULL and empty both mean the primary account. Swift passes NULL for
+        // every account that exists today; an extra Claude account passes its
+        // config directory, which is what its binding was published under.
+        let account = match unsafe { optional_string_from(account_key) } {
+            Ok(account) => account,
+            Err(message) => return envelope(Err::<serde_json::Value, String>(message)),
+        };
         let result = unsafe { required_string_from(client_id, "client_id") }.and_then(|client| {
-            unsafe { required_string_from(window_key, "window_key") }
-                .and_then(|window| quota_curve_result(&client, &window, generation))
+            unsafe { required_string_from(window_key, "window_key") }.and_then(|window| {
+                quota_curve_result(&client, account.as_deref(), &window, generation)
+            })
         });
         envelope(result)
     })
@@ -937,6 +992,42 @@ pub unsafe extern "C" fn tb_set_extra_scan_paths(json: *const c_char) -> *mut c_
     guarded("tb_set_extra_scan_paths", || {
         envelope(unsafe { set_extra_scan_paths_from_c(json) })
     })
+}
+
+/// Replace the process-wide registry of extra Claude config directories (see
+/// the `claude_config_dirs` module doc). `json` is an array of absolute
+/// directory paths, e.g. `["/Users/x/.claude-work"]`; full-replace semantics
+/// (`[]` clears it). Each one is fetched as its own Claude quota card, using
+/// the Keychain item that directory selects. Success data is
+/// `{"registeredCount":N,"rejected":[{"path","reason"}]}`; a path is rejected
+/// when it is empty, relative, the filesystem root, or a repeat of one already
+/// in the list. Existence is not probed — whether the directory is readable
+/// right now says nothing about which account its credential belongs to.
+///
+/// This is NOT `tb_set_extra_scan_paths`. That one takes the expanded
+/// `<dir>/projects` and `<dir>/transcripts` sub-roots and decides what the
+/// scanner walks; this one takes the config directories and decides whose
+/// credential a quota card is fetched with.
+///
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_set_claude_config_dirs(json: *const c_char) -> *mut c_char {
+    guarded("tb_set_claude_config_dirs", || {
+        envelope(unsafe { set_claude_config_dirs_from_c(json) })
+    })
+}
+
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated UTF-8 string.
+unsafe fn set_claude_config_dirs_from_c(json: *const c_char) -> Result<serde_json::Value, String> {
+    if json.is_null() {
+        return Err("Claude config dirs payload must not be NULL".to_string());
+    }
+    let raw = unsafe { CStr::from_ptr(json) }
+        .to_str()
+        .map_err(|_| "Claude config dirs payload is not valid UTF-8".to_string())?;
+    claude_config_dirs::set_from_json(raw)
 }
 
 /// # Safety
@@ -1257,6 +1348,104 @@ mod tests {
         )
     }
 
+    /// G7. Two accounts of one client publishing the same window must not
+    /// collide in the binding map.
+    ///
+    /// Keyed on `(provider, window)` alone the second insert replaces the
+    /// first, and `tb_quota_curve` then answers with the surviving account's
+    /// series under a generation that validates — the caller gets a curve, the
+    /// generation check passes, and nothing on either side of the FFI can tell
+    /// it belongs to the other account. That is why the account is a lookup
+    /// parameter rather than something inferred here.
+    #[test]
+    fn g7_two_accounts_of_one_client_keep_separate_curve_bindings() {
+        let _guard = QUOTA_CURVE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let primary = agent_quota_history::SeriesKey::new(
+            "claude",
+            &agent_account_scope::HistoryScope::for_test("scope-primary"),
+            "session.v1",
+        );
+        let second = agent_quota_history::SeriesKey::new(
+            "claude",
+            &agent_account_scope::HistoryScope::for_test("scope-second"),
+            "session.v1",
+        );
+        assert_ne!(primary, second, "the fixture's two series are the same key");
+
+        let dir = "/Users/someone/.claude-work";
+        replace_quota_curve_bindings(
+            9,
+            vec![(None, primary.clone()), (Some(dir.to_string()), second.clone())],
+        );
+
+        let state = QUOTA_CURVE_BINDINGS
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            state.series.len(),
+            2,
+            "the two accounts collapsed onto one binding, so one of them is unreachable"
+        );
+        assert_eq!(
+            state
+                .series
+                .get(&("claude".to_string(), None, "session.v1".to_string())),
+            Some(&primary),
+            "the primary's binding was replaced by the second account's"
+        );
+        assert_eq!(
+            state.series.get(&(
+                "claude".to_string(),
+                Some(dir.to_string()),
+                "session.v1".to_string()
+            )),
+            Some(&second)
+        );
+        drop(state);
+
+        // G7b. Two directories differing only in trailing whitespace are two
+        // accounts, and the binding table is the sixth place that has to agree.
+        //
+        // Collapsed, the later publication overwrites the earlier one and both
+        // ABI lookups answer with the surviving account's curve under a
+        // generation that validates — the same undetectable failure the account
+        // parameter exists to prevent, reached by normalizing the parameter
+        // instead of by omitting it.
+        let spaced = "/Users/someone/claude dir ";
+        let trimmed = "/Users/someone/claude dir";
+        replace_quota_curve_bindings(
+            11,
+            vec![
+                (Some(spaced.to_string()), primary.clone()),
+                (Some(trimmed.to_string()), second.clone()),
+            ],
+        );
+        let state = QUOTA_CURVE_BINDINGS
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            state.series.len(),
+            2,
+            "the trailing space was normalized away, so one account's binding \
+             overwrote the other's"
+        );
+        assert_eq!(
+            state.series.get(&(
+                "claude".to_string(),
+                Some(spaced.to_string()),
+                "session.v1".to_string()
+            )),
+            Some(&primary),
+            "the exact path no longer addresses the binding it published"
+        );
+        drop(state);
+
+        replace_quota_curve_bindings(0, Vec::new());
+    }
+
     fn quota_curve_temp_path(label: &str) -> (PathBuf, PathBuf) {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1305,6 +1494,7 @@ mod tests {
     ) -> Result<serde_json::Value, String> {
         quota_curve_result_with_reader(
             client_id,
+            None,
             window_key,
             generation,
             || {},
@@ -1332,7 +1522,7 @@ mod tests {
         let (directory, path) = quota_curve_temp_path("unbound-generation");
         let now = 9_400_000;
         record_quota_curve_sample(&path, quota_curve_key("account-a"), now + 96, 10.0, now, 96);
-        replace_quota_curve_bindings(4, vec![quota_curve_key("account-a")]);
+        replace_quota_curve_bindings(4, vec![quota_curve_key("account-a")].into_iter().map(|k| (None, k)));
 
         assert_eq!(
             quota_curve_value_at_path(&path, "__smoke__", "__smoke__", 4, now).unwrap_err(),
@@ -1569,12 +1759,12 @@ mod tests {
         record_quota_curve_sample(&path, quota_curve_key("account-a"), reset_at, 10.0, now, 96);
         record_quota_curve_sample(&path, quota_curve_key("account-b"), reset_at, 80.0, now, 96);
 
-        replace_quota_curve_bindings(1, vec![quota_curve_key("account-a")]);
+        replace_quota_curve_bindings(1, vec![quota_curve_key("account-a")].into_iter().map(|k| (None, k)));
         let account_a = quota_curve_value_at_path(&path, "codex", "weekly.v1", 1, now)
             .expect("account A curve");
         assert_eq!(account_a["points"][0]["usedPercent"], 10.0);
 
-        replace_quota_curve_bindings(2, vec![quota_curve_key("account-b")]);
+        replace_quota_curve_bindings(2, vec![quota_curve_key("account-b")].into_iter().map(|k| (None, k)));
         let account_b = quota_curve_value_at_path(&path, "codex", "weekly.v1", 2, now)
             .expect("account B curve");
         assert_eq!(account_b["points"][0]["usedPercent"], 80.0);
@@ -1596,12 +1786,12 @@ mod tests {
         let account_b = quota_curve_key("account-b");
         record_quota_curve_sample(&path, account_a.clone(), reset_at, 10.0, now, 96);
         record_quota_curve_sample(&path, account_b, reset_at, 20.0, now, 96);
-        replace_quota_curve_bindings(1, vec![account_a.clone()]);
+        replace_quota_curve_bindings(1, vec![account_a.clone()].into_iter().map(|k| (None, k)));
         let before = quota_curve_value_at_path(&path, "codex", "weekly.v1", 1, now)
             .expect("previous tuple remains available");
 
         let serialization =
-            serialize_agent_usage_with_bindings(2, vec![quota_curve_key("account-b")], || {
+            serialize_agent_usage_with_bindings(2, vec![(None, quota_curve_key("account-b"))], || {
                 Err("injected serialization failure".to_string())
             });
         assert_eq!(
@@ -1652,7 +1842,7 @@ mod tests {
         let reset_at = now + 96;
         let key = quota_curve_key("account-a");
         record_quota_curve_sample(&path, key.clone(), reset_at, 10.0, now, 96);
-        replace_quota_curve_bindings(1, vec![key]);
+        replace_quota_curve_bindings(1, vec![key].into_iter().map(|k| (None, k)));
         let (paused_tx, paused_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let (committed_tx, committed_rx) = mpsc::channel();
@@ -1660,6 +1850,7 @@ mod tests {
         let reader = std::thread::spawn(move || {
             quota_curve_result_with_reader(
                 "codex",
+                None,
                 "weekly.v1",
                 1,
                 || {
@@ -1672,7 +1863,7 @@ mod tests {
         });
         paused_rx.recv().expect("reader reached history boundary");
         let writer = std::thread::spawn(move || {
-            replace_quota_curve_bindings(2, vec![quota_curve_key("account-b")]);
+            replace_quota_curve_bindings(2, vec![quota_curve_key("account-b")].into_iter().map(|k| (None, k)));
             committed_tx.send(()).expect("commit binding tuple");
         });
         committed_rx
@@ -1705,7 +1896,7 @@ mod tests {
         let now = 9_500_000;
         let key = quota_curve_key("account-a");
         record_quota_curve_sample(&path, key.clone(), now + 96, 10.0, now, 96);
-        replace_quota_curve_bindings(1, vec![key]);
+        replace_quota_curve_bindings(1, vec![key].into_iter().map(|k| (None, k)));
 
         let (inside_tx, inside_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -1714,6 +1905,7 @@ mod tests {
         let reader = std::thread::spawn(move || {
             quota_curve_result_with_reader(
                 "codex",
+                None,
                 "weekly.v1",
                 1,
                 || {},
@@ -1727,7 +1919,7 @@ mod tests {
         inside_rx.recv().expect("reader entered the guarded window");
 
         let writer = std::thread::spawn(move || {
-            replace_quota_curve_bindings(2, vec![quota_curve_key("account-b")]);
+            replace_quota_curve_bindings(2, vec![quota_curve_key("account-b")].into_iter().map(|k| (None, k)));
             committed_tx.send(()).expect("commit binding tuple");
         });
         // The publication must NOT complete while the reader holds the guard.
@@ -1767,7 +1959,7 @@ mod tests {
         let reset_at = now + 96;
         record_quota_curve_sample(&path, quota_curve_key("account-a"), reset_at, 10.0, now, 96);
         record_quota_curve_sample(&path, quota_curve_key("account-b"), reset_at, 80.0, now, 96);
-        replace_quota_curve_bindings(1, vec![quota_curve_key("account-a")]);
+        replace_quota_curve_bindings(1, vec![quota_curve_key("account-a")].into_iter().map(|k| (None, k)));
 
         let (paused_tx, paused_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -1775,6 +1967,7 @@ mod tests {
         let reader = std::thread::spawn(move || {
             quota_curve_result_with_reader(
                 "codex",
+                None,
                 "weekly.v1",
                 1,
                 || {
@@ -1786,7 +1979,7 @@ mod tests {
             )
         });
         paused_rx.recv().expect("reader reached history boundary");
-        replace_quota_curve_bindings(1, vec![quota_curve_key("account-b")]);
+        replace_quota_curve_bindings(1, vec![quota_curve_key("account-b")].into_iter().map(|k| (None, k)));
         release_tx.send(()).expect("release history reader");
 
         assert_eq!(
@@ -1807,11 +2000,11 @@ mod tests {
     fn quota_curve_binding_tuple_is_atomically_visible() {
         let _test_guard = quota_curve_test_guard();
         reset_quota_curve_bindings();
-        replace_quota_curve_bindings(1, vec![quota_curve_key("account-a")]);
+        replace_quota_curve_bindings(1, vec![quota_curve_key("account-a")].into_iter().map(|k| (None, k)));
         let (start_tx, start_rx) = mpsc::channel();
         let writer = std::thread::spawn(move || {
             start_rx.recv().expect("start tuple replacement");
-            replace_quota_curve_bindings(2, vec![quota_curve_key("account-b")]);
+            replace_quota_curve_bindings(2, vec![quota_curve_key("account-b")].into_iter().map(|k| (None, k)));
         });
         // Without requiring generation 2 to actually be observed, every read can
         // land on generation 1 and the loop proves nothing about the interval
@@ -1828,14 +2021,14 @@ mod tests {
                 1 => assert_eq!(
                     state
                         .series
-                        .get(&("codex".to_string(), "weekly.v1".to_string()))
+                        .get(&("codex".to_string(), None, "weekly.v1".to_string()))
                         .map(|key| key.account_scope.as_str()),
                     Some("account-a")
                 ),
                 2 => assert_eq!(
                     state
                         .series
-                        .get(&("codex".to_string(), "weekly.v1".to_string()))
+                        .get(&("codex".to_string(), None, "weekly.v1".to_string()))
                         .map(|key| key.account_scope.as_str()),
                     Some("account-b")
                 ),
@@ -1857,7 +2050,7 @@ mod tests {
                 assert_eq!(
                     state
                         .series
-                        .get(&("codex".to_string(), "weekly.v1".to_string()))
+                        .get(&("codex".to_string(), None, "weekly.v1".to_string()))
                         .map(|key| key.account_scope.as_str()),
                     Some("account-b")
                 );
@@ -1877,7 +2070,7 @@ mod tests {
         record_quota_curve_sample(&path, key.clone(), reset_at, 10.0, now, 96);
         let before_bytes = fs::read(&path).expect("read fixture bytes");
         agent_quota_history::reset_save_call_count();
-        replace_quota_curve_bindings(1, vec![key]);
+        replace_quota_curve_bindings(1, vec![key].into_iter().map(|k| (None, k)));
         quota_curve_value_at_path(&path, "codex", "weekly.v1", 1, now).expect("read quota curve");
         assert_eq!(agent_quota_history::save_call_count(), 0);
         assert_eq!(
@@ -1894,7 +2087,7 @@ mod tests {
         let (directory, path) = quota_curve_temp_path("errors");
         let now = 9_400_000;
         let key = quota_curve_key("account-a");
-        replace_quota_curve_bindings(1, vec![key]);
+        replace_quota_curve_bindings(1, vec![key].into_iter().map(|k| (None, k)));
         assert_eq!(
             quota_curve_value_at_path(&path, "codex", "weekly.v1", 1, now)
                 .expect("missing history is a successful empty result"),
@@ -1933,32 +2126,33 @@ mod tests {
         let now = 9_500_000;
         let reset_at = now + 96;
         record_quota_curve_sample(&path, quota_curve_key("account-a"), reset_at, 10.0, now, 96);
-        replace_quota_curve_bindings(1, vec![quota_curve_key("account-a")]);
+        replace_quota_curve_bindings(1, vec![quota_curve_key("account-a")].into_iter().map(|k| (None, k)));
         let (empty_directory, empty_path) = quota_curve_temp_path("c-abi-empty");
         set_test_quota_curve_history_path(Some(empty_path));
         let client = CString::new("codex").expect("client id");
         let window = CString::new("weekly.v1").expect("window key");
-        let no_history = unsafe { take(tb_quota_curve(client.as_ptr(), window.as_ptr(), 1)) };
+        let no_history = unsafe { take(tb_quota_curve(client.as_ptr(), std::ptr::null(), window.as_ptr(), 1)) };
         let no_history_json: serde_json::Value =
             serde_json::from_str(&no_history).expect("decode C ABI no-history result");
         assert_eq!(no_history_json["ok"], true);
         assert!(no_history_json["data"].is_null());
 
         set_test_quota_curve_history_path(Some(path.clone()));
-        let success = unsafe { take(tb_quota_curve(client.as_ptr(), window.as_ptr(), 1)) };
+        let success = unsafe { take(tb_quota_curve(client.as_ptr(), std::ptr::null(), window.as_ptr(), 1)) };
         let success_json: serde_json::Value =
             serde_json::from_str(&success).expect("decode C ABI success");
         assert_eq!(success_json["ok"], true);
         assert_eq!(success_json["data"]["points"][0]["usedPercent"], 10.0);
 
-        let expired = unsafe { take(tb_quota_curve(client.as_ptr(), window.as_ptr(), 0)) };
+        let expired = unsafe { take(tb_quota_curve(client.as_ptr(), std::ptr::null(), window.as_ptr(), 0)) };
         assert!(expired.contains("quota curve generation is expired"));
-        let null_client = unsafe { take(tb_quota_curve(std::ptr::null(), window.as_ptr(), 1)) };
+        let null_client = unsafe { take(tb_quota_curve(std::ptr::null(), std::ptr::null(), window.as_ptr(), 1)) };
         assert!(null_client.contains("client_id is required"));
         let invalid_client = [0xff_u8, 0];
         let invalid_utf8 = unsafe {
             take(tb_quota_curve(
                 invalid_client.as_ptr().cast(),
+                std::ptr::null(),
                 window.as_ptr(),
                 1,
             ))
@@ -2017,7 +2211,7 @@ mod tests {
             .sum();
         assert_eq!(store_sample_count, 6_192);
 
-        replace_quota_curve_bindings(1, vec![key]);
+        replace_quota_curve_bindings(1, vec![key].into_iter().map(|k| (None, k)));
         let payload = quota_curve_value_at_path(&path, "codex", "weekly.v1", 1, now)
             .expect("read complete retained sequence");
         assert_eq!(

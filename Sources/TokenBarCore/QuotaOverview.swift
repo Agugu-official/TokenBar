@@ -7,6 +7,11 @@ import Foundation
 /// curve alone — a ~2ms read — so the all-subscription lens can carry it.
 public struct QuotaWindowSummary: Equatable, Sendable, Identifiable {
     public let clientId: String
+    /// Nil for the primary account. Part of `id` because two accounts of one
+    /// client can offer identically-carded windows, and this id is both the
+    /// `Identifiable` key of a rendered list and the lookup into the grids
+    /// `DashboardModel` stores per account.
+    public let accountKey: String?
     public let cardId: String
     public let windowLabel: String
     /// Consumption of each recorded cycle, oldest first. Drawn as a strip, so
@@ -24,7 +29,9 @@ public struct QuotaWindowSummary: Equatable, Sendable, Identifiable {
     public let neverExhausted: Bool
     public let cycleCount: Int
 
-    public var id: String { "\(clientId)|\(cardId)" }
+    public var id: String {
+        AccountIdentity(clientId: clientId, accountKey: accountKey).windowKey(cardId: cardId)
+    }
 }
 
 /// A window the heatmap can draw, whether or not it has completed a cycle yet.
@@ -43,10 +50,19 @@ public struct QuotaHeatmapWindow: Equatable, Sendable, Identifiable {
     /// worth looking at leads.
     public let total: Double
 
-    public var id: String { "\(clientId)|\(cardId)" }
+    /// See `QuotaWindowSummary.accountKey`.
+    public let accountKey: String?
 
-    public init(clientId: String, cardId: String, windowLabel: String, total: Double) {
+    public var id: String {
+        AccountIdentity(clientId: clientId, accountKey: accountKey).windowKey(cardId: cardId)
+    }
+
+    public init(
+        clientId: String, accountKey: String? = nil, cardId: String, windowLabel: String,
+        total: Double
+    ) {
         self.clientId = clientId
+        self.accountKey = accountKey
         self.cardId = cardId
         self.windowLabel = windowLabel
         self.total = total
@@ -69,9 +85,12 @@ public enum QuotaOverviewFold {
     /// card already states their current position, and a row saying "no history
     /// yet" repeated across every fresh install is noise.
     public static func summaries(
-        windows: [(clientId: String, cardId: String, label: String, cycles: [QuotaCycle])]
+        windows: [(
+            clientId: String, accountKey: String?, cardId: String, label: String,
+            cycles: [QuotaCycle]
+        )]
     ) -> [QuotaWindowSummary] {
-        windows.compactMap { window in
+        windows.compactMap { window -> QuotaWindowSummary? in
             guard !window.cycles.isEmpty else { return nil }
             // `cycles` arrives newest first from `QuotaHistoryFold`; a strip
             // reads left to right in time.
@@ -83,7 +102,8 @@ public enum QuotaOverviewFold {
             // last at 100% has a span of 60 and would have been called quiet.
             let peak = window.cycles.map(\.peakUsedPercent).max() ?? 0
             return QuotaWindowSummary(
-                clientId: window.clientId, cardId: window.cardId,
+                clientId: window.clientId, accountKey: window.accountKey,
+                cardId: window.cardId,
                 windowLabel: window.label,
                 recent: Array(consumption),
                 recentPeaks: Array(peaks),
