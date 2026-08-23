@@ -313,19 +313,27 @@ enum ClaudeExtraRoots {
                 // the moment Settings saves, which is before this queue has
                 // installed anything, so a task keyed on it can restart, run,
                 // and publish while the engine is still scanning the old roots.
+                // Drop the throttled payload FIRST, and await it. Waking a
+                // poll is not enough on its own — the fetch it wakes into is
+                // answered from `AgentUsageThrottle`'s 50-second floor, which
+                // would hand back the payload built for the account set that
+                // just changed.
+                //
+                // Ordering is the whole point. Signalling first and
+                // invalidating in an unstructured `Task` let the resumed poll
+                // reach the throttle before that task was even submitted, so it
+                // received the old set anyway and the card outlived its account
+                // for the rest of the floor — the same symptom, reintroduced by
+                // the fix for it.
+                await AgentUsageThrottle.shared.invalidate()
                 // A generation moved here cannot fire early by construction.
                 UserDefaults.standard.set(
                     UserDefaults.standard.integer(forKey: generationKey) &+ 1,
                     forKey: generationKey)
-                // And wake the polls directly. The generation only reaches a
-                // view that is on screen; this reaches the loop that owns the
-                // cards whether or not anything is watching.
+                // Wake the polls directly. The generation only reaches a view
+                // that is on screen; this reaches the loop that owns the cards
+                // whether or not anything is watching.
                 RegistryChange.signal()
-                // And drop the throttled payload. Waking the poll is not
-                // enough on its own: the fetch it wakes into is answered from
-                // `AgentUsageThrottle`'s 50-second floor, which would hand back
-                // the payload built for the account set that just changed.
-                Task { await AgentUsageThrottle.shared.invalidate() }
                 completion?(result)
             }
         }

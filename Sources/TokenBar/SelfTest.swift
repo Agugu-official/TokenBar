@@ -13421,6 +13421,37 @@ enum SelfTest {
                 + "a second account existed still resolves to the SAME primary window, "
                 + "not whichever account the payload happens to list first")
 
+        // M3-k. Two accounts' rows must be distinguishable.
+        //
+        // Both rows render `style.displayName` and nothing else, so two Claude
+        // accounts on the same plan — or two whose profile lookup failed —
+        // showed identical headings and identical detail text. The reader could
+        // not tell which quota, or which error, belonged to which directory.
+        //
+        // Basename rather than path: this heading is the part of the app that
+        // ends up in screenshots and the value is a directory under the user's
+        // home.
+        expect(
+            AgentLimitsCard.accountLabel(
+                AccountIdentity(clientId: "claude", accountKey: nil)) == nil,
+            "M3-k the primary row acquired a qualifier it does not need")
+        expect(
+            AgentLimitsCard.accountLabel(
+                AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-work"))
+                == ".claude-work",
+            "M3-k an extra row is not labelled with its account")
+        expect(
+            AgentLimitsCard.accountLabel(
+                AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-work"))
+                != AgentLimitsCard.accountLabel(
+                    AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-other")),
+            "M3-k two accounts produce the same label, so the rows stay indistinguishable")
+        expect(
+            !(AgentLimitsCard.accountLabel(
+                AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-work"))?
+                .contains("/Users") ?? true),
+            "M3-k the label carries the home path into a heading that appears in screenshots")
+
         // M3-j. An account change must invalidate the throttled payload.
         //
         // This is the layer the three previous attempts at "the card outlives
