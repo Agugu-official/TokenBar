@@ -200,7 +200,8 @@ enum WindowCardLoader {
             candidates: candidates, resolution: resolved, samples: samples,
             resetMs: window.resetsAt.flatMap(parseISO8601Ms),
             durationMs: window.durationSeconds.map { $0 * 1000 },
-            placementPending: pending, nowMs: nowMs), scanFailed: false)
+            placementPending: pending, nowMs: nowMs,
+            modelScope: window.modelScope), scanFailed: false)
     }
 
     /// The earliest interval start across every candidate window of every
@@ -272,7 +273,8 @@ enum WindowCardLoader {
             windowLabel: quota.windowLabel, candidates: quota.candidates,
             resolution: resolved, samples: quota.samples,
             resetMs: quota.resetMs, durationMs: quota.durationMs,
-            placementPending: false, nowMs: quota.nowMs)
+            placementPending: false, nowMs: quota.nowMs,
+            modelScope: quota.modelScope)
 
         guard let (start, end) = interval(resolved) else {
             return (settled, WindowUsageHalf(mine: [], bars: [], hits: []))
@@ -280,13 +282,31 @@ enum WindowCardLoader {
         // A scan that starts after this window did cannot answer for it.
         guard scan.covers(start: start) else { return nil }
 
-        let mine = scan.slice(from: start, to: min(end, quota.nowMs)).filter(isMine)
+        // Two predicates, applied to different questions on purpose.
+        //
+        // `isMine` answers "is this the subscription's usage" and decides where
+        // the window IS — it is what `firstUsageAfterReset` above consumes.
+        // `inScope` answers "is this the model the allowance counts" and
+        // decides only what the card DISPLAYS.
+        //
+        // The scope is deliberately NOT applied to placement. A scoped weekly
+        // window is anchored by the provider's own reset, so narrowing the
+        // placement probe buys no accuracy — while a scope join that matches
+        // nothing would turn the card blank instead of merely empty, which
+        // moves a naming mismatch from "we found no usage" to "there is no
+        // window". The blast radius of the heuristic stays inside the totals.
+        let subscription = scan.slice(from: start, to: min(end, quota.nowMs)).filter(isMine)
+        let mine = quota.modelScope.map { scope in
+            subscription.filter { ModelScope.covers(scope, modelId: $0.modelId) }
+        } ?? subscription
         let geo = WindowCardGeometry.usageGeometry(
             windowStartMs: start, windowEndMs: end, nowMs: min(quota.nowMs, end),
             samples: quota.samples, messages: mine)
         return (settled, WindowUsageHalf(
             mine: mine, bars: geo.bars, hits: geo.hits,
-            undatedCount: scan.undatedCount))
+            undatedCount: scan.undatedCount,
+            scopeMatchedNothing: quota.modelScope != nil
+                && mine.isEmpty && !subscription.isEmpty))
     }
 
     static func interval(_ s: WindowResolution) -> (start: Int64, end: Int64)? {

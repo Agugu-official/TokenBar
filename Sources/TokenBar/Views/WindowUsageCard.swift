@@ -114,6 +114,7 @@ struct WindowUsageCard: View {
                 chart(geo).zIndex(1)
                 legend(geo).frame(height: Self.legendHeight)
                 undatedNote(usage)
+                scopeNote(usage, label: quota.windowLabel)
                 Group {
                     if let usage {
                         equivalenceRow(
@@ -415,6 +416,24 @@ struct WindowUsageCard: View {
     /// not exist to be recovered. Saying "not in these totals" on every card
     /// therefore claimed each card had lost a row that may belong to another
     /// subscription entirely — a per-card claim the data cannot support.
+    /// The scope join found nothing. Said, not drawn as an idle week.
+    ///
+    /// The scope is the provider's display name and the rows carry the
+    /// transcript's model id; when those do not line up the honest report is
+    /// that the filter matched nothing, because empty bars under a moving curve
+    /// read as "you did no work", which is a claim about the user's week that
+    /// this card has no evidence for.
+    @ViewBuilder
+    private func scopeNote(_ usage: WindowUsageHalf?, label: String) -> some View {
+        if let usage, usage.scopeMatchedNothing {
+            Text("No local usage matched %@, though this subscription has other usage in this window"
+                .localized(label))
+                .font(.system(size: 9))
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     @ViewBuilder
     private func undatedNote(_ usage: WindowUsageHalf?) -> some View {
         if let usage, usage.undatedCount > 0 {

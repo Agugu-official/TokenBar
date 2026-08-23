@@ -563,6 +563,18 @@ pub struct UsageWindow {
     contract_duration: Option<DurationEvidence>,
     pace_status: PaceStatusPayload,
     historical_pace: Option<HistoricalPacePayload>,
+    /// The model this window's allowance is scoped to, as the provider's own
+    /// display-name slug — `fable` for a "Fable only" weekly limit.
+    ///
+    /// Set ONLY where the provider declares a scope (`limits[].scope.model`),
+    /// never inferred from a label. "Designs" and "Daily Routines" are windows
+    /// with a narrow scope that is not a MODEL, and a flat `seven_day_opus`
+    /// field says nothing about scope at all — guessing from those is how a
+    /// filter starts excluding usage the allowance actually counts.
+    ///
+    /// The display name rather than `scope.model.id` for the reason the card id
+    /// uses it: the live payload reports `id: null` while the field exists.
+    model_scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -588,6 +600,8 @@ struct UsageWindowWire<'a> {
     pace_status: &'a PaceStatusPayload,
     #[serde(skip_serializing_if = "Option::is_none")]
     historical_pace: Option<&'a HistoricalPacePayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_scope: Option<&'a str>,
 }
 
 impl Serialize for UsageWindow {
@@ -606,6 +620,7 @@ impl Serialize for UsageWindow {
             window_minutes: self.duration_seconds.map(|seconds| seconds / 60),
             pace_status: &self.pace_status,
             historical_pace: self.historical_pace.as_ref(),
+            model_scope: self.model_scope.as_deref(),
         }
         .serialize(serializer)
     }
@@ -667,6 +682,10 @@ impl UsageWindow {
                 reason: Some("windowIdentity".to_string()),
             },
             historical_pace: None,
+            // Absent by default and attached only by the adapter that has a
+            // provider-declared scope. A window nobody scoped must read as
+            // "not scoped", never as "scoped to nothing".
+            model_scope: None,
         };
         window.refresh_initial_pace_status();
         window
@@ -718,6 +737,18 @@ impl UsageWindow {
 
     /// Attach provider-semantic presentation and history identity plus the
     /// frozen provider/contract duration evidence.
+    /// Attach the provider-declared model scope. Separate from `with_identity`
+    /// because identity is emitted for every window and scope only for the few
+    /// the provider narrows — folding it in would make every call site state a
+    /// scope it does not have.
+    pub(crate) fn with_model_scope(mut self, slug: impl Into<String>) -> Self {
+        let slug = slug.into();
+        if !slug.is_empty() {
+            self.model_scope = Some(slug);
+        }
+        self
+    }
+
     pub(crate) fn with_identity(
         mut self,
         card_id: impl Into<String>,
@@ -4400,12 +4431,17 @@ fn append_claude_scoped_windows(
             label, percent, resets_at, now,
         )
         .map(|window| {
-            window.with_identity(
-                window_key.clone(),
-                Some(window_key),
-                None,
-                Some(DurationEvidence::contract(7 * 24 * 60 * 60)),
-            )
+            window
+                .with_identity(
+                    window_key.clone(),
+                    Some(window_key),
+                    None,
+                    Some(DurationEvidence::contract(7 * 24 * 60 * 60)),
+                )
+                // The same slug the identity is derived from, so a consumer
+                // filtering usage by scope and a consumer keying history by
+                // window cannot disagree about which model this is.
+                .with_model_scope(slug.clone())
         }) {
             windows.push(window);
         }
@@ -7356,6 +7392,48 @@ mod tests {
             windows[0].resets_at.as_deref(),
             Some("2026-08-10T00:00:00.000Z")
         );
+        // The scope reaches the consumer, and it is the DISPLAY-NAME slug.
+        // `scope.model.id` here is "claude/fable.5:promo" — deliberately
+        // unlike the slug, so an implementation that switched to the id
+        // would fail rather than coincide. The live payload reports that id
+        // as null anyway, which is why identity comes from the display name.
+        assert_eq!(windows[0].model_scope.as_deref(), Some("fable"));
+        let wire = serde_json::to_value(&windows[0]).expect("serialize window");
+        assert_eq!(wire["modelScope"], "fable");
+    }
+
+    /// A window nobody scoped must say so by ABSENCE, not by an empty string.
+    ///
+    /// "Designs" and "Daily Routines" are narrow windows whose scope is not a
+    /// model, and the flat `seven_day_*` fields declare no scope at all. A
+    /// consumer filtering usage by scope has to be able to tell "not scoped"
+    /// from "scoped to something", and the key is omitted rather than emitted
+    /// null so the distinction survives the wire.
+    #[test]
+    fn an_unscoped_claude_window_carries_no_model_scope() {
+        let usage = ClaudeUsageResponse {
+            seven_day: Some(ClaudeWindow {
+                utilization: Some(23.0),
+                resets_at: None,
+            }),
+            seven_day_design: Some(ClaudeWindow {
+                utilization: Some(0.0),
+                resets_at: None,
+            }),
+            ..Default::default()
+        };
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let windows = claude_windows(&usage, now);
+        assert!(!windows.is_empty());
+        for window in &windows {
+            assert_eq!(window.model_scope, None, "{}", window.label);
+            let wire = serde_json::to_value(window).expect("serialize window");
+            assert!(
+                wire.get("modelScope").is_none(),
+                "{} emitted a modelScope key",
+                window.label
+            );
+        }
     }
 
     #[test]
@@ -10900,6 +10978,7 @@ mod tests {
                     reason: reason.map(|value| value.to_string()),
                 },
                 historical_pace,
+                model_scope: None,
             }
         }
 

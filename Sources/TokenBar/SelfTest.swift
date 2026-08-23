@@ -11176,15 +11176,17 @@ enum SelfTest {
         func windowPayload(
             _ agents: [(client: String, windows: [(card: String, key: String,
                                                    resetsAt: String, durationSecs: Int64)])],
-            generation: UInt64 = 7
+            generation: UInt64 = 7,
+            modelScope: String? = nil
         ) -> AgentUsagePayload {
+            let scopeField = modelScope.map { #","modelScope":"\#($0)""# } ?? ""
             let body = agents.map { agent in
                 let windows = agent.windows.map { w in
                     """
                     {"cardId":"\(w.card)","label":"\(w.card)","usedPercent":10,
                      "remainingPercent":90,"resetsAt":"\(w.resetsAt)",
                      "durationSeconds":\(w.durationSecs),
-                     "windowMinutes":\(w.durationSecs / 60),
+                     "windowMinutes":\(w.durationSecs / 60)\(scopeField),
                      "paceStatus":{"state":"learningHistory","windowKey":"\(w.key)",
                                    "durationSeconds":\(w.durationSecs),
                                    "durationSource":"provider","completeCycles":1}}
@@ -11498,6 +11500,122 @@ enum SelfTest {
                 payload: withRecent, clients: ["codex", "claude"], nowMs: wNow * 1000)
                 == (wNow - 3_600 - 604_800) * 1000,
             "L3b a past reset still within one duration keeps bounding the scan")
+
+        // MS. A model-scoped window ("Fable only") must show only that model's
+        // usage. It showed the whole subscription's, so the bars underneath the
+        // curve were explaining a different quota than the one drawn.
+        //
+        // The join is between two naming systems and nothing guarantees they
+        // agree — the provider sends `scope.model.id: null`, so the scope is
+        // its DISPLAY-NAME slug while the rows carry the transcript's canonical
+        // id. These fixtures use the real strings from both sides.
+        expect(ModelScope.covers("fable", modelId: "claude-fable-5"),
+               "MS the provider's display slug matches the transcript's canonical id")
+        expect(!ModelScope.covers("fable", modelId: "claude-sonnet-4-5"),
+               "MS and does not match a different model, or the filter is a no-op")
+        expect(ModelScope.covers("claude-fable-5", modelId: "claude-fable-5-20260101"),
+               "MS a multi-token scope matches when every token is present, so a "
+                   + "display name spelled out in full still lands")
+        expect(!ModelScope.covers("fable-max", modelId: "claude-fable-5"),
+               "MS but a token the id lacks does NOT match — the rule is a subset "
+                   + "test, and this is the under-match the scope note exists for")
+        expect(!ModelScope.covers("", modelId: "claude-fable-5"),
+               "MS an empty scope selects nothing rather than everything")
+
+        let msIso = ISO8601DateFormatter().string(
+            from: Date(timeIntervalSince1970: Double(wNow + 3_600)))
+        let msPayload = windowPayload([
+            (client: "codex", windows: [(card: "weekly_scoped.fable.v1",
+                                         key: "weekly_scoped.fable.v1",
+                                         resetsAt: msIso, durationSecs: 604_800)]),
+        ], modelScope: "fable")
+        let msMessages = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":\((wNow - 1_000) * 1000),"client":"codex","providerId":"anthropic",
+              "modelId":"claude-fable-5","input":700,"output":0,"cacheRead":0,"cacheWrite":0,
+              "reasoning":0,"cost":1.0,"isTurnStart":true},
+             {"timestamp":\((wNow - 900) * 1000),"client":"codex","providerId":"anthropic",
+              "modelId":"claude-sonnet-4-5","input":300,"output":0,"cacheRead":0,"cacheWrite":0,
+              "reasoning":0,"cost":0.5,"isTurnStart":true}]
+            """.utf8))
+        // Declared, or `isMine` rejects every row and all three cases below
+        // pass on an empty set rather than on the filter.
+        let msConfirmed = [UsageAttribution.Record(
+            client: "codex", provider: "anthropic", state: .assigned("codex"))]
+        let msScan = UnionScan(
+            fromMs: (wNow - 604_800) * 1000, untilMs: wNow * 1000,
+            capturedAt: Date(), messages: msMessages)
+        let msStage1 = WindowCardLoader.quotaHalf(
+            payload: msPayload, clientId: "codex", attempted: true,
+            curve: { _, _, _ in
+                windowCurve(resetAtSecs: wNow + 3_600, durationSecs: 604_800,
+                            at: [(wNow - 2_000, 4), (wNow - 500, 9)])
+            },
+            nowMs: wNow * 1000)
+        if case let .quotaOnly(msQuota, _) = msStage1 {
+            expect(msQuota.modelScope == "fable",
+                   "MS the scope reaches stage 1 from the payload, so stage 2 does "
+                       + "not re-derive it from the window key")
+            let msHalf = WindowCardLoader.usageHalf(
+                quota: msQuota, scan: msScan, confirmed: msConfirmed)
+            expect(msHalf?.1.mine.map(\.modelId) == ["claude-fable-5"],
+                   "MS a scoped window counts only the model its allowance is about")
+            expect(msHalf?.1.scopeMatchedNothing == false,
+                   "MS and does not claim the scope missed when it matched")
+        } else {
+            expect(false, "MS the scoped fixture reaches stage 1")
+        }
+
+        // The other direction, or the filter is satisfied by dropping
+        // everything: the same scan against an UNSCOPED window keeps both rows.
+        let msUnscoped = windowPayload([
+            (client: "codex", windows: [(card: "weekly.v1", key: "weekly.v1",
+                                         resetsAt: msIso, durationSecs: 604_800)]),
+        ])
+        let msUnscopedStage1 = WindowCardLoader.quotaHalf(
+            payload: msUnscoped, clientId: "codex", attempted: true,
+            curve: { _, _, _ in
+                windowCurve(resetAtSecs: wNow + 3_600, durationSecs: 604_800,
+                            at: [(wNow - 2_000, 4), (wNow - 500, 9)])
+            },
+            nowMs: wNow * 1000)
+        if case let .quotaOnly(msQuota, _) = msUnscopedStage1 {
+            expect(msQuota.modelScope == nil,
+                   "MS a window the provider did not narrow carries no scope")
+            let msHalf = WindowCardLoader.usageHalf(
+                quota: msQuota, scan: msScan, confirmed: msConfirmed)
+            expect(msHalf?.1.mine.count == 2,
+                   "MS and an unscoped window still counts the whole subscription")
+        } else {
+            expect(false, "MS the unscoped fixture reaches stage 1")
+        }
+
+        // MS-MISS. The join finding nothing is reported, not drawn as an idle
+        // week. Empty bars under a moving curve state that the user did no
+        // work, which is a claim this card has no evidence for.
+        let msMissPayload = windowPayload([
+            (client: "codex", windows: [(card: "weekly_scoped.ghost.v1",
+                                         key: "weekly_scoped.ghost.v1",
+                                         resetsAt: msIso, durationSecs: 604_800)]),
+        ], modelScope: "ghost")
+        let msMissStage1 = WindowCardLoader.quotaHalf(
+            payload: msMissPayload, clientId: "codex", attempted: true,
+            curve: { _, _, _ in
+                windowCurve(resetAtSecs: wNow + 3_600, durationSecs: 604_800,
+                            at: [(wNow - 2_000, 4), (wNow - 500, 9)])
+            },
+            nowMs: wNow * 1000)
+        if case let .quotaOnly(msQuota, _) = msMissStage1 {
+            let msHalf = WindowCardLoader.usageHalf(
+                quota: msQuota, scan: msScan, confirmed: msConfirmed)
+            expect(msHalf?.1.mine.isEmpty == true
+                       && msHalf?.1.scopeMatchedNothing == true,
+                   "MS-MISS a scope that matches nothing says so, rather than "
+                       + "presenting an empty window as a quiet week")
+        } else {
+            expect(false, "MS-MISS the unmatched fixture reaches stage 1")
+        }
 
         // L2a. `usageHalf` consumes a scan rather than issuing one: the single
         // scan is structural. It must also refuse a scan that starts too late,
