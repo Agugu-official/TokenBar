@@ -1684,7 +1684,9 @@ private struct DashboardSnapshot {
             // rebuilt it. Only on the transition, so a run of failures does not
             // redo the same work every minute.
             if payload == nil, firstSettlement { refreshWindowQuotaHalves() }
-            try? await Task.sleep(for: .seconds(60))
+            // Interruptible: adding or removing an account must take its card
+            // with it in the same turn, not at this loop's convenience.
+            await ClaudeExtraRoots.RegistryChange.sleep(upTo: 60)
         }
     }
 

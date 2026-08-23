@@ -13421,6 +13421,46 @@ enum SelfTest {
                 + "a second account existed still resolves to the SAME primary window, "
                 + "not whichever account the payload happens to list first")
 
+        // M3-h. A registry change must wake the quota poll, not wait it out.
+        //
+        // The mirror of every other M3 gate: those assert that state is
+        // ESTABLISHED — two accounts appear, both survive, each resolves to its
+        // own series. None asserted what happens when an account goes away, and
+        // that is exactly the case that shipped broken: the card stayed for up
+        // to a minute describing an account the engine no longer fetched.
+        //
+        // Keying a view's `.task` on the generation was not enough, because it
+        // only holds while that view is alive — popover closed, or the separate
+        // Settings window in use, and nobody was observing. This asserts the
+        // mechanism that does not depend on a view: the sleep itself returns
+        // early when the registry moves.
+        let m3hWoken: Bool? = awaitMainActorValue {
+            let start = Date()
+            let slept = Task { @MainActor in
+                await ClaudeExtraRoots.RegistryChange.sleep(upTo: 60)
+                return Date().timeIntervalSince(start)
+            }
+            // Let the sleeper register before signalling, or the signal lands
+            // with no waiter and this measures nothing.
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            ClaudeExtraRoots.RegistryChange.signal()
+            return await slept.value < 5
+        }
+        expect(
+            m3hWoken == true,
+            "M3-h a registry change did not wake the quota poll before its 60s timeout")
+
+        // And the timeout still applies when nothing signals, so a missed
+        // signal degrades to the old cadence rather than hanging the loop.
+        let m3hTimedOut: Bool? = awaitMainActorValue {
+            let start = Date()
+            await ClaudeExtraRoots.RegistryChange.sleep(upTo: 0.2)
+            return Date().timeIntervalSince(start) >= 0.15
+        }
+        expect(
+            m3hTimedOut == true,
+            "M3-h the sleep returned before its timeout with nothing signalling")
+
         // M3-g. The quota lens's row ids must use the same key as the grids
         // they select into. `QuotaHeatmapCard` looks up `heatmaps[$0.id]`, so a
         // two-part id against a three-part grid key finds nothing: the extra

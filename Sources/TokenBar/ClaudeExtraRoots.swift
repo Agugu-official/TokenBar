@@ -189,6 +189,57 @@ enum ClaudeExtraRoots {
         UserDefaults.standard.removeObject(forKey: appliedKey)
     }
 
+    /// Wakes anything sleeping between polls when the installed account
+    /// registry moves.
+    ///
+    /// The quota cards come from a 60-second poll loop, so adding or removing
+    /// an account left the cards describing the previous set until that loop
+    /// happened to come round. Keying a view's `.task` on the generation fixed
+    /// it only while that view was alive — with the popover closed, or the
+    /// separate Settings window in use, nothing was observing. The registry is
+    /// process-wide state, so what waits on it has to be too.
+    @MainActor
+    enum RegistryChange {
+        private static var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+
+        /// Sleeps for `seconds`, or until the registry moves, whichever first.
+        ///
+        /// The timeout resumes ITS OWN waiter rather than calling `signal()`.
+        /// Routing it through `signal()` read as economical and made the
+        /// timeout depend on the wake-up path working: a mutation that stopped
+        /// `signal()` resuming anyone did not fail the test, it hung the sleep
+        /// forever — a worse outcome than the sixty-second wait this exists to
+        /// remove, and in the poll loop that owns the quota cards.
+        ///
+        /// Registration cannot lose a race with the timeout. Both run on the
+        /// MainActor, and `withCheckedContinuation`'s body runs synchronously
+        /// before the suspension, so the entry is in the map before the timeout
+        /// task can get a turn.
+        static func sleep(upTo seconds: Double) async {
+            let id = UUID()
+            let timeout = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(seconds))
+                guard !Task.isCancelled else { return }
+                resume(id)
+            }
+            await withCheckedContinuation { waiters[id] = $0 }
+            timeout.cancel()
+        }
+
+        private static func resume(_ id: UUID) {
+            waiters.removeValue(forKey: id)?.resume()
+        }
+
+        /// Releases every waiter. Idempotent: a change with nobody waiting is
+        /// not an error, and a second call before anyone sleeps again is a
+        /// no-op rather than a queued wake-up that would fire spuriously.
+        static func signal() {
+            let pending = waiters
+            waiters.removeAll()
+            for (_, waiter) in pending { waiter.resume() }
+        }
+    }
+
     private static let applyQueue = DispatchQueue(
         label: "com.nyanako.tokenbar.claude-extra-roots", qos: .utility)
 
@@ -249,6 +300,10 @@ enum ClaudeExtraRoots {
                 UserDefaults.standard.set(
                     UserDefaults.standard.integer(forKey: generationKey) &+ 1,
                     forKey: generationKey)
+                // And wake the polls directly. The generation only reaches a
+                // view that is on screen; this reaches the loop that owns the
+                // cards whether or not anything is watching.
+                RegistryChange.signal()
                 completion?(result)
             }
         }
