@@ -2,11 +2,13 @@
 
 **The dashboard rebuilds once.** The saved snapshot now records which scan roots produced it, so a snapshot written by the previous version is not restored on the first launch after updating. Expect one cold start and nothing else.
 
-**Downgrading after this release loses your quota pace history.** [#234](https://github.com/Nanako0129/TokenBar/pull/234)
+**Downgrading after this release sets your quota pace history aside.** [#234](https://github.com/Nanako0129/TokenBar/pull/234)
 
-The store holding those readings moves from schema 3 to schema 4. An older TokenBar cannot read the new format — it treats the file as corrupt, quarantines it, and starts accumulating from nothing. Your usage totals are unaffected: those are read from your logs and can always be recomputed. The pace readings cannot. They are observations taken over time, and weeks of them are what let a window say "Historically: lasts until reset" rather than falling back to a flat average.
+The store holding those readings moves from schema 3 to schema 4. An older TokenBar cannot read the new format, so it moves the file to a quarantine copy beside it and starts accumulating from nothing: the pace cards go back to learning, and a window says so rather than saying "Historically: lasts until reset".
 
-Upgrading itself loses nothing. The migration exists precisely so that a version bump does not reset everyone's history, and it preserves every sample exactly.
+**Nothing is deleted.** The quarantine copy holds the complete history, and it is what makes this recoverable rather than final. Usage totals are unaffected either way — those are read from your logs and can always be recomputed, while pace readings are observations taken over time and cannot be.
+
+Upgrading itself loses nothing. The migration exists precisely so that a version bump does not reset everyone's history, and it preserves every sample exactly — verified against a real store of 32 series and 3,117 samples, which without the migration is quarantined outright.
 
 The conversion is lazy: it happens on the next write the app had its own reason to make, not on load. So a file still reading `"schemaVersion": 3` for a while after updating is normal, and not a migration that failed to run.
 
