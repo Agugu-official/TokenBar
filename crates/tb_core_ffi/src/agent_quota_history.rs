@@ -1,4 +1,9 @@
-//! Schema-3 provider-neutral quota pace history transaction.
+//! Schema-4 provider-neutral quota pace history transaction.
+//!
+//! The schema counter and the `v3` in the store's filename are two different
+//! numbers: the filename names the store family and was fixed when the store
+//! was introduced, while `HISTORY_SCHEMA_VERSION` is the shape of what is
+//! inside it and is now `4`.
 //!
 //! The locked v3 transaction owns sampling, cycle-aware retention, migration,
 //! and the coherent historical evaluator. Provider adapters resolve identity
@@ -121,8 +126,9 @@ pub(crate) struct SeriesKey {
 impl SeriesKey {
     /// The scope argument is a `HistoryScope`, never an `AccountScope`: a key
     /// that outlives a credential rotation cannot be derived from the credential.
-    /// The persisted field name stays `accountScope` because the store's schema
-    /// is frozen at version 3.
+    /// The persisted field name stays `accountScope` because renaming it would
+    /// orphan every record already on disk, and no migration renames fields —
+    /// the version-4 upgrade adds `QuotaSample.plan` and touches nothing else.
     pub(crate) fn new(
         provider_id: impl Into<String>,
         history_scope: &HistoryScope,
