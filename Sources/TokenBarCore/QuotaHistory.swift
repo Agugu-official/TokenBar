@@ -281,6 +281,7 @@ public enum QuotaHistoryFold {
     /// unassigned usage lands in the other column rather than being dropped,
     /// because an unclassified source still consumed real time in that window.
     /// `modelScope` narrows the fold to the model a window's allowance counts,
+    /// and has NO DEFAULT on purpose — see the note on `spans`.
     /// for a provider-scoped window like Claude's "Fable only" weekly limit.
     /// Nil means the window is not scoped and every model counts.
     ///
@@ -292,7 +293,7 @@ public enum QuotaHistoryFold {
     /// applied at two of three call sites.
     public static func rows(
         cycles: [QuotaCycle], messages: [WindowMessage], subscription: String,
-        modelScope: String? = nil,
+        modelScope: String?,
         confirmed: [UsageAttribution.Record]
     ) -> [QuotaHistoryRow] {
         // Sorted once, then each cycle takes a contiguous slice: the naive
@@ -404,9 +405,18 @@ public enum QuotaHistoryFold {
     /// quota delta by the usage that produced it, so counting a model the
     /// allowance does not charge inflates the denominator and understates the
     /// price of the quota.
+    ///
+    /// No default value, and the omission is the safeguard. When this argument
+    /// defaulted to nil, `--window-probe` kept compiling unchanged and silently
+    /// began measuring something the shipping path no longer computes — and
+    /// that probe exists to tune `consideredCycles` against the shipping
+    /// calculation, so a divergence there invalidates the measurement rather
+    /// than merely differing from it. A required argument turns "a caller
+    /// forgot" into a build error, which is the only version of this rule that
+    /// cannot be forgotten again.
     public static func spans(
         cycles: [QuotaCycle], messages: [WindowMessage], subscription: String,
-        modelScope: String? = nil,
+        modelScope: String?,
         confirmed: [UsageAttribution.Record]
     ) -> [(exCacheRead: Int64, cost: Double)] {
         let sorted = inScope(messages, modelScope).sorted { $0.timestamp < $1.timestamp }

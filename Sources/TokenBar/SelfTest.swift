@@ -12139,6 +12139,7 @@ enum SelfTest {
             client: "c", provider: "p", state: .assigned("c"))]
         let qhsSpans = QuotaHistoryFold.spans(
             cycles: qhsCycles, messages: qhsMessages, subscription: "c",
+            modelScope: nil,
             confirmed: qhsRecords)
         expect(qhsSpans.first?.exCacheRead == 100 && qhsSpans.first.map { abs($0.cost - 0.25) < 1e-9 } == true,
                "QH-SHRINK usage taken before the recomputed start still counts toward the "
@@ -12160,6 +12161,7 @@ enum SelfTest {
             """.utf8))
         let qhspRows = QuotaHistoryFold.rows(
             cycles: qhsCycles, messages: qhspMessages, subscription: "c",
+            modelScope: nil,
             confirmed: qhsRecords)
         expect(qhspRows.first?.mineTokensExCacheRead == 800,
                "QH-SPAN the cycle column counts everything charged to the window")
@@ -12220,6 +12222,7 @@ enum SelfTest {
             """.utf8))
         let qhoRows = QuotaHistoryFold.rows(
             cycles: qhsCycles, messages: qhoMessages, subscription: "c",
+            modelScope: nil,
             confirmed: [UsageAttribution.Record(
                 client: "z", provider: "p", state: .assigned("other"))])
         expect(qhoRows.first?.otherTokens == 1000,
@@ -12245,6 +12248,7 @@ enum SelfTest {
             """.utf8))
         let qhoCostRows = QuotaHistoryFold.rows(
             cycles: qhsCycles, messages: qhoCostOnly, subscription: "c",
+            modelScope: nil,
             confirmed: [UsageAttribution.Record(
                 client: "z", provider: "p", state: .assigned("other"))])
         // QH-SCOPE. The chart, these history rows and the equivalence spans are
@@ -12267,6 +12271,7 @@ enum SelfTest {
             client: "c", provider: "anthropic", state: .assigned("c"))]
         let qhsUnscopedRows = QuotaHistoryFold.rows(
             cycles: qhsCycles, messages: qhsScopeMessages, subscription: "c",
+            modelScope: nil,
             confirmed: qhsDeclared)
         let qhsScopedRows = QuotaHistoryFold.rows(
             cycles: qhsCycles, messages: qhsScopeMessages, subscription: "c",
@@ -12279,6 +12284,7 @@ enum SelfTest {
                    + "allowance charges")
         let qhsUnscopedSpans = QuotaHistoryFold.spans(
             cycles: qhsCycles, messages: qhsScopeMessages, subscription: "c",
+            modelScope: nil,
             confirmed: qhsDeclared)
         let qhsScopedSpans = QuotaHistoryFold.spans(
             cycles: qhsCycles, messages: qhsScopeMessages, subscription: "c",
@@ -12300,6 +12306,7 @@ enum SelfTest {
         // outstanding question they had already answered.
         let qhxRows = QuotaHistoryFold.rows(
             cycles: qhsCycles, messages: qhoMessages, subscription: "c",
+            modelScope: nil,
             confirmed: [
                 UsageAttribution.Record(
                     client: "z", provider: "p", state: .assigned("other")),
@@ -12447,7 +12454,7 @@ enum SelfTest {
                 attributedMessage(at: 125_000_000, client: "unknown", provider: "nowhere",
                                   model: "x", tokens: 3, cost: 5),
             ],
-            subscription: "claude", confirmed: qhConfirmed)
+            subscription: "claude", modelScope: nil, confirmed: qhConfirmed)
 
         let older = qhRows[1]
         expect(older.mineTokens == 10 && older.mineCost == 1,
