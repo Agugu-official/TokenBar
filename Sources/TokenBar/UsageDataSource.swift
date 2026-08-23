@@ -91,6 +91,10 @@ actor AgentUsageThrottle {
 
     private var last: (payload: AgentUsagePayload, at: Date)?
     private var inFlight: Task<AgentUsagePayload, Error>?
+    /// Advanced by `invalidate()`. A request compares the value it was issued
+    /// under against the current one before caching its result — `Task` is a
+    /// struct, so identity comparison is not available for the same purpose.
+    private var generation = 0
 
     /// `now` is a clock rather than an instant, and is read twice: once to
     /// decide, and once to stamp the result.
@@ -116,12 +120,37 @@ actor AgentUsageThrottle {
         // Its result is this caller's answer — they asked inside one round trip
         // of each other, and the endpoint cannot have moved between them.
         if let inFlight { return try await inFlight.value }
+        let issuedAt = generation
         let task = Task { try await fetch() }
         inFlight = task
-        defer { inFlight = nil }
+        defer { if generation == issuedAt { inFlight = nil } }
         let fresh = try await task.value
-        last = (fresh, now())
+        // Only cache it if nothing invalidated while it was in flight. Stamping
+        // unconditionally would re-seat, for another full window, the answer
+        // this request was already too old to give.
+        if generation == issuedAt { last = (fresh, now()) }
         return fresh
+    }
+
+    /// Forget the cached payload because the QUESTION changed, not because
+    /// enough time passed.
+    ///
+    /// The floor exists to stop repeated identical questions reaching an
+    /// endpoint that rate-limits. A Claude account being added or removed is
+    /// not that: the cached answer describes a set of accounts that no longer
+    /// exists, and holding it for the rest of the 50-second window is what made
+    /// a card outlive its account — the delay users saw as "it does update, but
+    /// only after a while".
+    ///
+    /// `inFlight` is dropped as well as `last`. A request already out was
+    /// issued against the previous registry, so the next caller must start its
+    /// own rather than join one whose answer is about the old accounts. The
+    /// outstanding task still completes and still returns to whoever is already
+    /// awaiting it; it simply stops being anyone else's answer.
+    func invalidate() {
+        generation &+= 1
+        last = nil
+        inFlight = nil
     }
 
     /// Test seam only: forget the cached payload.

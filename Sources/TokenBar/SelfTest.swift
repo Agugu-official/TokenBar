@@ -13421,6 +13421,45 @@ enum SelfTest {
                 + "a second account existed still resolves to the SAME primary window, "
                 + "not whichever account the payload happens to list first")
 
+        // M3-j. An account change must invalidate the throttled payload.
+        //
+        // This is the layer the three previous attempts at "the card outlives
+        // its account" all missed. Waking the poll immediately achieves nothing
+        // while `AgentUsageThrottle` answers the woken fetch from a payload it
+        // cached before the change: the floor is 50 seconds, which is exactly
+        // the delay the user reported as "it does update, but only after a
+        // while".
+        //
+        // The floor is right and stays — it protects an endpoint that
+        // rate-limits from repeated identical questions. An account being added
+        // or removed is a DIFFERENT question, and the cached answer describes a
+        // set of accounts that no longer exists.
+        let m3jRefetched: Bool? = awaitMainActorValue { () async throws -> Bool in
+            let throttle = AgentUsageThrottle()
+            let clock = ThrottleClock(Date(timeIntervalSince1970: 2_000_000))
+            let counter = ThrottleCallCounter()
+            let empty = try JSONDecoder().decode(
+                AgentUsagePayload.self,
+                from: Data(#"{"generatedAt":"2026-08-23T00:00:00Z","agents":[]}"#.utf8))
+            let fetch: @Sendable () async throws -> AgentUsagePayload = {
+                await counter.bump()
+                return empty
+            }
+            _ = try await throttle.payload(now: { clock.value }, fetch: fetch)
+            // Well inside the floor: without an invalidation this is served
+            // from cache and the counter does not move.
+            _ = try await throttle.payload(now: { clock.value }, fetch: fetch)
+            let cachedCalls = await counter.count
+            await throttle.invalidate()
+            _ = try await throttle.payload(now: { clock.value }, fetch: fetch)
+            let afterInvalidate = await counter.count
+            return cachedCalls == 1 && afterInvalidate == 2
+        }
+        expect(
+            m3jRefetched == true,
+            "M3-j an account change did not force a fresh fetch, so the cards keep the old set "
+                + "for the rest of the throttle floor")
+
         // M3-h. A registry change must wake the quota poll, not wait it out.
         //
         // The mirror of every other M3 gate: those assert that state is

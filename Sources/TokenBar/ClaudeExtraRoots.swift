@@ -321,6 +321,11 @@ enum ClaudeExtraRoots {
                 // view that is on screen; this reaches the loop that owns the
                 // cards whether or not anything is watching.
                 RegistryChange.signal()
+                // And drop the throttled payload. Waking the poll is not
+                // enough on its own: the fetch it wakes into is answered from
+                // `AgentUsageThrottle`'s 50-second floor, which would hand back
+                // the payload built for the account set that just changed.
+                Task { await AgentUsageThrottle.shared.invalidate() }
                 completion?(result)
             }
         }
