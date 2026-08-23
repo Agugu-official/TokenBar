@@ -495,6 +495,80 @@ private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendab
     }
 }
 
+/// Moves the account registry WHILE the quota fetch is in flight, which is the
+/// only moment the guard `M3-p` covers can be observed: the payload is already
+/// being built when the registry changes, so it answers the previous one.
+///
+/// The first fetch signals and returns the stale payload; every fetch after it
+/// returns the fresh one. A poll that applies the first has published the
+/// previous account set.
+private final class RegistryRaceSource: UsageDataSource, @unchecked Sendable {
+    private let inner = DashboardModelTestSource(failingGraphYear: "")
+    private let stale: AgentUsagePayload
+    private let fresh: AgentUsagePayload
+    private var pending: CheckedContinuation<Void, Never>?
+    var fetches = 0
+
+    init(stale: AgentUsagePayload, fresh: AgentUsagePayload) {
+        self.stale = stale
+        self.fresh = fresh
+    }
+
+    func quotaCurveSync(
+        clientId: String, accountKey: String?, windowKey: String, generation: UInt64
+    ) throws -> QuotaCurve? { nil }
+
+    var allowsQuotaCachePersistence: Bool { false }
+    func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        try await inner.graph(year: year, priority: priority)
+    }
+    func refreshGraph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        try await inner.refreshGraph(year: year, priority: priority)
+    }
+    func modelReport(year: String?, priority: TaskPriority) async throws -> ModelReport {
+        try await inner.modelReport(year: year, priority: priority)
+    }
+    func hourlyReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> HourlyReport {
+        try await inner.hourlyReport(year: year, clients: clients, priority: priority)
+    }
+    func agentsReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> AgentsReport {
+        try await inner.agentsReport(year: year, clients: clients, priority: priority)
+    }
+    /// Every fetch after the first SUSPENDS until `release()` — that pause is
+    /// what makes the property observable. Left running, the loop applies the
+    /// fresh payload a few milliseconds later and the final value is the same
+    /// whether or not the stale one was published on the way; the first version
+    /// of this source did that and its gate could not fail.
+    func agentUsage() async throws -> AgentUsagePayload {
+        fetches += 1
+        if fetches == 1 {
+            await MainActor.run { ClaudeExtraRoots.RegistryChange.signal() }
+            return stale
+        }
+        await withCheckedContinuation { pending = $0 }
+        return fresh
+    }
+
+    /// Lets the held fetch finish. A continuation rather than a semaphore: the
+    /// poll runs on the main actor, and blocking it would stop the very test
+    /// that is about to release this.
+    func release() {
+        pending?.resume()
+        pending = nil
+    }
+    func usageTrace(windowSecs: Int64) async throws -> [TraceBucket] {
+        try await inner.usageTrace(windowSecs: windowSecs)
+    }
+    func tokensPerMin() async throws -> Double { try await inner.tokensPerMin() }
+    func windowUsage(from: Int64, until: Int64) async throws -> WindowUsage {
+        WindowUsage(messages: [], undatedCount: 0, processingTimeMs: 0)
+    }
+}
+
 private final class AttributedSeriesTestSource: UsageDataSource, @unchecked Sendable {
     let graphPayload: UsagePayload
     let refreshPayload: UsagePayload
@@ -13840,6 +13914,76 @@ enum SelfTest {
             "M3-o the quota pollers were not woken until the scan-root probe "
                 + "returned, so a stalled mount leaves the cards on the previous "
                 + "account set for the whole filesystem timeout")
+
+        // M3-p. A payload fetched under the previous registry must not be
+        // applied, only dropped.
+        //
+        // `AgentUsageThrottle.invalidate()` deliberately hands an in-flight
+        // result to the waiter that asked for it — the caller asked a question
+        // and gets an answer — so the poll receives a payload built for the
+        // account set that has since changed. Applying it publishes the old set
+        // to the cards, the Auto gauge and a persisted scalar, and the
+        // correction is a whole network round away.
+        //
+        // Driven through the real `pollAgentUsage` rather than asserting the
+        // comparison, because the comparison is `==` and the defect was never
+        // in the comparison — it was in applying before making it.
+        //
+        // The generations are deliberately far above every other fixture's.
+        // `AgentUsagePublicationState.resolve` returns the PREVIOUSLY published
+        // payload for any candidate whose generation is lower than the highest
+        // this process has seen, and other cases publish generation 9 — so a
+        // low-numbered fixture here is silently replaced and the assertion
+        // measures another case's payload rather than this one's. The first
+        // version of this check did exactly that and failed against correct
+        // code.
+        let m3pApplied: String? = awaitMainActorValue {
+            let staleJSON = """
+            {"generatedAt":"stale","publicationGeneration":90001,"agents":[
+              {"clientId":"claude","source":"oauth","updatedAt":"stale","windows":[]}
+            ]}
+            """
+            let freshJSON = """
+            {"generatedAt":"fresh","publicationGeneration":90002,"agents":[
+              {"clientId":"claude","source":"oauth","updatedAt":"fresh","windows":[]}
+            ]}
+            """
+            let decoder = JSONDecoder()
+            let source = RegistryRaceSource(
+                stale: try! decoder.decode(
+                    AgentUsagePayload.self, from: Data(staleJSON.utf8)),
+                fresh: try! decoder.decode(
+                    AgentUsagePayload.self, from: Data(freshJSON.utf8)))
+            let model = DashboardModel(source: source, initialYear: nil)
+            let poll = Task { await model.pollAgentUsage() }
+            // Wait for the SECOND fetch to start and then look, while it is
+            // still held. Looking after it finishes measures nothing: the fresh
+            // payload lands either way, and the question is whether the stale
+            // one was published before it.
+            for _ in 0..<200 {
+                if source.fetches >= 2 { break }
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            let published = model.agentUsage?.generatedAt
+            let fetches = source.fetches
+            source.release()
+            poll.cancel()
+            // Put the process-wide publication floor back where it was, or
+            // these generations reject every later case's payload and hand it
+            // this one instead — see `resetForTesting`.
+            AgentUsagePublicationCoordinator.resetForTesting()
+            // Two values in one, so neither can pass vacuously: `nil` published
+            // is only meaningful if the loop actually got as far as a second
+            // fetch, and a second fetch is only meaningful if nothing was
+            // published before it.
+            guard fetches >= 2 else { return "never-refetched" }
+            return published ?? "dropped"
+        } ?? nil
+        expect(
+            m3pApplied == "dropped",
+            "M3-p the poll published a payload built for the previous account "
+                + "set instead of dropping it and refetching")
 
         // M3-j. An account change must invalidate the throttled payload.
         //

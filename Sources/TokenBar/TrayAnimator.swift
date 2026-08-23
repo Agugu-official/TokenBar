@@ -405,6 +405,18 @@ final class TrayAnimator {
                 let registryEpoch = ClaudeExtraRoots.RegistryChange.epoch
                 let payload = try? await source.agentUsage()
                 guard let self, !Task.isCancelled else { break }
+                // A payload built for the previous account set must not be
+                // applied. `AgentUsageThrottle.invalidate()` deliberately hands
+                // an in-flight result to the waiter that asked for it rather
+                // than failing it — the caller asked a question and gets an
+                // answer — but this loop's answer becomes the Auto gauge, the
+                // coordinator state and a persisted scalar, and the correction
+                // is a whole network round away. Dropping it costs one cycle;
+                // applying it shows the old account set for that round.
+                //
+                // The epoch, not the payload's contents: nothing in the payload
+                // says which registry produced it.
+                guard ClaudeExtraRoots.RegistryChange.epoch == registryEpoch else { continue }
                 if let payload {
                     Self.applyQuotaPayload(
                         payload,

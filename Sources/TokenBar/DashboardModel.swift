@@ -79,6 +79,20 @@ enum AgentUsagePublicationCoordinator {
     static func resolve(_ candidate: AgentUsagePayload) -> AgentUsagePayload {
         state.resolve(candidate)
     }
+
+    /// Test seam only: back to the state of a process that has published
+    /// nothing.
+    ///
+    /// This floor is process-wide and monotone, so a case that publishes a high
+    /// generation silently rejects every later case's payload and hands it the
+    /// earlier one instead — the later case then measures a fixture it never
+    /// built, and fails for a reason nothing in it points at. That is not
+    /// hypothetical: `M3-p` needs generations above every other fixture's to be
+    /// published at all, and without this reset it broke `M3-f`, two hundred
+    /// lines further down, by doing so.
+    static func resetForTesting() {
+        state = AgentUsagePublicationState()
+    }
 }
 
 /// What a graph commit actually did. `GraphFetchOutcome.committed` used to be
@@ -1673,6 +1687,13 @@ private struct DashboardSnapshot {
             let registryEpoch = ClaudeExtraRoots.RegistryChange.epoch
             let payload = try? await source.agentUsage()
             if Task.isCancelled { break }
+            // Same guard the tray poll carries, for the same reason and in the
+            // same shape: a payload built for the previous account set is not
+            // an answer to the question this registry asks. `continue` rather
+            // than falling through, so the immediate refetch happens now
+            // instead of after the sleep — and `agentUsageAttempted` stays
+            // where it was, because nothing about the new registry has settled.
+            if ClaudeExtraRoots.RegistryChange.epoch != registryEpoch { continue }
             if let payload {
                 let resolved = AgentUsagePublicationCoordinator.resolve(payload)
                 agentUsage = resolved
