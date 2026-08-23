@@ -174,7 +174,12 @@ enum WindowProbe {
                         }
                         let spans = QuotaHistoryFold.spans(
                             cycles: admitted, messages: messages,
-                            subscription: agent.clientId, confirmed: confirmed)
+                            subscription: agent.clientId,
+                            // The probe measures the SHIPPING calculation, so
+                            // it has to narrow the same way. A sweep run on a
+                            // scoped window without this tunes a constant
+                            // against numbers the app never computes.
+                            modelScope: w.modelScope, confirmed: confirmed)
                         return WindowEquivalence.aggregate(
                             declared: !confirmed.isEmpty,
                             cycles: zip(admitted, spans).map { cycle, span in

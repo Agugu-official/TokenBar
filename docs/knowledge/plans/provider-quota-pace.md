@@ -416,7 +416,7 @@ Weighted median沿用v2的deterministic tie rule：依value升冪排序，累積
 
 ## Storage and migration
 
-Generic store 使用 `quota-pace-history-v3.json`，schema version 固定為 `3`。Top level 是排序後的 `series[]`；每個 `SeriesState` 保存 `providerId`、opaque `accountScope`、`windowKey`、optional `activeResetAt`、`lastActivityAt`、optional rollover state與 `samples[]`。Sample 固定包含 `resetAt`、`durationSeconds`、`durationSource`、`usedPercent`、`sampledAt` 與 `origin`（`liveV3` 或 `importedV2`）。v1 永不讀取；既有 `codex-weekly-history-v2.json` 是唯一 migration input，且 bytes、mtime 與 pathname 必須保持不變。
+Generic store 使用 `quota-pace-history-v3.json`，schema version 現為 `4`。檔名裡的 `v3` 是 store family、在 store 建立時就固定，與 schema counter 是兩個不同的號碼；升級是就地惰性的，磁碟上的檔案會維持 `"schemaVersion": 3` 直到下一次本來就要寫檔的交易。Top level 是排序後的 `series[]`；每個 `SeriesState` 保存 `providerId`、opaque `accountScope`（承載的是 `HistoryScope` 而非 `AccountScope`，欄位名為相容既有記錄而保留）、`windowKey`、optional `activeResetAt`、`lastActivityAt`、optional rollover state與 `samples[]`。Sample 固定包含 `resetAt`、`durationSeconds`、`durationSource`、`usedPercent`、`sampledAt` 與 `origin`（`liveV3` 或 `importedV2`），schema 4 另加 optional `plan`——目前恆為 `None` 且不做 backfill，也不得進入 canonical sample key。v1 永不讀取；既有 `codex-weekly-history-v2.json` 是唯一 migration input，且 bytes、mtime 與 pathname 必須保持不變。
 
 | Concern | Required behavior |
 |---|---|

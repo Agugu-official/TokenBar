@@ -16,7 +16,7 @@ superseded_on: 2026-07-17
 
 這份計畫記錄 Codex Weekly historical pace v2 曾採用的 reset timestamp、歷史群組與 Linear fallback 設計；其 runtime writer、persistence 與 evaluator 已退役，以下內容不再是可執行的 current contract。
 
-> **退役狀態（2026-07-31）：** `crates/tb_core_ffi/src/agent_history.rs` module 已移除，v2 writer／evaluator 與專用 evaluator tests 不再編譯。現行 Historical runtime 只由 [`agent_quota_history.rs`](../../../crates/tb_core_ffi/src/agent_quota_history.rs) 的 schema-3 v3 擁有；`codex-weekly-history-v2.json` 現在只由 `migrate_codex_v2` 作 current-account-bound、read-only migration input。本文的舊設計、fixtures 與 checkpoints 均保留作 historical record，不得當成 current gate。
+> **退役狀態（2026-07-31）：** `crates/tb_core_ffi/src/agent_history.rs` module 已移除，v2 writer／evaluator 與專用 evaluator tests 不再編譯。現行 Historical runtime 只由 [`agent_quota_history.rs`](../../../crates/tb_core_ffi/src/agent_quota_history.rs) 的 **schema-4** store 擁有(檔名 `quota-pace-history-v3.json` 中的 `v3` 是 store 家族代號,不是 schema 版本)；`codex-weekly-history-v2.json` 現在只由 `migrate_codex_v2` 作 current-account-bound、read-only migration input。本文的舊設計、fixtures 與 checkpoints 均保留作 historical record，不得當成 current gate。
 
 > **後續範圍：** Provider quota cards 的 duration、identity、learning state、generic v3 history 與 schema-2 importer 由 [`provider-quota-pace.md`](provider-quota-pace.md) 接手；本文件只保留退役 v2 writer／evaluator 的歷史背景。
 

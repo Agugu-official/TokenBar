@@ -282,6 +282,16 @@ public struct UsageWindow: Decodable, Sendable {
     /// validated current-cycle evidence passes the v3 quality gate.
     /// Missing or null is state-dependent in the v3 contract.
     public let historicalPace: HistoricalPace?
+    /// The model this window's allowance is scoped to, as the provider's own
+    /// display-name slug — `fable` for a "Fable only" weekly limit. Nil for
+    /// every window the provider did not narrow.
+    ///
+    /// Emitted by the engine only where the provider DECLARES a scope
+    /// (`limits[].scope.model`). It is never inferred from a label here or
+    /// there: "Designs" and "Daily Routines" are narrow windows whose scope is
+    /// not a model, and a flat `seven_day_opus` field says nothing about scope
+    /// at all.
+    public let modelScope: String?
 
     // Defaults preserve existing pure Swift linear fixtures. A v3 status is
     // validated below; the legacy default deliberately does not derive a
@@ -291,8 +301,10 @@ public struct UsageWindow: Decodable, Sendable {
         resetsAt: String? = nil, resetText: String? = nil,
         windowMinutes: Int64? = nil, historicalPace: HistoricalPace? = nil,
         cardId: String? = nil, durationSeconds: Int64? = nil,
-        paceStatus: PaceStatus = .legacyMissing
+        paceStatus: PaceStatus = .legacyMissing,
+        modelScope: String? = nil
     ) {
+        self.modelScope = modelScope
         precondition(
             Self.usagePercentageValidationError(
                 usedPercent: usedPercent,
@@ -342,7 +354,7 @@ public struct UsageWindow: Decodable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case cardId, label, usedPercent, remainingPercent, resetsAt, resetText
-        case windowMinutes, paceStatus, historicalPace
+        case windowMinutes, paceStatus, historicalPace, modelScope
     }
 
     public init(from decoder: Decoder) throws {
@@ -354,6 +366,10 @@ public struct UsageWindow: Decodable, Sendable {
         let resetText = try container.decodeIfPresent(String.self, forKey: .resetText)
         let windowMinutes = try container.decodeIfPresent(Int64.self, forKey: .windowMinutes)
         let historicalPace = try container.decodeIfPresent(HistoricalPace.self, forKey: .historicalPace)
+        // Absent is the ordinary answer — the engine omits the key for every
+        // unscoped window — so `decodeIfPresent` is correct here and is NOT the
+        // conflation the other optional fields on this type warn about.
+        self.modelScope = try container.decodeIfPresent(String.self, forKey: .modelScope)
 
         if let message = Self.usagePercentageValidationError(
             usedPercent: usedPercent,

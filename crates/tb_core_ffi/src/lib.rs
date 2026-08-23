@@ -1569,6 +1569,7 @@ mod tests {
                     // exact-equality assertions below could not see one.
                     sampled_at: 999_907,
                     origin: agent_quota_history::SampleOrigin::LiveV3,
+                    plan: None,
                 },
                 agent_quota_history::QuotaSample {
                     reset_at: 1_000_000,
@@ -1577,6 +1578,7 @@ mod tests {
                     used_percent: 55.0,
                     sampled_at: 999_945,
                     origin: agent_quota_history::SampleOrigin::ImportedV2,
+                    plan: None,
                 },
                 agent_quota_history::QuotaSample {
                     reset_at: 1_000_500,
@@ -1585,6 +1587,7 @@ mod tests {
                     used_percent: 3.0,
                     sampled_at: 1_000_405,
                     origin: agent_quota_history::SampleOrigin::LiveV3,
+                    plan: None,
                 },
             ],
         };
@@ -1702,6 +1705,7 @@ mod tests {
                 used_percent: 40.0,
                 sampled_at: normalized - 1_000,
                 origin: agent_quota_history::SampleOrigin::LiveV3,
+                plan: None,
             }],
         };
 

@@ -25,6 +25,10 @@ struct WindowQuotaHalf: Sendable {
     /// card cannot state one answer and then replace it with another.
     let placementPending: Bool
     let nowMs: Int64
+    /// The provider-declared model scope of this window, carried from stage 1
+    /// so stage 2 filters the usage it displays to the model the allowance is
+    /// actually about. Nil for every window the provider did not narrow.
+    let modelScope: String?
 }
 
 /// Stage 2. The product of the union scan, already attributed and already
@@ -40,6 +44,15 @@ struct WindowUsageHalf: Sendable {
     /// than another's. Carried so the card can disclose the omission, never so
     /// it can claim the omission was its own.
     var undatedCount: Int = 0
+    /// The window declared a model scope and NOTHING in this subscription's
+    /// usage matched it, while unscoped usage exists.
+    ///
+    /// Carried because the scope is a join between the provider's display name
+    /// and the transcript's model id, and a join that finds nothing looks
+    /// exactly like a week with no work in it. Drawing empty bars under a
+    /// moving curve would state a fact about the user's week that this card
+    /// cannot support; saying the scope matched nothing states what happened.
+    var scopeMatchedNothing: Bool = false
 }
 
 /// What the card is, at any moment. Five cases, exhaustive by construction:

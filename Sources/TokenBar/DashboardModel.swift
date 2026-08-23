@@ -1395,6 +1395,11 @@ private struct DashboardSnapshot {
             // main actor.
             let spans = QuotaHistoryFold.spans(
                 cycles: cycles, messages: scan.messages, subscription: client,
+                // `key` IS the window's `"<clientId>|<cardId>"`, so each
+                // estimate is narrowed to its own window's scope rather than to
+                // whichever one the card happens to be showing.
+                modelScope: WindowCardLoader.modelScope(
+                    payload: agentUsage, cardId: key),
                 confirmed: confirmed)
             built[key] = WindowEquivalence.aggregate(
                 declared: !confirmed.isEmpty,
@@ -1421,6 +1426,11 @@ private struct DashboardSnapshot {
             // bills it. A row whose usage was declared elsewhere is exactly
             // what the "other" column exists to show.
             subscription: client,
+            // The window these cycles belong to, not the client's default: the
+            // user can select a scoped window, and its history has to answer
+            // for the same allowance the chart above it draws.
+            modelScope: WindowCardLoader.modelScope(
+                payload: agentUsage, cardId: quotaCyclesCardId),
             confirmed: UsageAttribution.confirmed().records)
     }
 
