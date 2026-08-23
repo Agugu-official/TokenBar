@@ -448,10 +448,16 @@ private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendab
 
     init(payload: AgentUsagePayload) { self.payload = payload }
 
+    /// Per-account override, checked before the shared `curve` fallback: lets
+    /// a case give a second Claude account its own distinct curve so a test
+    /// can prove the two are not conflated.
+    var curveByAccount: [String?: QuotaCurve] = [:]
+
     func quotaCurveSync(
-        clientId: String, windowKey: String, generation: UInt64
+        clientId: String, accountKey: String?, windowKey: String, generation: UInt64
     ) throws -> QuotaCurve? {
         if failCurveRead { throw QuotaUnavailable() }
+        if let byAccount = curveByAccount[accountKey] { return byAccount }
         return curve
     }
 
@@ -11240,7 +11246,7 @@ enum SelfTest {
         // below is that it produces a placed window from memory alone.
         let stage1 = WindowCardLoader.quotaHalf(
             payload: wPayload, clientId: "codex", attempted: true,
-            curve: { _, _, _ in wCurve }, nowMs: wNow * 1000)
+            curve: { _, _, _, _ in wCurve }, nowMs: wNow * 1000)
         var stage1Placed = false
         var stage1Live = false
         if case let .quotaOnly(q, _) = stage1 {
@@ -11262,7 +11268,7 @@ enum SelfTest {
         var isLoading = false
         if case .loading = WindowCardLoader.quotaHalf(
             payload: nil, clientId: "codex", attempted: false,
-            curve: { _, _, _ in wCurve }, nowMs: wNow * 1000) { isLoading = true }
+            curve: { _, _, _, _ in wCurve }, nowMs: wNow * 1000) { isLoading = true }
         expect(isLoading, "L6a a payload that has not arrived yet is loading")
 
         // L6a (ii). Payload in, but this window has no recorded history: a
@@ -11271,7 +11277,7 @@ enum SelfTest {
         var noHistory = false
         if case .noQuotaHistory = WindowCardLoader.quotaHalf(
             payload: wPayload, clientId: "codex", attempted: true,
-            curve: { _, _, _ in nil }, nowMs: wNow * 1000) { noHistory = true }
+            curve: { _, _, _, _ in nil }, nowMs: wNow * 1000) { noHistory = true }
         expect(noHistory,
                "L6a a window with no quota history is terminal, not perpetually loading")
 
@@ -11286,7 +11292,7 @@ enum SelfTest {
         var transientIsLoading = false
         if case .loading = WindowCardLoader.quotaHalf(
             payload: wPayload, clientId: "codex", attempted: true,
-            curve: { _, _, _ in throw CurveReadFailed() }, nowMs: wNow * 1000)
+            curve: { _, _, _, _ in throw CurveReadFailed() }, nowMs: wNow * 1000)
         { transientIsLoading = true }
         expect(transientIsLoading,
                "L6b a failed curve read is transient, never a claim of no history")
@@ -11306,17 +11312,17 @@ enum SelfTest {
         expect(
             stateIsLoading(WindowCardLoader.quotaHalf(
                 payload: nil, clientId: "codex", attempted: false,
-                curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
+                curve: { _, _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d no payload and no attempt yet is still waiting")
         expect(
             stateIsBlocked(WindowCardLoader.quotaHalf(
                 payload: nil, clientId: "codex", attempted: true,
-                curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
+                curve: { _, _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d no payload after the attempt settled is a terminal answer")
         expect(
             stateIsBlocked(WindowCardLoader.quotaHalf(
                 payload: wPayload, clientId: "not-in-payload", attempted: true,
-                curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
+                curve: { _, _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d a client the settled payload does not carry is answered, not awaited")
         // The third guard, and the one the "no quota windows" wording was
         // written for: present, no error, and offering nothing to settle on.
@@ -11329,17 +11335,17 @@ enum SelfTest {
         expect(
             stateIsBlocked(WindowCardLoader.quotaHalf(
                 payload: emptyWindows, clientId: "codex", attempted: true,
-                curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
+                curve: { _, _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d an agent present with no windows is answered once the attempt has settled")
         expect(
             stateIsLoading(WindowCardLoader.quotaHalf(
                 payload: emptyWindows, clientId: "codex", attempted: false,
-                curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
+                curve: { _, _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d and is still a wait before it has")
         expect(
             stateIsLoading(WindowCardLoader.quotaHalf(
                 payload: wPayload, clientId: "not-in-payload", attempted: false,
-                curve: { _, _, _ in nil }, nowMs: wNow * 1000)),
+                curve: { _, _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d a client missing from an unsettled payload is still a wait")
 
         // L6g. The picker's selection must be one of its own options. The
@@ -11376,12 +11382,12 @@ enum SelfTest {
         expect(
             WindowCardLoader.quotaHalf(
                 payload: wPayload, clientId: "codex", attempted: true,
-                curve: { _, _, _ in wCurve }, nowMs: wNow * 1000).cardId == wSelected,
+                curve: { _, _, _, _ in wCurve }, nowMs: wNow * 1000).cardId == wSelected,
             "L6f a resolved card reports the same identity the selection does")
         expect(
             WindowCardLoader.quotaHalf(
                 payload: nil, clientId: "codex", attempted: false,
-                curve: { _, _, _ in nil }, nowMs: wNow * 1000).cardId == nil,
+                curve: { _, _, _, _ in nil }, nowMs: wNow * 1000).cardId == nil,
             "L6f while a card about no window reports none, so it is never retained")
 
         // L6e. Teaching `quotaHalf` to answer is not the same as the answer
@@ -11418,13 +11424,13 @@ enum SelfTest {
             WindowCardLoader.curveSamples(
                 payload: wPayload, clientId: "codex",
                 window: wPayload.agents[0].uniqueCardWindows[0],
-                curve: { _, _, _ in throw CurveReadFailed() }, nowMs: wNow * 1000) == nil,
+                curve: { _, _, _, _ in throw CurveReadFailed() }, nowMs: wNow * 1000) == nil,
             "L6b a throwing read yields nil, meaning unknown")
         expect(
             WindowCardLoader.curveSamples(
                 payload: wPayload, clientId: "codex",
                 window: wPayload.agents[0].uniqueCardWindows[0],
-                curve: { _, _, _ in nil }, nowMs: wNow * 1000) == [],
+                curve: { _, _, _, _ in nil }, nowMs: wNow * 1000) == [],
             "L6b a read that succeeds with no curve yields empty, meaning none")
 
         // Same contract, same reason, one layer over: the history card reads
@@ -11434,12 +11440,12 @@ enum SelfTest {
         expect(
             WindowCardLoader.cycles(
                 payload: nil, clientId: "codex",
-                curve: { _, _, _ in nil }) == nil,
+                curve: { _, _, _, _ in nil }) == nil,
             "L6c no payload yet is unknown, not an empty history")
         expect(
             WindowCardLoader.cycles(
                 payload: wPayload, clientId: "codex",
-                curve: { _, _, _ in nil }) == [],
+                curve: { _, _, _, _ in nil }) == [],
             "L6c a payload whose curve holds nothing is an empty history")
 
         // L3a. The union starts at the earliest R - D across every client, so
@@ -11969,7 +11975,7 @@ enum SelfTest {
         // cap applied at the fold made a window that ran out forty cycles ago
         // report that it never had.
         let qhcSummary = QuotaOverviewFold.summaries(windows: [
-            (clientId: "c", cardId: "w", label: "W", cycles: qhcAll)
+            (clientId: "c", accountKey: nil, cardId: "w", label: "W", cycles: qhcAll)
         ]).first
         expect(qhcSummary?.neverExhausted == false && qhcSummary?.cycleCount == 40,
                "QH-CAP-LIFETIME exhaustion older than the cap is still visible to the "
@@ -12030,10 +12036,10 @@ enum SelfTest {
         // only the restricted return, then above both while the opencode branch
         // exited before either — and each fix moved a line without making "no
         // hidden client leaves this function" checkable. Now it is.
-        expect(AgentLimitsCard.visible(["codex", "claude"], hiddenRaw: "claude")
+        expect(AgentLimitsCard.visible(["codex", "claude"], hiddenRaw: "claude") { $0 }
                    == ["codex"],
                "AL-HIDDEN a hidden client is removed from a candidate list")
-        expect(AgentLimitsCard.visible(["codex", "claude"], hiddenRaw: "") ==
+        expect(AgentLimitsCard.visible(["codex", "claude"], hiddenRaw: "") { $0 } ==
                    ["codex", "claude"],
                "AL-HIDDEN and an empty hide set removes nothing, so the check "
                    + "above is not simply emptying the list")
@@ -12170,7 +12176,7 @@ enum SelfTest {
                "QH-B and the peak is the absolute reading, so the ceiling is knowable")
         expect(
             QuotaOverviewFold.summaries(windows: [
-                (clientId: "c", cardId: "w", label: "W", cycles: qhbCycles)
+                (clientId: "c", accountKey: nil, cardId: "w", label: "W", cycles: qhbCycles)
             ]).first?.neverExhausted == false,
             "QH-B a cycle that reached 100% is not reported as never having run out")
 
@@ -12480,11 +12486,11 @@ enum SelfTest {
         // `QuotaHistoryFold.cycles` hands back newest first; a strip is read in
         // time order, so the fold has to reverse it. 30 is the newest here.
         let qoSummaries = QuotaOverviewFold.summaries(windows: [
-            (clientId: "claude", cardId: "session.v1", label: "Session",
+            (clientId: "claude", accountKey: nil, cardId: "session.v1", label: "Session",
              cycles: [qoCycle(500, 30), qoCycle(400, 58), qoCycle(300, 10)]),
-            (clientId: "grok", cardId: "billing.v1", label: "Weekly",
+            (clientId: "grok", accountKey: nil, cardId: "billing.v1", label: "Weekly",
              cycles: [qoCycle(500, 99)]),
-            (clientId: "copilot", cardId: "chat.v1", label: "Chat", cycles: []),
+            (clientId: "copilot", accountKey: nil, cardId: "chat.v1", label: "Chat", cycles: []),
         ])
 
         expect(qoSummaries.map(\.clientId) == ["grok", "claude"],
@@ -12505,7 +12511,7 @@ enum SelfTest {
         // reassurance. The fixture above cannot reach this: three cycles all
         // fit, so the two readings coincide.
         let qoLong = QuotaOverviewFold.summaries(windows: [(
-            clientId: "claude", cardId: "session.v1", label: "Session",
+            clientId: "claude", accountKey: nil, cardId: "session.v1", label: "Session",
             // Newest first, so the 99 is the OLDEST of twenty and falls off a
             // sixteen-bar strip.
             cycles: (0..<19).map { qoCycle(Int64(1000 - $0 * 10), 5) }
@@ -13317,6 +13323,205 @@ enum SelfTest {
                 + "(this is display-only — a missing path stays in the persisted list, "
                 + "matching how vendor's own scan silently skips nonexistent roots "
                 + "instead of dropping the user's configuration)")
+
+        // MARK: - M3: a Claude card is addressed by (clientId, accountKey)
+
+        // Two Claude accounts sharing `clientId == "claude"`, listed EXTRA
+        // account first — deliberately not primary-first, so a mutation that
+        // resolves "the first agent whose clientId matches" instead of "the
+        // agent whose (clientId, accountKey) pair matches" changes the
+        // answer rather than accidentally still passing by array order.
+        // Distinct remaining percentages (primary 90, extra 20) so the
+        // tighter one — the extra account — is never the one a naive
+        // first-match would already happen to return.
+        let m3ExtraKey = "/Users/x/.claude-extra"
+        let m3PayloadJSON = """
+        {"generatedAt":"now","publicationGeneration":9,"agents":[
+          {"clientId":"claude","accountKey":"\(m3ExtraKey)","source":"oauth","updatedAt":"now",
+           "windows":[{"cardId":"session.v1","label":"Session","usedPercent":80,"remainingPercent":20}]},
+          {"clientId":"claude","source":"oauth","updatedAt":"now",
+           "windows":[{"cardId":"session.v1","label":"Session","usedPercent":10,"remainingPercent":90}]}
+        ]}
+        """
+        let m3Payload = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(m3PayloadJSON.utf8))
+
+        // M3-a. Restore the historical `Dictionary(agents.map { ($0.clientId, $0) },
+        // uniquingKeysWith: { first, _ in first })` — keying by clientId alone — to
+        // watch this go red: the second account collapses into the first and the
+        // count drops from 2 to 1.
+        expect(
+            AgentLimitsCard.snapshotsByRow(m3Payload.agents).count == 2,
+            "M3-a two Claude agents with different accountKey both survive to the "
+                + "rendered list, rather than one collapsing onto the other under a "
+                + "clientId-only dictionary key")
+
+        // M3-b. Change `expandedWithExtraAccounts` to test `visiblePrimaries.contains`
+        // membership before deciding whether to emit the EXTRA row too (instead of
+        // unconditionally appending every known id's extras) to watch this go red.
+        let m3KnownIds = ["codex", "claude"]
+        let m3VisiblePrimaries = Set(
+            AgentLimitsCard.visible(
+                m3KnownIds.map { AccountIdentity(clientId: $0, accountKey: nil) },
+                hiddenRaw: "claude"
+            ) { $0.clientId }.map(\.clientId))
+        let m3Expanded = AgentLimitsCard.expandedWithExtraAccounts(
+            known: m3KnownIds, visiblePrimaries: m3VisiblePrimaries, agents: m3Payload.agents)
+        expect(
+            m3Expanded.contains(AccountIdentity(clientId: "claude", accountKey: m3ExtraKey))
+                && !m3Expanded.contains(AccountIdentity(clientId: "claude", accountKey: nil))
+                && m3Expanded.contains(AccountIdentity(clientId: "codex", accountKey: nil)),
+            "M3-b hiding the primary Claude account by clientId (\"claude\" in "
+                + "limitsHiddenRaw) removes only the primary row, leaving the extra "
+                + "account's row visible and codex untouched")
+
+        // M3-c. Change `agent.clientId == parsed.clientId && agent.accountKey ==
+        // accountKey` back to `agent.clientId == parsed.clientId` in both
+        // `canonicalSelection` and `resolve` to watch this go red.
+        let m3Auto = QuotaResolver.resolve(payload: m3Payload, selection: QuotaResolver.auto)
+        expect(
+            m3Auto?.clientId == "claude" && m3Auto?.accountKey == m3ExtraKey
+                && m3Auto?.window.remainingPercent == 20,
+            "M3-c auto mode can select the EXTRA account when it is the tighter of "
+                + "the two, not only ever the first snapshot in the payload")
+        let m3StoredSelection = QuotaResolver.selection(clientId: "claude", cardId: "session.v1")
+        let m3ResolvedPrimary = QuotaResolver.resolve(
+            payload: m3Payload, selection: m3StoredSelection, accountKey: nil)
+        let m3ResolvedExtra = QuotaResolver.resolve(
+            payload: m3Payload, selection: m3StoredSelection, accountKey: m3ExtraKey)
+        expect(
+            m3ResolvedPrimary?.accountKey == nil && m3ResolvedPrimary?.window.remainingPercent == 90
+                && m3ResolvedExtra?.accountKey == m3ExtraKey
+                && m3ResolvedExtra?.window.remainingPercent == 20,
+            "M3-c resolving the identical stored \"claude|session.v1\" selection for "
+                + "two different accountKey contexts returns the account each names, "
+                + "not the same arbitrary snapshot both times")
+
+        // M3-d. Drop the `agent.accountKey == tightest.accountKey` conjunct from the
+        // fold's identity check (back to `(clientId, cardId)` alone) to watch this
+        // go red: the primary's identically-carded window then matches the
+        // tightest's `(clientId, cardId)` and is skipped as if it were the same
+        // window, instead of being counted as an "other".
+        let m3Summary = QuotaSummaryFold.build(payload: m3Payload)
+        expect(
+            m3Summary?.tightestAccountKey == m3ExtraKey && m3Summary?.otherWindows == 1,
+            "M3-d QuotaSummary counts the primary account's identically-carded "
+                + "window as an OTHER window rather than folding it into the tightest")
+
+        // M3-e. Change `payload.agents.first(where: { $0.clientId == clientId &&
+        // $0.accountKey == nil })` back to `payload.agents.first(where: { $0.clientId
+        // == clientId })` in `WindowCardLoader.select` to watch this go red — the
+        // extra account is listed FIRST in `m3Payload`, so an accountKey-blind match
+        // resolves to its 20%-remaining window instead of the primary's 90%.
+        let m3Selected = WindowCardLoader.select(
+            payload: m3Payload, clientId: "claude", chosen: m3StoredSelection)
+        expect(
+            m3Selected?.window.remainingPercent == 90,
+            "M3-e an existing \"tokenbar.window.card.selection\" value written before "
+                + "a second account existed still resolves to the SAME primary window, "
+                + "not whichever account the payload happens to list first")
+
+        // M3-g. The quota lens's row ids must use the same key as the grids
+        // they select into. `QuotaHeatmapCard` looks up `heatmaps[$0.id]`, so a
+        // two-part id against a three-part grid key finds nothing: the extra
+        // account's heatmap would be blank, and both accounts' picker entries
+        // would carry the same id in an `Identifiable` list.
+        //
+        // The primary's id must stay byte-identical to the two-part form every
+        // stored and in-memory key has always used, or the same lookup breaks
+        // for users who have no second account at all.
+        let m3gPrimary = AccountIdentity(clientId: "claude", accountKey: nil)
+        let m3gExtra = AccountIdentity(
+            clientId: "claude", accountKey: "/Users/someone/.claude-work")
+        expect(
+            m3gPrimary.windowKey(cardId: "session.v1") == "claude|session.v1",
+            "M3-g the primary's window key keeps the two-part shape everything already stores")
+        expect(
+            m3gExtra.windowKey(cardId: "session.v1") != m3gPrimary.windowKey(cardId: "session.v1"),
+            "M3-g two accounts offering the same window collapse onto one key")
+
+        let m3gSummaries = QuotaOverviewFold.summaries(windows: [
+            (clientId: "claude", accountKey: nil, cardId: "session.v1", label: "Session",
+             cycles: [qoCycle(1_000, 40)]),
+            (clientId: "claude", accountKey: "/Users/someone/.claude-work",
+             cardId: "session.v1", label: "Session", cycles: [qoCycle(1_000, 70)]),
+        ])
+        expect(
+            Set(m3gSummaries.map(\.id)).count == 2,
+            "M3-g two accounts' summaries share one id, so a list keyed on it renders one")
+        expect(
+            m3gSummaries.first(where: { $0.accountKey == nil })?.id == "claude|session.v1",
+            "M3-g the primary's summary id drifted from the shape the grids are stored under")
+
+        let m3gHeatmapIds = Set([
+            QuotaHeatmapWindow(
+                clientId: "claude", cardId: "session.v1", windowLabel: "Session", total: 1
+            ).id,
+            QuotaHeatmapWindow(
+                clientId: "claude", accountKey: "/Users/someone/.claude-work",
+                cardId: "session.v1", windowLabel: "Session", total: 1
+            ).id,
+        ])
+        expect(
+            m3gHeatmapIds.count == 2,
+            "M3-g two accounts' heatmap picker entries share one id")
+
+        // M3-f. Change `windowCurves`/`quotaHeatmaps` back to a bare
+        // "clientId|cardId" key (dropping `accountKey`) to watch this go red: the
+        // second write silently overwrites the first, so both dictionaries end up
+        // with one entry instead of two.
+        let m3fNow = Int64(Date().timeIntervalSince1970)
+        let m3fReset = m3fNow + 3_600
+        let m3fResetIso = ISO8601DateFormatter().string(
+            from: Date(timeIntervalSince1970: Double(m3fReset)))
+        func m3fAgentJSON(accountKey: String?, usedPercent: Int) -> String {
+            let window = """
+                {"cardId":"session.v1","label":"Session","usedPercent":\(usedPercent),
+                 "remainingPercent":\(100 - usedPercent),"resetsAt":"\(m3fResetIso)",
+                 "durationSeconds":18000,"windowMinutes":300,
+                 "paceStatus":{"state":"learningHistory","windowKey":"session.v1",
+                               "durationSeconds":18000,"durationSource":"provider","completeCycles":1}}
+                """
+            let accountField = accountKey.map { "\"accountKey\":\"\($0)\"," } ?? ""
+            return """
+                {"clientId":"claude",\(accountField)"source":"oauth","updatedAt":"now","windows":[\(window)]}
+                """
+        }
+        let m3fPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data("""
+                {"generatedAt":"now","publicationGeneration":11,"agents":[
+                  \(m3fAgentJSON(accountKey: m3ExtraKey, usedPercent: 80)),
+                  \(m3fAgentJSON(accountKey: nil, usedPercent: 10))
+                ]}
+                """.utf8))
+        let m3fPrimaryCurve = windowCurve(
+            resetAtSecs: m3fReset, durationSecs: 18_000, at: [(m3fNow - 3_000, 4)])
+        let m3fExtraCurve = windowCurve(
+            resetAtSecs: m3fReset, durationSecs: 18_000, at: [(m3fNow - 3_000, 77)])
+        let m3fResult: (curveKeys: Int, curvesDiffer: Bool, heatmapKeys: Int)? = awaitMainActorValue {
+            let src = WindowScanCountingSource(payload: m3fPayload)
+            src.curveByAccount = [nil: m3fPrimaryCurve, m3ExtraKey: m3fExtraCurve]
+            let m = DashboardModel(source: src, initialYear: nil)
+            m.windowCardClients = ["claude"]
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while !m.agentUsageAttempted, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            poll.cancel()
+            _ = await poll.value
+            let curveValues = Set(m.windowCurves.values.map { $0.map(\.usedPercent) })
+            return (m.windowCurves.count, curveValues.count == 2, m.quotaHeatmaps.count)
+        }
+        expect(
+            m3fResult?.curveKeys == 2 && m3fResult?.curvesDiffer == true
+                && m3fResult?.heatmapKeys == 2,
+            "M3-f two accounts' window curves and heatmaps land under two distinct "
+                + "keys with two distinct sets of readings, rather than one account's "
+                + "data silently overwriting the other's under a shared "
+                + "\"clientId|cardId\" key")
 
         if failures > 0 {
             print("\(failures) selftest check(s) failed")

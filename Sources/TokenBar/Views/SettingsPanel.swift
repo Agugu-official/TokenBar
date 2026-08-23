@@ -1099,8 +1099,14 @@ struct SettingsPanel: View {
         let canonical = QuotaResolver.canonicalSelection(
             payload: agentUsage, selection: quotaSource)
         let selectedClientId = quotaClientId(from: canonical)
+        // Primary accounts only: this picker writes one global selection
+        // string with no account component, and an extra account can offer
+        // windows carded identically to the primary's (both a "session.v1"),
+        // so this list must not offer a choice it cannot actually distinguish
+        // once persisted. An extra account's windows remain visible in the
+        // Agent-limits overview.
         let agents = (agentUsage?.agents ?? []).filter {
-            $0.error == nil && !$0.uniqueCardWindows.isEmpty
+            $0.error == nil && $0.accountKey == nil && !$0.uniqueCardWindows.isEmpty
         }
         let availableClientIds = agents.map(\.clientId)
         let clientIds = selectedClientId.map {

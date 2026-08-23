@@ -201,8 +201,8 @@ enum WindowProbe {
                     let t = Date()
                     _ = WindowCardLoader.curveSamples(
                         payload: payload, clientId: agent.clientId, window: w,
-                        curve: { c, k, g in
-                            (try? TBCore.quotaCurve(clientId: c, windowKey: k, generation: g)) ?? nil
+                        curve: { c, a, k, g in
+                            (try? TBCore.quotaCurve(clientId: c, accountKey: a, windowKey: k, generation: g)) ?? nil
                         }, nowMs: now) ?? []
                     curveMs.append(("\(agent.clientId)|\(w.cardId)",
                                     Date().timeIntervalSince(t) * 1000))
@@ -227,8 +227,8 @@ enum WindowProbe {
                 for w in agent.uniqueCardWindows {
                     let samples = WindowCardLoader.curveSamples(
                         payload: payload, clientId: agent.clientId, window: w,
-                        curve: { c, k, g in
-                            (try? TBCore.quotaCurve(clientId: c, windowKey: k, generation: g)) ?? nil
+                        curve: { c, a, k, g in
+                            (try? TBCore.quotaCurve(clientId: c, accountKey: a, windowKey: k, generation: g)) ?? nil
                         }, nowMs: now) ?? []
                     let res = WindowCardLoader.resolution(
                         window: w, nowMs: now, firstUsageAfterReset: nil)
@@ -249,8 +249,8 @@ enum WindowProbe {
                 for w in agent.uniqueCardWindows {
                     let samples = WindowCardLoader.curveSamples(
                         payload: payload, clientId: agent.clientId, window: w,
-                        curve: { c, k, g in
-                            (try? TBCore.quotaCurve(clientId: c, windowKey: k, generation: g)) ?? nil
+                        curve: { c, a, k, g in
+                            (try? TBCore.quotaCurve(clientId: c, accountKey: a, windowKey: k, generation: g)) ?? nil
                         }, nowMs: now) ?? []
                     guard let iv = AgentLimitsCard.sparklineInterval(
                         window: w, samples: samples, nowMs: now) else { continue }

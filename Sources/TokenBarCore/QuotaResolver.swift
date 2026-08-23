@@ -21,12 +21,22 @@ public enum QuotaResolver {
     /// provider failure, so silently changing it to Auto would show another
     /// provider instead of letting callers retain the selected source's last-good
     /// value.
+    ///
+    /// `accountKey` picks WHICH account of `parsed.clientId` this selection
+    /// belongs to — nil (the default) is the primary account, which is what
+    /// every existing single-string persisted selection means and must keep
+    /// meaning. A card ID string alone cannot name the account: two accounts
+    /// of the same client can both offer a window called `session.v1`, so an
+    /// extra account's selection is kept in its OWN storage key by the caller
+    /// and resolved by passing that account's key here explicitly.
     public static func canonicalSelection(
-        payload: AgentUsagePayload?, selection: String
+        payload: AgentUsagePayload?, selection: String, accountKey: String? = nil
     ) -> String {
         guard let parsed = parseExplicitSelection(selection) else { return auto }
         guard let payload else { return selection }
-        guard let agent = payload.agents.first(where: { $0.clientId == parsed.clientId }) else {
+        guard let agent = payload.agents.first(where: {
+            $0.clientId == parsed.clientId && $0.accountKey == accountKey
+        }) else {
             return selection
         }
 
@@ -46,20 +56,31 @@ public enum QuotaResolver {
     /// selection is always honored, even for an excluded client (the user
     /// deliberately picked it as the tray source). Empty set = pre-hide
     /// behavior, byte-identical.
+    /// `accountKey` is the account this call resolves an EXPLICIT selection
+    /// for — see `canonicalSelection`. It plays no part in AUTO mode, which
+    /// already considers every account of every client and returns whichever
+    /// one it picks.
     public static func resolve(
-        payload: AgentUsagePayload?, selection: String, excluding: Set<String> = []
-    ) -> (clientId: String, window: UsageWindow)? {
+        payload: AgentUsagePayload?, selection: String, accountKey: String? = nil,
+        excluding: Set<String> = []
+    ) -> (clientId: String, accountKey: String?, window: UsageWindow)? {
         guard let payload else { return nil }
-        let canonical = canonicalSelection(payload: payload, selection: selection)
+        let canonical = canonicalSelection(
+            payload: payload, selection: selection, accountKey: accountKey)
         if canonical == Self.auto {
-            return autoCandidate(payload: payload, excluding: excluding)
+            guard let best = autoCandidate(payload: payload, excluding: excluding) else {
+                return nil
+            }
+            return (best.identity.clientId, best.identity.accountKey, best.window)
         }
 
         guard let parsed = parseExplicitSelection(canonical),
-              let agent = payload.agents.first(where: { $0.clientId == parsed.clientId }),
+              let agent = payload.agents.first(where: {
+                  $0.clientId == parsed.clientId && $0.accountKey == accountKey
+              }),
               let window = agent.uniqueCardWindows.first(where: { $0.cardId == parsed.value })
         else { return nil }
-        return (agent.clientId, window)
+        return (agent.clientId, agent.accountKey, window)
     }
 
     /// True when `resolve` returned nil ONLY because the exclusion removed every
@@ -96,10 +117,14 @@ public enum QuotaResolver {
         return (clientId, value)
     }
 
+    /// Considers every account of every client — `payload.agents` is a flat
+    /// list of snapshots, not deduplicated by client id, so a second Claude
+    /// account is just another entry the same loop already visits — and
+    /// returns whichever single window is tightest across all of them.
     private static func autoCandidate(
         payload: AgentUsagePayload, excluding: Set<String>
-    ) -> (clientId: String, window: UsageWindow)? {
-        var best: (clientId: String, window: UsageWindow)?
+    ) -> (identity: AccountIdentity, window: UsageWindow)? {
+        var best: (identity: AccountIdentity, window: UsageWindow)?
         for agent in payload.agents
         where agent.error == nil && !excluding.contains(agent.clientId) {
             // Rust omits malformed percentage readings before serialization.
@@ -107,7 +132,7 @@ public enum QuotaResolver {
             // duration error can coexist with a valid remaining-percentage gauge.
             for window in agent.uniqueCardWindows where window.remainingPercent.isFinite {
                 if best == nil || window.remainingPercent < best!.window.remainingPercent {
-                    best = (agent.clientId, window)
+                    best = (agent.accountIdentity, window)
                 }
             }
         }

@@ -43,6 +43,18 @@ enum WindowCardLoader {
     /// Observed keys (2026-08-14, live payload): `session.v1`, `main.session.v1`,
     /// `weekly.v1`, `main.weekly.v1`, `weekly_scoped.fable.v1`, `chat.v1`,
     /// `billing.weekly.v1`, `additional.<hash>.primary.v1`.
+    /// Identifies one window's curve/heatmap across every displayed client AND
+    /// account. `"<clientId>|<cardId>"` alone collides the instant a second
+    /// account of the same client offers an identically-carded window (both a
+    /// "session.v1") — one account's curve would silently overwrite the
+    /// other's in a shared dictionary keyed that way. The primary account
+    /// keeps the exact two-part shape callers have always built by hand
+    /// (`"\(clientId)|\(cardId)")`), so a plain client's curve key is
+    /// unaffected; only an extra account's key grows a third segment.
+    static func curveKey(clientId: String, accountKey: String?, cardId: String) -> String {
+        AccountIdentity(clientId: clientId, accountKey: accountKey).windowKey(cardId: cardId)
+    }
+
     static func isSessionClass(windowKey: String?) -> Bool {
         guard let windowKey else { return false }
         return windowKey.split(separator: ".").contains("session")
@@ -54,8 +66,13 @@ enum WindowCardLoader {
     static func select(
         payload: AgentUsagePayload, clientId: String, chosen explicit: String? = nil
     ) -> (clientId: String, window: UsageWindow)? {
-        guard let agent = payload.agents.first(where: { $0.clientId == clientId }),
-              agent.error == nil
+        // Primary account only: a client tab is a single detail card with a
+        // single stored selection and no account component, so it can only
+        // ever show one account's windows. An extra account has no tab of its
+        // own — it surfaces as its own row in the Agent-limits overview.
+        guard let agent = payload.agents.first(where: {
+            $0.clientId == clientId && $0.accountKey == nil
+        }), agent.error == nil
         else { return nil }
         return pick(windows: agent.uniqueCardWindows, clientId: clientId, chosen: explicit)
     }
@@ -71,7 +88,10 @@ enum WindowCardLoader {
     static func pickForHistory(
         payload: AgentUsagePayload, clientId: String, chosen explicit: String? = nil
     ) -> (clientId: String, window: UsageWindow)? {
-        guard let agent = payload.agents.first(where: { $0.clientId == clientId })
+        // Primary account only — see `select`.
+        guard let agent = payload.agents.first(where: {
+            $0.clientId == clientId && $0.accountKey == nil
+        })
         else { return nil }
         return pick(windows: agent.uniqueCardWindows, clientId: clientId, chosen: explicit)
     }
@@ -123,7 +143,7 @@ enum WindowCardLoader {
     /// whole reason this half is instant.
     static func quotaHalf(
         payload: AgentUsagePayload?, clientId: String, attempted: Bool,
-        curve: (String, String, UInt64) throws -> QuotaCurve?, nowMs: Int64
+        curve: (String, String?, String, UInt64) throws -> QuotaCurve?, nowMs: Int64
     ) -> WindowCardState {
         // `attempted` decides whether an absence is a wait or an answer. Both
         // guards used to return `.loading` either way — the first through a
@@ -136,7 +156,10 @@ enum WindowCardLoader {
                            reason: "Quota could not be loaded.".localized)
                 : .loading
         }
-        guard let agent = payload.agents.first(where: { $0.clientId == clientId })
+        // Primary account only — see `select`.
+        guard let agent = payload.agents.first(where: {
+            $0.clientId == clientId && $0.accountKey == nil
+        })
         else {
             // Not "reported no windows" — this agent is not in the report at
             // all, and a client enabled a moment ago sits here until the next
@@ -180,7 +203,7 @@ enum WindowCardLoader {
         // the same mistake as the one this file's `noQuotaHistory` comment
         // warns about, in the other direction.
         guard let samples = curveSamples(
-            payload: payload, clientId: clientId, window: window,
+            payload: payload, clientId: clientId, accountKey: nil, window: window,
             curve: curve, nowMs: nowMs)
         else { return .loading }
         guard !samples.isEmpty else {
@@ -310,7 +333,7 @@ enum WindowCardLoader {
     /// reason, as `curveSamples`.
     static func cycles(
         payload: AgentUsagePayload?, clientId: String,
-        curve read: (String, String, UInt64) throws -> QuotaCurve?
+        curve read: (String, String?, String, UInt64) throws -> QuotaCurve?
     ) -> [QuotaCycle]? {
         // Split, not one guard: no payload is "could not be obtained" and must
         // be nil, while a payload that simply offers no history is `[]`. Folding
@@ -324,7 +347,8 @@ enum WindowCardLoader {
               let generation = payload.publicationGeneration
         else { return [] }
         let attempt: QuotaCurve?
-        do { attempt = try read(clientId, key, generation) } catch { return nil }
+        // Primary account only — see `select`.
+        do { attempt = try read(clientId, nil, key, generation) } catch { return nil }
         guard let curve = attempt else { return [] }
         // Capped: this list is what the history card draws AND what bounds the
         // union scan, through its oldest entry's `evidenceStartMs`.
@@ -353,8 +377,9 @@ enum WindowCardLoader {
     /// when it was obtained and this window has none. Callers must not collapse
     /// the two: only the second says anything about the subscription.
     static func curveSamples(
-        payload: AgentUsagePayload, clientId: String, window: UsageWindow,
-        curve read: (String, String, UInt64) throws -> QuotaCurve?, nowMs: Int64
+        payload: AgentUsagePayload, clientId: String, accountKey: String? = nil,
+        window: UsageWindow,
+        curve read: (String, String?, String, UInt64) throws -> QuotaCurve?, nowMs: Int64
     ) -> [QuotaSample]? {
         // A window the payload cannot key, or a payload with no generation, is
         // a settled "nothing to read" rather than a failed read.
@@ -365,7 +390,7 @@ enum WindowCardLoader {
         // flatten the throw and the legitimate nil into one value, which is
         // precisely the conflation this function exists to undo.
         let attempt: QuotaCurve?
-        do { attempt = try read(clientId, key, generation) } catch { return nil }
+        do { attempt = try read(clientId, accountKey, key, generation) } catch { return nil }
         guard let curve = attempt else { return [] }
 
         // Bounded by the window the provider anchors, not by a resolution that

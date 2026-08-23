@@ -8,6 +8,11 @@ import Foundation
 /// statement rather than a smaller copy of that card.
 public struct QuotaSummary: Equatable, Sendable {
     public let tightestClient: String
+    /// Which account of `tightestClient` the tightest window belongs to — nil
+    /// for the primary account. Needed to tell the tightest window apart from
+    /// a second account's window of the same client and card id when folding
+    /// `otherWindows`/`othersComfortable` below.
+    public let tightestAccountKey: String?
     /// The provider's own label for the window, untranslated. Display code
     /// localizes it; the raw value stays comparable.
     public let tightestLabel: String
@@ -98,10 +103,14 @@ public enum QuotaSummaryFold {
                         aheadPercent: pace.deltaPercent,
                         etaText: shown.etaText, riskText: shown.riskText)
                 }
-                // Identity is the pair, not the label: two subscriptions can
-                // both call a window "Weekly", and counting by label alone
-                // would drop one of them from the tally.
+                // Identity is (clientId, accountKey, cardId), not the label or
+                // the client-cardId pair alone: two subscriptions can both
+                // call a window "Weekly", and two accounts of the SAME client
+                // can both offer a "session.v1" card id — either collapse
+                // would drop the other one's window from the tally, or worse,
+                // skip it here and never count it as tightest either.
                 if agent.clientId == tightest.clientId,
+                   agent.accountKey == tightest.accountKey,
                    window.cardId == tightest.window.cardId { continue }
                 others.append(window.remainingPercent)
             }
@@ -109,6 +118,7 @@ public enum QuotaSummaryFold {
 
         return QuotaSummary(
             tightestClient: tightest.clientId,
+            tightestAccountKey: tightest.accountKey,
             tightestLabel: tightest.window.label,
             remainingPercent: tightest.window.remainingPercent,
             resetsAt: tightest.window.resetsAt,

@@ -21,14 +21,18 @@ protocol UsageDataSource: Sendable {
     func usageTrace(windowSecs: Int64) async throws -> [TraceBucket]
     func tokensPerMin() async throws -> Double
     func windowUsage(from: Int64, until: Int64) async throws -> WindowUsage
+    /// `accountKey` selects which account of `clientId` to read — nil is the
+    /// primary account. Required (not defaulted) so a conformer that forgets
+    /// it fails to compile against the protocol instead of silently falling
+    /// through to the extension's always-nil default.
     func quotaCurve(
-        clientId: String, windowKey: String, generation: UInt64
+        clientId: String, accountKey: String?, windowKey: String, generation: UInt64
     ) async throws -> QuotaCurve?
     /// Synchronous because it is a ~2ms read of an already-persisted file, and
     /// because the card's first stage must complete without a task hop — an
     /// await here would put the "instant" half behind the scheduler.
     func quotaCurveSync(
-        clientId: String, windowKey: String, generation: UInt64
+        clientId: String, accountKey: String?, windowKey: String, generation: UInt64
     ) throws -> QuotaCurve?
 }
 
@@ -42,11 +46,11 @@ extension UsageDataSource {
     }
 
     func quotaCurve(
-        clientId: String, windowKey: String, generation: UInt64
+        clientId: String, accountKey: String?, windowKey: String, generation: UInt64
     ) async throws -> QuotaCurve? { nil }
 
     func quotaCurveSync(
-        clientId: String, windowKey: String, generation: UInt64
+        clientId: String, accountKey: String?, windowKey: String, generation: UInt64
     ) throws -> QuotaCurve? { nil }
 }
 
@@ -134,19 +138,21 @@ struct LiveUsageDataSource: UsageDataSource {
     }
 
     func quotaCurve(
-        clientId: String, windowKey: String, generation: UInt64
+        clientId: String, accountKey: String?, windowKey: String, generation: UInt64
     ) async throws -> QuotaCurve? {
         try await Task.detached(priority: .userInitiated) {
             try TBCore.quotaCurve(
-                clientId: clientId, windowKey: windowKey, generation: generation)
+                clientId: clientId, accountKey: accountKey, windowKey: windowKey,
+                generation: generation)
         }.value
     }
 
     func quotaCurveSync(
-        clientId: String, windowKey: String, generation: UInt64
+        clientId: String, accountKey: String?, windowKey: String, generation: UInt64
     ) throws -> QuotaCurve? {
         try TBCore.quotaCurve(
-            clientId: clientId, windowKey: windowKey, generation: generation)
+            clientId: clientId, accountKey: accountKey, windowKey: windowKey,
+            generation: generation)
     }
 
     func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
