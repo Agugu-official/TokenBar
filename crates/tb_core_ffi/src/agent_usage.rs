@@ -2072,6 +2072,19 @@ async fn fetch_codex_inner() -> ProviderFetchOutcome {
 /// is the one caller, and it refuses outright in that case rather than falling
 /// back to `None` — falling back would merge the samples into the primary's
 /// series instead.
+/// The identifier is the SHA-256 of the directory, not the directory. The
+/// shared `resolve_authoritative_with` trims an `OpaqueId` before hashing it,
+/// which would map `/x/dir ` and `/x/dir` to one scope — two accounts sharing
+/// one series, the contamination this whole path exists to prevent. Hex has no
+/// whitespace, so the shared trim is a no-op on it, and the digest is injective
+/// on the exact bytes.
+///
+/// The trim is not removed there instead, because Codex and Antigravity resolve
+/// through the same function against history that already exists on disk, and
+/// changing a durable derivation for them would orphan it with no error, no
+/// corrupt file and nothing to point at — a far worse outcome than the one
+/// being fixed. Claude's extra accounts have no history yet: they arrive with
+/// this branch.
 fn claude_history_scope_with<R>(
     config_dir: Option<&str>,
     resolve: R,
@@ -2079,13 +2092,36 @@ fn claude_history_scope_with<R>(
 where
     R: FnOnce(&str, Option<(AuthoritativeIdKind, &str)>) -> Result<HistoryScope, AccountScopeError>,
 {
+    let digest = claude_extra_config_dir(config_dir).map(|dir| sha256_hex(dir.to_string()));
     resolve(
         "claude",
-        config_dir
-            .map(str::trim)
-            .filter(|dir| !dir.is_empty())
-            .map(|dir| (AuthoritativeIdKind::OpaqueId, dir)),
+        digest
+            .as_deref()
+            .map(|digest| (AuthoritativeIdKind::OpaqueId, digest)),
     )
+}
+
+/// The one place a config-directory argument becomes "which account is this":
+/// `None` or empty is the primary, and anything else is the extra account's
+/// directory used **byte for byte**.
+///
+/// One function rather than the rule restated at each site. It was written
+/// three times — the Keychain service, the durable history scope, and the
+/// account key that reaches the wire — and each copy trimmed. Trimming looks
+/// harmless at every one of them and is not: Swift sends `standardizingPath`'s
+/// output, which keeps surrounding whitespace, so for a directory whose name
+/// really ends in a space the three derivations would each address a directory
+/// that does not exist while the scanner read the one that does. Fixing the
+/// registry's own normalization first and leaving these was exactly that
+/// failure — a correction that changed nothing, because the value it corrected
+/// was trimmed again one call later.
+///
+/// Emptiness is still the primary's marker, and it is checked without trimming
+/// so that a whitespace-only string is not silently promoted to "primary". No
+/// such string can arrive: `claude_config_dirs::normalize` refuses anything
+/// that is not an absolute path, and whitespace is not.
+fn claude_extra_config_dir(config_dir: Option<&str>) -> Option<&str> {
+    config_dir.filter(|dir| !dir.is_empty())
 }
 
 /// `semantic_source` for a credential read out of the Keychain item a config
@@ -2153,7 +2189,7 @@ fn claude_account_identity_with<R>(
 where
     R: FnOnce(&str, Option<(AuthoritativeIdKind, &str)>) -> Result<HistoryScope, AccountScopeError>,
 {
-    let Some(dir) = config_dir.map(str::trim).filter(|dir| !dir.is_empty()) else {
+    let Some(dir) = claude_extra_config_dir(config_dir) else {
         // The primary account. Its argument is `None` and stays `None`: that
         // value addresses every series already on disk.
         return ClaudeAccountIdentity {
@@ -3216,7 +3252,7 @@ fn keychain_item_not_found(status: &std::process::ExitStatus) -> bool {
 /// identity (`claude_history_scope`): the directory does not merely sit
 /// alongside the credential, it selects which one is read.
 fn claude_keychain_service(config_dir: Option<&str>) -> String {
-    match config_dir.map(str::trim).filter(|dir| !dir.is_empty()) {
+    match claude_extra_config_dir(config_dir) {
         None => CLAUDE_KEYCHAIN_SERVICE.to_string(),
         Some(dir) => format!(
             "{CLAUDE_KEYCHAIN_SERVICE}-{}",
@@ -5174,8 +5210,16 @@ fn additional_limit_source(limit: &CodexAdditionalRateLimit) -> Option<String> {
     .map(str::to_string)
 }
 
+/// Hashes the value it is given, with nothing removed first.
+///
+/// It used to trim, which is the fourth place one config-directory identity was
+/// silently rewritten before being hashed and the one no reader of
+/// `claude_keychain_service` would have thought to open — the trim was two
+/// calls away, inside a general-purpose helper, serving neither of its two
+/// callers. A digest helper that edits its input is a digest of something the
+/// caller did not ask about.
 fn sha256_hex(value: String) -> String {
-    let digest = Sha256::digest(value.trim().as_bytes());
+    let digest = Sha256::digest(value.as_bytes());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
@@ -11472,7 +11516,12 @@ mod tests {
 
         // The primary directory uses the bare service, and the blank forms a
         // caller could produce must not invent a suffix.
-        for primary in [None, Some(""), Some("   ")] {
+        // `Some("   ")` is deliberately NOT in this list, though it used to be.
+        // Whitespace-only is not the primary — it is an invalid extra
+        // directory, refused upstream by `claude_config_dirs::normalize`
+        // because it is not an absolute path. Treating it as the primary here
+        // required trimming, and trimming is what G6b exists to forbid.
+        for primary in [None, Some("")] {
             assert_eq!(
                 claude_keychain_service(primary),
                 "Claude Code-credentials",
@@ -11486,6 +11535,65 @@ mod tests {
             claude_keychain_service(Some("/Users/nanako/.claude-work")),
             claude_keychain_service(Some("/Users/nanako/.claude-other"))
         );
+    }
+
+    /// G6b. Every identity derived from a config directory must use the
+    /// directory's exact string, and all three of them must agree.
+    ///
+    /// One assertion covering three functions on purpose. The rule was written
+    /// three times — which Keychain item to read, which durable history series
+    /// to write, and which account key reaches the wire — and all three trimmed.
+    /// Correcting the registry's own normalization while these stood changed
+    /// nothing, because the preserved value was trimmed again one call later;
+    /// a per-function gate would have gone green on that non-fix.
+    ///
+    /// The failure has no error in it. A directory whose name really ends in a
+    /// space — legal, and reachable through the folder picker — would have its
+    /// transcripts scanned under the real path while all three identities
+    /// addressed a directory that does not exist. The card reports no login
+    /// found, forever, for an account that is logged in.
+    #[test]
+    fn g6b_every_config_dir_identity_uses_the_exact_path() {
+        let spaced = "/Users/someone/claude dir ";
+        let trimmed = "/Users/someone/claude dir";
+
+        assert_ne!(
+            claude_keychain_service(Some(spaced)),
+            claude_keychain_service(Some(trimmed)),
+            "the Keychain service was derived from the trimmed path, so this \
+             account reads an item that does not exist"
+        );
+
+        let scope = TestRefreshScope::new("claude", "g6b-claude");
+        let resolve = |provider: &str, authoritative: Option<(AuthoritativeIdKind, &str)>| {
+            scope.resolve_history(provider, authoritative)
+        };
+        assert_ne!(
+            claude_history_scope_with(Some(spaced), resolve)
+                .expect("spaced directory resolves")
+                .as_str(),
+            claude_history_scope_with(Some(trimmed), resolve)
+                .expect("trimmed directory resolves")
+                .as_str(),
+            "the durable history scope was derived from the trimmed path, so \
+             this account's samples land in another directory's series"
+        );
+
+        // And the account key that reaches the wire — the UI identity and the
+        // quota-curve binding key — is the directory verbatim.
+        let identity = claude_account_identity_with(
+            Some(spaced),
+            &claude_config_dir_test_credentials(spaced),
+            resolve,
+        );
+        assert_eq!(
+            identity.account_key.as_deref(),
+            Some(spaced),
+            "the account key was trimmed, so the card is addressed by a path \
+             the registry never stored"
+        );
+
+        scope.cleanup();
     }
 
     /// G9a. The primary's last-good entry must survive a second account of the
@@ -11576,8 +11684,10 @@ mod tests {
 
         let constant = scope.resolve_history("claude", None).unwrap();
 
-        // Primary: no directory, and the blank forms a caller could produce.
-        for primary in [None, Some(""), Some("   ")] {
+        // Primary: no directory, and the blank form a caller could produce.
+        // Whitespace-only is not here — see G6b; it is an invalid extra
+        // directory, not the primary, and calling it the primary took a trim.
+        for primary in [None, Some("")] {
             let resolved = claude_history_scope_with(primary, resolve)
                 .expect("the primary directory must resolve, not error");
             assert_eq!(
@@ -11587,14 +11697,20 @@ mod tests {
             );
         }
 
-        // An isolated directory resolves authoritatively, on the directory path.
+        // An isolated directory resolves authoritatively, on the SHA-256 of the
+        // directory path rather than the path — see `claude_history_scope_with`
+        // for why the shared resolver's trim cannot be given the raw path.
         let a = "/Users/someone/.claude-work";
         let b = "/Users/someone/.claude-other";
         let resolved_a = claude_history_scope_with(Some(a), resolve).expect("authoritative scope");
         assert_eq!(
             resolved_a.as_str(),
             scope
-                .resolve_authoritative("claude", AuthoritativeIdKind::OpaqueId, a)
+                .resolve_authoritative(
+                    "claude",
+                    AuthoritativeIdKind::OpaqueId,
+                    &sha256_hex(a.to_string())
+                )
                 .unwrap()
                 .as_str()
         );
