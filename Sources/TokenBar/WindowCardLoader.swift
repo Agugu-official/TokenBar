@@ -296,9 +296,7 @@ enum WindowCardLoader {
         // moves a naming mismatch from "we found no usage" to "there is no
         // window". The blast radius of the heuristic stays inside the totals.
         let subscription = scan.slice(from: start, to: min(end, quota.nowMs)).filter(isMine)
-        let mine = quota.modelScope.map { scope in
-            subscription.filter { ModelScope.covers(scope, modelId: $0.modelId) }
-        } ?? subscription
+        let mine = QuotaHistoryFold.inScope(subscription, quota.modelScope)
         let geo = WindowCardGeometry.usageGeometry(
             windowStartMs: start, windowEndMs: end, nowMs: min(quota.nowMs, end),
             samples: quota.samples, messages: mine)
@@ -350,6 +348,26 @@ enum WindowCardLoader {
         // union scan, through its oldest entry's `evidenceStartMs`.
         return QuotaHistoryFold.considered(QuotaHistoryFold.cycles(
             points: curve.points))
+    }
+
+    /// The model scope of one window, addressed the way every other surface
+    /// addresses a window: by its `"<clientId>|<cardId>"`.
+    ///
+    /// The history rows and the equivalence estimate are keyed that way and
+    /// have no `UsageWindow` in hand, so without this they would each re-derive
+    /// the scope from the window key string — three parsers for one fact, which
+    /// is how they drift.
+    static func modelScope(payload: AgentUsagePayload?, cardId: String?) -> String? {
+        guard let payload, let cardId,
+              let separator = cardId.firstIndex(of: "|")
+        else { return nil }
+        let clientId = String(cardId[cardId.startIndex..<separator])
+        let card = String(cardId[cardId.index(after: separator)...])
+        return payload.agents
+            .first { $0.clientId == clientId }?
+            .uniqueCardWindows
+            .first { $0.cardId == card }?
+            .modelScope
     }
 
     /// The `"<clientId>|<cardId>"` the card is currently showing, or nil when

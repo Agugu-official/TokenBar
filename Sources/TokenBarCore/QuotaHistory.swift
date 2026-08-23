@@ -280,14 +280,25 @@ public enum QuotaHistoryFold {
     /// only when the user's own declaration assigns it there; excluded and
     /// unassigned usage lands in the other column rather than being dropped,
     /// because an unclassified source still consumed real time in that window.
+    /// `modelScope` narrows the fold to the model a window's allowance counts,
+    /// for a provider-scoped window like Claude's "Fable only" weekly limit.
+    /// Nil means the window is not scoped and every model counts.
+    ///
+    /// Applied HERE rather than by the caller, and that is the point of the
+    /// parameter existing. The current-window chart, these history rows and the
+    /// equivalence spans are three surfaces of one quota; narrowing only the
+    /// chart made them disagree about the same window — corrected bars above,
+    /// uncorrected "past windows" underneath. A rule the fold owns cannot be
+    /// applied at two of three call sites.
     public static func rows(
         cycles: [QuotaCycle], messages: [WindowMessage], subscription: String,
+        modelScope: String? = nil,
         confirmed: [UsageAttribution.Record]
     ) -> [QuotaHistoryRow] {
         // Sorted once, then each cycle takes a contiguous slice: the naive
         // filter-per-cycle is O(cycles x messages), and on live data that is
         // 15 x 45,844 walks of the whole array on the main actor.
-        let sorted = messages.sorted { $0.timestamp < $1.timestamp }
+        let sorted = inScope(messages, modelScope).sorted { $0.timestamp < $1.timestamp }
         let stamps = sorted.map(\.timestamp)
         let spans = spanTotals(
             cycles: cycles, sorted: sorted, stamps: stamps,
@@ -389,14 +400,26 @@ public enum QuotaHistoryFold {
     ///
     /// Returned parallel to `cycles`, one entry each, so a caller that already
     /// has the sorted array pays no second sort.
+    /// Same `modelScope` contract as `rows`: the equivalence estimate divides a
+    /// quota delta by the usage that produced it, so counting a model the
+    /// allowance does not charge inflates the denominator and understates the
+    /// price of the quota.
     public static func spans(
         cycles: [QuotaCycle], messages: [WindowMessage], subscription: String,
+        modelScope: String? = nil,
         confirmed: [UsageAttribution.Record]
     ) -> [(exCacheRead: Int64, cost: Double)] {
-        let sorted = messages.sorted { $0.timestamp < $1.timestamp }
+        let sorted = inScope(messages, modelScope).sorted { $0.timestamp < $1.timestamp }
         return spanTotals(
             cycles: cycles, sorted: sorted, stamps: sorted.map(\.timestamp),
             subscription: subscription, confirmed: confirmed)
+    }
+
+    /// The messages a scoped window may count. One statement of the rule, so
+    /// the three surfaces of a window cannot apply it differently.
+    public static func inScope(_ messages: [WindowMessage], _ scope: String?) -> [WindowMessage] {
+        guard let scope else { return messages }
+        return messages.filter { ModelScope.covers(scope, modelId: $0.modelId) }
     }
 
     private static func spanTotals(

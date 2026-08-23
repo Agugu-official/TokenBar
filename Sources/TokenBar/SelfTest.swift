@@ -11591,6 +11591,26 @@ enum SelfTest {
             expect(false, "MS the unscoped fixture reaches stage 1")
         }
 
+        // MS-KEY. The history rows and the equivalence estimate hold a
+        // `"<clientId>|<cardId>"` and no `UsageWindow`, so they ask for the
+        // scope by that key. Without one lookup they would each parse it out of
+        // the window-key string — three parsers for one fact.
+        expect(WindowCardLoader.modelScope(
+                   payload: msPayload, cardId: "codex|weekly_scoped.fable.v1") == "fable",
+               "MS-KEY a window's scope is addressable by the same key every other "
+                   + "surface uses to name it")
+        expect(WindowCardLoader.modelScope(
+                   payload: msUnscoped, cardId: "codex|weekly.v1") == nil,
+               "MS-KEY and an unscoped window answers nil, so the lookup is not "
+                   + "simply returning whatever it finds first")
+        expect(WindowCardLoader.modelScope(
+                   payload: msPayload, cardId: "codex|no.such.window.v1") == nil
+                   && WindowCardLoader.modelScope(
+                       payload: msPayload, cardId: "ghost|weekly_scoped.fable.v1") == nil
+                   && WindowCardLoader.modelScope(payload: msPayload, cardId: nil) == nil,
+               "MS-KEY an unknown card, an unknown client and a missing key all "
+                   + "answer nil rather than the wrong window's scope")
+
         // MS-MISS. The join finding nothing is reported, not drawn as an idle
         // week. Empty bars under a moving curve state that the user did no
         // work, which is a claim this card has no evidence for.
@@ -12227,6 +12247,48 @@ enum SelfTest {
             cycles: qhsCycles, messages: qhoCostOnly, subscription: "c",
             confirmed: [UsageAttribution.Record(
                 client: "z", provider: "p", state: .assigned("other"))])
+        // QH-SCOPE. The chart, these history rows and the equivalence spans are
+        // three surfaces of ONE quota. Narrowing only the chart made them
+        // disagree about the same window — corrected bars above, uncorrected
+        // "past windows" underneath, counting Sonnet against a Fable
+        // allowance. The rule lives in the fold so it cannot be applied at two
+        // of the three.
+        let qhsScopeMessages = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":\((qhsReset - 500_000) * 1000),"client":"c","providerId":"anthropic",
+              "modelId":"claude-fable-5","input":700,"output":0,"cacheRead":0,"cacheWrite":0,
+              "reasoning":0,"cost":1.0,"isTurnStart":true},
+             {"timestamp":\((qhsReset - 400_000) * 1000),"client":"c","providerId":"anthropic",
+              "modelId":"claude-sonnet-4-5","input":300,"output":0,"cacheRead":0,"cacheWrite":0,
+              "reasoning":0,"cost":0.5,"isTurnStart":true}]
+            """.utf8))
+        let qhsDeclared = [UsageAttribution.Record(
+            client: "c", provider: "anthropic", state: .assigned("c"))]
+        let qhsUnscopedRows = QuotaHistoryFold.rows(
+            cycles: qhsCycles, messages: qhsScopeMessages, subscription: "c",
+            confirmed: qhsDeclared)
+        let qhsScopedRows = QuotaHistoryFold.rows(
+            cycles: qhsCycles, messages: qhsScopeMessages, subscription: "c",
+            modelScope: "fable", confirmed: qhsDeclared)
+        expect(qhsUnscopedRows.first?.mineTokens == 1000,
+               "QH-SCOPE without a scope the history counts every model, so the "
+                   + "scoped case below is a narrowing rather than an empty fixture")
+        expect(qhsScopedRows.first?.mineTokens == 700,
+               "QH-SCOPE a scoped window's history counts only the model its "
+                   + "allowance charges")
+        let qhsUnscopedSpans = QuotaHistoryFold.spans(
+            cycles: qhsCycles, messages: qhsScopeMessages, subscription: "c",
+            confirmed: qhsDeclared)
+        let qhsScopedSpans = QuotaHistoryFold.spans(
+            cycles: qhsCycles, messages: qhsScopeMessages, subscription: "c",
+            modelScope: "fable", confirmed: qhsDeclared)
+        expect(qhsUnscopedSpans.first?.exCacheRead == 1000
+                   && qhsScopedSpans.first?.exCacheRead == 700,
+               "QH-SCOPE and the equivalence denominator narrows with it — counting "
+                   + "a model the allowance does not charge understates what the "
+                   + "quota costs")
+
         expect(qhoCostRows.first?.otherHasUnattributed == true,
                "QH-OTHER an unclassified contribution that arrives as cost with no "
                    + "tokens is still unclassified — the label cannot be decided by "
