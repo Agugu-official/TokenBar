@@ -1,4 +1,9 @@
-//! Schema-3 provider-neutral quota pace history transaction.
+//! Schema-4 provider-neutral quota pace history transaction.
+//!
+//! The schema counter and the `v3` in the store's filename are two different
+//! numbers: the filename names the store family and was fixed when the store
+//! was introduced, while `HISTORY_SCHEMA_VERSION` is the shape of what is
+//! inside it and is now `4`.
 //!
 //! The locked v3 transaction owns sampling, cycle-aware retention, migration,
 //! and the coherent historical evaluator. Provider adapters resolve identity
@@ -22,7 +27,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
-pub(crate) const HISTORY_SCHEMA_VERSION: u32 = 3;
+pub(crate) const HISTORY_SCHEMA_VERSION: u32 = 4;
+/// The version this store shipped as from v1.10.0 through v1.13.3, which is
+/// every version that has written the file. `migrate_store_to_current` upgrades
+/// it in memory on load; see `load_store_at_with_mode`.
+pub(crate) const HISTORY_SCHEMA_VERSION_V3: u32 = 3;
+/// `v3` in these names is the store *family*, fixed when the file was
+/// introduced — not its schema version. The version lives in
+/// `HISTORY_SCHEMA_VERSION` and in the file's own `schemaVersion` field. A v4
+/// store is read from and written to these same paths; renaming them would
+/// strand every existing file.
 pub(crate) const HISTORY_FILE_NAME: &str = "quota-pace-history-v3.json";
 pub(crate) const HISTORY_LOCK_FILE_NAME: &str = "quota-pace-v3.lock";
 pub(crate) const LEGACY_V2_FILE_NAME: &str = "codex-weekly-history-v2.json";
@@ -112,8 +126,9 @@ pub(crate) struct SeriesKey {
 impl SeriesKey {
     /// The scope argument is a `HistoryScope`, never an `AccountScope`: a key
     /// that outlives a credential rotation cannot be derived from the credential.
-    /// The persisted field name stays `accountScope` because the store's schema
-    /// is frozen at version 3.
+    /// The persisted field name stays `accountScope` because renaming it would
+    /// orphan every record already on disk, and no migration renames fields —
+    /// the version-4 upgrade adds `QuotaSample.plan` and touches nothing else.
     pub(crate) fn new(
         provider_id: impl Into<String>,
         history_scope: &HistoryScope,
@@ -161,6 +176,31 @@ pub(crate) struct QuotaSample {
     pub(crate) used_percent: f64,
     pub(crate) sampled_at: i64,
     pub(crate) origin: SampleOrigin,
+    /// The subscription plan this sample was taken under. Always `None` for
+    /// now: the field exists so the schema bump and its migration land once,
+    /// ahead of the contract that decides where a plan value may be read from.
+    /// `None` means "not recorded", never "no plan" — nothing may infer a
+    /// value for a sample taken before this field existed, because a plan
+    /// change in the user's past would be recorded as a fact that never
+    /// happened, and no downstream check could tell.
+    ///
+    /// `default` covers v3 samples, which carry no key. Deliberately not
+    /// `skip_serializing_if`: writing `"plan": null` is what makes a v4 file
+    /// unreadable by a v3 build's `deny_unknown_fields`, which is a property
+    /// the downgrade test pins rather than papers over.
+    ///
+    /// **This field must never enter `sample_key`.** Anything that changes
+    /// that key's range is a data migration even when it looks like a
+    /// constant: two samples the old range separated can collide under the
+    /// new one, a duplicate key makes `validate_series` call the series
+    /// corrupt, and the remedy is quarantining the whole file. A per-sample
+    /// flaw then destroys every series. That is not hypothetical — it
+    /// happened on this store when the phase-bucket count moved from a fixed
+    /// 48 to a per-duration value, and 168 is not a multiple of 48 (see
+    /// `PHASE_BUCKET_MULTIPLE`). Pooling by plan belongs in the consumer, not
+    /// in the identity of a stored sample.
+    #[serde(default)]
+    pub(crate) plan: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -638,6 +678,7 @@ fn migrate_codex_v2_at_paths_with_clock_and_mode(
             used_percent: sample.used_percent,
             sampled_at: sample.sampled_at,
             origin: SampleOrigin::ImportedV2,
+            plan: None,
         });
     }
     if candidates.is_empty() {
@@ -1360,6 +1401,7 @@ fn add_sample_if_new(
         used_percent,
         sampled_at,
         origin: SampleOrigin::LiveV3,
+        plan: None,
     };
     if !validate_sample(&candidate) {
         return false;
@@ -3061,6 +3103,58 @@ fn load_store(path: &Path, now: i64) -> Result<LoadedStore, HistoryError> {
     load_store_at_with_mode(StorageMode::Generic, path, now, now)
 }
 
+/// Upgrade a store deserialized from disk to `HISTORY_SCHEMA_VERSION`.
+///
+/// v3 → v4 adds `QuotaSample::plan`, which `#[serde(default)]` has already
+/// filled with `None` by the time this runs. Nothing else differs, so the
+/// upgrade is the version stamp alone — and deliberately nothing more. Reading
+/// a plan for samples taken before the field existed would turn a known
+/// unknown into an unknown error: the user's history contains a real plan
+/// change, and a backfilled value would be wrong for one side of it while
+/// every downstream check kept working on the wrong answer.
+///
+/// **Placed between deserialization and `validate_store`, and the version
+/// equality inside `validate_store` is left exactly as strict.** That check
+/// demands an exact version match
+/// and is also the gate `validate_store_at` applies before a transaction
+/// writes (`save_store_atomic_with_mode`). Relaxing it there would let a store
+/// still stamped `3` reach the writer and produce a file whose version field
+/// says 3 while its samples carry `plan` — a shape no version of this code can
+/// read back, written irreversibly.
+///
+/// **The upgrade is lazy, and that is the chosen semantics.** The transaction
+/// snapshots `before` from the value this function returns and writes only when
+/// the store actually changed, so a bare version bump does not dirty it and
+/// does not trigger a write; `read_series_at_path_with_mode` never writes at
+/// all. The file therefore stays `"schemaVersion": 3` on disk until the next
+/// transaction that had a reason to write anyway, re-upgrading in memory on
+/// every load until then. Chosen over an eager upgrade because writing is the
+/// only irreversible act here, and because a file still stamped 3 is one an
+/// older build can still read — the downgrade window closes when the file is
+/// rewritten, not when this code ships. The cost is that the on-disk format
+/// converts at an unpredictable moment, which is why it is documented here,
+/// in `architecture.md`, and in `verification.md`: someone inspecting the file
+/// and finding `3` would otherwise read it as a failed migration.
+///
+/// A store at any other version is returned untouched for `validate_store` to
+/// reject, which quarantines it. That covers a file written by a future build.
+///
+/// **Ordering against `drop_unplaceable_samples`** (PR #227, which occupies
+/// this same position): the upgrade runs first. The two are commutative today
+/// — that pass reads only `series.samples` and this one writes only
+/// `schema_version` — so the order is chosen for the case where they stop
+/// being commutative. A migration that ever rewrites samples must run before
+/// the pass that judges whether a sample is placeable, or the judging happens
+/// against the shape the previous version wrote. Version first, samples
+/// second, and a future migration inherits the order rather than re-deciding
+/// it under merge pressure.
+fn migrate_store_to_current(mut store: Store) -> Store {
+    if store.schema_version == HISTORY_SCHEMA_VERSION_V3 {
+        store.schema_version = HISTORY_SCHEMA_VERSION;
+    }
+    store
+}
+
 fn load_store_at_with_mode(
     mode: StorageMode,
     path: &Path,
@@ -3087,6 +3181,17 @@ fn load_store_at_with_mode(
     // place is a sample to forget, not a history to burn.
     let parsed = serde_json::from_slice::<Store>(&bytes)
         .ok()
+        // Version before samples, and the reason is not one you can observe
+        // here. `drop_unplaceable_samples` judges every sample against the
+        // CURRENT bucket rules and per-cycle cap, so a migration that rewrites
+        // `sampled_at`, `reset_at`, or `duration_seconds` must run before it —
+        // otherwise its output is judged by coordinates it was in the middle
+        // of changing. v3→v4 rewrites none of those (it stamps the version and
+        // relies on `serde(default)` for `plan`), so these two commute today:
+        // read and write sets are disjoint. The constraint is prospective, and
+        // it is written down now because the migration that needs it will not
+        // be able to add it retroactively.
+        .map(migrate_store_to_current)
         .map(drop_unplaceable_samples)
         .filter(|store| validate_store(store));
     if let Some(store) = parsed {
@@ -4053,6 +4158,7 @@ mod tests {
             used_percent,
             sampled_at,
             origin,
+            plan: None,
         }
     }
 
@@ -5159,8 +5265,295 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Rewrite an on-disk v4 store into the exact shape a v3 build wrote:
+    /// version stamp back to 3, `plan` key gone from every sample.
+    ///
+    /// Derived from a real file rather than hand-written JSON so it cannot
+    /// drift out of sync with the rest of the schema, and it asserts the key
+    /// was actually there to remove — otherwise a regression that stopped
+    /// serializing `plan` would quietly turn this into a v4-loads-v4 test.
+    fn downgrade_file_to_v3(path: &Path) -> usize {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(value["schemaVersion"], HISTORY_SCHEMA_VERSION);
+        value["schemaVersion"] = serde_json::json!(HISTORY_SCHEMA_VERSION_V3);
+        let mut samples = 0;
+        for series in value["series"].as_array_mut().unwrap() {
+            for sample in series["samples"].as_array_mut().unwrap() {
+                assert!(
+                    sample.as_object_mut().unwrap().remove("plan").is_some(),
+                    "the fixture must start from a file that serializes `plan`"
+                );
+                samples += 1;
+            }
+        }
+        assert!(samples > 0, "an empty fixture makes every later claim vacuous");
+        fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+        samples
+    }
+
+    /// V1a, V1b and V2 in one function, because the order is load-bearing and
+    /// invisible in the code: if the v3 store were quarantined instead of
+    /// upgraded, the store would be empty and "every sample's plan is None"
+    /// would pass on the empty set. The sample count is asserted first and
+    /// carried forward so that cannot happen silently.
     #[test]
-    fn writes_schema_three_sorted_series_and_exact_sample_fields() {
+    fn a_v3_store_upgrades_in_memory_keeps_every_sample_and_converts_on_disk_only_when_written() {
+        let (directory, path) = temp_path("v3-upgrade");
+        let now = 1_000_000;
+        let reset = now + 7 * DAY;
+
+        // Build a real multi-series, multi-sample store through the shipping
+        // write path, then take it back to v3.
+        // Offsets are spaced by more than one phase bucket. A 7-day window is
+        // split into `phase_bucket_count(7 * DAY)` buckets — 192, since
+        // anything over two days takes the `PHASE_BUCKET_MULTIPLE` step — so a
+        // bucket is 52.5 minutes and 4h apart is comfortably clear. Samples
+        // inside one bucket replace each other, which would leave a fixture far
+        // smaller than it reads as; the spacing is deliberately loose enough to
+        // survive another change to the bucket count.
+        for (account, offset, used) in [
+            ("a", 0, 10.0),
+            ("a", 4 * HOUR, 20.0),
+            ("a", 8 * HOUR, 30.0),
+            ("b", 0, 15.0),
+            ("b", 4 * HOUR, 25.0),
+        ] {
+            assert!(matches!(
+                record(
+                    &path,
+                    account,
+                    Some(reset),
+                    used,
+                    now + offset,
+                    provider(reset, 7 * DAY),
+                    None
+                ),
+                HistoryOutcome::Ready { sampled: true, .. }
+            ));
+        }
+        let before = read_store(&path);
+        let series_count = before.series.len();
+        assert_eq!(series_count, 2);
+        let sample_count = downgrade_file_to_v3(&path);
+        assert_eq!(sample_count, 5);
+
+        // V1a — the upgrade happens on load, loses nothing, and does not
+        // quarantine.
+        let loaded =
+            load_store_at_with_mode(StorageMode::System, &path, now + 12 * HOUR, now + 12 * HOUR)
+                .unwrap();
+        assert!(!loaded.quarantined, "a v3 store was quarantined instead of upgraded");
+        assert_eq!(loaded.store.schema_version, HISTORY_SCHEMA_VERSION);
+        assert_eq!(loaded.store.series.len(), series_count);
+        assert_eq!(
+            loaded
+                .store
+                .series
+                .iter()
+                .map(|series| series.samples.len())
+                .sum::<usize>(),
+            sample_count
+        );
+        assert_eq!(loaded.store, before, "the upgrade changed something other than the version");
+
+        // V1b — the upgrade is lazy. Loading is not a reason to write, so the
+        // file is still stamped 3 and still carries no `plan` key.
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            on_disk["schemaVersion"], HISTORY_SCHEMA_VERSION_V3,
+            "loading rewrote the file, so the eager-upgrade risk this slice avoids is present"
+        );
+        assert!(
+            on_disk["series"][0]["samples"][0]
+                .as_object()
+                .unwrap()
+                .get("plan")
+                .is_none()
+        );
+
+        // V2 — a transaction that had a reason to write converts the file, and
+        // every sample it writes, old and new, has no plan.
+        assert!(matches!(
+            record(
+                &path,
+                "a",
+                Some(reset),
+                40.0,
+                now + 12 * HOUR,
+                provider(reset, 7 * DAY),
+                None
+            ),
+            HistoryOutcome::Ready { sampled: true, .. }
+        ));
+        let after = read_store(&path);
+        assert_eq!(after.schema_version, HISTORY_SCHEMA_VERSION);
+        assert_eq!(
+            after
+                .series
+                .iter()
+                .map(|series| series.samples.len())
+                .sum::<usize>(),
+            sample_count + 1
+        );
+        assert!(
+            after
+                .series
+                .iter()
+                .flat_map(|series| series.samples.iter())
+                .all(|sample| sample.plan.is_none()),
+            "a plan value was written, and nothing in this slice has one to write"
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// V5. The hermetic fixture above proves the upgrade on a store this test
+    /// file built; this one proves it on a store the shipping app actually
+    /// wrote, which is the only kind that exists on a user's disk.
+    ///
+    /// **The operator supplies a copy.** Point
+    /// `TOKENBAR_QUOTA_STORE_COPY_SOURCE` at a file you copied out yourself:
+    ///
+    /// ```text
+    /// cp "$HOME/Library/Application Support/com.nyanako.tokenbar/quota-pace-history-v3.json" /tmp/store-copy.json
+    /// TOKENBAR_QUOTA_STORE_COPY_SOURCE=/tmp/store-copy.json cargo test -p tb_core_ffi -- --ignored real_store
+    /// ```
+    ///
+    /// A source inside the application-data directory is refused by this
+    /// function, not by how it is invoked. `#[ignore]` and an unset variable
+    /// are properties of the caller and decay differently from the body:
+    /// `cargo test -- --ignored` is a normal thing to run, and a variable
+    /// exported once into a shell profile is a normal thing to forget. A check
+    /// here cannot be un-set by either.
+    ///
+    /// Byte-equality at the end would only prove this test did not modify the
+    /// source. It proves nothing about a panic between the copy and the
+    /// assertion, and nothing at all if the process is killed. Not opening the
+    /// live file is the only guarantee that survives those.
+    #[test]
+    #[ignore = "needs a store copy the operator made; see the doc comment"]
+    fn a_real_store_upgrades_without_losing_series_or_samples() {
+        let source = std::env::var("TOKENBAR_QUOTA_STORE_COPY_SOURCE")
+            .expect("set TOKENBAR_QUOTA_STORE_COPY_SOURCE to a copy you made");
+        let source = Path::new(&source);
+        // Resolve first: a symlink into the data directory is the same file.
+        let resolved = fs::canonicalize(source).expect("resolve the source path");
+        if let Some(home) = crate::user_home_dir() {
+            let protected = home.join("Library/Application Support");
+            assert!(
+                !resolved.starts_with(&protected),
+                "refusing to open {} — it is inside the application-data directory. \
+                 Copy the store out and point the variable at the copy.",
+                resolved.display()
+            );
+        }
+        let original = fs::read(&resolved).expect("read the store copy");
+
+        let (directory, path) = temp_path("real-store-copy");
+        fs::write(&path, &original).unwrap();
+
+        let raw: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        let series_before = raw["series"].as_array().unwrap().len();
+        let samples_before: usize = raw["series"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|series| series["samples"].as_array().unwrap().len())
+            .sum();
+        assert!(samples_before > 0, "an empty source proves nothing");
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let loaded = load_store_at_with_mode(StorageMode::System, &path, now, now).unwrap();
+
+        assert!(!loaded.quarantined, "the real store was quarantined");
+        assert_eq!(loaded.store.schema_version, HISTORY_SCHEMA_VERSION);
+        assert_eq!(loaded.store.series.len(), series_before);
+        // Two passes run between deserialization and this assertion: the
+        // upgrade, and `drop_unplaceable_samples`. A healthy store should lose
+        // nothing to either, so a drop here is worth failing on whichever one
+        // caused it — but read the failure carefully before assuming it was
+        // the migration.
+        assert_eq!(
+            loaded
+                .store
+                .series
+                .iter()
+                .map(|series| series.samples.len())
+                .sum::<usize>(),
+            samples_before,
+            "a real store lost samples on load — either the migration or \
+             `drop_unplaceable_samples` rejected data this build should place"
+        );
+        assert!(
+            loaded
+                .store
+                .series
+                .iter()
+                .flat_map(|series| series.samples.iter())
+                .all(|sample| sample.plan.is_none()),
+            "a plan value appeared on a sample that predates the field"
+        );
+
+        assert_eq!(fs::read(&resolved).unwrap(), original, "the source was modified");
+        assert_eq!(fs::read(&path).unwrap(), original, "the copy was rewritten on load");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// V3. Uses a `Some` value even though nothing writes one yet: with only
+    /// `None` in play, a field that was dropped from the wire entirely would
+    /// still round-trip.
+    #[test]
+    fn the_plan_field_round_trips_through_the_wire_format() {
+        let sample = quota_sample(2_000_000, 7 * DAY, 0.5, 42.0, SampleOrigin::LiveV3);
+        let with_plan = QuotaSample {
+            plan: Some("pro".to_string()),
+            ..sample.clone()
+        };
+        for original in [sample, with_plan] {
+            let bytes = serde_json::to_vec(&original).unwrap();
+            let restored = serde_json::from_slice::<QuotaSample>(&bytes).unwrap();
+            assert_eq!(restored, original);
+        }
+    }
+
+    /// V6. Makes the one-way nature of the conversion falsifiable rather than
+    /// asserted in prose: a build that predates `plan` rejects a v4 file, so a
+    /// user who downgrades after their file has been rewritten loses the
+    /// history to quarantine. That is the cost the lazy upgrade defers — it
+    /// does not remove it.
+    #[test]
+    fn a_v3_reader_cannot_parse_a_v4_store() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct V3Sample {
+            reset_at: i64,
+            duration_seconds: i64,
+            duration_source: DurationSource,
+            used_percent: f64,
+            sampled_at: i64,
+            origin: SampleOrigin,
+        }
+
+        let v4 = serde_json::to_vec(&QuotaSample {
+            plan: None,
+            ..quota_sample(2_000_000, 7 * DAY, 0.5, 42.0, SampleOrigin::LiveV3)
+        })
+        .unwrap();
+        assert!(
+            serde_json::from_slice::<V3Sample>(&v4).is_err(),
+            "a v3 reader accepted a v4 sample, so this test proves nothing about the downgrade"
+        );
+    }
+
+    #[test]
+    fn writes_current_schema_sorted_series_and_exact_sample_fields() {
         let (directory, path) = temp_path("schema");
         let now = 1_000_000;
         let reset = now + 7 * DAY;
@@ -6238,6 +6631,7 @@ mod tests {
             used_percent: 10.0,
             sampled_at: sample_reset,
             origin: SampleOrigin::LiveV3,
+            plan: None,
         }];
         assert!(!validate_series(&series));
         series.last_activity_at = sample_reset + 60;
@@ -6316,6 +6710,7 @@ mod tests {
             used_percent: 10.0,
             sampled_at: now,
             origin: SampleOrigin::LiveV3,
+            plan: None,
         };
         let store = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
@@ -6552,6 +6947,7 @@ mod tests {
             used_percent: 40.0,
             sampled_at: upper_bound + 5,
             origin: SampleOrigin::LiveV3,
+            plan: None,
         };
         let tainted = SeriesState {
             provider_id: "claude".into(),
@@ -6697,6 +7093,7 @@ mod tests {
             // updating this one in place.
             sampled_at: observation_now - 50_000,
             origin: SampleOrigin::LiveV3,
+            plan: None,
         };
         let series = SeriesState {
             provider_id: "copilot".into(),
@@ -6762,6 +7159,7 @@ mod tests {
             used_percent: 10.0,
             sampled_at: 80, // strictly between observation_now and upper_bound
             origin: SampleOrigin::LiveV3,
+            plan: None,
         };
         let series = SeriesState {
             provider_id: "claude".into(),
@@ -7017,6 +7415,7 @@ mod tests {
             used_percent: 8.0,
             sampled_at: upper_bound - 20,
             origin: SampleOrigin::LiveV3,
+            plan: None,
         };
         let series = SeriesState {
             provider_id: "claude".into(),
@@ -7621,6 +8020,7 @@ mod tests {
             used_percent: 10.0,
             sampled_at,
             origin: SampleOrigin::LiveV3,
+            plan: None,
         };
         assert!(validate_sample(&sample(reset - DAY)));
         assert!(validate_sample(&sample(reset - 1)));
@@ -7887,6 +8287,7 @@ mod tests {
                     used_percent: 10.0,
                     sampled_at: now - DAY,
                     origin: SampleOrigin::LiveV3,
+                    plan: None,
                 }],
             });
         }
