@@ -13435,9 +13435,10 @@ enum SelfTest {
         // mechanism that does not depend on a view: the sleep itself returns
         // early when the registry moves.
         let m3hWoken: Bool? = awaitMainActorValue {
+            let epoch = ClaudeExtraRoots.RegistryChange.epoch
             let start = Date()
             let slept = Task { @MainActor in
-                await ClaudeExtraRoots.RegistryChange.sleep(upTo: 60)
+                await ClaudeExtraRoots.RegistryChange.sleep(upTo: 60, since: epoch)
                 return Date().timeIntervalSince(start)
             }
             // Let the sleeper register before signalling, or the signal lands
@@ -13450,11 +13451,31 @@ enum SelfTest {
             m3hWoken == true,
             "M3-h a registry change did not wake the quota poll before its 60s timeout")
 
+        // M3-i. The signal must be STICKY. The quota poll spends most of each
+        // cycle inside a network fetch, so a removal signals while the loop is
+        // busy far more often than while it sleeps. A fire-and-forget wake-up
+        // drops that one, and the card stays for the full sixty seconds — which
+        // is exactly what shipped and what the user saw: "it does go away, but
+        // only after a while".
+        let m3iSticky: Bool? = awaitMainActorValue {
+            // Observed BEFORE the change, the way the poll reads it before its
+            // fetch.
+            let epoch = ClaudeExtraRoots.RegistryChange.epoch
+            ClaudeExtraRoots.RegistryChange.signal()
+            let start = Date()
+            await ClaudeExtraRoots.RegistryChange.sleep(upTo: 60, since: epoch)
+            return Date().timeIntervalSince(start) < 1
+        }
+        expect(
+            m3iSticky == true,
+            "M3-i a change that landed before the sleep was dropped, so the poll waited it out")
+
         // And the timeout still applies when nothing signals, so a missed
         // signal degrades to the old cadence rather than hanging the loop.
         let m3hTimedOut: Bool? = awaitMainActorValue {
             let start = Date()
-            await ClaudeExtraRoots.RegistryChange.sleep(upTo: 0.2)
+            await ClaudeExtraRoots.RegistryChange.sleep(
+                upTo: 0.2, since: ClaudeExtraRoots.RegistryChange.epoch)
             return Date().timeIntervalSince(start) >= 0.15
         }
         expect(

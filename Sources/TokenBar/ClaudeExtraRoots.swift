@@ -200,6 +200,19 @@ enum ClaudeExtraRoots {
     /// process-wide state, so what waits on it has to be too.
     @MainActor
     enum RegistryChange {
+        /// Advanced by every `signal()`. A caller records it BEFORE the work it
+        /// might be interrupted during, and passes it back to `sleep` — so a
+        /// change that lands while that caller was busy is not lost.
+        ///
+        /// The first version had no epoch and dropped a signal that arrived
+        /// with nobody waiting, which its own comment described as harmless.
+        /// It is not: the quota poll spends most of each cycle inside a network
+        /// fetch, so removing an account almost always signalled while the loop
+        /// was busy. The signal went nowhere, the in-flight fetch published a
+        /// payload built from the registry as it was before the removal, and
+        /// the card stayed for the full sixty seconds — the exact symptom this
+        /// was written to fix.
+        private(set) static var epoch = 0
         private static var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
         /// Sleeps for `seconds`, or until the registry moves, whichever first.
@@ -215,7 +228,10 @@ enum ClaudeExtraRoots {
         /// MainActor, and `withCheckedContinuation`'s body runs synchronously
         /// before the suspension, so the entry is in the map before the timeout
         /// task can get a turn.
-        static func sleep(upTo seconds: Double) async {
+        static func sleep(upTo seconds: Double, since observed: Int) async {
+            // Already stale: the registry moved while the caller was working,
+            // so there is nothing to wait for and the next fetch is owed now.
+            guard observed == epoch else { return }
             let id = UUID()
             let timeout = Task { @MainActor in
                 try? await Task.sleep(for: .seconds(seconds))
@@ -234,6 +250,7 @@ enum ClaudeExtraRoots {
         /// not an error, and a second call before anyone sleeps again is a
         /// no-op rather than a queued wake-up that would fire spuriously.
         static func signal() {
+            epoch &+= 1
             let pending = waiters
             waiters.removeAll()
             for (_, waiter) in pending { waiter.resume() }

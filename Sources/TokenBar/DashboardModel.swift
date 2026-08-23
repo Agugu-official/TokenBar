@@ -1656,6 +1656,11 @@ private struct DashboardSnapshot {
     /// previous payload; per-provider errors live inside each snapshot.
     func pollAgentUsage() async {
         while !Task.isCancelled {
+            // Read BEFORE the fetch. The fetch is network-bound and owns most
+            // of the cycle, so a registry change lands during it far more often
+            // than during the sleep; carrying the epoch across is what stops
+            // that change being dropped.
+            let registryEpoch = ClaudeExtraRoots.RegistryChange.epoch
             let payload = try? await source.agentUsage()
             if Task.isCancelled { break }
             if let payload {
@@ -1686,7 +1691,7 @@ private struct DashboardSnapshot {
             if payload == nil, firstSettlement { refreshWindowQuotaHalves() }
             // Interruptible: adding or removing an account must take its card
             // with it in the same turn, not at this loop's convenience.
-            await ClaudeExtraRoots.RegistryChange.sleep(upTo: 60)
+            await ClaudeExtraRoots.RegistryChange.sleep(upTo: 60, since: registryEpoch)
         }
     }
 
