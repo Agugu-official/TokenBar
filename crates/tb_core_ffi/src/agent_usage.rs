@@ -2822,16 +2822,45 @@ fn keychain_item_not_found(status: &std::process::ExitStatus) -> bool {
     status.code() == Some(44)
 }
 
+/// Keychain service holding the credentials for one `CLAUDE_CONFIG_DIR`.
+///
+/// Claude Code derives this itself — the primary directory uses the bare
+/// service name, and every other directory gets the first eight hex digits of
+/// the SHA-256 of its absolute path appended. Verified against a live item:
+/// `sha256("/Users/nanako/.claude-work")[..8]` is `7d296157`, which is the
+/// service the real entry carries.
+///
+/// This derivation is also what makes the directory admissible as a durable
+/// identity (`claude_history_scope`): the directory does not merely sit
+/// alongside the credential, it selects which one is read.
+fn claude_keychain_service(config_dir: Option<&str>) -> String {
+    match config_dir.map(str::trim).filter(|dir| !dir.is_empty()) {
+        None => CLAUDE_KEYCHAIN_SERVICE.to_string(),
+        Some(dir) => format!(
+            "{CLAUDE_KEYCHAIN_SERVICE}-{}",
+            &sha256_hex(dir.to_string())[..8]
+        ),
+    }
+}
+
 fn load_claude_credentials_from_keychain() -> Result<Option<String>, String> {
-    load_claude_credentials_from_keychain_item(None)
+    load_claude_credentials_from_keychain_for(None)
+}
+
+/// Read one config directory's credentials. `None` is the primary directory.
+fn load_claude_credentials_from_keychain_for(
+    config_dir: Option<&str>,
+) -> Result<Option<String>, String> {
+    load_claude_credentials_from_keychain_item(&claude_keychain_service(config_dir), None)
 }
 
 #[cfg(target_os = "macos")]
 fn load_claude_credentials_from_keychain_item(
+    service: &str,
     account: Option<&str>,
 ) -> Result<Option<String>, String> {
     let mut command = std::process::Command::new("/usr/bin/security");
-    command.args(["find-generic-password", "-s", CLAUDE_KEYCHAIN_SERVICE]);
+    command.args(["find-generic-password", "-s", service]);
     if let Some(account) = account {
         command.args(["-a", account]);
     }
@@ -3440,7 +3469,7 @@ fn reload_claude_credentials(original: &ClaudeCredentials) -> Result<ClaudeCrede
                 "Claude Keychain account could not be captured during refresh.".to_string()
             })?;
             let raw =
-                load_claude_credentials_from_keychain_item(Some(&account))?.ok_or_else(|| {
+                load_claude_credentials_from_keychain_item(CLAUDE_KEYCHAIN_SERVICE, Some(&account))?.ok_or_else(|| {
                     "Claude Keychain credentials disappeared during refresh.".to_string()
                 })?;
             let mut credentials =
@@ -3751,7 +3780,8 @@ fn validate_claude_keychain_target(
         credentials,
         || Ok(claude_keychain_account()),
         |captured_account| {
-            load_claude_credentials_from_keychain_item(Some(captured_account)).map_err(|_| ())
+            load_claude_credentials_from_keychain_item(CLAUDE_KEYCHAIN_SERVICE, Some(captured_account))
+                .map_err(|_| ())
         },
     )
     .map(|_| ())
@@ -3780,7 +3810,8 @@ fn save_claude_credentials_to_keychain(
         credentials,
         || Ok(claude_keychain_account()),
         |captured_account| {
-            load_claude_credentials_from_keychain_item(Some(captured_account)).map_err(|_| ())
+            load_claude_credentials_from_keychain_item(CLAUDE_KEYCHAIN_SERVICE, Some(captured_account))
+                .map_err(|_| ())
         },
     )?;
 
@@ -10879,6 +10910,43 @@ mod tests {
             assert_ne!(fallback.as_str(), two.as_str());
         }
         scope.cleanup();
+    }
+
+    /// G6. The Keychain service name for an isolated config directory.
+    ///
+    /// The expected value is not computed by this test — it is the service a
+    /// real Keychain item on this machine carries for
+    /// `/Users/nanako/.claude-work`, read with `security find-generic-password`
+    /// before the code was written. A test that derived its own expectation
+    /// from the same function would agree with any derivation, including a
+    /// wrong one.
+    ///
+    /// Getting this wrong is not an error the user would see: the read simply
+    /// finds no item, the account falls back to another credential source, and
+    /// the card shows the primary's numbers under the second account's name.
+    #[test]
+    fn g6_keychain_service_matches_the_real_item_for_an_isolated_config_dir() {
+        assert_eq!(
+            claude_keychain_service(Some("/Users/nanako/.claude-work")),
+            "Claude Code-credentials-7d296157"
+        );
+
+        // The primary directory uses the bare service, and the blank forms a
+        // caller could produce must not invent a suffix.
+        for primary in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                claude_keychain_service(primary),
+                "Claude Code-credentials",
+                "the primary directory must read the unsuffixed item"
+            );
+        }
+
+        // Two directories must not share a service, or one account would read
+        // the other's credentials.
+        assert_ne!(
+            claude_keychain_service(Some("/Users/nanako/.claude-work")),
+            claude_keychain_service(Some("/Users/nanako/.claude-other"))
+        );
     }
 
     /// G9a. The primary's last-good entry must survive a second account of the
