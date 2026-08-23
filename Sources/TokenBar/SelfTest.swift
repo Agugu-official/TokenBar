@@ -13666,6 +13666,55 @@ enum SelfTest {
                 == ClientRegistry.style("claude").displayName,
             "M3-l a single-account install gained a qualifier on the tightest line")
 
+        // M3-m. One Settings save must invalidate once, not twice.
+        //
+        // `commitClaudeExtraRoots` calls `apply` and its `UserDefaults` write
+        // trips `AppDelegate`'s observer, which calls it again — the observer's
+        // gate compares against a value only the observer updates, so it cannot
+        // see the direct call. That was harmless while an apply merely
+        // re-registered an identical list. It stopped being harmless once apply
+        // began dropping the throttled payload and waking every poller: two of
+        // those means one edit can issue two full provider rounds, each able to
+        // spend 30 seconds on one account, against a provider that rate-limits.
+        //
+        // Asserted on the claim rather than through `apply`, which needs the
+        // FFI and a real registry. Three properties, and the third is the one a
+        // plausible wrong implementation gets wrong: a membership test over
+        // everything ever applied would swallow the re-add below, leaving the
+        // core scanning what the removal installed while Settings showed the
+        // directory present.
+        let m3mClaims: [Bool]? = awaitMainActorValue {
+            ClaudeExtraRoots.resetApplyClaimForTesting()
+            let claim = ClaudeExtraRoots.claimApplyForTesting
+            let claims = [
+                claim("A", "a"), // first
+                claim("A", "a"), // the duplicate one save produces
+                claim("B", "b"), // a genuinely different list
+                claim("A", "a"), // removed, then added back
+                claim("A", "different"), // only the account registry changed
+            ]
+            ClaudeExtraRoots.resetApplyClaimForTesting()
+            return claims
+        }
+        expect(
+            m3mClaims?[0] == true && m3mClaims?[1] == false,
+            "M3-m the second apply for one save was not coalesced, so an edit "
+                + "issues two provider rounds")
+        expect(
+            m3mClaims?[2] == true,
+            "M3-m a genuinely different list was coalesced away, so the change "
+                + "never reached the core")
+        expect(
+            m3mClaims?[3] == true,
+            "M3-m removing a directory and adding it back was treated as a "
+                + "duplicate, so the re-add never reached the core")
+        // Either payload differing on its own is still a change: the scan roots
+        // and the account registry are separate registries.
+        expect(
+            m3mClaims?[4] == true,
+            "M3-m only one of the two payloads is compared, so a change to the "
+                + "other is coalesced away")
+
         // M3-j. An account change must invalidate the throttled payload.
         //
         // This is the layer the three previous attempts at "the card outlives

@@ -189,6 +189,13 @@ enum ClaudeExtraRoots {
         UserDefaults.standard.removeObject(forKey: appliedKey)
     }
 
+    /// Test seam only: forget the coalescing claim, or a test that applies the
+    /// same list a second time silently measures the skip path.
+    @MainActor
+    static func resetApplyClaimForTesting() {
+        lastApplied = nil
+    }
+
     /// Wakes anything sleeping between polls when the installed account
     /// registry moves.
     ///
@@ -260,6 +267,48 @@ enum ClaudeExtraRoots {
     private static let applyQueue = DispatchQueue(
         label: "com.nyanako.tokenbar.claude-extra-roots", qos: .utility)
 
+    /// The payloads the most recent apply claimed, and what it answered.
+    ///
+    /// One Settings save reaches `apply` twice: `commitClaudeExtraRoots` calls
+    /// it, and the `UserDefaults` write that call makes also trips
+    /// `AppDelegate`'s observer, whose gate compares against a value only the
+    /// observer updates. That was harmless when an apply merely re-registered
+    /// an identical list. It stopped being harmless when apply started dropping
+    /// the throttled payload and waking every poller: two of those means one
+    /// edit can issue two full provider rounds, each able to spend 30 seconds
+    /// on a single account, against a provider that rate-limits.
+    @MainActor private static var lastApplied: (
+        roots: String, configDirs: String, result: ExtraScanPathsResult?
+    )?
+
+    /// Whether this apply has work to do, claiming these payloads if so.
+    ///
+    /// Claimed at the top rather than recorded at the bottom: both calls for
+    /// one save are made from the main actor before either has finished its
+    /// trip through `applyQueue`, so a claim taken at the end would still let
+    /// them both through.
+    ///
+    /// Compared against the LAST apply, not against every apply ever made.
+    /// Removing a directory and adding it back is a real change both times,
+    /// and a membership test would swallow the second one — the registry would
+    /// keep whatever the removal installed while Settings showed the directory
+    /// present.
+    /// Test seam. `apply` itself needs the FFI and a real registry, so the
+    /// decision is asserted where it is made.
+    @MainActor
+    static func claimApplyForTesting(roots: String, configDirs: String) -> Bool {
+        claimApply(roots: roots, configDirs: configDirs)
+    }
+
+    @MainActor
+    private static func claimApply(roots: String, configDirs: String) -> Bool {
+        if let lastApplied, lastApplied.roots == roots, lastApplied.configDirs == configDirs {
+            return false
+        }
+        lastApplied = (roots, configDirs, nil)
+        return true
+    }
+
     /// Push the persisted config dirs to the Rust registry. Call at launch
     /// and after every add/remove so the change takes effect without an app
     /// restart (D1). Failures are logged by `TBCore`, not thrown further — a
@@ -287,9 +336,32 @@ enum ClaudeExtraRoots {
     static func apply(
         then completion: (@Sendable @MainActor (ExtraScanPathsResult?) -> Void)? = nil
     ) {
-        let configDirs = load()
-        let json = payloadJSON(configDirs)
-        let configDirsJSON = configDirsPayloadJSON(configDirs)
+        Task { @MainActor in
+            let configDirs = load()
+            let json = payloadJSON(configDirs)
+            let configDirsJSON = configDirsPayloadJSON(configDirs)
+            // Both applies for one save are enqueued here before either
+            // reaches the queue below, and the main actor runs them in order,
+            // so the second finds the payloads already claimed. It still
+            // answers its caller — with the first apply's result once that
+            // lands, or nil while it is still in flight, which is what the
+            // Settings row would have shown anyway.
+            guard claimApply(roots: json, configDirs: configDirsJSON) else {
+                completion?(lastApplied?.result)
+                return
+            }
+            install(json: json, configDirsJSON: configDirsJSON, then: completion)
+        }
+    }
+
+    /// The half of `apply` that actually talks to the core, split out so the
+    /// coalescing decision above is not buried in it.
+    @MainActor
+    private static func install(
+        json: String,
+        configDirsJSON: String,
+        then completion: (@Sendable @MainActor (ExtraScanPathsResult?) -> Void)?
+    ) {
         applyQueue.async {
             // The quota-card registry, from the configured list. Separate call
             // and separate registry from the scan roots below: this one decides
@@ -334,6 +406,14 @@ enum ClaudeExtraRoots {
                 // that is on screen; this reaches the loop that owns the cards
                 // whether or not anything is watching.
                 RegistryChange.signal()
+                // Kept so a coalesced apply can answer its caller with what
+                // this one installed rather than with nothing. Guarded, because
+                // a later save may have claimed different payloads while this
+                // one was in the queue: overwriting that claim with these older
+                // ones would let a duplicate of the newer save through.
+                if lastApplied?.roots == json, lastApplied?.configDirs == configDirsJSON {
+                    lastApplied = (json, configDirsJSON, result)
+                }
                 completion?(result)
             }
         }
