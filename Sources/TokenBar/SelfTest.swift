@@ -13187,6 +13187,26 @@ enum SelfTest {
             ],
             "payloadJSON deduplicates repeated config dirs instead of doubling the path list")
 
+        // The OTHER payload built from the same list: the config dirs
+        // themselves, for `tb_set_claude_config_dirs`. It answers "whose
+        // credential is this quota card fetched with", where payloadJSON above
+        // answers "which directories does the scanner walk", so it must carry
+        // the dirs and not their sub-roots.
+        let configDirsPayload = ClaudeExtraRoots.configDirsPayloadJSON([
+            "/Users/x/.claude-work/", "/Users/x/.claude-work", "/Users/y/.claude-other",
+        ])
+        let decodedConfigDirs = try! JSONDecoder().decode(
+            [String].self, from: Data(configDirsPayload.utf8))
+        expect(
+            decodedConfigDirs == ["/Users/x/.claude-work", "/Users/y/.claude-other"],
+            "configDirsPayloadJSON standardizes and deduplicates the config dirs themselves "
+                + "(mutation: keeping the trailing slash derives a different Keychain service "
+                + "name, so the account's card would read no credential at all; emitting the "
+                + "expanded sub-roots would derive it from a directory that holds no item)")
+        expect(
+            ClaudeExtraRoots.configDirsPayloadJSON([]) == "[]",
+            "configDirsPayloadJSON([]) clears the registry rather than leaving it untouched")
+
         // CE-APPLIED. What produced a scan is the registry the engine ACCEPTED,
         // not the list the user configured. `apply` deliberately keeps the
         // setter off the calling actor — the core probes each path with

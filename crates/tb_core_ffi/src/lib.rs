@@ -24,6 +24,7 @@ mod agent_quota_history;
 mod agent_storage_windows;
 mod agent_usage;
 mod agents_report;
+mod claude_config_dirs;
 mod extra_scan_paths;
 mod filter_parity_probe;
 mod hourly_report;
@@ -198,9 +199,8 @@ fn with_agent_usage_publication_gate<T>(
     with_publication_gate(&AGENT_USAGE_PUBLICATION_GATE, body)
 }
 
-/// `series` pairs each key with the account it belongs to. M1 publishes only
-/// the primary, so every pair carries `None`; M2 supplies an extra Claude
-/// account's config directory for its own keys.
+/// `series` pairs each key with the account it belongs to — `None` for the
+/// primary, an extra Claude account's config directory for its own keys.
 fn replace_quota_curve_bindings(
     generation: u64,
     series: impl IntoIterator<Item = (Option<String>, agent_quota_history::SeriesKey)>,
@@ -230,17 +230,16 @@ fn replace_quota_curve_bindings(
 
 fn serialize_agent_usage_with_bindings<F>(
     generation: u64,
-    bindings: Vec<agent_quota_history::SeriesKey>,
+    bindings: Vec<(Option<String>, agent_quota_history::SeriesKey)>,
     serialize: F,
 ) -> Result<serde_json::Value, String>
 where
     F: FnOnce() -> Result<serde_json::Value, String>,
 {
     let value = serialize()?;
-    // M1 publishes one account per client. M2 pairs an extra Claude account's
-    // config directory with its own keys instead of mapping everything to the
-    // primary.
-    replace_quota_curve_bindings(generation, bindings.into_iter().map(|key| (None, key)));
+    // The account each key was published under travels with it, so two Claude
+    // accounts serving the same window keys keep separate bindings.
+    replace_quota_curve_bindings(generation, bindings);
     Ok(value)
 }
 
@@ -1004,6 +1003,42 @@ pub unsafe extern "C" fn tb_set_extra_scan_paths(json: *const c_char) -> *mut c_
     })
 }
 
+/// Replace the process-wide registry of extra Claude config directories (see
+/// the `claude_config_dirs` module doc). `json` is an array of absolute
+/// directory paths, e.g. `["/Users/x/.claude-work"]`; full-replace semantics
+/// (`[]` clears it). Each one is fetched as its own Claude quota card, using
+/// the Keychain item that directory selects. Success data is
+/// `{"registeredCount":N,"rejected":[{"path","reason"}]}`; a path is rejected
+/// when it is empty, relative, the filesystem root, or a repeat of one already
+/// in the list. Existence is not probed — whether the directory is readable
+/// right now says nothing about which account its credential belongs to.
+///
+/// This is NOT `tb_set_extra_scan_paths`. That one takes the expanded
+/// `<dir>/projects` and `<dir>/transcripts` sub-roots and decides what the
+/// scanner walks; this one takes the config directories and decides whose
+/// credential a quota card is fetched with.
+///
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_set_claude_config_dirs(json: *const c_char) -> *mut c_char {
+    guarded("tb_set_claude_config_dirs", || {
+        envelope(unsafe { set_claude_config_dirs_from_c(json) })
+    })
+}
+
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated UTF-8 string.
+unsafe fn set_claude_config_dirs_from_c(json: *const c_char) -> Result<serde_json::Value, String> {
+    if json.is_null() {
+        return Err("Claude config dirs payload must not be NULL".to_string());
+    }
+    let raw = unsafe { CStr::from_ptr(json) }
+        .to_str()
+        .map_err(|_| "Claude config dirs payload is not valid UTF-8".to_string())?;
+    claude_config_dirs::set_from_json(raw)
+}
+
 /// # Safety
 /// `json` must be NULL or a valid NUL-terminated UTF-8 string.
 unsafe fn set_extra_scan_paths_from_c(json: *const c_char) -> Result<serde_json::Value, String> {
@@ -1724,7 +1759,7 @@ mod tests {
             .expect("previous tuple remains available");
 
         let serialization =
-            serialize_agent_usage_with_bindings(2, vec![quota_curve_key("account-b")], || {
+            serialize_agent_usage_with_bindings(2, vec![(None, quota_curve_key("account-b"))], || {
                 Err("injected serialization failure".to_string())
             });
         assert_eq!(

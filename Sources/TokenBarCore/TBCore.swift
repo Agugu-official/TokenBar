@@ -77,6 +77,21 @@ public struct ExtraScanPathsResult: Decodable, Equatable, Sendable {
     public let rejected: [ScanPathNote]
 }
 
+/// One directory `tb_set_claude_config_dirs` refused, and why. Unlike an
+/// unreadable scan root, nothing here fixes itself by waiting: the path is
+/// empty, relative, the filesystem root, or a repeat of one already listed.
+public struct RejectedConfigDir: Decodable, Equatable, Sendable {
+    public let path: String
+    public let reason: String
+}
+
+/// Result of `tb_set_claude_config_dirs`.
+public struct ClaudeConfigDirsResult: Decodable, Equatable, Sendable {
+    /// Directories now fetched as their own Claude quota card.
+    public let registeredCount: Int
+    public let rejected: [RejectedConfigDir]
+}
+
 /// Thin Swift facade over the tb_core_ffi staticlib. All calls are blocking;
 /// invoke from a background thread/actor in app code. `agentUsage()` is also
 /// network-bound.
@@ -316,6 +331,20 @@ public enum TBCore {
     /// an existing non-directory).
     public static func setExtraScanPaths(json: String) throws -> ExtraScanPathsResult {
         try unwrap(json.withCString { tb_set_extra_scan_paths($0) })
+    }
+
+    /// Replace the process-wide registry of extra Claude config directories.
+    /// `json` is an array of absolute directory paths; full-replace semantics
+    /// — `[]` clears it. Each registered directory is fetched as its own Claude
+    /// quota card, using the Keychain item that directory selects.
+    ///
+    /// Distinct from `setExtraScanPaths`, which takes the expanded
+    /// `<dir>/projects` and `<dir>/transcripts` sub-roots and answers which
+    /// directories the usage scanner walks. This one answers whose credential
+    /// a quota card is fetched with, so it takes the config directories the
+    /// user configured — not the scan subset the core accepted.
+    public static func setClaudeConfigDirs(json: String) throws -> ClaudeConfigDirsResult {
+        try unwrap(json.withCString { tb_set_claude_config_dirs($0) })
     }
 
     /// OAuth quota cards for codex/claude/antigravity/copilot/grok. Network-bound;

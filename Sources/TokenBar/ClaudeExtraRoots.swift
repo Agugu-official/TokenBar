@@ -77,6 +77,29 @@ enum ClaudeExtraRoots {
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
+    /// The `tb_set_claude_config_dirs` payload: the configured directories
+    /// themselves, standardized, as a JSON array.
+    ///
+    /// Deliberately built from `load()` — the list the user configured — and
+    /// not from `appliedPayloadJSON`, the scan subset the core accepted. They
+    /// answer different questions: a directory the scanner refuses is still a
+    /// perfectly valid account whose Keychain item holds real credentials, and
+    /// `appliedKey` is empty until the launch-time apply lands, which is an
+    /// honest answer about scanning and a wrong one about identity.
+    ///
+    /// Standardized with the same `standardizingPath` `expand` uses, because
+    /// the Keychain service the core derives is the SHA-256 of this exact
+    /// string: `/x/.claude-work/` and `/x/.claude-work` would read different
+    /// items, and only one of them exists.
+    static func configDirsPayloadJSON(_ configDirs: [String]) -> String {
+        var seen = Set<String>()
+        let standardized = configDirs
+            .map { ($0 as NSString).standardizingPath }
+            .filter { seen.insert($0).inserted }
+        let data = (try? JSONEncoder().encode(standardized)) ?? Data("[]".utf8)
+        return String(data: data, encoding: .utf8) ?? "[]"
+    }
+
     /// Which of `paths` are missing right now, resolved off the calling actor.
     ///
     /// Settings renders a warning icon per row, and doing that from `isMissing`
@@ -196,8 +219,15 @@ enum ClaudeExtraRoots {
     static func apply(
         then completion: (@Sendable @MainActor (ExtraScanPathsResult?) -> Void)? = nil
     ) {
-        let json = payloadJSON(load())
+        let configDirs = load()
+        let json = payloadJSON(configDirs)
+        let configDirsJSON = configDirsPayloadJSON(configDirs)
         applyQueue.async {
+            // The quota-card registry, from the configured list. Separate call
+            // and separate registry from the scan roots below: this one decides
+            // whose credential each Claude card is fetched with, and a failure
+            // in either must not stop the other from being installed.
+            _ = try? TBCore.setClaudeConfigDirs(json: configDirsJSON)
             let result = try? TBCore.setExtraScanPaths(json: json)
             Task { @MainActor in
                 // Before the invalidation and the generation bump, so anything

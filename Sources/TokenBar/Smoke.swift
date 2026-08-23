@@ -78,6 +78,31 @@ enum Smoke {
             return "empty registry round-trips (registered 0, unreadable 0, rejected 0)"
         }
 
+        // Install the configured Claude accounts before the quota check below.
+        //
+        // Unlike the scan-paths registry above, an EMPTY one here would make
+        // this smoke describe a process that no user runs: the account registry
+        // is what decides how many Claude cards get fetched, so leaving it empty
+        // silently tests the single-account path and reports it as coverage of
+        // the multi-account one. That is exactly how the isolated-environment
+        // check first came back showing one account when two were configured.
+        //
+        // The shipping app installs this asynchronously at launch
+        // (`ClaudeExtraRoots.apply`), so a fetch issued in the first moments can
+        // still race it and see an empty registry; losing that race costs one
+        // refresh, and the accounts appear on the next.
+        summarize("claude-accounts") {
+            let configDirs = ClaudeExtraRoots.load()
+            let result = try TBCore.setClaudeConfigDirs(
+                json: ClaudeExtraRoots.configDirsPayloadJSON(configDirs))
+            guard result.registeredCount == configDirs.count, result.rejected.isEmpty else {
+                throw TBCoreError.bridge(
+                    "configured \(configDirs.count) but registered \(result.registeredCount) "
+                        + "with \(result.rejected.count) rejected")
+            }
+            return "\(result.registeredCount) extra account(s) registered"
+        }
+
         summarize("trace") {
             let buckets = try TBCore.usageTrace(windowSecs: 600)
             let rate = try TBCore.tokensPerMin()
