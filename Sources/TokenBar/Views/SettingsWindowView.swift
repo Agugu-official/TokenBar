@@ -57,6 +57,7 @@ struct SettingsWindowView: View {
     @AppStorage(ClientRegistry.tabOrderKey) private var tabsOrderRaw = ""
     @AppStorage(TrayAnimator.quotaSourceKey) private var quotaSourceRaw = QuotaResolver.auto
     @AppStorage(ClientRegistry.limitsHiddenKey) private var limitsHiddenRaw = ""
+    @AppStorage(ClaudeExtraRoots.generationKey) private var extraRootsGeneration = 0
 
     /// The user's hidden client set, parsed from the observed raw string.
     private var hiddenClients: Set<String> {
@@ -171,7 +172,9 @@ struct SettingsWindowView: View {
         .task(id: model.committedSliceKey) {
             await model.ensureModelData(for: .stats)
         }
-        .task { await model.pollAgentUsage() }
+        // See `PopoverView`: keyed so removing an account takes its card away
+        // in the same turn rather than at the poll's convenience.
+        .task(id: extraRootsGeneration) { await model.pollAgentUsage() }
         .task(id: quotaReconciliationID) {
             guard let payload = model.agentUsage else { return }
             let defaults = UsageDataSources.current.allowsQuotaCachePersistence
