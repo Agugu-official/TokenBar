@@ -11554,7 +11554,7 @@ enum SelfTest {
             capturedAt: Date(), messages: msMessages)
         let msStage1 = WindowCardLoader.quotaHalf(
             payload: msPayload, clientId: "codex", attempted: true,
-            curve: { _, _, _ in
+            curve: { _, _, _, _ in
                 windowCurve(resetAtSecs: wNow + 3_600, durationSecs: 604_800,
                             at: [(wNow - 2_000, 4), (wNow - 500, 9)])
             },
@@ -11581,7 +11581,7 @@ enum SelfTest {
         ])
         let msUnscopedStage1 = WindowCardLoader.quotaHalf(
             payload: msUnscoped, clientId: "codex", attempted: true,
-            curve: { _, _, _ in
+            curve: { _, _, _, _ in
                 windowCurve(resetAtSecs: wNow + 3_600, durationSecs: 604_800,
                             at: [(wNow - 2_000, 4), (wNow - 500, 9)])
             },
@@ -11627,7 +11627,7 @@ enum SelfTest {
         ], modelScope: "ghost")
         let msMissStage1 = WindowCardLoader.quotaHalf(
             payload: msMissPayload, clientId: "codex", attempted: true,
-            curve: { _, _, _ in
+            curve: { _, _, _, _ in
                 windowCurve(resetAtSecs: wNow + 3_600, durationSecs: 604_800,
                             at: [(wNow - 2_000, 4), (wNow - 500, 9)])
             },
