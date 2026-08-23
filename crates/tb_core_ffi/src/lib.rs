@@ -211,10 +211,7 @@ fn replace_quota_curve_bindings(
             (
                 (
                     key.provider_id.clone(),
-                    account
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
+                    crate::agent_usage::account_key_component(account.as_deref())
                         .map(str::to_string),
                     key.window_key.clone(),
                 ),
@@ -493,10 +490,7 @@ where
             .series
             .get(&(
                 client_id.to_string(),
-                account_key
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string),
+                crate::agent_usage::account_key_component(account_key).map(str::to_string),
                 window_key.to_string(),
             ))
             .cloned()
@@ -530,10 +524,7 @@ where
     }
     if state.series.get(&(
         client_id.to_string(),
-        account_key
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
+        crate::agent_usage::account_key_component(account_key).map(str::to_string),
         window_key.to_string(),
     )) != Some(&key)
     {
@@ -1412,6 +1403,43 @@ mod tests {
                 "session.v1".to_string()
             )),
             Some(&second)
+        );
+        drop(state);
+
+        // G7b. Two directories differing only in trailing whitespace are two
+        // accounts, and the binding table is the sixth place that has to agree.
+        //
+        // Collapsed, the later publication overwrites the earlier one and both
+        // ABI lookups answer with the surviving account's curve under a
+        // generation that validates — the same undetectable failure the account
+        // parameter exists to prevent, reached by normalizing the parameter
+        // instead of by omitting it.
+        let spaced = "/Users/someone/claude dir ";
+        let trimmed = "/Users/someone/claude dir";
+        replace_quota_curve_bindings(
+            11,
+            vec![
+                (Some(spaced.to_string()), primary.clone()),
+                (Some(trimmed.to_string()), second.clone()),
+            ],
+        );
+        let state = QUOTA_CURVE_BINDINGS
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            state.series.len(),
+            2,
+            "the trailing space was normalized away, so one account's binding \
+             overwrote the other's"
+        );
+        assert_eq!(
+            state.series.get(&(
+                "claude".to_string(),
+                Some(spaced.to_string()),
+                "session.v1".to_string()
+            )),
+            Some(&primary),
+            "the exact path no longer addresses the binding it published"
         );
         drop(state);
 

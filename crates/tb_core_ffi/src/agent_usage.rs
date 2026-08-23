@@ -503,10 +503,7 @@ type AccountSlot = (String, Option<String>);
 fn account_slot(client_id: &str, account: Option<&str>) -> AccountSlot {
     (
         client_id.to_string(),
-        account
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
+        account_key_component(account).map(str::to_string),
     )
 }
 
@@ -2092,7 +2089,7 @@ fn claude_history_scope_with<R>(
 where
     R: FnOnce(&str, Option<(AuthoritativeIdKind, &str)>) -> Result<HistoryScope, AccountScopeError>,
 {
-    let digest = claude_extra_config_dir(config_dir).map(|dir| sha256_hex(dir.to_string()));
+    let digest = account_key_component(config_dir).map(|dir| sha256_hex(dir.to_string()));
     resolve(
         "claude",
         digest
@@ -2101,9 +2098,8 @@ where
     )
 }
 
-/// The one place a config-directory argument becomes "which account is this":
-/// `None` or empty is the primary, and anything else is the extra account's
-/// directory used **byte for byte**.
+/// The one place an account argument becomes "which account is this": `None`
+/// or empty is the primary, and anything else is used **byte for byte**.
 ///
 /// One function rather than the rule restated at each site. It was written
 /// three times — the Keychain service, the durable history scope, and the
@@ -2120,8 +2116,8 @@ where
 /// so that a whitespace-only string is not silently promoted to "primary". No
 /// such string can arrive: `claude_config_dirs::normalize` refuses anything
 /// that is not an absolute path, and whitespace is not.
-fn claude_extra_config_dir(config_dir: Option<&str>) -> Option<&str> {
-    config_dir.filter(|dir| !dir.is_empty())
+pub(crate) fn account_key_component(account: Option<&str>) -> Option<&str> {
+    account.filter(|value| !value.is_empty())
 }
 
 /// `semantic_source` for a credential read out of the Keychain item a config
@@ -2189,7 +2185,7 @@ fn claude_account_identity_with<R>(
 where
     R: FnOnce(&str, Option<(AuthoritativeIdKind, &str)>) -> Result<HistoryScope, AccountScopeError>,
 {
-    let Some(dir) = claude_extra_config_dir(config_dir) else {
+    let Some(dir) = account_key_component(config_dir) else {
         // The primary account. Its argument is `None` and stays `None`: that
         // value addresses every series already on disk.
         return ClaudeAccountIdentity {
@@ -3252,7 +3248,7 @@ fn keychain_item_not_found(status: &std::process::ExitStatus) -> bool {
 /// identity (`claude_history_scope`): the directory does not merely sit
 /// alongside the credential, it selects which one is read.
 fn claude_keychain_service(config_dir: Option<&str>) -> String {
-    match claude_extra_config_dir(config_dir) {
+    match account_key_component(config_dir) {
         None => CLAUDE_KEYCHAIN_SERVICE.to_string(),
         Some(dir) => format!(
             "{CLAUDE_KEYCHAIN_SERVICE}-{}",
@@ -11592,6 +11588,25 @@ mod tests {
             "the account key was trimmed, so the card is addressed by a path \
              the registry never stored"
         );
+
+        // And the last-good cache slot, which is a fifth consumer of the same
+        // rule. Collapsed, the two accounts share one entry and each refresh
+        // overwrites the other's fallback — one account's state stored under
+        // another's name, which nothing downstream can detect.
+        assert_ne!(
+            account_slot("claude", Some(spaced)),
+            account_slot("claude", Some(trimmed)),
+            "the last-good cache slot was derived from the trimmed path"
+        );
+
+        // The primary is still addressed by absence, and an empty string is
+        // still the primary — that is what distinguishes "no account" from
+        // "an account whose name happens to be blank", and it is checked
+        // without trimming so a whitespace-only value is not promoted to
+        // primary.
+        assert_eq!(account_key_component(None), None);
+        assert_eq!(account_key_component(Some("")), None);
+        assert_eq!(account_key_component(Some("  ")), Some("  "));
 
         scope.cleanup();
     }
