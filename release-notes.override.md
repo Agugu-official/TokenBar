@@ -2,6 +2,14 @@
 
 **The dashboard rebuilds once.** The saved snapshot now records which scan roots produced it, so a snapshot written by the previous version is not restored on the first launch after updating. Expect one cold start and nothing else.
 
+**Downgrading after this release loses your quota pace history.** [#234](https://github.com/Nanako0129/TokenBar/pull/234)
+
+The store holding those readings moves from schema 3 to schema 4. An older TokenBar cannot read the new format — it treats the file as corrupt, quarantines it, and starts accumulating from nothing. Your usage totals are unaffected: those are read from your logs and can always be recomputed. The pace readings cannot. They are observations taken over time, and weeks of them are what let a window say "Historically: lasts until reset" rather than falling back to a flat average.
+
+Upgrading itself loses nothing. The migration exists precisely so that a version bump does not reset everyone's history, and it preserves every sample exactly.
+
+The conversion is lazy: it happens on the next write the app had its own reason to make, not on load. So a file still reading `"schemaVersion": 3` for a while after updating is normal, and not a migration that failed to run.
+
 ## Features
 
 - **Quota gets its own lens.** [#227](https://github.com/Nanako0129/TokenBar/pull/227)
@@ -21,6 +29,12 @@
 - **Claude scan roots can be added in Settings.** [#230](https://github.com/Nanako0129/TokenBar/pull/230)
 
   A second Claude account kept under its own `CLAUDE_CONFIG_DIR` is invisible to a scan that reads only the default location. Those directories can now be registered, and a root that is temporarily unreachable — an unmounted volume, a directory not yet created — is kept and retried on the next scan rather than dropped from your configuration.
+
+- **A second Claude account gets its own quota card and its own history.** [#235](https://github.com/Nanako0129/TokenBar/pull/235)
+
+  An account kept under its own `CLAUDE_CONFIG_DIR` is fetched, identified and recorded separately from the main one, so each card carries its own plan label and accumulates its own reset cycles rather than sharing a single series.
+
+  **One limit is deliberate.** When an additional account's token expires, TokenBar does not refresh it in place. The card says so and asks you to run `claude` under that `CLAUDE_CONFIG_DIR`. The credential refresh path reloads, validates and saves against the main configuration directory throughout, so sending an additional account through it would write that account's token over your main account's stored credential and log you out of the main account. It fails closed instead, which is a worse experience than a silent refresh and a much better one than a silent logout.
 
 - **Long quota windows are sampled about four times as often.** [#227](https://github.com/Nanako0129/TokenBar/pull/227)
 
@@ -45,6 +59,14 @@
 - **A source you excluded is no longer reported back as unclassified.** [#227](https://github.com/Nanako0129/TokenBar/pull/227)
 
   Excluding a source *is* classifying it. The line naming what else was active in a window folded "you excluded this" together with "you have not looked at this yet", so it presented a decision you had already made as an open question.
+
+- **Launching no longer throws away caches that were still valid.** [#233](https://github.com/Nanako0129/TokenBar/pull/233)
+
+  The scan-root list is pushed to the engine at every launch and on every settings save, not only when the list has changed — and doing so dropped every cached scan result and advanced the marker that forces a reload, unconditionally. So an ordinary launch paid to rebuild what it already had, and a popover open at the wrong moment additionally took a full forced rescan for a root set identical to the one already installed. Both now happen only when the installed roots actually differ.
+
+- **Two Claude accounts no longer interfere with each other's backoff or profile cache.** [#235](https://github.com/Nanako0129/TokenBar/pull/235)
+
+  A single shared rate-limit cooldown meant one account clearing it lifted it for the other, and a single shared profile entry collapsed its one-hour lifetime into a fetch on every poll. Both are now per account. Single-account users are unaffected.
 
 - **A count of zero is no longer shown where nothing was counted.** [#227](https://github.com/Nanako0129/TokenBar/pull/227)
 
