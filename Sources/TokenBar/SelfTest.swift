@@ -13565,6 +13565,33 @@ enum SelfTest {
                "CE-APPLIED a process that has never applied compares against the "
                    + "empty registry, which is what the engine holds then")
 
+        // CE-MOVED. `apply` runs at launch and on every Settings save, not only
+        // when the list changes, so "an apply ran" never implied "something
+        // changed". Both consequences of an apply — dropping every Swift-side
+        // scan cache and advancing the generation views key their reloads on —
+        // were unconditional, so every launch paid for both. A popover already
+        // open when that landed took a forced, cache-bypassing rescan for a
+        // registry identical to the one already installed.
+        ClaudeExtraRoots.resetAppliedForTesting()
+        let ceOK = try! JSONDecoder().decode(
+            ExtraScanPathsResult.self,
+            from: Data(#"{"registeredCount":1,"unreadable":[],"rejected":[]}"#.utf8))
+        let ceFirst = ClaudeExtraRoots.payloadJSON(["/tmp/tokenbar-moved"])
+        expect(ClaudeExtraRoots.recordAppliedAndReportChange(ceFirst, result: ceOK),
+               "CE-MOVED installing a registry that differs reports a change")
+        expect(!ClaudeExtraRoots.recordAppliedAndReportChange(ceFirst, result: ceOK),
+               "CE-MOVED and installing the SAME registry again reports none — which "
+                   + "is the launch case, and the one that was paying for a rescan")
+        expect(ClaudeExtraRoots.recordAppliedAndReportChange(
+                   ClaudeExtraRoots.payloadJSON(["/tmp/tokenbar-moved-2"]), result: ceOK),
+               "CE-MOVED a genuinely different registry still reports a change, so the "
+                   + "gate is a comparison rather than a one-shot latch")
+        expect(!ClaudeExtraRoots.recordAppliedAndReportChange(
+                   ClaudeExtraRoots.payloadJSON(["/tmp/tokenbar-moved-3"]), result: nil),
+               "CE-MOVED a failed setter reports no change, because the registry still "
+                   + "holds what it held")
+        ClaudeExtraRoots.resetAppliedForTesting()
+
         // isRejectedRoot: home and root are refused; an ordinary subfolder is not.
         let ceHome = FileManager.default.homeDirectoryForCurrentUser.path
         expect(

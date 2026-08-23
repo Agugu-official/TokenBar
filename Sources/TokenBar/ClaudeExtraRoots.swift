@@ -157,9 +157,28 @@ enum ClaudeExtraRoots {
     /// Record what the setter actually installed. A failed call leaves the
     /// registry holding whatever it held, so the stored value must not move.
     static func recordApplied(_ requestedJSON: String, result: ExtraScanPathsResult?) {
-        guard let result else { return }
-        UserDefaults.standard.set(
-            registeredJSON(requestedJSON, rejected: result.rejected), forKey: appliedKey)
+        _ = recordAppliedAndReportChange(requestedJSON, result: result)
+    }
+
+    /// Record, and report whether the installed registry actually MOVED.
+    ///
+    /// The distinction is the whole cost question. `apply` runs at launch and
+    /// on every Settings save, not only when the list changes, so "an apply
+    /// ran" has never implied "something changed" — yet the cache drop and the
+    /// generation bump were both unconditional. Every launch therefore dropped
+    /// every scan-derived cache and advanced the number the views key their
+    /// reloads on, and a popover already open when that landed paid a forced,
+    /// cache-bypassing rescan for a registry identical to the one already
+    /// installed.
+    @discardableResult
+    static func recordAppliedAndReportChange(
+        _ requestedJSON: String, result: ExtraScanPathsResult?
+    ) -> Bool {
+        guard let result else { return false }
+        let json = registeredJSON(requestedJSON, rejected: result.rejected)
+        guard json != appliedPayloadJSON else { return false }
+        UserDefaults.standard.set(json, forKey: appliedKey)
+        return true
     }
 
     /// `requestedJSON` minus the paths the setter refused, in the same shape.
@@ -409,7 +428,24 @@ enum ClaudeExtraRoots {
                 // Before the invalidation and the generation bump, so anything
                 // they restart reads the registry that is now installed rather
                 // than the one it replaced.
-                recordApplied(json, result: result)
+                let moved = recordAppliedAndReportChange(json, result: result)
+                // Both of these exist to undo work done under the OLD roots,
+                // so both are gated on the roots having actually moved.
+                //
+                // They were unconditional, and the launch-time `apply()` is
+                // unconditional too, so every launch dropped every scan-derived
+                // cache and advanced the generation the views key their reloads
+                // on. A popover already open when that landed took a forced,
+                // cache-bypassing rescan on top of its initial load — the
+                // registry being identical to the one already installed.
+                //
+                // `apply` is called on a schedule and on every Settings save,
+                // not only when the list changes, so "it ran" has never implied
+                // "something changed". Only the comparison does.
+                guard moved else {
+                    completion?(result)
+                    return
+                }
                 // The engine dropped its own caches inside the setter. These
                 // are the Swift ones, which answer without asking it — see
                 // `invalidateScanDerivedCaches`. Unconditional on `completion`,
