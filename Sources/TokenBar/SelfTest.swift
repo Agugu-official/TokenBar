@@ -2960,7 +2960,7 @@ enum SelfTest {
         func quotaCurveFailure(client: String, window: String, generation: UInt64) -> String? {
             do {
                 _ = try TBCore.quotaCurve(
-                    clientId: client, windowKey: window, generation: generation)
+                    clientId: client, accountKey: nil, windowKey: window, generation: generation)
                 return nil
             } catch let TBCoreError.bridge(message) {
                 return message
@@ -7163,7 +7163,7 @@ enum SelfTest {
         // substitution visible rather than silent.
         do {
             let curve = try TBCore.quotaCurve(
-                clientId: "__selftest__", windowKey: "__selftest__", generation: 0)
+                clientId: "__selftest__", accountKey: nil, windowKey: "__selftest__", generation: 0)
             expect(false, "unbound quota curve fails closed (got \(curve == nil ? "null" : "a curve"))")
         } catch let TBCoreError.bridge(message) {
             expect(
@@ -11422,13 +11422,13 @@ enum SelfTest {
         // check above is one `try?` away from silently reverting.
         expect(
             WindowCardLoader.curveSamples(
-                payload: wPayload, clientId: "codex",
+                payload: wPayload, clientId: "codex", accountKey: nil,
                 window: wPayload.agents[0].uniqueCardWindows[0],
                 curve: { _, _, _, _ in throw CurveReadFailed() }, nowMs: wNow * 1000) == nil,
             "L6b a throwing read yields nil, meaning unknown")
         expect(
             WindowCardLoader.curveSamples(
-                payload: wPayload, clientId: "codex",
+                payload: wPayload, clientId: "codex", accountKey: nil,
                 window: wPayload.agents[0].uniqueCardWindows[0],
                 curve: { _, _, _, _ in nil }, nowMs: wNow * 1000) == [],
             "L6b a read that succeeds with no curve yields empty, meaning none")
@@ -13432,25 +13432,52 @@ enum SelfTest {
         // ends up in screenshots and the value is a directory under the user's
         // home.
         expect(
-            AgentLimitsCard.accountLabel(
-                AccountIdentity(clientId: "claude", accountKey: nil)) == nil,
+            AccountIdentity(clientId: "claude", accountKey: nil).accountLabel == nil,
             "M3-k the primary row acquired a qualifier it does not need")
         expect(
-            AgentLimitsCard.accountLabel(
-                AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-work"))
+            AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-work").accountLabel
                 == ".claude-work",
             "M3-k an extra row is not labelled with its account")
         expect(
-            AgentLimitsCard.accountLabel(
-                AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-work"))
-                != AgentLimitsCard.accountLabel(
-                    AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-other")),
+            AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-work").accountLabel
+                != AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-other").accountLabel,
             "M3-k two accounts produce the same label, so the rows stay indistinguishable")
         expect(
-            !(AgentLimitsCard.accountLabel(
-                AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-work"))?
+            !(AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-work").accountLabel?
                 .contains("/Users") ?? true),
             "M3-k the label carries the home path into a heading that appears in screenshots")
+
+        // M3-l. And the Overview's one-line answer has to carry it too.
+        //
+        // `M3-k` covers the derivation; it cannot see a caller that has the
+        // label available and renders the bare client name anyway, which is
+        // what `QuotaSummaryLine.tightestRow` did. Auto picks the extra account
+        // in `m3Payload` (that is what M3-c asserts), so this is the exact
+        // sentence a user with two Claude subscriptions reads on the landing
+        // tab, and with the qualifier dropped it names neither of them.
+        //
+        // Delete the `account` term from `tightestName`'s join to watch it go
+        // red. The primary case is asserted beside it because a "fix" that
+        // always appends something would satisfy the first assertion alone.
+        let m3TightestName = m3Summary.map { QuotaSummaryLine.tightestName($0) }
+        expect(
+            m3TightestName?.contains(".claude-extra") == true,
+            "M3-l the Overview's tightest line names the client but not which of "
+                + "its two accounts the window belongs to")
+        let m3PrimaryOnly = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data("""
+            {"generatedAt":"now","publicationGeneration":9,"agents":[
+              {"clientId":"claude","source":"oauth","updatedAt":"now",
+               "windows":[{"cardId":"session.v1","label":"Session","usedPercent":10,
+                           "remainingPercent":90}]}
+            ]}
+            """.utf8))
+        expect(
+            QuotaSummaryFold.build(payload: m3PrimaryOnly)
+                .map { QuotaSummaryLine.tightestName($0) }
+                == ClientRegistry.style("claude").displayName,
+            "M3-l a single-account install gained a qualifier on the tightest line")
 
         // M3-j. An account change must invalidate the throttled payload.
         //

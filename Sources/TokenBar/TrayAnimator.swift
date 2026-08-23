@@ -399,6 +399,10 @@ final class TrayAnimator {
         quotaTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let source = self?.source else { break }
+                // Read before the fetch, like the popover's poll: the fetch is
+                // network-bound and owns most of the cycle, so a registry change
+                // lands during it far more often than during the sleep.
+                let registryEpoch = ClaudeExtraRoots.RegistryChange.epoch
                 let payload = try? await source.agentUsage()
                 guard let self, !Task.isCancelled else { break }
                 if let payload {
@@ -410,7 +414,13 @@ final class TrayAnimator {
                         render: { self.renderGaugeIcon() },
                         notify: { self.onQuotaUpdated?() })
                 }
-                try? await Task.sleep(for: .seconds(300))
+                // Interruptible. This poll is the Auto gauge's only source, and
+                // it is the one poll that runs with no window open — the launch
+                // race and every change made while the popover is closed reach
+                // the tray through here and nowhere else. A plain 300-second
+                // sleep meant an added account could be missing from the gauge,
+                // or a removed one still counted in it, for five minutes.
+                await ClaudeExtraRoots.RegistryChange.sleep(upTo: 300, since: registryEpoch)
             }
         }
     }

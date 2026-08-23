@@ -173,7 +173,7 @@ enum Smoke {
             }
             do {
                 let curve = try TBCore.quotaCurve(
-                    clientId: "__smoke__", windowKey: "__smoke__", generation: generation)
+                    clientId: "__smoke__", accountKey: nil, windowKey: "__smoke__", generation: generation)
                 throw SmokeExpectationFailure(
                     "unbound series returned \(curve == nil ? "null" : "a curve") instead of failing closed")
             } catch let TBCoreError.bridge(message) {

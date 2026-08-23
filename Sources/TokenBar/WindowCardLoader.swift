@@ -376,8 +376,10 @@ enum WindowCardLoader {
     /// Returns `nil` when the reading could not be obtained at all, and `[]`
     /// when it was obtained and this window has none. Callers must not collapse
     /// the two: only the second says anything about the subscription.
+    // No default: a caller that omits this reads the primary account's curve
+    // and nothing reports the mistake, so the argument is required.
     static func curveSamples(
-        payload: AgentUsagePayload, clientId: String, accountKey: String? = nil,
+        payload: AgentUsagePayload, clientId: String, accountKey: String?,
         window: UsageWindow,
         curve read: (String, String?, String, UInt64) throws -> QuotaCurve?, nowMs: Int64
     ) -> [QuotaSample]? {

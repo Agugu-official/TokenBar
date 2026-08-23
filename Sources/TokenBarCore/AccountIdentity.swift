@@ -38,6 +38,25 @@ public struct AccountIdentity: Hashable, Sendable {
         guard let accountKey else { return "\(clientId)|\(cardId)" }
         return "\(clientId)|\(accountKey)|\(cardId)"
     }
+
+    /// A short label naming which account this is, for any surface that shows
+    /// the client's display name and would otherwise render two accounts
+    /// identically. Nil for the primary, which needs no qualifier.
+    ///
+    /// The basename, not the path. The value is a directory under the user's
+    /// home, and the surfaces that use this are the ones that end up in
+    /// screenshots; the full path stays reachable through a tooltip for the
+    /// case where two directories share a last component.
+    ///
+    /// It lives here rather than beside one of its callers because the label
+    /// two views derive separately is the label they eventually derive
+    /// differently, and the reader has no way to tell that the "work" in the
+    /// limits card and the "work" in the overview line mean the same account.
+    public var accountLabel: String? {
+        guard let accountKey else { return nil }
+        let name = (accountKey as NSString).lastPathComponent
+        return name.isEmpty ? accountKey : name
+    }
 }
 
 extension AgentUsageSnapshot {

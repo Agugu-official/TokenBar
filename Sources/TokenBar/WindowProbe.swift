@@ -108,7 +108,7 @@ enum WindowProbe {
                     guard let key = w.paceStatus.windowKey,
                           let gen = payload.publicationGeneration,
                           let curve = (try? TBCore.quotaCurve(
-                              clientId: agent.clientId, windowKey: key, generation: gen)) ?? nil,
+                              clientId: agent.clientId, accountKey: agent.accountKey, windowKey: key, generation: gen)) ?? nil,
                           !curve.points.isEmpty
                     else { continue }
                     var byCycle: [Int64: [QuotaCurvePoint]] = [:]
@@ -140,7 +140,7 @@ enum WindowProbe {
                     guard let key = w.paceStatus.windowKey,
                           let gen = payload.publicationGeneration,
                           let curve = (try? TBCore.quotaCurve(
-                              clientId: agent.clientId, windowKey: key, generation: gen)) ?? nil,
+                              clientId: agent.clientId, accountKey: agent.accountKey, windowKey: key, generation: gen)) ?? nil,
                           !curve.points.isEmpty
                     else { continue }
                     let full = QuotaHistoryFold.cycles(
@@ -200,7 +200,7 @@ enum WindowProbe {
                 for w in agent.uniqueCardWindows {
                     let t = Date()
                     _ = WindowCardLoader.curveSamples(
-                        payload: payload, clientId: agent.clientId, window: w,
+                        payload: payload, clientId: agent.clientId, accountKey: agent.accountKey, window: w,
                         curve: { c, a, k, g in
                             (try? TBCore.quotaCurve(clientId: c, accountKey: a, windowKey: k, generation: g)) ?? nil
                         }, nowMs: now) ?? []
@@ -226,7 +226,7 @@ enum WindowProbe {
             for agent in payload.agents {
                 for w in agent.uniqueCardWindows {
                     let samples = WindowCardLoader.curveSamples(
-                        payload: payload, clientId: agent.clientId, window: w,
+                        payload: payload, clientId: agent.clientId, accountKey: agent.accountKey, window: w,
                         curve: { c, a, k, g in
                             (try? TBCore.quotaCurve(clientId: c, accountKey: a, windowKey: k, generation: g)) ?? nil
                         }, nowMs: now) ?? []
@@ -248,7 +248,7 @@ enum WindowProbe {
             for agent in payload.agents {
                 for w in agent.uniqueCardWindows {
                     let samples = WindowCardLoader.curveSamples(
-                        payload: payload, clientId: agent.clientId, window: w,
+                        payload: payload, clientId: agent.clientId, accountKey: agent.accountKey, window: w,
                         curve: { c, a, k, g in
                             (try? TBCore.quotaCurve(clientId: c, accountKey: a, windowKey: k, generation: g)) ?? nil
                         }, nowMs: now) ?? []
@@ -342,7 +342,7 @@ enum WindowProbe {
                       }),
                       let dS = w.durationSeconds,
                       let c = (try? TBCore.quotaCurve(
-                          clientId: agent.clientId, windowKey: k,
+                          clientId: agent.clientId, accountKey: agent.accountKey, windowKey: k,
                           generation: payload.publicationGeneration ?? 0)) ?? nil
                 else { continue }
                 let lo = (rMs - dS * 1000) / 1000, hi = now / 1000
@@ -365,7 +365,7 @@ enum WindowProbe {
                               .map { Int64($0.timeIntervalSince1970 * 1000) }
                       }),
                       let c = (try? TBCore.quotaCurve(
-                          clientId: agent.clientId, windowKey: k,
+                          clientId: agent.clientId, accountKey: agent.accountKey, windowKey: k,
                           generation: payload.publicationGeneration ?? 0)) ?? nil,
                       let last = c.points.last
                 else { continue }
@@ -386,7 +386,7 @@ enum WindowProbe {
                       }),
                       let d = w.durationSeconds,
                       let c = (try? TBCore.quotaCurve(
-                          clientId: agent.clientId, windowKey: k,
+                          clientId: agent.clientId, accountKey: agent.accountKey, windowKey: k,
                           generation: payload.publicationGeneration ?? 0)) ?? nil
                 else { continue }
                 // Exactly what curveSamples does today: time range only.
@@ -404,7 +404,7 @@ enum WindowProbe {
             for agent in payload.agents { for w in agent.windows {
                 guard let k = w.paceStatus.windowKey,
                       let c = (try? TBCore.quotaCurve(
-                          clientId: agent.clientId, windowKey: k,
+                          clientId: agent.clientId, accountKey: agent.accountKey, windowKey: k,
                           generation: payload.publicationGeneration ?? 0)) ?? nil,
                       c.points.count > 3 else { continue }
                 let pts = c.points.sorted { $0.sampledAt < $1.sampledAt }
@@ -435,7 +435,7 @@ enum WindowProbe {
             for agent in payload.agents { for w in agent.windows {
                 guard let k = w.paceStatus.windowKey else { continue }
                 let t = Date()
-                let c = (try? TBCore.quotaCurve(clientId: agent.clientId, windowKey: k,
+                let c = (try? TBCore.quotaCurve(clientId: agent.clientId, accountKey: agent.accountKey, windowKey: k,
                                                 generation: payload.publicationGeneration ?? 0)) ?? nil
                 let ms = Date().timeIntervalSince(t) * 1000
                 print(String(format: "  %-10@ %-22@ %5.1f ms  %d 點  resetAt/dur 齊全=%@",
@@ -467,6 +467,8 @@ enum WindowProbe {
             print(String(format: "  合計：%.0f ms（vs 逐窗各掃一次）", unionMs + filterTotal))
 
             print("\n=== SCAN COST（每次載入一次，非每次 hover）===")
+            // `resolved` carries no account key, so this section reads the
+            // primary account only — stated rather than defaulted.
             for (client, card, state) in resolved {
                 guard let (start, end) = interval(state) else { continue }
                 var t0 = Date()
@@ -519,7 +521,7 @@ enum WindowProbe {
                     }
                     let attrMs = Date().timeIntervalSince(t0) * 1000
                     let qs = (try? TBCore.quotaCurve(
-                        clientId: client, windowKey: card,
+                        clientId: client, accountKey: nil, windowKey: card,
                         generation: payload.publicationGeneration ?? 0))??.points
                         .filter { $0.sampledAt >= start / 1000 && $0.sampledAt <= now / 1000 }
                         .map { QuotaSample(atMs: $0.sampledAt * 1000, usedPercent: $0.usedPercent) }
@@ -548,7 +550,7 @@ enum WindowProbe {
                     continue
                 }
                 let qc = try TBCore.quotaCurve(
-                    clientId: client, windowKey: key, generation: payload.publicationGeneration ?? 0)
+                    clientId: client, accountKey: nil, windowKey: key, generation: payload.publicationGeneration ?? 0)
                 guard let qc else { print("    額度線：series 未綁定"); continue }
                 // sampledAt/resetAt are SECONDS — the decoder subtracts
                 // durationSeconds from resetAt directly (QuotaCurve.swift:64).

@@ -652,25 +652,6 @@ struct AgentLimitsCard: View {
 
     // MARK: - Per-agent section
 
-    /// What distinguishes one account's row from another's, or nil for the
-    /// primary — which needs no qualifier because it is the only unlabelled
-    /// one.
-    ///
-    /// Both rows otherwise render `style.displayName` and nothing else, so two
-    /// accounts on the same plan, or two whose profile lookup failed, were
-    /// indistinguishable: the reader could not tell which quota or which error
-    /// belonged to which configured directory.
-    ///
-    /// The basename, not the path. The full value is a directory under the
-    /// user's home, and this heading is the part of the app that ends up in
-    /// screenshots; the whole path is still reachable through the tooltip for
-    /// the case where two directories share a last component.
-    static func accountLabel(_ row: AccountIdentity) -> String? {
-        guard let accountKey = row.accountKey else { return nil }
-        let name = (accountKey as NSString).lastPathComponent
-        return name.isEmpty ? accountKey : name
-    }
-
     @ViewBuilder private func agentSection(
         _ row: AccountIdentity, visible: [AccountIdentity]
     ) -> some View {
@@ -695,7 +676,7 @@ struct AgentLimitsCard: View {
                 AgentIconView(clientId: id, size: 14)
                 Text(style.displayName)
                     .font(.caption.weight(.semibold))
-                if let account = Self.accountLabel(row) {
+                if let account = row.accountLabel {
                     Text(account)
                         .font(.caption2)
                         .foregroundStyle(.secondary)

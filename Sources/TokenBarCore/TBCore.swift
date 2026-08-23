@@ -280,8 +280,10 @@ public enum TBCore {
     /// publishing the same window would replace the first. The call would then
     /// answer with the other account's curve under a generation that
     /// validates — nothing on either side of the FFI could tell.
+    // No default: a caller that omits this reads the primary account's curve
+    // and nothing reports the mistake, so the argument is required.
     public static func quotaCurve(
-        clientId: String, accountKey: String? = nil, windowKey: String, generation: UInt64
+        clientId: String, accountKey: String?, windowKey: String, generation: UInt64
     ) throws -> QuotaCurve? {
         let curve: QuotaCurve? = try clientId.withCString { client in
             try windowKey.withCString { window in
