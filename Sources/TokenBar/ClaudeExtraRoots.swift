@@ -356,10 +356,21 @@ enum ClaudeExtraRoots {
 
     /// The half of `apply` that actually talks to the core, split out so the
     /// coalescing decision above is not buried in it.
+    ///
+    /// The two setters are parameters with the real ones as defaults, because
+    /// the property that matters here is an ORDER between them and the only way
+    /// to observe an order is to hold one of them still. `M3-o` passes a scan
+    /// setter that blocks and asserts the quota wake has already happened.
     @MainActor
     private static func install(
         json: String,
         configDirsJSON: String,
+        setConfigDirs: @escaping @Sendable (String) -> Void = {
+            _ = try? TBCore.setClaudeConfigDirs(json: $0)
+        },
+        setScanPaths: @escaping @Sendable (String) -> ExtraScanPathsResult? = {
+            try? TBCore.setExtraScanPaths(json: $0)
+        },
         then completion: (@Sendable @MainActor (ExtraScanPathsResult?) -> Void)?
     ) {
         applyQueue.async {
@@ -367,8 +378,33 @@ enum ClaudeExtraRoots {
             // and separate registry from the scan roots below: this one decides
             // whose credential each Claude card is fetched with, and a failure
             // in either must not stop the other from being installed.
-            _ = try? TBCore.setClaudeConfigDirs(json: configDirsJSON)
-            let result = try? TBCore.setExtraScanPaths(json: json)
+            setConfigDirs(configDirsJSON)
+            // Wake the quota side HERE, between the two setters, not after
+            // both.
+            //
+            // The two registries have two sets of consumers and only one of the
+            // setters can block. `setClaudeConfigDirs` installs a list of
+            // strings; `setExtraScanPaths` probes every path with `read_dir`,
+            // and a stalled network or external mount can hold that for the
+            // whole mount timeout — the case this feature exists to tolerate.
+            // With both notifications behind both setters, the quota cards kept
+            // describing the previous account set for that entire timeout,
+            // waiting on a probe whose answer they do not consume.
+            //
+            // Only the quota side moves. `recordApplied`, the scan-derived
+            // caches and the generation stay behind `setExtraScanPaths`,
+            // because those ARE about scan roots: a generation bumped early
+            // would restart a load that then scans the roots this call has not
+            // installed yet, which is the reason it was placed after the setter
+            // in the first place.
+            Task { @MainActor in
+                // Same order as below and for the same reason: a poll woken
+                // before the throttle is dropped is answered from the payload
+                // built for the account set that just changed.
+                await AgentUsageThrottle.shared.invalidate()
+                RegistryChange.signal()
+            }
+            let result = setScanPaths(json)
             Task { @MainActor in
                 // Before the invalidation and the generation bump, so anything
                 // they restart reads the registry that is now installed rather
@@ -381,31 +417,22 @@ enum ClaudeExtraRoots {
                 // nothing about whether the caches went stale.
                 DashboardModel.invalidateScanDerivedCaches()
                 // Bumped AFTER the setter returns, and this is what views key
-                // their reloads on — not the persisted list. The list changes
-                // the moment Settings saves, which is before this queue has
-                // installed anything, so a task keyed on it can restart, run,
-                // and publish while the engine is still scanning the old roots.
-                // Drop the throttled payload FIRST, and await it. Waking a
-                // poll is not enough on its own — the fetch it wakes into is
-                // answered from `AgentUsageThrottle`'s 50-second floor, which
-                // would hand back the payload built for the account set that
-                // just changed.
-                //
-                // Ordering is the whole point. Signalling first and
-                // invalidating in an unstructured `Task` let the resumed poll
-                // reach the throttle before that task was even submitted, so it
-                // received the old set anyway and the card outlived its account
-                // for the rest of the floor — the same symptom, reintroduced by
-                // the fix for it.
-                await AgentUsageThrottle.shared.invalidate()
-                // A generation moved here cannot fire early by construction.
+                // their scan-derived reloads on — not the persisted list. The
+                // list changes the moment Settings saves, which is before this
+                // queue has installed anything, so a task keyed on it can
+                // restart, run, and publish while the engine is still scanning
+                // the old roots. A generation moved here cannot fire early by
+                // construction.
                 UserDefaults.standard.set(
                     UserDefaults.standard.integer(forKey: generationKey) &+ 1,
                     forKey: generationKey)
-                // Wake the polls directly. The generation only reaches a view
-                // that is on screen; this reaches the loop that owns the cards
-                // whether or not anything is watching.
-                RegistryChange.signal()
+                // The throttle drop and the poll wake are NOT repeated here.
+                // They belong to the quota registry, which was installed before
+                // the scan probe, and they ran there; doing them again would
+                // spend a second wake on an account set that has not moved
+                // since — which is the cost the apply-level coalescing exists
+                // to avoid, reintroduced one layer down.
+                //
                 // Kept so a coalesced apply can answer its caller with what
                 // this one installed rather than with nothing. Guarded, because
                 // a later save may have claimed different payloads while this
@@ -417,5 +444,22 @@ enum ClaudeExtraRoots {
                 completion?(result)
             }
         }
+    }
+
+    /// Test seam. Drives `install` with substituted setters so the order
+    /// between installing the quota registry and probing the scan roots is
+    /// observable — see `install`'s doc comment.
+    @MainActor
+    static func installForTesting(
+        json: String,
+        configDirsJSON: String,
+        setConfigDirs: @escaping @Sendable (String) -> Void,
+        setScanPaths: @escaping @Sendable (String) -> ExtraScanPathsResult?,
+        then completion: (@Sendable @MainActor (ExtraScanPathsResult?) -> Void)?
+    ) {
+        install(
+            json: json, configDirsJSON: configDirsJSON,
+            setConfigDirs: setConfigDirs, setScanPaths: setScanPaths,
+            then: completion)
     }
 }

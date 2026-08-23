@@ -67,8 +67,7 @@ struct QuotaHistoryStripCard: View {
             // what turns a bar into "how many windows ago".
             let ago = summary.recent.count - 1 - hover.index
             VStack(alignment: .leading, spacing: 3) {
-                Text(verbatim: "\(ClientRegistry.style(summary.clientId).displayName) · "
-                     + summary.windowLabel.localized)
+                Text(verbatim: Self.rowLabel(summary))
                     .font(.caption2.weight(.semibold))
                 Text(ago == 0 ? "Most recent window".localized
                               : "%@ windows ago".localized(String(ago)))
@@ -104,13 +103,28 @@ struct QuotaHistoryStripCard: View {
         return summaries.allSatisfy(\.neverExhausted) ? "never exhausted".localized : nil
     }
 
+    /// The client name and window label a row (and its tooltip) both show,
+    /// qualified by account the same way `QuotaSummaryLine.tightestName` is:
+    /// two accounts of one client can carry identically-carded history, so
+    /// the client's display name alone leaves their rows indistinguishable.
+    ///
+    /// A named function, not composed inline in `row`/`tooltipLayer`, so
+    /// `M3-n` can assert the string directly.
+    static func rowLabel(_ summary: QuotaWindowSummary) -> String {
+        let style = ClientRegistry.style(summary.clientId)
+        let account = AccountIdentity(
+            clientId: summary.clientId, accountKey: summary.accountKey
+        ).accountLabel
+        let name = [style.displayName, account].compactMap(\.self).joined(separator: " ")
+        return "\(name) · \(summary.windowLabel.localized)"
+    }
+
     @ViewBuilder
     private func row(_ summary: QuotaWindowSummary) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
                 AgentIconView(clientId: summary.clientId, size: 11)
-                Text(verbatim: "\(ClientRegistry.style(summary.clientId).displayName) · "
-                     + summary.windowLabel.localized)
+                Text(verbatim: Self.rowLabel(summary))
                     .font(.caption2)
                     .lineLimit(1)
                 Spacer(minLength: 4)

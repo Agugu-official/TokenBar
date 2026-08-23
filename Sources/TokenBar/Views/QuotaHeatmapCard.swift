@@ -100,12 +100,12 @@ struct QuotaHeatmapCard: View {
                 Button {
                     selectedRaw = window.id
                 } label: {
-                    Text(verbatim: label(window))
+                    Text(verbatim: Self.label(window))
                 }
             }
         } label: {
             HStack(spacing: 3) {
-                Text(verbatim: selected.map(label) ?? "")
+                Text(verbatim: selected.map(Self.label) ?? "")
                     .lineLimit(1)
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 6))
@@ -122,9 +122,20 @@ struct QuotaHeatmapCard: View {
         .fixedSize()
     }
 
-    private func label(_ window: QuotaHeatmapWindow) -> String {
-        "\(ClientRegistry.style(window.clientId).displayName) · "
-            + window.windowLabel.localized
+    /// The picker's row and current-selection text, qualified by account the
+    /// same way `QuotaSummaryLine.tightestName` is — see its doc comment for
+    /// why the client's display name alone leaves two accounts' windows
+    /// indistinguishable in the menu.
+    ///
+    /// `static`, and a named function rather than composed inline, so `M3-n`
+    /// can assert the string directly.
+    static func label(_ window: QuotaHeatmapWindow) -> String {
+        let style = ClientRegistry.style(window.clientId)
+        let account = AccountIdentity(
+            clientId: window.clientId, accountKey: window.accountKey
+        ).accountLabel
+        let name = [style.displayName, account].compactMap(\.self).joined(separator: " ")
+        return "\(name) · \(window.windowLabel.localized)"
     }
 
     private func heatmap(_ grid: QuotaHeatmap) -> some View {

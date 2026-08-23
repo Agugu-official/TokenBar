@@ -49,6 +49,11 @@ public struct QuotaSummary: Equatable, Sendable {
 
 public struct BurnWarning: Equatable, Sendable {
     public let clientId: String
+    /// Which account of `clientId` is burning fastest. See
+    /// `QuotaSummary.tightestAccountKey` — the same two-account ambiguity
+    /// applies here: nil names the primary, and a client with an extra
+    /// account needs this to say which subscription the warning is about.
+    public let accountKey: String?
     public let label: String
     /// Actual used percent minus the expected one. Always positive here —
     /// a window running under its schedule is not a warning.
@@ -99,7 +104,8 @@ public enum QuotaSummaryFold {
                     let shown = UsagePace.presentation(
                         window: window, mode: paceMode, pace: pace)
                     burning = BurnWarning(
-                        clientId: agent.clientId, label: window.label,
+                        clientId: agent.clientId, accountKey: agent.accountKey,
+                        label: window.label,
                         aheadPercent: pace.deltaPercent,
                         etaText: shown.etaText, riskText: shown.riskText)
                 }

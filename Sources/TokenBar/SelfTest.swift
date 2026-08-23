@@ -13715,6 +13715,132 @@ enum SelfTest {
             "M3-m only one of the two payloads is compared, so a change to the "
                 + "other is coalesced away")
 
+        // M3-n. Two more Overview surfaces render only the client name, so two
+        // accounts of one client read identically there too.
+        //
+        // Task A: `QuotaHistoryStripCard.row`/`tooltipLayer` and
+        // `QuotaHeatmapCard.label`/picker compose the row text inline in a
+        // `some View` body, which cannot be asserted directly — pulled out
+        // into `QuotaHistoryStripCard.rowLabel` and the now-`static`
+        // `QuotaHeatmapCard.label`, the same move `tightestName`'s doc
+        // comment already explains for this exact reason.
+        let m3nSummary = QuotaOverviewFold.summaries(windows: [
+            (clientId: "claude", accountKey: m3ExtraKey, cardId: "session.v1",
+             label: "Session", cycles: [
+                QuotaCycle(
+                    resetAtMs: 500_000, startMs: 400_000, usedPercent: 30,
+                    sampleCount: 40, observedFraction: 0.9)]),
+        ])[0]
+        expect(
+            QuotaHistoryStripCard.rowLabel(m3nSummary).contains(".claude-extra")
+                && QuotaHistoryStripCard.rowLabel(m3nSummary).contains("Session"),
+            "M3-n the history strip's row names the client and window but not "
+                + "which of its two accounts the history belongs to")
+        let m3nHeatmapWindow = QuotaHeatmapWindow(
+            clientId: "claude", accountKey: m3ExtraKey, cardId: "session.v1",
+            windowLabel: "Session", total: 30)
+        expect(
+            QuotaHeatmapCard.label(m3nHeatmapWindow).contains(".claude-extra")
+                && QuotaHeatmapCard.label(m3nHeatmapWindow).contains("Session"),
+            "M3-n the heatmap's picker names the client and window but not "
+                + "which of its two accounts the grid belongs to")
+
+        // Task B: `BurnWarning` carried only `clientId`, so `burnRow` rendered
+        // the same text for either account. Two Claude agents, linear pace so
+        // the expectation is arithmetic: both half elapsed, the EXTRA
+        // account far ahead of its line (90 used against 50 expected) and the
+        // primary only slightly ahead (55 against 50) — the extra account's
+        // deficit must win, and the rendered label must name it.
+        //
+        // Delete the `account` term from `burnName`'s join (or drop
+        // `accountKey` from the `BurnWarning` the fold builds) to watch this
+        // go red.
+        let m3nDuration: Int64 = 18_000
+        func m3nWindowJSON(clientId: String, accountKey: String?, used: Double) -> String {
+            let reset = burnNow.addingTimeInterval(Double(m3nDuration) * 0.5)
+            let iso = ISO8601DateFormatter().string(from: reset)
+            let account = accountKey.map { "\"accountKey\":\"\($0)\"," } ?? ""
+            return """
+            {"clientId":"\(clientId)",\(account)"source":"oauth","updatedAt":"t","windows":[
+             {"cardId":"session.v1","label":"Session","usedPercent":\(used),
+              "remainingPercent":\(100 - used),"resetsAt":"\(iso)",
+              "durationSeconds":\(m3nDuration),"windowMinutes":\(m3nDuration / 60),
+              "paceStatus":{"state":"learningHistory","windowKey":"session.v1",
+                            "durationSeconds":\(m3nDuration),"durationSource":"provider",
+                            "completeCycles":1}}]}
+            """
+        }
+        let m3nBurnPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data("""
+            {"generatedAt":"t","publicationGeneration":1,"agents":[
+              \(m3nWindowJSON(clientId: "claude", accountKey: m3ExtraKey, used: 90)),
+              \(m3nWindowJSON(clientId: "claude", accountKey: nil, used: 55))
+            ]}
+            """.utf8))
+        let m3nBurn = QuotaSummaryFold.build(
+            payload: m3nBurnPayload, paceMode: .linear, now: burnNow)
+        expect(
+            m3nBurn?.burning?.accountKey == m3ExtraKey,
+            "M3-n the fastest-burning window belongs to the EXTRA account, but "
+                + "the warning does not record which account it came from")
+        let m3nBurnLabel = m3nBurn?.burning.map { QuotaSummaryLine.burnName($0) }
+        expect(
+            m3nBurnLabel?.contains(".claude-extra") == true,
+            "M3-n the burn-fastest line names the client but not which of its "
+                + "two accounts is burning")
+        // Single-account case, asserted separately: a "fix" that always
+        // appends a qualifier would satisfy the assertion above alone.
+        let m3nPrimaryBurn = QuotaSummaryFold.build(
+            payload: burnPayload([(client: "claude", used: 80, elapsedFraction: 0.5)]),
+            paceMode: .linear, now: burnNow)
+        expect(
+            m3nPrimaryBurn?.burning.map { QuotaSummaryLine.burnName($0) }
+                == ClientRegistry.style("claude").displayName,
+            "M3-n a single-account install gained a qualifier on the burn-fastest line")
+
+        // M3-o. The quota side must be woken between the two setters, not after
+        // both of them.
+        //
+        // `apply` installs two registries. `setClaudeConfigDirs` hands over a
+        // list of strings; `setExtraScanPaths` probes every path with
+        // `read_dir`, and a stalled network or external mount holds that for
+        // the whole mount timeout — the case this feature exists to tolerate.
+        // With the throttle drop and the wake behind BOTH setters, the quota
+        // cards kept describing the previous account set for that entire
+        // timeout, waiting on a probe whose answer they never consume.
+        //
+        // Observing an order means holding one side still, which is why
+        // `install` takes its two setters as parameters: the scan setter here
+        // blocks on a semaphore and never returns until the assertion is made.
+        // It blocks `applyQueue`, never the main actor, or the wake it is
+        // waiting for could not run and this would deadlock rather than fail.
+        let m3oWokeBeforeScan: Bool? = awaitMainActorValue {
+            let gate = DispatchSemaphore(value: 0)
+            let before = ClaudeExtraRoots.RegistryChange.epoch
+            ClaudeExtraRoots.installForTesting(
+                json: "{}", configDirsJSON: "[]",
+                setConfigDirs: { _ in },
+                setScanPaths: { _ in
+                    gate.wait()
+                    return nil
+                },
+                then: nil)
+            var woke = false
+            for _ in 0..<200 where !woke {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+                woke = ClaudeExtraRoots.RegistryChange.epoch != before
+            }
+            gate.signal()
+            ClaudeExtraRoots.resetApplyClaimForTesting()
+            return woke
+        }
+        expect(
+            m3oWokeBeforeScan == true,
+            "M3-o the quota pollers were not woken until the scan-root probe "
+                + "returned, so a stalled mount leaves the cards on the previous "
+                + "account set for the whole filesystem timeout")
+
         // M3-j. An account change must invalidate the throttled payload.
         //
         // This is the layer the three previous attempts at "the card outlives
