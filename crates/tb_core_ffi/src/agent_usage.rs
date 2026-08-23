@@ -19,7 +19,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{LazyLock, Mutex};
 use tower_service::Service;
 
@@ -1706,13 +1708,77 @@ async fn fetch_claude() -> AgentUsageSnapshot {
 /// With no extra directory configured the registry is empty, the loop body
 /// never runs, and this is the single `fetch_claude()` call it was before.
 async fn fetch_claude_accounts() -> Vec<AgentUsageSnapshot> {
-    let mut agents = vec![fetch_claude().await];
-    // ponytail: sequential; one extra account costs one more round trip on a
-    // 60s poll. A JoinSet only earns its keep past a couple of accounts.
-    for config_dir in crate::claude_config_dirs::snapshot() {
-        agents.push(fetch_claude_extra_account(&config_dir).await);
+    let config_dirs = crate::claude_config_dirs::snapshot();
+    if config_dirs.is_empty() {
+        return vec![fetch_claude().await];
     }
-    agents
+    // Concurrent, not sequential. An earlier version ran these in a loop and
+    // justified it as "one extra account costs one more round trip on a 60s
+    // poll", which measures the wrong thing: each request owns a 30-second
+    // timeout, and the provider-wide `tokio::join!` above cannot return until
+    // this function does, so a slow Claude account holds back the already
+    // finished Codex, Copilot, Grok and Antigravity cards for as long as it
+    // takes — and Settings sets no limit on how many accounts there are, so
+    // the delay grows linearly with a number the user chooses.
+    //
+    // Bounded rather than fully parallel: N accounts firing at once is N
+    // simultaneous requests to one provider, which is how a refresh turns into
+    // a rate-limit. Four is above any realistic account count, so the bound
+    // costs nothing in practice and exists for the case that is not realistic.
+    let mut work: Vec<Pin<Box<dyn Future<Output = AgentUsageSnapshot>>>> =
+        vec![Box::pin(fetch_claude())];
+    for config_dir in config_dirs {
+        work.push(Box::pin(async move {
+            fetch_claude_extra_account(&config_dir).await
+        }));
+    }
+    join_local_ordered(work).await
+}
+
+/// Run every future concurrently, at most `MAX_ACCOUNT_FETCHES_IN_FLIGHT` at a
+/// time, and return the results in the order the futures were given rather than
+/// the order they finished.
+///
+/// Both halves of that sentence are load-bearing. **Ordered**, because the
+/// caller's order is the order the cards are laid out in and completion order
+/// is whichever account's provider answered first — a reordering nothing would
+/// report. **Bounded**, because N accounts firing at once is N simultaneous
+/// requests to one provider, which is how a refresh becomes a rate-limit.
+///
+/// `spawn_local` inside a `LocalSet` rather than `JoinSet::spawn`: a provider
+/// fetch holds non-`Send` state across its awaits, so moving one between
+/// threads does not compile. Nothing here wants a second thread anyway — the
+/// work is entirely network wait.
+const MAX_ACCOUNT_FETCHES_IN_FLIGHT: usize = 4;
+
+async fn join_local_ordered<T: 'static>(
+    futures: Vec<Pin<Box<dyn Future<Output = T>>>>,
+) -> Vec<T> {
+    tokio::task::LocalSet::new()
+        .run_until(async move {
+            let mut slots: Vec<Option<T>> = (0..futures.len()).map(|_| None).collect();
+            let mut tasks = tokio::task::JoinSet::new();
+            let mut pending = futures.into_iter().enumerate();
+            let mut queued = 0usize;
+            loop {
+                while queued < MAX_ACCOUNT_FETCHES_IN_FLIGHT {
+                    let Some((index, future)) = pending.next() else { break };
+                    tasks.spawn_local(async move { (index, future.await) });
+                    queued += 1;
+                }
+                let Some(joined) = tasks.join_next().await else { break };
+                queued -= 1;
+                // A panicking fetch drops that one result rather than taking
+                // the whole publication down. Every real provider failure
+                // already arrives as a `ProviderFetchOutcome`, so reaching this
+                // arm is a bug rather than a provider being unreachable.
+                if let Ok((index, value)) = joined {
+                    slots[index] = Some(value);
+                }
+            }
+            slots.into_iter().flatten().collect()
+        })
+        .await
 }
 
 async fn fetch_claude_extra_account(config_dir: &str) -> AgentUsageSnapshot {
@@ -5325,6 +5391,63 @@ where
 mod tests {
     use super::*;
     use crate::agent_account_scope::test_support::TestRefreshScope;
+
+    /// The two properties `join_local_ordered` exists for, on futures that
+    /// finish in the opposite order to the one they were given in — which is
+    /// the case a version that pushed results as they arrived would pass by
+    /// accident if every future took the same time.
+    ///
+    /// Mutations, both verified red: returning results in completion order
+    /// (push instead of the indexed slot) reverses the sequence; removing the
+    /// `queued < MAX_ACCOUNT_FETCHES_IN_FLIGHT` bound lets all seven run at
+    /// once and the observed peak becomes 7.
+    #[test]
+    fn account_fetches_run_concurrently_bounded_and_return_in_input_order() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::time::Duration;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let live = Rc::new(Cell::new(0usize));
+        let peak = Rc::new(Cell::new(0usize));
+        let total = 7;
+        let (ordered, observed_peak) = runtime.block_on(async {
+            let mut work: Vec<Pin<Box<dyn Future<Output = usize>>>> = Vec::new();
+            for index in 0..total {
+                let live = Rc::clone(&live);
+                let peak = Rc::clone(&peak);
+                work.push(Box::pin(async move {
+                    live.set(live.get() + 1);
+                    peak.set(peak.get().max(live.get()));
+                    // Later entries finish FIRST, so input order and completion
+                    // order disagree for every pair.
+                    tokio::time::sleep(Duration::from_millis(
+                        ((total - index) * 10) as u64,
+                    ))
+                    .await;
+                    live.set(live.get() - 1);
+                    index
+                }));
+            }
+            let ordered = join_local_ordered(work).await;
+            (ordered, peak.get())
+        });
+
+        assert_eq!(
+            ordered,
+            (0..total).collect::<Vec<_>>(),
+            "results came back in completion order, so the cards would be laid \
+             out in whichever order the providers happened to answer"
+        );
+        assert_eq!(
+            observed_peak, MAX_ACCOUNT_FETCHES_IN_FLIGHT,
+            "the in-flight bound was not applied — {total} accounts would mean \
+             {total} simultaneous requests to one provider"
+        );
+    }
 
     #[test]
     fn claude_user_agent_uses_first_version_token() {

@@ -33,20 +33,28 @@ pub(crate) fn snapshot() -> Vec<String> {
         .clone()
 }
 
-/// Trailing separators and surrounding whitespace change the SHA-256 the
-/// Keychain service name is derived from, so `/x/.claude-work/` would read no
-/// item at all while looking identical in Settings. A relative path is
-/// refused rather than resolved: it would resolve against whatever the process
-/// CWD happens to be, and the resulting identity would move with it.
+/// Trailing separators change the SHA-256 the Keychain service name is derived
+/// from, so `/x/.claude-work/` would read no item at all while looking
+/// identical in Settings. A relative path is refused rather than resolved: it
+/// would resolve against whatever the process CWD happens to be, and the
+/// resulting identity would move with it.
+///
+/// Whitespace is deliberately NOT trimmed, though an earlier version did. The
+/// Swift side sends `standardizingPath`'s output verbatim and that call does
+/// not strip surrounding whitespace, so trimming here would derive the Keychain
+/// service from a string that is not the directory: a folder whose name really
+/// ends in a space is reachable through the picker, its transcripts would be
+/// scanned under the real path, and its quota card would report no login found
+/// forever. Whitespace is a legal character in a path, and the two derivations
+/// of one identity have to agree before either of them has to look tidy.
 fn normalize(raw: &str) -> Result<String, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    if raw.is_empty() {
         return Err("empty path".to_string());
     }
-    if !Path::new(trimmed).is_absolute() {
+    if !Path::new(raw).is_absolute() {
         return Err("path is not absolute".to_string());
     }
-    let stripped = trimmed.trim_end_matches('/');
+    let stripped = raw.trim_end_matches('/');
     if stripped.is_empty() {
         return Err("path is the filesystem root".to_string());
     }
@@ -118,7 +126,7 @@ mod tests {
         reset_for_test();
 
         let result = set_from_json(
-            r#"["/Users/x/.claude-work/", "  /Users/x/.claude-other  ", "relative/dir", "", "/Users/x/.claude-work"]"#,
+            r#"["/Users/x/.claude-work/", "/Users/x/claude dir ", "relative/dir", "", "/Users/x/.claude-work"]"#,
         )
         .unwrap();
 
@@ -127,9 +135,12 @@ mod tests {
             snapshot(),
             vec![
                 "/Users/x/.claude-work".to_string(),
-                "/Users/x/.claude-other".to_string()
+                "/Users/x/claude dir ".to_string()
             ],
-            "a trailing separator would derive a different Keychain service"
+            "a trailing separator would derive a different Keychain service, and \
+             trimming the trailing SPACE would derive one for a directory that is \
+             not the one Swift registered for scanning — that account's \
+             transcripts would be read while its quota card reported no login"
         );
         let reasons: Vec<&str> = result["rejected"]
             .as_array()
@@ -141,6 +152,9 @@ mod tests {
             reasons,
             vec!["path is not absolute", "empty path", "duplicate directory"]
         );
+        // And a path that is nothing but whitespace is still refused, by the
+        // absolute-path rule rather than by trimming it into emptiness.
+        assert!(set_from_json(r#"["   "]"#).unwrap()["registeredCount"] == 0);
 
         // Full-replace, including back to nothing.
         set_from_json("[]").unwrap();
