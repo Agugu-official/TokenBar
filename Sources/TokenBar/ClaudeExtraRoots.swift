@@ -208,6 +208,50 @@ enum ClaudeExtraRoots {
         UserDefaults.standard.removeObject(forKey: appliedKey)
     }
 
+    /// The account registry's own applied marker — the same idea as
+    /// `appliedKey` above, for the OTHER registry `install` writes.
+    ///
+    /// It has to be a separate persisted value, not a reuse of `appliedKey` or
+    /// of `lastApplied` below. `appliedKey` answers a question about scan
+    /// roots; this one answers "which accounts is the quota side fetching",
+    /// and the two payloads are built from the same configured list but are
+    /// not the same string — a directory the scanner refuses is still absent
+    /// from `appliedPayloadJSON` while it is present here. And `lastApplied`
+    /// is in-memory and resets to nil every launch, which is exactly the case
+    /// that needed catching: at launch there is no PREVIOUS apply for
+    /// `lastApplied` to differ from, so a comparison against it always reports
+    /// a change, on every process start, whether or not the account list
+    /// actually differs from what a previous process already installed.
+    static let appliedConfigDirsKey = "tokenbar.claude.extraRootsAppliedConfigDirs"
+
+    /// Overridable for the same reason `appliedProvider` is.
+    nonisolated(unsafe) static var appliedConfigDirsProvider: @Sendable () -> String = {
+        UserDefaults.standard.string(forKey: appliedConfigDirsKey) ?? configDirsPayloadJSON([])
+    }
+
+    static var appliedConfigDirsJSON: String { appliedConfigDirsProvider() }
+
+    /// Record, and report whether the account registry actually moved.
+    ///
+    /// No `result` parameter, unlike the scan side's twin: `setClaudeConfigDirs`
+    /// returns nothing for `install` to check, so there is no partial-failure
+    /// case to gate persistence on — the list is either installed or it is not
+    /// attempted, and `install` always attempts it.
+    @discardableResult
+    static func recordAppliedConfigDirsAndReportChange(_ configDirsJSON: String) -> Bool {
+        guard configDirsJSON != appliedConfigDirsJSON else { return false }
+        UserDefaults.standard.set(configDirsJSON, forKey: appliedConfigDirsKey)
+        return true
+    }
+
+    /// Test seam only: back to the pre-apply state.
+    static func resetAppliedConfigDirsForTesting() {
+        appliedConfigDirsProvider = {
+            UserDefaults.standard.string(forKey: appliedConfigDirsKey) ?? configDirsPayloadJSON([])
+        }
+        UserDefaults.standard.removeObject(forKey: appliedConfigDirsKey)
+    }
+
     /// Test seam only: forget the coalescing claim, or a test that applies the
     /// same list a second time silently measures the skip path.
     @MainActor
@@ -417,6 +461,21 @@ enum ClaudeExtraRoots {
             // installed yet, which is the reason it was placed after the setter
             // in the first place.
             Task { @MainActor in
+                // Gated the same way the scan side is, and for the same
+                // reason: `install` runs at launch and on every Settings save,
+                // not only when the account list changes, so an unconditional
+                // wake here paid the same repeated cost `recordAppliedAndReportChange`
+                // exists to remove — just on the other registry. `lastApplied`
+                // above cannot catch the launch case, because it starts nil
+                // every process and a comparison against nil always reports a
+                // change; `appliedConfigDirsJSON` is persisted across launches,
+                // which is what the comparison needs to be meaningful here.
+                //
+                // Recorded before the wake, so anything the wake restarts reads
+                // the registry that is now installed rather than the one it
+                // replaced — same reason the scan side records before its own
+                // invalidation, below.
+                guard recordAppliedConfigDirsAndReportChange(configDirsJSON) else { return }
                 // Same order as below and for the same reason: a poll woken
                 // before the throttle is dropped is answered from the payload
                 // built for the account set that just changed.

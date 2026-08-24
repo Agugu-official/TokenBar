@@ -13592,6 +13592,28 @@ enum SelfTest {
                    + "holds what it held")
         ClaudeExtraRoots.resetAppliedForTesting()
 
+        // CE-CONFIG-MOVED. The account registry's own twin of CE-MOVED. `install`
+        // wakes the quota throttle and every sleeping poller between its two
+        // setters, and that wake was unconditional in exactly the way the scan
+        // side's cache-drop and generation-bump were — `install` runs at launch
+        // and on every Settings save, and `lastApplied` cannot catch the launch
+        // case because it is in-memory and starts nil every process, so a
+        // comparison against it always reports a change on the first apply of
+        // a run. `appliedConfigDirsJSON` is persisted, which is what makes the
+        // comparison mean something across a relaunch.
+        ClaudeExtraRoots.resetAppliedConfigDirsForTesting()
+        let ceCfgFirst = ClaudeExtraRoots.configDirsPayloadJSON(["/tmp/tokenbar-cfg-moved"])
+        expect(ClaudeExtraRoots.recordAppliedConfigDirsAndReportChange(ceCfgFirst),
+               "CE-CONFIG-MOVED installing an account list that differs reports a change")
+        expect(!ClaudeExtraRoots.recordAppliedConfigDirsAndReportChange(ceCfgFirst),
+               "CE-CONFIG-MOVED and installing the SAME list again reports none — the "
+                   + "launch case, and the one that was paying for an unnecessary wake")
+        expect(ClaudeExtraRoots.recordAppliedConfigDirsAndReportChange(
+                   ClaudeExtraRoots.configDirsPayloadJSON(["/tmp/tokenbar-cfg-moved-2"])),
+               "CE-CONFIG-MOVED a genuinely different list still reports a change, so "
+                   + "the gate is a comparison rather than a one-shot latch")
+        ClaudeExtraRoots.resetAppliedConfigDirsForTesting()
+
         // isRejectedRoot: home and root are refused; an ordinary subfolder is not.
         let ceHome = FileManager.default.homeDirectoryForCurrentUser.path
         expect(
@@ -13916,11 +13938,19 @@ enum SelfTest {
         // blocks on a semaphore and never returns until the assertion is made.
         // It blocks `applyQueue`, never the main actor, or the wake it is
         // waiting for could not run and this would deadlock rather than fail.
+        //
+        // `configDirsJSON` here must genuinely differ from what
+        // `resetAppliedConfigDirsForTesting` leaves as the baseline, or the
+        // CE-CONFIG-MOVED gate this exercise now runs through would report no
+        // change and the wake would never fire — this test would then be
+        // asserting a deadlock timeout rather than the order it names.
+        ClaudeExtraRoots.resetAppliedConfigDirsForTesting()
+        let m3oConfigDirs = ClaudeExtraRoots.configDirsPayloadJSON(["/tmp/tokenbar-m3o"])
         let m3oWokeBeforeScan: Bool? = awaitMainActorValue {
             let gate = DispatchSemaphore(value: 0)
             let before = ClaudeExtraRoots.RegistryChange.epoch
             ClaudeExtraRoots.installForTesting(
-                json: "{}", configDirsJSON: "[]",
+                json: "{}", configDirsJSON: m3oConfigDirs,
                 setConfigDirs: { _ in },
                 setScanPaths: { _ in
                     gate.wait()
@@ -13941,6 +13971,31 @@ enum SelfTest {
             "M3-o the quota pollers were not woken until the scan-root probe "
                 + "returned, so a stalled mount leaves the cards on the previous "
                 + "account set for the whole filesystem timeout")
+
+        // M3-o2. The mirror of M3-o, and the half that proves the gate GATES
+        // rather than merely not breaking the case above. Re-installing the
+        // SAME account list `install` just recorded as applied must not wake
+        // anything: that is the launch call and every no-op Settings save,
+        // and before this fix it woke every poller and dropped the quota
+        // throttle for a registry identical to the one already installed.
+        let m3oNotWoken: Bool? = awaitMainActorValue {
+            let before = ClaudeExtraRoots.RegistryChange.epoch
+            let done = ThrottleGate()
+            ClaudeExtraRoots.installForTesting(
+                json: "{}", configDirsJSON: m3oConfigDirs,
+                setConfigDirs: { _ in },
+                setScanPaths: { _ in nil },
+                then: { _ in Task { await done.open() } })
+            await done.wait()
+            ClaudeExtraRoots.resetApplyClaimForTesting()
+            return ClaudeExtraRoots.RegistryChange.epoch == before
+        }
+        expect(
+            m3oNotWoken == true,
+            "M3-o2 re-applying the SAME account list wakes no poller, so an "
+                + "unchanged registry — the launch case above all — costs "
+                + "nothing on the quota side")
+        ClaudeExtraRoots.resetAppliedConfigDirsForTesting()
 
         // M3-p. A payload fetched under the previous registry must not be
         // applied, only dropped.
