@@ -252,6 +252,39 @@ enum ClaudeExtraRoots {
         UserDefaults.standard.removeObject(forKey: appliedConfigDirsKey)
     }
 
+    /// Whether THIS PROCESS has installed the account registry at least once.
+    ///
+    /// `appliedConfigDirsJSON` answers "does this list differ from what a
+    /// PREVIOUS install recorded", which is the wrong question on a process's
+    /// first install: the Rust account registry is process-memory state and
+    /// starts empty regardless of what an earlier process persisted, so a
+    /// relaunch with an unchanged account list installs into an EMPTY
+    /// registry while the persisted marker already says "unchanged" — the
+    /// comparison reports no move for a transition that is, in this process,
+    /// real.
+    ///
+    /// The consequence was not a cosmetic staleness. `TrayAnimator` starts its
+    /// quota poll immediately at launch, before `apply`'s install has
+    /// necessarily finished, and its FIRST fetch can race the setter and read
+    /// only the primary account. That result is applied because nothing had
+    /// signalled `RegistryChange` to move the epoch it checks against — and
+    /// the loop's own recovery is `RegistryChange.sleep(upTo: 300, ...)`,
+    /// which needs exactly the signal this flag exists to guarantee. Without
+    /// it, a missing account could stay missing from the tray gauge for the
+    /// full five minutes even though the registry had held it since launch.
+    @MainActor private static var didInstallConfigDirsThisProcess = false
+
+    /// The canonical empty-account-list payload, compared against directly
+    /// rather than checking the source list for emptiness — the check has to
+    /// run on the same encoded string `install` already holds.
+    private static let emptyConfigDirsJSON = configDirsPayloadJSON([])
+
+    /// Test seam only: forget that this process has installed anything.
+    @MainActor
+    static func resetInstalledConfigDirsThisProcessForTesting() {
+        didInstallConfigDirsThisProcess = false
+    }
+
     /// Test seam only: forget the coalescing claim, or a test that applies the
     /// same list a second time silently measures the skip path.
     @MainActor
@@ -475,7 +508,18 @@ enum ClaudeExtraRoots {
                 // the registry that is now installed rather than the one it
                 // replaced — same reason the scan side records before its own
                 // invalidation, below.
-                guard recordAppliedConfigDirsAndReportChange(configDirsJSON) else { return }
+                let recordedChange = recordAppliedConfigDirsAndReportChange(configDirsJSON)
+                // The persisted comparison alone is not enough: it reports no
+                // change whenever THIS process's list happens to match what a
+                // PREVIOUS process installed, even on this process's first
+                // install into a Rust registry that starts empty regardless.
+                // `TrayAnimator`'s launch-time poll races that first install
+                // directly, so the first non-empty install of a process must
+                // wake pollers even when the persisted marker already agrees.
+                let firstNonEmptyInstall = !didInstallConfigDirsThisProcess
+                    && configDirsJSON != Self.emptyConfigDirsJSON
+                didInstallConfigDirsThisProcess = true
+                guard recordedChange || firstNonEmptyInstall else { return }
                 // Same order as below and for the same reason: a poll woken
                 // before the throttle is dropped is answered from the payload
                 // built for the account set that just changed.

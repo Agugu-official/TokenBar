@@ -13997,6 +13997,66 @@ enum SelfTest {
                 + "nothing on the quota side")
         ClaudeExtraRoots.resetAppliedConfigDirsForTesting()
 
+        // M3-o3. The relaunch case `appliedConfigDirsJSON` alone cannot see.
+        //
+        // A user with a persisted extra account quits and reopens the app.
+        // `apply()` reads the SAME account list this new process's persisted
+        // marker already recorded from the PREVIOUS process — so the
+        // persisted comparison reports no change — while the Rust registry in
+        // THIS process starts genuinely empty. `TrayAnimator` starts polling
+        // immediately at launch and can race that first install, reading only
+        // the primary account; without a wake, nothing corrects that reading
+        // for up to five minutes. Set up exactly that: the persisted marker
+        // already agrees with what is about to install, and this process has
+        // installed nothing yet.
+        let m3oRelaunch = ClaudeExtraRoots.configDirsPayloadJSON(["/tmp/tokenbar-m3o-relaunch"])
+        let m3oRelaunchWoke: Bool? = awaitMainActorValue {
+            ClaudeExtraRoots.resetAppliedConfigDirsForTesting()
+            _ = ClaudeExtraRoots.recordAppliedConfigDirsAndReportChange(m3oRelaunch)
+            ClaudeExtraRoots.resetInstalledConfigDirsThisProcessForTesting()
+            let before = ClaudeExtraRoots.RegistryChange.epoch
+            let done = ThrottleGate()
+            ClaudeExtraRoots.installForTesting(
+                json: "{}", configDirsJSON: m3oRelaunch,
+                setConfigDirs: { _ in },
+                setScanPaths: { _ in nil },
+                then: { _ in Task { await done.open() } })
+            await done.wait()
+            ClaudeExtraRoots.resetApplyClaimForTesting()
+            return ClaudeExtraRoots.RegistryChange.epoch != before
+        }
+        expect(
+            m3oRelaunchWoke == true,
+            "M3-o3 the first install of a process wakes pollers even when the "
+                + "persisted marker already matches, because the Rust registry "
+                + "does not persist across a relaunch the way the marker does")
+
+        // M3-o4. The same first-install case, but with nothing configured.
+        // Waking pollers for an empty registry that stays empty corrects
+        // nothing and reintroduces exactly the cost this fix removes, so the
+        // "first install" exemption applies only to a non-empty list.
+        let m3oEmptyRelaunchWoke: Bool? = awaitMainActorValue {
+            ClaudeExtraRoots.resetAppliedConfigDirsForTesting()
+            ClaudeExtraRoots.resetInstalledConfigDirsThisProcessForTesting()
+            let before = ClaudeExtraRoots.RegistryChange.epoch
+            let done = ThrottleGate()
+            ClaudeExtraRoots.installForTesting(
+                json: "{}", configDirsJSON: ClaudeExtraRoots.configDirsPayloadJSON([]),
+                setConfigDirs: { _ in },
+                setScanPaths: { _ in nil },
+                then: { _ in Task { await done.open() } })
+            await done.wait()
+            ClaudeExtraRoots.resetApplyClaimForTesting()
+            let woke = ClaudeExtraRoots.RegistryChange.epoch != before
+            ClaudeExtraRoots.resetInstalledConfigDirsThisProcessForTesting()
+            return woke
+        }
+        expect(
+            m3oEmptyRelaunchWoke == false,
+            "M3-o4 a first install with no accounts configured does not wake "
+                + "pollers — there is nothing for the extra wake to correct")
+        ClaudeExtraRoots.resetAppliedConfigDirsForTesting()
+
         // M3-p. A payload fetched under the previous registry must not be
         // applied, only dropped.
         //
