@@ -7,6 +7,29 @@ import Foundation
 /// be one: the same subscription measured 21x apart between its session window
 /// and its weekly window on the same day.
 public enum WindowEquivalence {
+    /// The token count a quota ratio may divide, for ONE message.
+    ///
+    /// A function rather than a convention, because this ratio is computed in
+    /// two places — `row` for the live window and `QuotaHistoryFold.spanTotals`
+    /// for the pooled history — and they are rendered one above the other in
+    /// `QuotaView`. When the basis was a convention rather than a name, the two
+    /// disagreed: fixing the pooled path alone left the card on top showing the
+    /// old inflated price beside the corrected history directly below it.
+    ///
+    /// The FULL count, cache reads included, because the cost it is divided
+    /// into is `message.cost` — the message's whole priced cost — and that
+    /// cannot be narrowed to match a smaller count: `WindowMessage` carries one
+    /// cost, not one per token class. Excluding cache reads therefore priced
+    /// one set of tokens and counted another, and on a Claude Code workload the
+    /// excluded share is most of the volume (issue #237).
+    ///
+    /// Deliberately NOT the bars' basis. `WindowCardGeometry` sizes bars from
+    /// `tokensExCacheRead` because including cache reads decouples them from
+    /// the quota line. Different question, different basis — but each stated
+    /// where it is used, so a third caller has something to call rather than a
+    /// precedent to copy.
+    public static func ratioTokens(_ message: WindowMessage) -> Int64 { message.tokens }
+
     /// The provider reports whole percents, so a measured Δ carries ±0.5.
     static let quantisationHalfStep = 0.5
     /// How much relative error the displayed ratio may carry.
@@ -156,7 +179,7 @@ public enum WindowEquivalence {
         let inSpan = messages.filter {
             $0.timestamp > first.atMs && $0.timestamp <= last.atMs
         }
-        let tokens = inSpan.reduce(Int64(0)) { $0.saturatingAdding($1.tokensExCacheRead) }
+        let tokens = inSpan.reduce(Int64(0)) { $0.saturatingAdding(ratioTokens($1)) }
         let cost = inSpan.reduce(0.0) { $0 + $1.cost }
         let error = Int((quantisationHalfStep / delta * 100).rounded())
 

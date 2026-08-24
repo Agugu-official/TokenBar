@@ -344,7 +344,7 @@ struct QuotaHistoryCard: View {
                     cycles: counted.map {
                         WindowEquivalence.Cycle(
                             deltaPercent: $0.cycle.usedPercent,
-                            spanTokens: $0.spanTokensExCacheRead, spanCost: $0.spanCost,
+                            spanTokens: $0.spanTokens, spanCost: $0.spanCost,
                             observedFraction: $0.cycle.observedFraction)
                     }),
                 tokens: Format.compactTokens, money: Format.usdOrBelowCent))

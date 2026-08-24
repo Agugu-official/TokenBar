@@ -92,17 +92,37 @@ public struct QuotaHistoryRow: Equatable, Sendable, Identifiable {
     public let cycle: QuotaCycle
     /// Attributed to THIS subscription — the number the quota bar is about.
     public let mineTokens: Int64
-    /// The same total with cache reads removed, which is what the quota
-    /// equivalence divides by. `WindowEquivalence.row` already excludes them;
-    /// carrying it here keeps the aggregate over many cycles on the same basis
-    /// as the single-window figure rather than quietly using a fuller total.
+    /// The same total on the BARS' basis — cache reads removed.
+    ///
+    /// Not the equivalence's basis. `spanTokens` below is the full count, for
+    /// the reason given there; this one matches `WindowCardGeometry`, which
+    /// sizes the bars from everything except cache reads because including
+    /// them decouples the bars from the quota line (measured: 4.5x vs 1.2x
+    /// discrimination). A figure printed beside the bars should be countable
+    /// in them.
     public let mineTokensExCacheRead: Int64
     public let mineCost: Double
     /// The same two quantities restricted to the cycle's OBSERVED span, which
     /// is the only interval the quota delta describes. The whole-window figures
     /// above are what the row displays — "this window cost me X" is a question
     /// about the window — while these are the only ones a ratio may divide.
-    public let spanTokensExCacheRead: Int64
+    ///
+    /// The FULL token count, cache reads included, and that is the load-bearing
+    /// part. These two feed `WindowEquivalence`, which prints them on one line
+    /// as "10% of quota ~ X tokens · $Y API-equivalent" — two descriptions of
+    /// the same work, which a reader divides. `spanCost` is `message.cost`, the
+    /// message's whole priced cost, and a message's cost cannot be decomposed
+    /// here: `WindowMessage` carries one `cost`, not one per token class. So a
+    /// count excluding cache reads beside a cost including them is the one
+    /// pairing that cannot be made consistent, and it inflated the implied
+    /// per-token price by the cache-read share — most of a Claude Code
+    /// workload, which this repo's own bar comment puts at 200x the volume at
+    /// a tenth the price.
+    ///
+    /// Full-and-full is therefore not a preference between two workable
+    /// options; it is the only achievable pairing until per-class cost crosses
+    /// the FFI. See issue #237.
+    public let spanTokens: Int64
     public let spanCost: Double
     /// Everything else recorded in the same interval, summed. Not noise: it is
     /// the answer to "the window barely moved, so where did the work go".
@@ -361,7 +381,7 @@ public enum QuotaHistoryFold {
                 cycle: cycle,
                 mineTokens: mine.tokens, mineTokensExCacheRead: mine.exCacheRead,
                 mineCost: mine.cost,
-                spanTokensExCacheRead: span.exCacheRead, spanCost: span.cost,
+                spanTokens: span.tokens, spanCost: span.cost,
                 otherTokens: other.tokens, otherCost: other.cost,
                 otherHasAssigned: other.hasAssigned,
                 otherHasExcluded: other.hasExcluded,
@@ -418,7 +438,7 @@ public enum QuotaHistoryFold {
         cycles: [QuotaCycle], messages: [WindowMessage], subscription: String,
         modelScope: String?,
         confirmed: [UsageAttribution.Record]
-    ) -> [(exCacheRead: Int64, cost: Double)] {
+    ) -> [(tokens: Int64, cost: Double)] {
         let sorted = inScope(messages, modelScope).sorted { $0.timestamp < $1.timestamp }
         return spanTotals(
             cycles: cycles, sorted: sorted, stamps: sorted.map(\.timestamp),
@@ -435,7 +455,7 @@ public enum QuotaHistoryFold {
     private static func spanTotals(
         cycles: [QuotaCycle], sorted: [WindowMessage], stamps: [Int64],
         subscription: String, confirmed: [UsageAttribution.Record]
-    ) -> [(exCacheRead: Int64, cost: Double)] {
+    ) -> [(tokens: Int64, cost: Double)] {
         cycles.map { cycle in
             // Bounded by the SPAN, not by `[start, reset)`. The span is what
             // the denominator measures, and it is not always inside the cycle:
@@ -445,7 +465,7 @@ public enum QuotaHistoryFold {
             // overflowing on a corrupt timestamp.
             let lo = lowerBound(stamps, cycle.firstSampleMs)
             let hi = lowerBound(stamps, cycle.lastSampleMs.saturatingAdding(1))
-            var span = (exCacheRead: Int64(0), cost: 0.0)
+            var span = (tokens: Int64(0), cost: 0.0)
             for message in sorted[lo..<max(lo, hi)]
             where message.timestamp > cycle.firstSampleMs
                 && message.timestamp <= cycle.lastSampleMs
@@ -454,8 +474,13 @@ public enum QuotaHistoryFold {
                     client: message.client, provider: message.providerId,
                     model: message.modelId, records: confirmed), target == subscription
                 else { continue }
-                span.exCacheRead = span.exCacheRead.saturatingAdding(
-                    message.tokensExCacheRead)
+                // Through `WindowEquivalence.ratioTokens`, which is where the
+                // basis is stated. The live-window path in `row` computes the
+                // same ratio and reads the same function, so the two surfaces
+                // cannot drift apart the way they did when each summed for
+                // itself.
+                span.tokens = span.tokens.saturatingAdding(
+                    WindowEquivalence.ratioTokens(message))
                 span.cost += message.cost
             }
             return span
