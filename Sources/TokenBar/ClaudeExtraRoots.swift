@@ -157,9 +157,28 @@ enum ClaudeExtraRoots {
     /// Record what the setter actually installed. A failed call leaves the
     /// registry holding whatever it held, so the stored value must not move.
     static func recordApplied(_ requestedJSON: String, result: ExtraScanPathsResult?) {
-        guard let result else { return }
-        UserDefaults.standard.set(
-            registeredJSON(requestedJSON, rejected: result.rejected), forKey: appliedKey)
+        _ = recordAppliedAndReportChange(requestedJSON, result: result)
+    }
+
+    /// Record, and report whether the installed registry actually MOVED.
+    ///
+    /// The distinction is the whole cost question. `apply` runs at launch and
+    /// on every Settings save, not only when the list changes, so "an apply
+    /// ran" has never implied "something changed" — yet the cache drop and the
+    /// generation bump were both unconditional. Every launch therefore dropped
+    /// every scan-derived cache and advanced the number the views key their
+    /// reloads on, and a popover already open when that landed paid a forced,
+    /// cache-bypassing rescan for a registry identical to the one already
+    /// installed.
+    @discardableResult
+    static func recordAppliedAndReportChange(
+        _ requestedJSON: String, result: ExtraScanPathsResult?
+    ) -> Bool {
+        guard let result else { return false }
+        let json = registeredJSON(requestedJSON, rejected: result.rejected)
+        guard json != appliedPayloadJSON else { return false }
+        UserDefaults.standard.set(json, forKey: appliedKey)
+        return true
     }
 
     /// `requestedJSON` minus the paths the setter refused, in the same shape.
@@ -187,6 +206,83 @@ enum ClaudeExtraRoots {
     static func resetAppliedForTesting() {
         appliedProvider = { UserDefaults.standard.string(forKey: appliedKey) ?? payloadJSON([]) }
         UserDefaults.standard.removeObject(forKey: appliedKey)
+    }
+
+    /// The account registry's own applied marker — the same idea as
+    /// `appliedKey` above, for the OTHER registry `install` writes.
+    ///
+    /// It has to be a separate persisted value, not a reuse of `appliedKey` or
+    /// of `lastApplied` below. `appliedKey` answers a question about scan
+    /// roots; this one answers "which accounts is the quota side fetching",
+    /// and the two payloads are built from the same configured list but are
+    /// not the same string — a directory the scanner refuses is still absent
+    /// from `appliedPayloadJSON` while it is present here. And `lastApplied`
+    /// is in-memory and resets to nil every launch, which is exactly the case
+    /// that needed catching: at launch there is no PREVIOUS apply for
+    /// `lastApplied` to differ from, so a comparison against it always reports
+    /// a change, on every process start, whether or not the account list
+    /// actually differs from what a previous process already installed.
+    static let appliedConfigDirsKey = "tokenbar.claude.extraRootsAppliedConfigDirs"
+
+    /// Overridable for the same reason `appliedProvider` is.
+    nonisolated(unsafe) static var appliedConfigDirsProvider: @Sendable () -> String = {
+        UserDefaults.standard.string(forKey: appliedConfigDirsKey) ?? configDirsPayloadJSON([])
+    }
+
+    static var appliedConfigDirsJSON: String { appliedConfigDirsProvider() }
+
+    /// Record, and report whether the account registry actually moved.
+    ///
+    /// No `result` parameter, unlike the scan side's twin: `setClaudeConfigDirs`
+    /// returns nothing for `install` to check, so there is no partial-failure
+    /// case to gate persistence on — the list is either installed or it is not
+    /// attempted, and `install` always attempts it.
+    @discardableResult
+    static func recordAppliedConfigDirsAndReportChange(_ configDirsJSON: String) -> Bool {
+        guard configDirsJSON != appliedConfigDirsJSON else { return false }
+        UserDefaults.standard.set(configDirsJSON, forKey: appliedConfigDirsKey)
+        return true
+    }
+
+    /// Test seam only: back to the pre-apply state.
+    static func resetAppliedConfigDirsForTesting() {
+        appliedConfigDirsProvider = {
+            UserDefaults.standard.string(forKey: appliedConfigDirsKey) ?? configDirsPayloadJSON([])
+        }
+        UserDefaults.standard.removeObject(forKey: appliedConfigDirsKey)
+    }
+
+    /// Whether THIS PROCESS has installed the account registry at least once.
+    ///
+    /// `appliedConfigDirsJSON` answers "does this list differ from what a
+    /// PREVIOUS install recorded", which is the wrong question on a process's
+    /// first install: the Rust account registry is process-memory state and
+    /// starts empty regardless of what an earlier process persisted, so a
+    /// relaunch with an unchanged account list installs into an EMPTY
+    /// registry while the persisted marker already says "unchanged" — the
+    /// comparison reports no move for a transition that is, in this process,
+    /// real.
+    ///
+    /// The consequence was not a cosmetic staleness. `TrayAnimator` starts its
+    /// quota poll immediately at launch, before `apply`'s install has
+    /// necessarily finished, and its FIRST fetch can race the setter and read
+    /// only the primary account. That result is applied because nothing had
+    /// signalled `RegistryChange` to move the epoch it checks against — and
+    /// the loop's own recovery is `RegistryChange.sleep(upTo: 300, ...)`,
+    /// which needs exactly the signal this flag exists to guarantee. Without
+    /// it, a missing account could stay missing from the tray gauge for the
+    /// full five minutes even though the registry had held it since launch.
+    @MainActor private static var didInstallConfigDirsThisProcess = false
+
+    /// The canonical empty-account-list payload, compared against directly
+    /// rather than checking the source list for emptiness — the check has to
+    /// run on the same encoded string `install` already holds.
+    private static let emptyConfigDirsJSON = configDirsPayloadJSON([])
+
+    /// Test seam only: forget that this process has installed anything.
+    @MainActor
+    static func resetInstalledConfigDirsThisProcessForTesting() {
+        didInstallConfigDirsThisProcess = false
     }
 
     /// Test seam only: forget the coalescing claim, or a test that applies the
@@ -398,6 +494,32 @@ enum ClaudeExtraRoots {
             // installed yet, which is the reason it was placed after the setter
             // in the first place.
             Task { @MainActor in
+                // Gated the same way the scan side is, and for the same
+                // reason: `install` runs at launch and on every Settings save,
+                // not only when the account list changes, so an unconditional
+                // wake here paid the same repeated cost `recordAppliedAndReportChange`
+                // exists to remove — just on the other registry. `lastApplied`
+                // above cannot catch the launch case, because it starts nil
+                // every process and a comparison against nil always reports a
+                // change; `appliedConfigDirsJSON` is persisted across launches,
+                // which is what the comparison needs to be meaningful here.
+                //
+                // Recorded before the wake, so anything the wake restarts reads
+                // the registry that is now installed rather than the one it
+                // replaced — same reason the scan side records before its own
+                // invalidation, below.
+                let recordedChange = recordAppliedConfigDirsAndReportChange(configDirsJSON)
+                // The persisted comparison alone is not enough: it reports no
+                // change whenever THIS process's list happens to match what a
+                // PREVIOUS process installed, even on this process's first
+                // install into a Rust registry that starts empty regardless.
+                // `TrayAnimator`'s launch-time poll races that first install
+                // directly, so the first non-empty install of a process must
+                // wake pollers even when the persisted marker already agrees.
+                let firstNonEmptyInstall = !didInstallConfigDirsThisProcess
+                    && configDirsJSON != Self.emptyConfigDirsJSON
+                didInstallConfigDirsThisProcess = true
+                guard recordedChange || firstNonEmptyInstall else { return }
                 // Same order as below and for the same reason: a poll woken
                 // before the throttle is dropped is answered from the payload
                 // built for the account set that just changed.
@@ -409,7 +531,24 @@ enum ClaudeExtraRoots {
                 // Before the invalidation and the generation bump, so anything
                 // they restart reads the registry that is now installed rather
                 // than the one it replaced.
-                recordApplied(json, result: result)
+                let moved = recordAppliedAndReportChange(json, result: result)
+                // Both of these exist to undo work done under the OLD roots,
+                // so both are gated on the roots having actually moved.
+                //
+                // They were unconditional, and the launch-time `apply()` is
+                // unconditional too, so every launch dropped every scan-derived
+                // cache and advanced the generation the views key their reloads
+                // on. A popover already open when that landed took a forced,
+                // cache-bypassing rescan on top of its initial load — the
+                // registry being identical to the one already installed.
+                //
+                // `apply` is called on a schedule and on every Settings save,
+                // not only when the list changes, so "it ran" has never implied
+                // "something changed". Only the comparison does.
+                guard moved else {
+                    completion?(result)
+                    return
+                }
                 // The engine dropped its own caches inside the setter. These
                 // are the Swift ones, which answer without asking it — see
                 // `invalidateScanDerivedCaches`. Unconditional on `completion`,
