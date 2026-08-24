@@ -474,11 +474,13 @@ public enum QuotaHistoryFold {
                     client: message.client, provider: message.providerId,
                     model: message.modelId, records: confirmed), target == subscription
                 else { continue }
-                // The FULL count, matching `message.cost` beside it. See
-                // `spanTokens`: the cost cannot be narrowed to exclude cache
-                // reads, so the count must not be either, or the ratio the two
-                // form is priced over one set and counted over another.
-                span.tokens = span.tokens.saturatingAdding(message.tokens)
+                // Through `WindowEquivalence.ratioTokens`, which is where the
+                // basis is stated. The live-window path in `row` computes the
+                // same ratio and reads the same function, so the two surfaces
+                // cannot drift apart the way they did when each summed for
+                // itself.
+                span.tokens = span.tokens.saturatingAdding(
+                    WindowEquivalence.ratioTokens(message))
                 span.cost += message.cost
             }
             return span

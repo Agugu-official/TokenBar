@@ -11223,6 +11223,14 @@ enum SelfTest {
 
         // Same tokens, two different deltas: a hardcoded coefficient would
         // return the same ratio for both.
+        //
+        // The expected counts below are 5,060,000 — input PLUS cache read. They
+        // used to be 60,000, and that number was not a decision: this fixture
+        // exists to prove the ratio scales with delta, and its author wrote
+        // down whatever the code returned for a message that happened to carry
+        // 5M cache reads. It therefore pinned a basis nobody had chosen, and
+        // pinned the wrong one (issue #237). An expectation copied from current
+        // behaviour asserts that the code does what it does.
         let eqMessages = [windowMessage(at: 1_500, input: 60_000, cacheRead: 5_000_000,
                                         cost: 30)]
         let wide = WindowEquivalence.row(
@@ -11234,10 +11242,10 @@ enum SelfTest {
                       QuotaSample(atMs: 2_000, usedPercent: 20)],
             messages: eqMessages)
         expect(
-            wide == .ratio(tokensPerTenth: 60_000, costPerTenth: 30, errorPercent: 5),
+            wide == .ratio(tokensPerTenth: 5_060_000, costPerTenth: 30, errorPercent: 5),
             "V15 the ratio is the measured quotient, not a coefficient")
         expect(
-            narrower == .ratio(tokensPerTenth: 30_000, costPerTenth: 15, errorPercent: 3),
+            narrower == .ratio(tokensPerTenth: 2_530_000, costPerTenth: 15, errorPercent: 3),
             "V15 doubling the quota delta halves the ratio")
         expect(
             WindowEquivalence.row(
@@ -12433,8 +12441,11 @@ enum SelfTest {
         // most of the volume, which is how "10% of quota ~ 4.8M · $172" reached
         // $36 per million (issue #237).
         //
-        // Every other fixture in this file sets `cacheRead: 0`, so none of them
-        // could tell the two bases apart — which is why the defect survived.
+        // Only V15 above carried a non-zero cache read before this, and it
+        // asserted the OLD basis — an expectation copied from behaviour rather
+        // than chosen, which is how a defect gets pinned by its own suite. The
+        // rest of this file sets `cacheRead: 0` and could not tell the two
+        // bases apart at all.
         let qhCacheMessages = try! JSONDecoder().decode(
             [WindowMessage].self,
             from: Data("""
@@ -12462,6 +12473,40 @@ enum SelfTest {
                    && qhCacheRows.first?.mineTokens == 1000,
                "QH-CACHE the bars' basis still excludes cache reads while the total "
                    + "includes them, so the two questions keep their two answers")
+
+        // QH-CACHE-LIVE. The SECOND path that computes this ratio, and the one
+        // the first fix missed. `WindowUsageCard.equivalenceRow` calls
+        // `WindowEquivalence.row` directly instead of going through the fold,
+        // and `QuotaView` renders that card immediately above the history —
+        // so a basis fixed in one place and not the other put the inflated
+        // price and the corrected price on screen together.
+        //
+        // Both now read `WindowEquivalence.ratioTokens`, and this asserts the
+        // live path specifically rather than trusting that they share a helper.
+        let qhLiveSamples = [
+            QuotaSample(atMs: 1_000_000, usedPercent: 10),
+            QuotaSample(atMs: 2_000_000, usedPercent: 20),
+        ]
+        let qhLiveMessages = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":1500000,"client":"c","providerId":"p",
+              "modelId":"m","input":100,"output":0,"cacheRead":900,"cacheWrite":0,
+              "reasoning":0,"cost":2.0,"isTurnStart":true}]
+            """.utf8))
+        // delta = 10 points, so per-tenth = tokens / 10 * 10 = the raw total.
+        if case let .ratio(tokensPerTenth, costPerTenth, _) =
+            WindowEquivalence.row(samples: qhLiveSamples, messages: qhLiveMessages)
+        {
+            expect(tokensPerTenth == 1000,
+                   "QH-CACHE-LIVE the live window's denominator counts cache reads too, "
+                       + "so the card above the history no longer contradicts it")
+            expect(costPerTenth == 2.0,
+                   "QH-CACHE-LIVE and its numerator is the whole message cost, "
+                       + "unchanged — the same pairing as the pooled path")
+        } else {
+            expect(false, "QH-CACHE-LIVE the live fixture produces a ratio row")
+        }
 
         // QH-B. Exhaustion is an absolute reading, not the observed span. A
         // cycle first seen at 40% and last at 100% consumed 60 points as far as
