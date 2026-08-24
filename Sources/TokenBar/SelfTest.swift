@@ -12221,7 +12221,7 @@ enum SelfTest {
             cycles: qhsCycles, messages: qhsMessages, subscription: "c",
             modelScope: nil,
             confirmed: qhsRecords)
-        expect(qhsSpans.first?.exCacheRead == 100 && qhsSpans.first.map { abs($0.cost - 0.25) < 1e-9 } == true,
+        expect(qhsSpans.first?.tokens == 100 && qhsSpans.first.map { abs($0.cost - 0.25) < 1e-9 } == true,
                "QH-SHRINK usage taken before the recomputed start still counts toward the "
                 + "span its own readings bracket")
 
@@ -12369,8 +12369,8 @@ enum SelfTest {
         let qhsScopedSpans = QuotaHistoryFold.spans(
             cycles: qhsCycles, messages: qhsScopeMessages, subscription: "c",
             modelScope: "fable", confirmed: qhsDeclared)
-        expect(qhsUnscopedSpans.first?.exCacheRead == 1000
-                   && qhsScopedSpans.first?.exCacheRead == 700,
+        expect(qhsUnscopedSpans.first?.tokens == 1000
+                   && qhsScopedSpans.first?.tokens == 700,
                "QH-SCOPE and the equivalence denominator narrows with it — counting "
                    + "a model the allowance does not charge understates what the "
                    + "quota costs")
@@ -12419,9 +12419,49 @@ enum SelfTest {
                "FMT-TOKENS an unmeasured count is a dash, a real zero is a zero, "
                    + "and a measured count is itself")
 
-        expect(qhspRows.first?.spanTokensExCacheRead == 100,
+        expect(qhspRows.first?.spanTokens == 100,
                "QH-SPAN the span counts only what the two readings bracket — the later "
                 + "message sits after the last sample, so no observed movement measures it")
+
+        // QH-CACHE. The span is the equivalence's DENOMINATOR and `spanCost` is
+        // its numerator, and the numerator is `message.cost` — the message's
+        // whole priced cost, cache reads included, which cannot be decomposed
+        // here because `WindowMessage` carries one cost and not one per token
+        // class. A denominator that excluded cache reads therefore priced one
+        // set of tokens and counted another, inflating the implied per-token
+        // rate by the cache-read share. On a Claude Code workload that share is
+        // most of the volume, which is how "10% of quota ~ 4.8M · $172" reached
+        // $36 per million (issue #237).
+        //
+        // Every other fixture in this file sets `cacheRead: 0`, so none of them
+        // could tell the two bases apart — which is why the defect survived.
+        let qhCacheMessages = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":\((qhsReset - 500_000) * 1000),"client":"c","providerId":"p",
+              "modelId":"m","input":100,"output":0,"cacheRead":900,"cacheWrite":0,
+              "reasoning":0,"cost":0.25,"isTurnStart":true}]
+            """.utf8))
+        let qhCacheSpans = QuotaHistoryFold.spans(
+            cycles: qhsCycles, messages: qhCacheMessages, subscription: "c",
+            modelScope: nil, confirmed: qhsRecords)
+        expect(qhCacheSpans.first?.tokens == 1000,
+               "QH-CACHE the equivalence denominator counts cache reads, because the "
+                   + "cost beside it does and the two are printed as one ratio")
+        expect(qhCacheSpans.first?.cost == 0.25,
+               "QH-CACHE and the cost is the message's whole cost, unchanged — the "
+                   + "fix moves the denominator to meet it, not the other way round")
+        // The bars keep the OTHER basis, deliberately, and this is the pair that
+        // says so: same message, two figures, cache reads in one and not the
+        // other. Folding them onto one basis would either decouple the bars from
+        // the quota line or break the ratio again.
+        let qhCacheRows = QuotaHistoryFold.rows(
+            cycles: qhsCycles, messages: qhCacheMessages, subscription: "c",
+            modelScope: nil, confirmed: qhsRecords)
+        expect(qhCacheRows.first?.mineTokensExCacheRead == 100
+                   && qhCacheRows.first?.mineTokens == 1000,
+               "QH-CACHE the bars' basis still excludes cache reads while the total "
+                   + "includes them, so the two questions keep their two answers")
 
         // QH-B. Exhaustion is an absolute reading, not the observed span. A
         // cycle first seen at 40% and last at 100% consumed 60 points as far as
