@@ -64,7 +64,9 @@ The conversion is lazy: it happens on the next write the app had its own reason 
 
 - **Launching no longer throws away caches that were still valid.** [#233](https://github.com/Nanako0129/TokenBar/pull/233)
 
-  The scan-root list is pushed to the engine at every launch and on every settings save, not only when the list has changed — and doing so dropped every cached scan result and advanced the marker that forces a reload, unconditionally. So an ordinary launch paid to rebuild what it already had, and a popover open at the wrong moment additionally took a full forced rescan for a root set identical to the one already installed. Both now happen only when the installed roots actually differ.
+  Your Claude directories are registered with the engine at every launch and on every settings save, not only when something has changed — and doing so dropped every cached scan result, advanced the marker that forces a reload, and re-fetched every quota, unconditionally. So an ordinary launch paid to rebuild what it already had, and spent provider requests doing it; a popover open at the wrong moment additionally took a full forced rescan for a directory set identical to the one already registered.
+
+  All of that is now gated on the registered set actually differing. One exception is deliberate: the FIRST registration after a launch still refreshes the quota cards even when your list is unchanged, because the engine starts each run with nothing registered — so that first registration is a real change from its point of view, and skipping it could leave the menu bar showing a reading taken before your extra account was known.
 
 - **Two Claude accounts no longer interfere with each other's backoff or profile cache.** [#235](https://github.com/Nanako0129/TokenBar/pull/235)
 
