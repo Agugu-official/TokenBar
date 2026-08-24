@@ -3418,7 +3418,7 @@ async fn harvest_shell_env_token_uncached() -> Option<String> {
 /// Resolve the user's login shell for the harvest. `$SHELL` is usually unset for
 /// a launchd-spawned GUI app, so fall back to Directory Services.
 #[cfg(target_os = "macos")]
-fn detect_login_shell() -> String {
+pub(crate) fn detect_login_shell() -> String {
     if let Ok(shell) = std::env::var("SHELL") {
         let shell = shell.trim();
         if !shell.is_empty() {

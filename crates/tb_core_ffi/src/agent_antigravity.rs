@@ -33,11 +33,12 @@ use serde::Deserialize;
 use serde_json::{json, value::RawValue, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 
 const LANG_SERVICE: &str = "/exa.language_server_pb.LanguageServerService/GetUserStatus";
 const CODE_ASSIST_BASE: &str = "https://cloudcode-pa.googleapis.com/v1internal";
@@ -130,18 +131,46 @@ pub(crate) async fn fetch(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFa
     .await;
     match primary {
         Ok(fetched) => Ok(fetched),
-        Err(primary_failure) => match fetch_agy_cli(now).await {
-            Ok(fetched) => Ok(fetched),
-            Err(_) => Err(primary_failure),
-        },
+        Err(primary_failure) if should_try_agy_fallback(&primary_failure) => {
+            match fetch_agy_cli(now).await {
+                Ok(fetched) => Ok(fetched),
+                Err(_) => Err(primary_failure),
+            }
+        }
+        Err(primary_failure) => Err(primary_failure),
     }
 }
 
+fn should_try_agy_fallback(failure: &ProviderFetchFailure) -> bool {
+    matches!(failure, ProviderFetchFailure::Terminal { .. })
+}
+
+#[cfg(target_os = "macos")]
 async fn fetch_agy_cli(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFailure> {
-    let executable = agy_cli_artifact_candidates()
-        .into_iter()
-        .next()
-        .ok_or_else(|| ProviderFetchFailure::terminal("Antigravity CLI was not found."))?;
+    let candidates = agy_cli_artifact_candidates().await;
+    let mut last_failure = None;
+    for executable in candidates {
+        match fetch_agy_cli_from(&executable, now).await {
+            Ok(fetched) => return Ok(fetched),
+            Err(failure) => last_failure = Some(failure),
+        }
+    }
+    Err(last_failure
+        .unwrap_or_else(|| ProviderFetchFailure::terminal("Antigravity CLI was not found.")))
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn fetch_agy_cli(_now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFailure> {
+    Err(ProviderFetchFailure::terminal(
+        "Antigravity CLI fallback is only supported on macOS.",
+    ))
+}
+
+#[cfg(target_os = "macos")]
+async fn fetch_agy_cli_from(
+    executable: &Path,
+    now: DateTime<Utc>,
+) -> Result<Fetched, ProviderFetchFailure> {
     let future = tokio::process::Command::new(executable)
         .args([
             "--print",
@@ -671,14 +700,14 @@ fn parse_agy_usage(body: &[u8], now: DateTime<Utc>) -> Result<Fetched, String> {
         .ok_or_else(|| "agy usage response missing data".to_string())?;
 
     let mut windows = Vec::new();
-    for (group_index, group) in data.groups.into_iter().enumerate() {
+    for group in data.groups {
         let group_name = group
             .name
             .as_deref()
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .unwrap_or("Antigravity");
-        for (bucket_index, bucket) in group.buckets.into_iter().enumerate() {
+        for bucket in group.buckets {
             let Some(id) = bucket
                 .id
                 .as_deref()
@@ -698,7 +727,7 @@ fn parse_agy_usage(body: &[u8], now: DateTime<Utc>) -> Result<Fetched, String> {
                 .filter(|name| !name.is_empty())
                 .map(|name| format!("{group_name} · {name}"))
                 .unwrap_or_else(|| format!("{group_name} · Limit"));
-            let card_id = format!("agy.{group_index}.{bucket_index}.{id}.v1");
+            let card_id = format!("agy.{id}.v1");
             if let Some(window) =
                 quota_window(label, fraction, reset, now, card_id.clone(), Some(card_id))
             {
@@ -1101,7 +1130,7 @@ async fn request_access_token(
     refresh_token: String,
     attempt_binding: ProviderCacheBinding,
 ) -> Result<Value, ProviderFetchFailure> {
-    let client = resolve_oauth_client().ok_or_else(|| {
+    let client = resolve_oauth_client().await.ok_or_else(|| {
         ProviderFetchFailure::terminal(
             "Antigravity OAuth client was not found. Install Antigravity.app or configure its OAuth client.",
         )
@@ -1717,7 +1746,7 @@ fn binding_candidate_is_better(
 
 // ── OAuth client discovery (scan Antigravity.app and the agy CLI) ─────────────
 
-fn resolve_oauth_client() -> Option<(String, String)> {
+async fn resolve_oauth_client() -> Option<(String, String)> {
     if let (Ok(id), Ok(secret)) = (
         std::env::var("ANTIGRAVITY_OAUTH_CLIENT_ID"),
         std::env::var("ANTIGRAVITY_OAUTH_CLIENT_SECRET"),
@@ -1727,15 +1756,21 @@ fn resolve_oauth_client() -> Option<(String, String)> {
             return Some((id, secret));
         }
     }
-    static CACHE: OnceLock<Option<(String, String)>> = OnceLock::new();
-    CACHE.get_or_init(discover_client_from_app).clone()
+    static CACHE: tokio::sync::OnceCell<Option<(String, String)>> =
+        tokio::sync::OnceCell::const_new();
+    CACHE
+        .get_or_init(|| async { discover_client_from_app().await })
+        .await
+        .clone()
 }
 
-fn discover_client_from_app() -> Option<(String, String)> {
+async fn discover_client_from_app() -> Option<(String, String)> {
     // The IDE is the canonical installation. Only consult `agy` when its
     // artifacts do not provide a usable client, so the CLI remains optional.
-    discover_client_from_artifacts(client_artifact_candidates())
-        .or_else(|| discover_client_from_artifacts(agy_cli_artifact_candidates()))
+    if let Some(client) = discover_client_from_artifacts(client_artifact_candidates()) {
+        return Some(client);
+    }
+    discover_client_from_artifacts(agy_cli_artifact_candidates().await)
 }
 
 fn discover_client_from_artifacts<I>(paths: I) -> Option<(String, String)>
@@ -1774,9 +1809,25 @@ fn client_artifact_candidates() -> Vec<PathBuf> {
         .collect()
 }
 
-fn agy_cli_artifact_candidates() -> Vec<PathBuf> {
-    let shell_path = discover_agy_from_login_shell();
-    agy_cli_artifact_candidates_from(std::env::var_os("PATH").as_deref(), shell_path)
+#[cfg(target_os = "macos")]
+async fn agy_cli_artifact_candidates() -> Vec<PathBuf> {
+    static CACHE: tokio::sync::OnceCell<Vec<PathBuf>> = tokio::sync::OnceCell::const_new();
+    CACHE
+        .get_or_init(|| async {
+            // PATH is the normal resolution rule. Only start a login shell
+            // when the GUI process did not inherit a usable PATH entry.
+            if let Some(path) = executable_from_path(std::env::var_os("PATH").as_deref(), "agy") {
+                return vec![path];
+            }
+            agy_cli_artifact_candidates_from(None, discover_agy_from_login_shell().await)
+        })
+        .await
+        .clone()
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn agy_cli_artifact_candidates() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 fn agy_cli_artifact_candidates_from(
@@ -1787,7 +1838,7 @@ fn agy_cli_artifact_candidates_from(
     if let Some(path) = executable_from_path(path_env, "agy") {
         candidates.push(path);
     }
-    if let Some(path) = shell_path.filter(|path| path.is_file()) {
+    if let Some(path) = shell_path.filter(|path| is_executable(path)) {
         if !candidates.contains(&path) {
             candidates.push(path);
         }
@@ -1799,29 +1850,59 @@ fn executable_from_path(path_env: Option<&OsStr>, name: &str) -> Option<PathBuf>
     let path_env = path_env?;
     std::env::split_paths(path_env)
         .map(|directory| directory.join(name))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable(candidate))
 }
 
-#[cfg(unix)]
-fn discover_agy_from_login_shell() -> Option<PathBuf> {
-    let output = Command::new("/bin/sh")
-        .args(["-lc", "command -v -- agy"])
-        .output()
+#[cfg(target_os = "macos")]
+async fn discover_agy_from_login_shell() -> Option<PathBuf> {
+    let script = "printf '\\0__TB_AGY_S__\\0'; command -v -- agy; printf '\\0__TB_AGY_E__\\0'";
+    let future = tokio::process::Command::new(crate::agent_usage::detect_login_shell())
+        .args(["-l", "-i", "-c", script])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), future)
+        .await
+        .ok()?
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&output.stdout)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let start_marker = "\0__TB_AGY_S__\0";
+    let end_marker = "\0__TB_AGY_E__\0";
+    let start = stdout.find(start_marker)? + start_marker.len();
+    let rest = &stdout[start..];
+    let end = rest.find(end_marker)?;
+    rest[..end]
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(PathBuf::from)
-        .find(|candidate| candidate.is_absolute() && candidate.is_file())
+        .find(|candidate| candidate.is_absolute() && is_executable(candidate))
 }
 
-#[cfg(not(unix))]
-fn discover_agy_from_login_shell() -> Option<PathBuf> {
+#[cfg(not(target_os = "macos"))]
+async fn discover_agy_from_login_shell() -> Option<PathBuf> {
     None
+}
+
+fn is_executable(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 fn is_token_byte(b: u8) -> bool {
@@ -1924,6 +2005,18 @@ fn gemini_home_from(
 mod tests {
     use super::*;
     use crate::agent_account_scope::test_support::TestRefreshScope;
+    use crate::agent_usage::SafeTransportDiagnostic;
+
+    fn mark_executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+        #[cfg(not(unix))]
+        let _ = path;
+    }
 
     #[test]
     fn gemini_home_uses_nonempty_configured_root_unchanged() {
@@ -2118,6 +2211,7 @@ mod tests {
         let client_id = ["884354919052", "-abc.apps.googleusercontent.com"].concat();
         let client_secret = ["GOCSPX-", "abcdefghijklmnopqrstuvwxyz12"].concat();
         std::fs::write(&agy, format!("agy cli\0{client_id}\0{client_secret}\0")).unwrap();
+        mark_executable(&agy);
 
         let path_env = root.path().as_os_str();
         let candidates = agy_cli_artifact_candidates_from(Some(path_env), None);
@@ -2155,32 +2249,46 @@ mod tests {
             "command": {
                 "name": "usage",
                 "data": {
-                    "groups": [{
-                        "name": "Gemini Models",
-                        "buckets": [
-                            {"id": "gemini-weekly", "name": "Weekly Limit Remaining", "remaining_fraction": 0.75, "reset_time": "2026-08-28T06:58:51Z"},
-                            {"id": "gemini-5h", "name": "Five Hour Limit Remaining", "remaining_fraction": 0.5, "reset_time": "2026-08-24T08:51:49Z"},
-                            {"id": "bad", "name": "Invalid", "remaining_fraction": 1.5}
-                        ]
-                    }]
+                    "groups": [
+                        {
+                            "name": "Gemini Models",
+                            "buckets": [
+                                {"id": "gemini-weekly", "name": "Weekly Limit Remaining", "remaining_fraction": 0.8837259411811829, "reset_time": "2026-08-28T06:58:51Z"},
+                                {"id": "gemini-5h", "name": "Five Hour Limit Remaining", "remaining_fraction": 1, "reset_time": "2026-08-24T18:14:23Z"}
+                            ]
+                        },
+                        {
+                            "name": "Claude and GPT models",
+                            "buckets": [
+                                {"id": "3p-weekly", "name": "Weekly Limit Remaining", "remaining_fraction": 1, "reset_time": "2026-08-31T13:14:23Z"},
+                                {"id": "3p-5h", "name": "Five Hour Limit Remaining", "remaining_fraction": 1, "reset_time": "2026-08-24T18:14:23Z"}
+                            ]
+                        }
+                    ]
                 }
             }
         }"#;
 
         let fetched = parse_agy_usage(body, now).unwrap();
         assert_eq!(fetched.source, "agy");
-        assert_eq!(fetched.windows.len(), 2);
+        assert_eq!(fetched.windows.len(), 4);
         assert_eq!(
             fetched.windows[0].label_for_test(),
             "Gemini Models · Weekly Limit Remaining"
         );
-        assert!((fetched.windows[0].remaining_for_test() - 75.0).abs() < f64::EPSILON);
+        assert!((fetched.windows[0].remaining_for_test() - 88.37259411811829).abs() < f64::EPSILON);
         assert_eq!(
             fetched.windows[0].pace_window_key_for_test(),
-            Some("agy.0.0.gemini-weekly.v1")
+            Some("agy.gemini-weekly.v1")
+        );
+        assert_eq!(
+            fetched.windows[2].label_for_test(),
+            "Claude and GPT models · Weekly Limit Remaining"
         );
         let wire = serde_json::to_value(&fetched.windows[1]).unwrap();
-        assert_eq!(wire["cardId"], "agy.0.1.gemini-5h.v1");
+        assert_eq!(wire["cardId"], "agy.gemini-5h.v1");
+        let third_wire = serde_json::to_value(&fetched.windows[2]).unwrap();
+        assert_eq!(third_wire["cardId"], "agy.3p-weekly.v1");
     }
 
     #[test]
@@ -2195,11 +2303,50 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let agy = root.path().join("agy");
         std::fs::write(&agy, b"agy cli").unwrap();
+        mark_executable(&agy);
 
         assert_eq!(
             agy_cli_artifact_candidates_from(None, Some(agy.clone())),
             vec![agy]
         );
+    }
+
+    #[test]
+    fn skips_non_executable_path_candidate_before_shell_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let path_dir = root.path().join("path");
+        std::fs::create_dir_all(&path_dir).unwrap();
+        let path_candidate = path_dir.join("agy");
+        let shell_candidate = root.path().join("shell-agy");
+        std::fs::write(&path_candidate, b"not executable").unwrap();
+        std::fs::write(&shell_candidate, b"agy cli").unwrap();
+        mark_executable(&shell_candidate);
+
+        assert_eq!(
+            agy_cli_artifact_candidates_from(
+                Some(path_candidate.parent().unwrap().as_os_str()),
+                Some(shell_candidate.clone()),
+            ),
+            vec![shell_candidate]
+        );
+    }
+
+    #[test]
+    fn agy_fallback_only_runs_for_terminal_failures() {
+        let transient = ProviderFetchFailure::transient(
+            "temporary",
+            None,
+            SafeTransportDiagnostic::from_facts(TransportErrorFacts::synthetic(
+                true,
+                false,
+                TransportPhase::Request,
+                None,
+            )),
+        );
+        assert!(!should_try_agy_fallback(&transient));
+        assert!(should_try_agy_fallback(&ProviderFetchFailure::terminal(
+            "terminal"
+        )));
     }
 
     #[test]
