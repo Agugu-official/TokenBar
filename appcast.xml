@@ -3,6 +3,40 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>1.14.0</title>
+            <pubDate>Mon, 24 Aug 2026 09:14:35 +0000</pubDate>
+            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.14.0</link>
+            <sparkle:version>831</sparkle:version>
+            <sparkle:shortVersionString>1.14.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>Note:</b>
+<ul>
+<li>The dashboard rebuilds once on the first launch after updating. The saved snapshot now records which scan roots produced it, so a snapshot written by the previous version is not restored. Expect one cold start and nothing else.</li>
+<li>Downgrading after this release sets your quota pace history aside. The store that records those readings moves to a new format, and an older TokenBar cannot read it — it moves the file to a quarantine copy beside it and starts over, so the pace cards go back to learning. Nothing is deleted: that copy holds the complete history and the data is recoverable. Usage totals are unaffected either way, because those are read from your logs. The conversion happens on the next write the app had a reason to make, so a file still reading schemaVersion 3 for a while after updating is normal and not a failed migration.</li>
+</ul>
+<b>Features:</b>
+<ul>
+<li>Quota gets its own lens. A window card draws the subscription's quota over time with the local usage that moved it underneath, so a flat stretch of quota can be read against the work that was or was not happening. Alongside it: Window history lists recent reset cycles for the open subscription, each expandable to a per-model breakdown; Past windows on the all-agent view shows a strip of cycle bars per quota window; an estimate says what 10% of the allowance is worth in tokens and dollars; a weekday heatmap shows when the allowance is spent; and a summary card carries the shape of it to Overview. Quota window rows also carry a recent-trend indicator, and Overview cards can be hidden individually apart from the usage chart, which stays as the lens's anchor.</li>
+<li>A model-scoped quota window now counts only its model. Claude reports scoped weekly limits such as "Fable only", and the usage drawn under those windows was the whole subscription's. The bars, the history rows and the cost estimate now all narrow to the model the allowance charges. When nothing local matches that model the card says so, rather than drawing an empty week.</li>
+<li>Claude scan roots can be added in Settings. A second Claude account kept under its own CLAUDE_CONFIG_DIR is invisible to a scan that only reads the default location. Those directories can now be registered, and unreachable ones are kept and retried rather than dropped.</li>
+<li>A second Claude account gets its own quota card and its own history. An account kept under its own CLAUDE_CONFIG_DIR is fetched, identified and recorded separately, so each card carries its own plan label and its own recorded cycles. One limit is deliberate: when an additional account's token expires TokenBar does not refresh it in place, and the card says so and asks you to run claude under that CLAUDE_CONFIG_DIR. Refreshing it in place would write that account's token over your main account's stored credential and log you out of the main account, so it fails closed instead.</li>
+<li>A weekly quota window now records a reading about every hour instead of about every 3.5 hours, and a window sitting at its full allowance records that starting point instead of waiting for the first spend.</li>
+</ul>
+<b>Fixes:</b>
+<ul>
+<li>Opening and closing the popover repeatedly no longer risks Anthropic's rate limit. Three independent callers fetched the quota payload, each written to call first and sleep after, and the popover's loop restarted on every open — so ten opens issued ten requests with nothing in between. Requests now share a floor and concurrent callers share one request. A slow request is timed from when it returned, not from when it was asked, so the protection does not dissolve exactly while the endpoint is struggling.</li>
+<li>Usage from a previous account no longer survives a change of credential target. Switching the durable authentication target left the prior account's usage on screen until something else replaced it.</li>
+<li>The cycle still running no longer appears under past windows. It was listed beside completed cycles and counted toward the estimate while still filling, so an estimate could move while being read.</li>
+<li>A source you excluded is no longer reported back as unclassified. Excluding a source is a classification, and the line that names what else was in a window said the opposite.</li>
+<li>Launching no longer throws away work it had already done. Registering your Claude directories with the engine happens at every launch and on every settings save, not only when something changed, and it dropped every cached scan result, forced a reload, and re-fetched every quota — regardless. So an ordinary launch paid to rebuild what it already had, and spent provider requests doing it. All of that now happens only when the registered directories actually differ, with one deliberate exception: the first registration after a launch still refreshes the quota cards, because the engine starts each run with none registered and the menu bar can otherwise show a reading taken before your extra account was known.</li>
+<li>Two Claude accounts no longer interfere with each other's rate-limit backoff or profile cache. A shared cooldown meant one account clearing it lifted it for the other, and a shared profile entry collapsed its one-hour lifetime into a fetch on every poll. Single-account users are unaffected.</li>
+<li>A count of zero is no longer shown where nothing was counted. A source that reports a price with no token counts rendered as a measured zero beside a real dollar amount, in the quota history rows, their expanded per-model rows, and the subscription trend under its token metric.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.14.0/TokenBar.app.tar.gz" length="9999391" type="application/octet-stream" sparkle:edSignature="dFxjhhg/jhcj8eqPP+yN9vPoXaeUnbNyHpiAmOS1sf0cTruo8vQ/u2msRblWVhSkgvtMW/Pn3pODSfPXFK6SAA=="/>
+        </item>
+        <item>
             <title>1.13.3</title>
             <pubDate>Sat, 15 Aug 2026 20:43:47 +0000</pubDate>
             <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.13.3</link>
@@ -100,31 +134,6 @@
 <p>Thanks: @yeha98555</p>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.13.0/TokenBar.app.tar.gz" length="9100227" type="application/octet-stream" sparkle:edSignature="UhNzmr0MnBT3AS0xoTEBtCt73BtYHw2fKjj2EAmrC2vupSQJtbdqvph5HoRPhv33Rxiq5w6j4nxFLeoyzG8HCg=="/>
-        </item>
-        <item>
-            <title>1.12.0</title>
-            <pubDate>Tue, 04 Aug 2026 09:43:24 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.12.0</link>
-            <sparkle:version>499</sparkle:version>
-            <sparkle:shortVersionString>1.12.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>New:</b>
-<ul>
-<li>A flat contribution heatmap joins the bar and 3D views in the usage chart. Press Command-G to cycle through all three.</li>
-<li>Claude plans that report per-model weekly caps now show those limits alongside the session and weekly windows.</li>
-</ul>
-<b>Improved:</b>
-<ul>
-<li>Reopening the popover no longer recomputes the hourly views, so they appear right away.</li>
-<li>The turn count shows a loading state instead of looking empty while it is still being read.</li>
-</ul>
-<b>Fixes:</b>
-<ul>
-<li>Non-square menu-bar animation art, such as the parrot, is fitted to the bar instead of being stretched to a square.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.12.0/TokenBar.app.tar.gz" length="8421268" type="application/octet-stream" sparkle:edSignature="EavTOPbF+lu7JBSWFaGL0K2f9OljoqYmc5POwLU/eOg0MWi0+sXUmmMvNHj8NKsiRbkmq3ygimTA1YgUBZ1RAg=="/>
         </item>
         <item>
             <title>1.1.1</title>
