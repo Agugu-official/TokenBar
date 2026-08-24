@@ -1,47 +1,77 @@
 ## Before you update
 
-**Five clients rescan once.** Amp, Cursor, OpenClaw, MiMoCode, and Mux advance to a new parser identity in this engine update, so their cached shards are rebuilt cold on the first refresh after installing. Expect one slower scan for those clients and nothing else; other clients keep their cache.
+**The dashboard rebuilds once.** The saved snapshot now records which scan roots produced it, so a snapshot written by the previous version is not restored on the first launch after updating. Expect one cold start and nothing else.
+
+**Downgrading after this release sets your quota pace history aside.** [#234](https://github.com/Nanako0129/TokenBar/pull/234)
+
+The store holding those readings moves from schema 3 to schema 4. An older TokenBar cannot read the new format, so it moves the file to a quarantine copy beside it and starts accumulating from nothing: the pace cards go back to learning, and a window says so rather than saying "Historically: lasts until reset".
+
+**Nothing is deleted.** The quarantine copy holds the complete history, and it is what makes this recoverable rather than final. Usage totals are unaffected either way — those are read from your logs and can always be recomputed, while pace readings are observations taken over time and cannot be.
+
+Upgrading itself loses nothing. The migration exists precisely so that a version bump does not reset everyone's history, and it preserves every sample exactly — verified against a real store of 32 series and 3,117 samples, which without the migration is quarantined outright.
+
+The conversion is lazy: it happens on the next write the app had its own reason to make, not on load. So a file still reading `"schemaVersion": 3` for a while after updating is normal, and not a migration that failed to run.
+
+## Features
+
+- **Quota gets its own lens.** [#227](https://github.com/Nanako0129/TokenBar/pull/227)
+
+  A quota percentage tells you how much is left and nothing about what spent it. The window card draws the subscription's quota over time with the local usage that moved it underneath, on the same axis, so a flat stretch of quota can be read against the work that was or was not happening. The line is the provider's reading; the bars are your transcripts.
+
+  Alongside it, four more answers that a single percentage cannot give. **Window history** lists recent reset cycles for the open subscription, each expandable to a per-model breakdown; **Past windows**, on the all-agent view, shows one row per quota window as a strip of cycle bars. **Equivalence** estimates what 10% of the allowance is worth in tokens and dollars, pooled across the cycles that carry enough evidence to say — and reports which of those conditions is missing when it cannot. A **weekday heatmap** shows when in the week the allowance actually goes. An **Overview summary** card carries the shape of it back to the front page, and Overview cards can now be hidden individually — apart from the usage chart, which stays put: Overview is where every hidden lens falls back to, and a fallback that can be emptied leaves nowhere to land.
+
+  Quota window rows also carry a recent-trend indicator, so a row shows direction rather than only level.
+
+- **A model-scoped quota window now counts only its model.** [#231](https://github.com/Nanako0129/TokenBar/pull/231)
+
+  Claude reports scoped weekly limits — a "Fable only" allowance alongside the general one. The line drawn for such a window was that allowance, but the usage drawn underneath it was the whole subscription's, so the bars were explaining a quota they had not moved. The chart, the history rows and the cost estimate now all narrow to the model the allowance charges.
+
+  The join is between two naming systems and is treated as one: the provider identifies the scope by display name — it sends no model id — while your transcripts carry a canonical id. When nothing local matches, the card says the scope matched nothing rather than drawing an empty week, because an empty chart under a moving quota line would claim you did no work.
+
+- **Claude scan roots can be added in Settings.** [#230](https://github.com/Nanako0129/TokenBar/pull/230)
+
+  A second Claude account kept under its own `CLAUDE_CONFIG_DIR` is invisible to a scan that reads only the default location. Those directories can now be registered, and a root that is temporarily unreachable — an unmounted volume, a directory not yet created — is kept and retried on the next scan rather than dropped from your configuration.
+
+- **A second Claude account gets its own quota card and its own history.** [#235](https://github.com/Nanako0129/TokenBar/pull/235)
+
+  An account kept under its own `CLAUDE_CONFIG_DIR` is fetched, identified and recorded separately from the main one, so each card carries its own plan label and accumulates its own reset cycles rather than sharing a single series.
+
+  **One limit is deliberate.** When an additional account's token expires, TokenBar does not refresh it in place. The card says so and asks you to run `claude` under that `CLAUDE_CONFIG_DIR`. The credential refresh path reloads, validates and saves against the main configuration directory throughout, so sending an additional account through it would write that account's token over your main account's stored credential and log you out of the main account. It fails closed instead, which is a worse experience than a silent refresh and a much better one than a silent logout.
+
+- **Long quota windows are sampled about four times as often.** [#227](https://github.com/Nanako0129/TokenBar/pull/227)
+
+  The quota history keeps one reading per slice of a cycle rather than one per interval, which on a seven-day window meant a reading roughly every 3.5 hours — a curve made of a handful of points while the headline above it moved. Windows longer than two days now use a finer grid, about one reading an hour. A window sitting at its full allowance also records that starting point, instead of waiting for the first spend to establish where the cycle began.
 
 ## Fixes
 
-- **A Claude credential store that holds no login no longer blocks the setup-token fallback.** [#221](https://github.com/Nanako0129/TokenBar/pull/221)
+- **Opening and closing the popover repeatedly no longer risks Anthropic's rate limit.** [#227](https://github.com/Nanako0129/TokenBar/pull/227)
 
-  The Claude card could sit permanently on "Claude credentials could not be loaded." while the documented `tokenbar-claude-oauth-token` Keychain path was never even read, so following the in-app instructions changed nothing. The cause was a `Claude Code-credentials` Keychain item that existed but carried no `claudeAiOauth` key — on the reporting machine it held only `mcpOAuth`, an MCP server's OAuth data written into the same item. TokenBar read that as a credential it could not parse and failed closed, which by design skips the setup-token fallback.
+  Three independent callers fetch the quota payload — the popover's poll loop, the Settings window's own loop, and the tray refresh — and each is written to call first and sleep after. The popover's loop is mounted by the view, so it restarted on every open and issued its leading call immediately. Ten opens issued ten requests with nothing in between, which is enough to reach the limit on `oauth/usage`. The engine already handled the aftermath of a 429; nothing bounded the attempts that produce one.
 
-  A store with no `claudeAiOauth` key is now treated as absence rather than damage, so the setup-token route is tried and, with no token stored, the card shows the setup prompt instead of an error. A credential whose `claudeAiOauth` is present but unusable still fails closed, and a Keychain item holding no login still does not fall through to `~/.claude/.credentials.json` — that fall-through was written and then dropped, because if the shape turns out to be what Claude Code leaves behind after a logout, falling through would silently resume a stale token and keep refreshing it. Reported by [@coshsh1991](https://github.com/coshsh1991) with the failing resolution traced to the exact line, which is what made it a direct fix rather than a hunt. [#219](https://github.com/Nanako0129/TokenBar/issues/219)
+  Requests now share a floor, and callers arriving together share one request rather than opening three. A request that is itself slow is timed from when it returned rather than from when it was asked — timing it from the ask made a slow response land already expired, so the next reopen fetched again, dissolving the protection exactly while the endpoint was struggling.
 
-- **Manual refresh now retries a model report that failed.** [#214](https://github.com/Nanako0129/TokenBar/pull/214)
+- **Usage from a previous account no longer survives a change of credential target.** [#223](https://github.com/Nanako0129/TokenBar/pull/223)
 
-  The Refresh button and Command-R refreshed the graph and any loaded Hourly or Agents report, but stopped short of the model report. A transient failure therefore stayed on screen until the next 60-second poll, including immediately after the user had explicitly asked for fresh data. A refresh that wanted a model report now retries it in the same pass, provided the graph itself refreshed successfully. Dashboards that never asked for one still perform no scan.
+  Switching the durable authentication target left the prior account's usage on screen until something else happened to replace it.
 
-- **Reopening the popover no longer shows the previous window's data.** [#213](https://github.com/Nanako0129/TokenBar/pull/213)
+- **The cycle still running no longer appears under past windows.** [#227](https://github.com/Nanako0129/TokenBar/pull/227)
 
-  Closing the popover during a scan left the retiring view able to finish and write its result into the shared reopen cache — after the next popover had already committed something newer. The next open then rendered the older payload. The newest view now owns that cache, and both the snapshot and live-data paths check ownership before writing. A retiring view still completes and updates its own state, so switching lenses is unaffected.
+  It was listed beside completed cycles as though comparable, and counted toward the three-cycle threshold the cost estimate needs — so an estimate could change under the reader as the cycle filled. The engine now marks which readings belong to the open cycle, rather than the display inferring it from a timestamp the two sides quantise differently.
 
-- **Sources with no usage are no longer offered for classification.** [#211](https://github.com/Nanako0129/TokenBar/pull/211)
+- **A source you excluded is no longer reported back as unclassified.** [#227](https://github.com/Nanako0129/TokenBar/pull/227)
 
-  Usage attribution built a row for every observed source key, including keys with nothing behind them, so a row reading `0 tokens · $0.00` asked which subscription had paid for nothing. An entry with no tokens and no cost is now dropped, and a range left with nothing reads as "No provider-split usage in this range." instead of presenting decisions that cannot matter.
+  Excluding a source *is* classifying it. The line naming what else was active in a window folded "you excluded this" together with "you have not looked at this yet", so it presented a decision you had already made as an open question.
 
-  The test runs per entry, before entries are folded into a source, matching where the breakdown card applies it. So an entry with zero tokens but non-zero cost is kept — that is spend, however it arrived — and a source whose entries cancel, `+5` and `-5` tokens at no cost, still appears: each entry is real, and the card can place them in different buckets.
+- **Launching no longer throws away caches that were still valid.** [#233](https://github.com/Nanako0129/TokenBar/pull/233)
 
-## Changes
+  Your Claude directories are registered with the engine at every launch and on every settings save, not only when something has changed — and doing so dropped every cached scan result, advanced the marker that forces a reload, and re-fetched every quota, unconditionally. So an ordinary launch paid to rebuild what it already had, and spent provider requests doing it; a popover open at the wrong moment additionally took a full forced rescan for a directory set identical to the one already registered.
 
-- **Three client names no longer claim a surface their data does not distinguish.** [#210](https://github.com/Nanako0129/TokenBar/pull/210)
+  All of that is now gated on the registered set actually differing. One exception is deliberate: the FIRST registration after a launch still refreshes the quota cards even when your list is unchanged, because the engine starts each run with nothing registered — so that first registration is a real change from its point of view, and skipping it could leave the menu bar showing a reading taken before your extra account was known.
 
-  | Was | Now |
-  |---|---|
-  | Codex CLI | Codex |
-  | Copilot CLI | Copilot |
-  | Cursor IDE | Cursor |
+- **Two Claude accounts no longer interfere with each other's backoff or profile cache.** [#235](https://github.com/Nanako0129/TokenBar/pull/235)
 
-  Each name promised a scope the underlying source cannot support. The `codex` card reads `~/.codex/sessions`, which every Codex surface writes to: across 1,733 local session files, the actual CLI accounted for roughly 4% of what the card was labelling "Codex CLI", behind Codex Desktop at 1,218 files. The `copilot` card merges two parsers covering the CLI, VS Code Copilot Chat, and the macOS desktop app. The `cursor` card is not a session parser at all — it reads an account usage export in which IDE, `cursor-agent`, and cloud-agent spend arrive in one undifferentiated ledger. Names that are genuinely surface-scoped were left alone.
+  A single shared rate-limit cooldown meant one account clearing it lifted it for the other, and a single shared profile entry collapsed its one-hour lifetime into a fetch on every poll. Both are now per account. Single-account users are unaffected.
 
-- **Usage attribution now says that some clients merge related routes before the page sees them.** [#211](https://github.com/Nanako0129/TokenBar/pull/211)
+- **A count of zero is no longer shown where nothing was counted.** [#227](https://github.com/Nanako0129/TokenBar/pull/227)
 
-  The page explained that provider IDs are compared exactly as the source emitted them, so related-looking routes may appear as separate rows and be classified independently. That is true, and it was the only half being told. Some clients merge those routes before reporting — Vertex AI arriving as Anthropic, Codex as OpenAI — and a row that arrived already merged cannot be split here, however it is classified. Whether a given row is affected depends on the client that produced it, not on the provider's name. The hint now carries both halves.
-
-- **Engine update.** [#217](https://github.com/Nanako0129/TokenBar/pull/217)
-
-  The shared usage engine advances to a reviewed revision carrying local-first graph pricing, embedded and partial cost provenance, message-only cost coverage, and preservation of Kilo's provider-reported cost. This is a pin-only update: no change to the cache format, the FFI boundary, or how results are decoded.
-
-  One part of it is visible in your numbers. A Trae row whose payload carries no usable dollar amount was previously left unpriced; under the default best-effort pricing it is now estimated, so a Trae total can rise without your usage having changed. Provider-reported values remain authoritative, and local-only pricing still leaves such rows unpriced.
+  A source that reports a price with no token counts rendered as a measured `0` beside a real dollar amount — in the quota history rows, in their expanded per-model rows, and in the subscription trend under its token metric. A missing measurement now reads as missing. The same rule already applied to prices in the other direction and was stated in one place per column; it is now stated once for both.
