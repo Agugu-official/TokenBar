@@ -69,7 +69,10 @@ enum PrimaryAttempt<Context> {
         context: Context,
         failure: ProviderFetchFailure,
     },
-    Transient(Context),
+    Transient {
+        context: Context,
+        failure: ProviderFetchFailure,
+    },
     FinalFailure(ProviderFetchFailure),
 }
 
@@ -107,10 +110,15 @@ where
                 Err(_) => Err(failure),
             }
         }
-        PrimaryAttempt::Transient(context) => match secondary_remote_attempt(context).await {
-            Ok(fetched) => Ok(fetched),
-            Err(failure) => Err(failure),
-        },
+        PrimaryAttempt::Transient { context, failure } => {
+            match secondary_remote_attempt(context).await {
+                Ok(fetched) => Ok(fetched),
+                Err(secondary_failure @ ProviderFetchFailure::Transient { .. }) => {
+                    Err(secondary_failure)
+                }
+                Err(ProviderFetchFailure::Terminal { .. }) => Err(failure),
+            }
+        }
         PrimaryAttempt::FinalFailure(failure) => Err(failure),
     }
 }
@@ -947,7 +955,7 @@ enum PrimaryQuotaAttempt {
     Success(Vec<UsageWindow>),
     Forbidden,
     SchemaContradiction(ProviderFetchFailure),
-    Transient,
+    Transient(ProviderFetchFailure),
     Terminal(ProviderFetchFailure),
 }
 
@@ -962,7 +970,7 @@ async fn fetch_oauth_primary(now: DateTime<Utc>) -> PrimaryAttempt<RemoteContext
         PrimaryQuotaAttempt::SchemaContradiction(failure) => {
             PrimaryAttempt::SchemaContradiction { context, failure }
         }
-        PrimaryQuotaAttempt::Transient => PrimaryAttempt::Transient(context),
+        PrimaryQuotaAttempt::Transient(failure) => PrimaryAttempt::Transient { context, failure },
         PrimaryQuotaAttempt::Terminal(failure) => PrimaryAttempt::FinalFailure(failure),
     }
 }
@@ -1439,8 +1447,7 @@ async fn fetch_available_models(
         Ok(response) => response,
         Err(CodeAssistPostFailure::Forbidden) => return PrimaryQuotaAttempt::Forbidden,
         Err(CodeAssistPostFailure::Failure(failure @ ProviderFetchFailure::Transient { .. })) => {
-            let _ = failure;
-            return PrimaryQuotaAttempt::Transient;
+            return PrimaryQuotaAttempt::Transient(failure);
         }
         Err(CodeAssistPostFailure::Failure(failure)) => {
             return PrimaryQuotaAttempt::Terminal(failure);
@@ -2990,7 +2997,12 @@ mod tests {
 
         let transient_recovered = fetch_with(
             || async { LocalAttempt::RouteMiss },
-            || async { PrimaryAttempt::Transient(()) },
+            || async {
+                PrimaryAttempt::Transient {
+                    context: (),
+                    failure: orchestration_transient("primary transient"),
+                }
+            },
             |()| async { Ok(orchestration_fetched("secondary")) },
         )
         .await
@@ -2999,20 +3011,30 @@ mod tests {
 
         let transient_then_terminal = fetch_with(
             || async { LocalAttempt::RouteMiss },
-            || async { PrimaryAttempt::Transient(()) },
+            || async {
+                PrimaryAttempt::Transient {
+                    context: (),
+                    failure: orchestration_transient("primary transient"),
+                }
+            },
             |()| async { Err(ProviderFetchFailure::terminal("secondary terminal")) },
         )
         .await
         .unwrap_err();
         assert!(matches!(
             transient_then_terminal,
-            ProviderFetchFailure::Terminal { ref display }
-                if display == "secondary terminal"
+            ProviderFetchFailure::Transient { ref display, .. }
+                if display == "primary transient"
         ));
 
         let both_transient = fetch_with(
             || async { LocalAttempt::RouteMiss },
-            || async { PrimaryAttempt::Transient(()) },
+            || async {
+                PrimaryAttempt::Transient {
+                    context: (),
+                    failure: orchestration_transient("primary transient"),
+                }
+            },
             |()| async { Err(orchestration_transient("secondary transient")) },
         )
         .await
