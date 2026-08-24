@@ -1419,7 +1419,7 @@ private struct DashboardSnapshot {
                 declared: !confirmed.isEmpty,
                 cycles: zip(cycles, spans).map { cycle, span in
                     WindowEquivalence.Cycle(
-                        deltaPercent: cycle.usedPercent, spanTokens: span.exCacheRead,
+                        deltaPercent: cycle.usedPercent, spanTokens: span.tokens,
                         spanCost: span.cost, observedFraction: cycle.observedFraction)
                 })
         }
