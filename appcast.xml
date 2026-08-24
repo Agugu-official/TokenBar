@@ -3,6 +3,21 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>1.14.1</title>
+            <pubDate>Mon, 24 Aug 2026 12:29:50 +0000</pubDate>
+            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.14.1</link>
+            <sparkle:version>837</sparkle:version>
+            <sparkle:shortVersionString>1.14.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>Fixes:</b>
+<ul>
+<li>The quota equivalence counted fewer tokens than it priced. The estimate under a quota window, and the heatmap tooltip that scales from it, print a token count beside a dollar amount as two descriptions of the same work. The count left out cache reads while the amount included their cost, so dividing one by the other gave a price several times higher than any model's list rate: one reading showed 72 quota points as 4.8M tokens and $172.25, which works out to $36 per million. Cache reads are most of the volume in a Claude Code session, so most of the tokens were missing from the count while all of their cost stayed in the price. The count now covers everything the price covers. The dollar figure does not change; the token figure grows, and the implied rate falls back to something near list.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.14.1/TokenBar.app.tar.gz" length="9999406" type="application/octet-stream" sparkle:edSignature="JzIAGrbsGyFs3zRbtp7Mw9pKSxpqRsNTeGpb+vi26hXLdAzf8cz46Ev4A8tFjP2/bBG+Mva/XqkBX5jf7jzlAw=="/>
+        </item>
+        <item>
             <title>1.14.0</title>
             <pubDate>Mon, 24 Aug 2026 09:14:35 +0000</pubDate>
             <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.14.0</link>
@@ -103,37 +118,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.13.1/TokenBar.app.tar.gz" length="9102093" type="application/octet-stream" sparkle:edSignature="1Ya2FetXs5MIehPSqhWjYTzSQ6gA7bB8+roq5l7DD5Hf66fd12oAq0zORj9+583UAtTCdOMkcN3OghDQOnCKAA=="/>
-        </item>
-        <item>
-            <title>1.13.0</title>
-            <pubDate>Sat, 08 Aug 2026 20:08:23 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.13.0</link>
-            <sparkle:version>633</sparkle:version>
-            <sparkle:shortVersionString>1.13.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>New:</b>
-<ul>
-<li>TokenBar can publish what you are working on to Discord. It is off by default. You choose which of today's tokens, the agent and the cost band it shows, and which agent by name; all three are shown unless you change them.</li>
-<li>A Usage attribution page in Settings lets you declare which subscription a client's local usage belongs to. Running another provider's model through an agent is common, and the usage was previously drawn against that agent's own quota. Stats now breaks the total into assigned, excluded and undeclared.</li>
-</ul>
-<b>Improved:</b>
-<ul>
-<li>Opening the popover no longer waits for two extra scans. The chart runs on its own and appears as soon as it is ready.</li>
-<li>Scanning is faster: on an 8 GB history, a cold scan dropped about 31 percent and a warm scan about 37 percent. Peak memory is about 15 percent higher, which is the trade for the parallel parsing.</li>
-<li>Restarting shows your last dashboard immediately and refreshes behind it, instead of showing nothing for several seconds.</li>
-<li>Turns that an in-place transcript rewrite used to drop are now kept. This does not restore history already lost. A total can still fall on the first launch if a transcript was compacted since the last scan, because the rebuild reads the file as it stands now.</li>
-</ul>
-<b>Fixes:</b>
-<ul>
-<li>Inactive segments of the view switch are clickable again.</li>
-<li>Codex shows its monochrome mark instead of the ChatGPT green.</li>
-<li>Hovering a heatmap cell rings it, the way the bar chart already did.</li>
-</ul>
-<p>Note: the first launch after this update rescans every client once, because the engine's cache format changed. Later launches are back to normal.</p>
-<p>Thanks: @yeha98555</p>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.13.0/TokenBar.app.tar.gz" length="9100227" type="application/octet-stream" sparkle:edSignature="UhNzmr0MnBT3AS0xoTEBtCt73BtYHw2fKjj2EAmrC2vupSQJtbdqvph5HoRPhv33Rxiq5w6j4nxFLeoyzG8HCg=="/>
         </item>
         <item>
             <title>1.1.1</title>
