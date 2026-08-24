@@ -2299,6 +2299,17 @@ mod tests {
     }
 
     #[test]
+    fn rejects_agy_chat_response_without_usage_command() {
+        let now = Utc::now();
+        let body = br#"{
+            "status": "SUCCESS",
+            "response": "A model-generated answer",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        }"#;
+        assert!(parse_agy_usage(body, now).is_err());
+    }
+
+    #[test]
     fn login_shell_agy_candidate_is_used_when_path_is_missing() {
         let root = tempfile::tempdir().unwrap();
         let agy = root.path().join("agy");
