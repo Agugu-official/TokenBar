@@ -11,7 +11,8 @@
 //!    no disk writes.
 //! 2. **OAuth remote (`oauth`)** — otherwise read the shared Google creds under
 //!    `GEMINI_CLI_HOME` (falling back to `~/.gemini`), refresh against Google
-//!    (client id/secret scanned from the installed Antigravity.app binary), and
+//!    (client id/secret scanned from the installed Antigravity.app binary, with
+//!    the `agy` CLI as a fallback when the IDE is not installed), and
 //!    hit the `cloudcode-pa.googleapis.com` Code Assist quota endpoints.
 //!
 //! Both yield per-model "remaining fraction + reset" which map to `UsageWindow`s.
@@ -31,6 +32,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, value::RawValue, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -112,9 +114,10 @@ where
     }
 }
 
-/// Auto: prefer the live Local IDE API; fall back to the OAuth remote API.
+/// Auto: prefer the live Local IDE API, then the OAuth remote API, and finally
+/// the optional `agy` CLI usage command when the earlier routes are unavailable.
 pub(crate) async fn fetch(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFailure> {
-    fetch_with(
+    let primary = fetch_with(
         || async move {
             match fetch_local_ide(now).await {
                 Ok(local) if !local.windows.is_empty() => LocalAttempt::Success(local),
@@ -124,7 +127,45 @@ pub(crate) async fn fetch(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFa
         || fetch_oauth_primary(now),
         |context| fetch_oauth_secondary(context, now),
     )
-    .await
+    .await;
+    match primary {
+        Ok(fetched) => Ok(fetched),
+        Err(primary_failure) => match fetch_agy_cli(now).await {
+            Ok(fetched) => Ok(fetched),
+            Err(_) => Err(primary_failure),
+        },
+    }
+}
+
+async fn fetch_agy_cli(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFailure> {
+    let executable = agy_cli_artifact_candidates()
+        .into_iter()
+        .next()
+        .ok_or_else(|| ProviderFetchFailure::terminal("Antigravity CLI was not found."))?;
+    let future = tokio::process::Command::new(executable)
+        .args([
+            "--print",
+            "/usage",
+            "--output-format",
+            "json",
+            "--print-timeout",
+            "30s",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(35), future)
+        .await
+        .map_err(|_| ProviderFetchFailure::terminal("Antigravity CLI usage timed out."))?
+        .map_err(|_| ProviderFetchFailure::terminal("Antigravity CLI usage failed."))?;
+    if !output.status.success() {
+        return Err(ProviderFetchFailure::terminal(
+            "Antigravity CLI usage failed.",
+        ));
+    }
+    parse_agy_usage(&output.stdout, now)
+        .map_err(|_| ProviderFetchFailure::terminal("Antigravity CLI usage could not be decoded."))
 }
 
 // ── Local IDE API ───────────────────────────────────────────────────────────
@@ -553,6 +594,41 @@ struct QuotaBucketsResponse {
     buckets: Vec<Box<RawValue>>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AgyUsageResponse {
+    status: Option<String>,
+    command: Option<AgyUsageCommand>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyUsageCommand {
+    name: Option<String>,
+    data: Option<AgyUsageData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyUsageData {
+    #[serde(default)]
+    groups: Vec<AgyUsageGroup>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyUsageGroup {
+    name: Option<String>,
+    #[serde(default)]
+    buckets: Vec<AgyUsageBucket>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyUsageBucket {
+    id: Option<String>,
+    name: Option<String>,
+    #[serde(rename = "remaining_fraction")]
+    remaining_fraction: Option<f64>,
+    #[serde(rename = "reset_time")]
+    reset_time: Option<String>,
+}
+
 #[derive(Debug)]
 struct ModelCandidate {
     model_id: Option<String>,
@@ -576,6 +652,72 @@ fn quota_window(
 ) -> Option<UsageWindow> {
     UsageWindow::try_from_provider_fraction(label, fraction, reset, now)
         .map(|window| window.with_identity(card_id, window_key, None, None))
+}
+
+fn parse_agy_usage(body: &[u8], now: DateTime<Utc>) -> Result<Fetched, String> {
+    let response: AgyUsageResponse =
+        serde_json::from_slice(body).map_err(|e| format!("decode agy usage: {e}"))?;
+    if response.status.as_deref() != Some("SUCCESS") {
+        return Err("agy usage command was not successful".to_string());
+    }
+    let command = response
+        .command
+        .ok_or_else(|| "agy usage response missing command".to_string())?;
+    if command.name.as_deref() != Some("usage") {
+        return Err("agy usage response missing usage command".to_string());
+    }
+    let data = command
+        .data
+        .ok_or_else(|| "agy usage response missing data".to_string())?;
+
+    let mut windows = Vec::new();
+    for (group_index, group) in data.groups.into_iter().enumerate() {
+        let group_name = group
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Antigravity");
+        for (bucket_index, bucket) in group.buckets.into_iter().enumerate() {
+            let Some(id) = bucket
+                .id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            else {
+                continue;
+            };
+            let Some(fraction) = bucket.remaining_fraction else {
+                continue;
+            };
+            let reset = bucket.reset_time.as_deref().and_then(parse_datetime);
+            let label = bucket
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(|name| format!("{group_name} · {name}"))
+                .unwrap_or_else(|| format!("{group_name} · Limit"));
+            let card_id = format!("agy.{group_index}.{bucket_index}.{id}.v1");
+            if let Some(window) =
+                quota_window(label, fraction, reset, now, card_id.clone(), Some(card_id))
+            {
+                windows.push(window);
+            }
+        }
+    }
+    if windows.is_empty() {
+        return Err("agy usage response contained no valid quota windows".to_string());
+    }
+
+    Ok(Fetched {
+        source: "agy".to_string(),
+        identity: None,
+        account_scope: Err(AccountScopeError::NoTrustedEvidence),
+        history_scope: Err(AccountScopeError::NoTrustedEvidence),
+        cache_binding: None,
+        windows,
+    })
 }
 
 fn parse_user_status(body: &str, now: DateTime<Utc>) -> Result<Fetched, String> {
@@ -1573,7 +1715,7 @@ fn binding_candidate_is_better(
     candidate_index < current_index
 }
 
-// ── OAuth client discovery (scan installed Antigravity.app) ───────────────────
+// ── OAuth client discovery (scan Antigravity.app and the agy CLI) ─────────────
 
 fn resolve_oauth_client() -> Option<(String, String)> {
     if let (Ok(id), Ok(secret)) = (
@@ -1590,7 +1732,17 @@ fn resolve_oauth_client() -> Option<(String, String)> {
 }
 
 fn discover_client_from_app() -> Option<(String, String)> {
-    for path in client_artifact_candidates() {
+    // The IDE is the canonical installation. Only consult `agy` when its
+    // artifacts do not provide a usable client, so the CLI remains optional.
+    discover_client_from_artifacts(client_artifact_candidates())
+        .or_else(|| discover_client_from_artifacts(agy_cli_artifact_candidates()))
+}
+
+fn discover_client_from_artifacts<I>(paths: I) -> Option<(String, String)>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    for path in paths {
         let Ok(data) = std::fs::read(&path) else {
             continue;
         };
@@ -1620,6 +1772,56 @@ fn client_artifact_candidates() -> Vec<PathBuf> {
         .iter()
         .flat_map(|root| relative.iter().map(move |r| root.join(r)))
         .collect()
+}
+
+fn agy_cli_artifact_candidates() -> Vec<PathBuf> {
+    let shell_path = discover_agy_from_login_shell();
+    agy_cli_artifact_candidates_from(std::env::var_os("PATH").as_deref(), shell_path)
+}
+
+fn agy_cli_artifact_candidates_from(
+    path_env: Option<&OsStr>,
+    shell_path: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = executable_from_path(path_env, "agy") {
+        candidates.push(path);
+    }
+    if let Some(path) = shell_path.filter(|path| path.is_file()) {
+        if !candidates.contains(&path) {
+            candidates.push(path);
+        }
+    }
+    candidates
+}
+
+fn executable_from_path(path_env: Option<&OsStr>, name: &str) -> Option<PathBuf> {
+    let path_env = path_env?;
+    std::env::split_paths(path_env)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(unix)]
+fn discover_agy_from_login_shell() -> Option<PathBuf> {
+    let output = Command::new("/bin/sh")
+        .args(["-lc", "command -v -- agy"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .find(|candidate| candidate.is_absolute() && candidate.is_file())
+}
+
+#[cfg(not(unix))]
+fn discover_agy_from_login_shell() -> Option<PathBuf> {
+    None
 }
 
 fn is_token_byte(b: u8) -> bool {
@@ -1907,6 +2109,97 @@ mod tests {
         let client = preferred_client(&ids, &secrets).unwrap();
         assert_eq!(client.0, "123-abcDEF_g.apps.googleusercontent.com");
         assert!(client.1.starts_with("GOCSPX-"));
+    }
+
+    #[test]
+    fn discovers_oauth_client_from_agy_on_path_without_installation_assumptions() {
+        let root = tempfile::tempdir().unwrap();
+        let agy = root.path().join("agy");
+        let client_id = ["884354919052", "-abc.apps.googleusercontent.com"].concat();
+        let client_secret = ["GOCSPX-", "abcdefghijklmnopqrstuvwxyz12"].concat();
+        std::fs::write(&agy, format!("agy cli\0{client_id}\0{client_secret}\0")).unwrap();
+
+        let path_env = root.path().as_os_str();
+        let candidates = agy_cli_artifact_candidates_from(Some(path_env), None);
+        assert_eq!(candidates, vec![agy.clone()]);
+
+        let client = discover_client_from_artifacts(candidates).unwrap();
+        assert_eq!(client.0, client_id);
+        assert_eq!(client.1, client_secret);
+    }
+
+    #[test]
+    fn prefers_ide_artifact_before_agy_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let ide = root.path().join("language_server");
+        let agy = root.path().join("agy");
+        let ide_client_id = ["111111111111", "-ide.apps.googleusercontent.com"].concat();
+        let agy_client_id = ["222222222222", "-agy.apps.googleusercontent.com"].concat();
+        let ide_client_secret = ["GOCSPX-", "abcdefghijklmnopqrstuvwxyz12"].concat();
+        let agy_client_secret = ["GOCSPX-", "zyxwvutsrqponmlkjihgfedcba21"].concat();
+        std::fs::write(&ide, format!("ide {ide_client_id}\0{ide_client_secret}\0")).unwrap();
+        std::fs::write(&agy, format!("agy {agy_client_id}\0{agy_client_secret}\0")).unwrap();
+
+        let client = discover_client_from_artifacts(vec![ide, agy]).unwrap();
+        assert_eq!(client.0, ide_client_id);
+        assert_eq!(client.1, ide_client_secret);
+    }
+
+    #[test]
+    fn parses_agy_usage_json_into_quota_windows() {
+        let now = DateTime::parse_from_rfc3339("2026-08-24T06:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let body = br#"{
+            "status": "SUCCESS",
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [{
+                        "name": "Gemini Models",
+                        "buckets": [
+                            {"id": "gemini-weekly", "name": "Weekly Limit Remaining", "remaining_fraction": 0.75, "reset_time": "2026-08-28T06:58:51Z"},
+                            {"id": "gemini-5h", "name": "Five Hour Limit Remaining", "remaining_fraction": 0.5, "reset_time": "2026-08-24T08:51:49Z"},
+                            {"id": "bad", "name": "Invalid", "remaining_fraction": 1.5}
+                        ]
+                    }]
+                }
+            }
+        }"#;
+
+        let fetched = parse_agy_usage(body, now).unwrap();
+        assert_eq!(fetched.source, "agy");
+        assert_eq!(fetched.windows.len(), 2);
+        assert_eq!(
+            fetched.windows[0].label_for_test(),
+            "Gemini Models · Weekly Limit Remaining"
+        );
+        assert!((fetched.windows[0].remaining_for_test() - 75.0).abs() < f64::EPSILON);
+        assert_eq!(
+            fetched.windows[0].pace_window_key_for_test(),
+            Some("agy.0.0.gemini-weekly.v1")
+        );
+        let wire = serde_json::to_value(&fetched.windows[1]).unwrap();
+        assert_eq!(wire["cardId"], "agy.0.1.gemini-5h.v1");
+    }
+
+    #[test]
+    fn rejects_agy_usage_without_valid_windows() {
+        let now = Utc::now();
+        let body = br#"{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"buckets":[{"id":"bad","remaining_fraction":2.0}]}]}}}"#;
+        assert!(parse_agy_usage(body, now).is_err());
+    }
+
+    #[test]
+    fn login_shell_agy_candidate_is_used_when_path_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let agy = root.path().join("agy");
+        std::fs::write(&agy, b"agy cli").unwrap();
+
+        assert_eq!(
+            agy_cli_artifact_candidates_from(None, Some(agy.clone())),
+            vec![agy]
+        );
     }
 
     #[test]
