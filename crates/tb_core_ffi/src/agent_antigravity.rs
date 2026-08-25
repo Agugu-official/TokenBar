@@ -11,7 +11,8 @@
 //!    no disk writes.
 //! 2. **OAuth remote (`oauth`)** — otherwise read the shared Google creds under
 //!    `GEMINI_CLI_HOME` (falling back to `~/.gemini`), refresh against Google
-//!    (client id/secret scanned from the installed Antigravity.app binary), and
+//!    (client id/secret scanned from the installed Antigravity.app binary, with
+//!    the `agy` CLI as a fallback when the IDE is not installed), and
 //!    hit the `cloudcode-pa.googleapis.com` Code Assist quota endpoints.
 //!
 //! Both yield per-model "remaining fraction + reset" which map to `UsageWindow`s.
@@ -31,11 +32,13 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, value::RawValue, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 
 const LANG_SERVICE: &str = "/exa.language_server_pb.LanguageServerService/GetUserStatus";
 const CODE_ASSIST_BASE: &str = "https://cloudcode-pa.googleapis.com/v1internal";
@@ -66,7 +69,10 @@ enum PrimaryAttempt<Context> {
         context: Context,
         failure: ProviderFetchFailure,
     },
-    Transient(Context),
+    Transient {
+        context: Context,
+        failure: ProviderFetchFailure,
+    },
     FinalFailure(ProviderFetchFailure),
 }
 
@@ -104,17 +110,23 @@ where
                 Err(_) => Err(failure),
             }
         }
-        PrimaryAttempt::Transient(context) => match secondary_remote_attempt(context).await {
-            Ok(fetched) => Ok(fetched),
-            Err(failure) => Err(failure),
-        },
+        PrimaryAttempt::Transient { context, failure } => {
+            match secondary_remote_attempt(context).await {
+                Ok(fetched) => Ok(fetched),
+                Err(secondary_failure @ ProviderFetchFailure::Transient { .. }) => {
+                    Err(secondary_failure)
+                }
+                Err(ProviderFetchFailure::Terminal { .. }) => Err(failure),
+            }
+        }
         PrimaryAttempt::FinalFailure(failure) => Err(failure),
     }
 }
 
-/// Auto: prefer the live Local IDE API; fall back to the OAuth remote API.
+/// Auto: prefer the live Local IDE API, then the OAuth remote API, and finally
+/// the optional `agy` CLI usage command when the earlier routes are unavailable.
 pub(crate) async fn fetch(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFailure> {
-    fetch_with(
+    let primary = fetch_with(
         || async move {
             match fetch_local_ide(now).await {
                 Ok(local) if !local.windows.is_empty() => LocalAttempt::Success(local),
@@ -124,7 +136,73 @@ pub(crate) async fn fetch(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFa
         || fetch_oauth_primary(now),
         |context| fetch_oauth_secondary(context, now),
     )
-    .await
+    .await;
+    match primary {
+        Ok(fetched) => Ok(fetched),
+        Err(primary_failure) if should_try_agy_fallback(&primary_failure) => {
+            match fetch_agy_cli(now).await {
+                Ok(fetched) => Ok(fetched),
+                Err(_) => Err(primary_failure),
+            }
+        }
+        Err(primary_failure) => Err(primary_failure),
+    }
+}
+
+fn should_try_agy_fallback(failure: &ProviderFetchFailure) -> bool {
+    matches!(failure, ProviderFetchFailure::Terminal { .. })
+}
+
+#[cfg(target_os = "macos")]
+async fn fetch_agy_cli(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFailure> {
+    let candidates = agy_cli_artifact_candidates().await;
+    let mut last_failure = None;
+    for executable in candidates {
+        match fetch_agy_cli_from(&executable, now).await {
+            Ok(fetched) => return Ok(fetched),
+            Err(failure) => last_failure = Some(failure),
+        }
+    }
+    Err(last_failure
+        .unwrap_or_else(|| ProviderFetchFailure::terminal("Antigravity CLI was not found.")))
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn fetch_agy_cli(_now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFailure> {
+    Err(ProviderFetchFailure::terminal(
+        "Antigravity CLI fallback is only supported on macOS.",
+    ))
+}
+
+#[cfg(target_os = "macos")]
+async fn fetch_agy_cli_from(
+    executable: &Path,
+    now: DateTime<Utc>,
+) -> Result<Fetched, ProviderFetchFailure> {
+    let future = tokio::process::Command::new(executable)
+        .args([
+            "--print",
+            "/usage",
+            "--output-format",
+            "json",
+            "--print-timeout",
+            "30s",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(35), future)
+        .await
+        .map_err(|_| ProviderFetchFailure::terminal("Antigravity CLI usage timed out."))?
+        .map_err(|_| ProviderFetchFailure::terminal("Antigravity CLI usage failed."))?;
+    if !output.status.success() {
+        return Err(ProviderFetchFailure::terminal(
+            "Antigravity CLI usage failed.",
+        ));
+    }
+    parse_agy_usage(&output.stdout, now)
+        .map_err(|_| ProviderFetchFailure::terminal("Antigravity CLI usage could not be decoded."))
 }
 
 // ── Local IDE API ───────────────────────────────────────────────────────────
@@ -553,6 +631,41 @@ struct QuotaBucketsResponse {
     buckets: Vec<Box<RawValue>>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AgyUsageResponse {
+    status: Option<String>,
+    command: Option<AgyUsageCommand>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyUsageCommand {
+    name: Option<String>,
+    data: Option<AgyUsageData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyUsageData {
+    #[serde(default)]
+    groups: Vec<AgyUsageGroup>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyUsageGroup {
+    name: Option<String>,
+    #[serde(default)]
+    buckets: Vec<AgyUsageBucket>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyUsageBucket {
+    id: Option<String>,
+    name: Option<String>,
+    #[serde(rename = "remaining_fraction")]
+    remaining_fraction: Option<f64>,
+    #[serde(rename = "reset_time")]
+    reset_time: Option<String>,
+}
+
 #[derive(Debug)]
 struct ModelCandidate {
     model_id: Option<String>,
@@ -576,6 +689,72 @@ fn quota_window(
 ) -> Option<UsageWindow> {
     UsageWindow::try_from_provider_fraction(label, fraction, reset, now)
         .map(|window| window.with_identity(card_id, window_key, None, None))
+}
+
+fn parse_agy_usage(body: &[u8], now: DateTime<Utc>) -> Result<Fetched, String> {
+    let response: AgyUsageResponse =
+        serde_json::from_slice(body).map_err(|e| format!("decode agy usage: {e}"))?;
+    if response.status.as_deref() != Some("SUCCESS") {
+        return Err("agy usage command was not successful".to_string());
+    }
+    let command = response
+        .command
+        .ok_or_else(|| "agy usage response missing command".to_string())?;
+    if command.name.as_deref() != Some("usage") {
+        return Err("agy usage response missing usage command".to_string());
+    }
+    let data = command
+        .data
+        .ok_or_else(|| "agy usage response missing data".to_string())?;
+
+    let mut windows = Vec::new();
+    for group in data.groups {
+        let group_name = group
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Antigravity");
+        for bucket in group.buckets {
+            let Some(id) = bucket
+                .id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            else {
+                continue;
+            };
+            let Some(fraction) = bucket.remaining_fraction else {
+                continue;
+            };
+            let reset = bucket.reset_time.as_deref().and_then(parse_datetime);
+            let label = bucket
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(|name| format!("{group_name} · {name}"))
+                .unwrap_or_else(|| format!("{group_name} · Limit"));
+            let card_id = format!("agy.{id}.v1");
+            if let Some(window) =
+                quota_window(label, fraction, reset, now, card_id.clone(), Some(card_id))
+            {
+                windows.push(window);
+            }
+        }
+    }
+    if windows.is_empty() {
+        return Err("agy usage response contained no valid quota windows".to_string());
+    }
+
+    Ok(Fetched {
+        source: "agy".to_string(),
+        identity: None,
+        account_scope: Err(AccountScopeError::NoTrustedEvidence),
+        history_scope: Err(AccountScopeError::NoTrustedEvidence),
+        cache_binding: None,
+        windows,
+    })
 }
 
 fn parse_user_status(body: &str, now: DateTime<Utc>) -> Result<Fetched, String> {
@@ -776,7 +955,7 @@ enum PrimaryQuotaAttempt {
     Success(Vec<UsageWindow>),
     Forbidden,
     SchemaContradiction(ProviderFetchFailure),
-    Transient,
+    Transient(ProviderFetchFailure),
     Terminal(ProviderFetchFailure),
 }
 
@@ -791,7 +970,7 @@ async fn fetch_oauth_primary(now: DateTime<Utc>) -> PrimaryAttempt<RemoteContext
         PrimaryQuotaAttempt::SchemaContradiction(failure) => {
             PrimaryAttempt::SchemaContradiction { context, failure }
         }
-        PrimaryQuotaAttempt::Transient => PrimaryAttempt::Transient(context),
+        PrimaryQuotaAttempt::Transient(failure) => PrimaryAttempt::Transient { context, failure },
         PrimaryQuotaAttempt::Terminal(failure) => PrimaryAttempt::FinalFailure(failure),
     }
 }
@@ -959,7 +1138,7 @@ async fn request_access_token(
     refresh_token: String,
     attempt_binding: ProviderCacheBinding,
 ) -> Result<Value, ProviderFetchFailure> {
-    let client = resolve_oauth_client().ok_or_else(|| {
+    let client = resolve_oauth_client().await.ok_or_else(|| {
         ProviderFetchFailure::terminal(
             "Antigravity OAuth client was not found. Install Antigravity.app or configure its OAuth client.",
         )
@@ -1268,8 +1447,7 @@ async fn fetch_available_models(
         Ok(response) => response,
         Err(CodeAssistPostFailure::Forbidden) => return PrimaryQuotaAttempt::Forbidden,
         Err(CodeAssistPostFailure::Failure(failure @ ProviderFetchFailure::Transient { .. })) => {
-            let _ = failure;
-            return PrimaryQuotaAttempt::Transient;
+            return PrimaryQuotaAttempt::Transient(failure);
         }
         Err(CodeAssistPostFailure::Failure(failure)) => {
             return PrimaryQuotaAttempt::Terminal(failure);
@@ -1573,9 +1751,9 @@ fn binding_candidate_is_better(
     candidate_index < current_index
 }
 
-// ── OAuth client discovery (scan installed Antigravity.app) ───────────────────
+// ── OAuth client discovery (scan Antigravity.app and the agy CLI) ─────────────
 
-fn resolve_oauth_client() -> Option<(String, String)> {
+async fn resolve_oauth_client() -> Option<(String, String)> {
     if let (Ok(id), Ok(secret)) = (
         std::env::var("ANTIGRAVITY_OAUTH_CLIENT_ID"),
         std::env::var("ANTIGRAVITY_OAUTH_CLIENT_SECRET"),
@@ -1585,12 +1763,28 @@ fn resolve_oauth_client() -> Option<(String, String)> {
             return Some((id, secret));
         }
     }
-    static CACHE: OnceLock<Option<(String, String)>> = OnceLock::new();
-    CACHE.get_or_init(discover_client_from_app).clone()
+    static CACHE: tokio::sync::OnceCell<Option<(String, String)>> =
+        tokio::sync::OnceCell::const_new();
+    CACHE
+        .get_or_init(|| async { discover_client_from_app().await })
+        .await
+        .clone()
 }
 
-fn discover_client_from_app() -> Option<(String, String)> {
-    for path in client_artifact_candidates() {
+async fn discover_client_from_app() -> Option<(String, String)> {
+    // The IDE is the canonical installation. Only consult `agy` when its
+    // artifacts do not provide a usable client, so the CLI remains optional.
+    if let Some(client) = discover_client_from_artifacts(client_artifact_candidates()) {
+        return Some(client);
+    }
+    discover_client_from_artifacts(agy_cli_artifact_candidates().await)
+}
+
+fn discover_client_from_artifacts<I>(paths: I) -> Option<(String, String)>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    for path in paths {
         let Ok(data) = std::fs::read(&path) else {
             continue;
         };
@@ -1620,6 +1814,102 @@ fn client_artifact_candidates() -> Vec<PathBuf> {
         .iter()
         .flat_map(|root| relative.iter().map(move |r| root.join(r)))
         .collect()
+}
+
+#[cfg(target_os = "macos")]
+async fn agy_cli_artifact_candidates() -> Vec<PathBuf> {
+    static CACHE: tokio::sync::OnceCell<Vec<PathBuf>> = tokio::sync::OnceCell::const_new();
+    CACHE
+        .get_or_init(|| async {
+            // PATH is the normal resolution rule. Only start a login shell
+            // when the GUI process did not inherit a usable PATH entry.
+            if let Some(path) = executable_from_path(std::env::var_os("PATH").as_deref(), "agy") {
+                return vec![path];
+            }
+            agy_cli_artifact_candidates_from(None, discover_agy_from_login_shell().await)
+        })
+        .await
+        .clone()
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn agy_cli_artifact_candidates() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+fn agy_cli_artifact_candidates_from(
+    path_env: Option<&OsStr>,
+    shell_path: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = executable_from_path(path_env, "agy") {
+        candidates.push(path);
+    }
+    if let Some(path) = shell_path.filter(|path| is_executable(path)) {
+        if !candidates.contains(&path) {
+            candidates.push(path);
+        }
+    }
+    candidates
+}
+
+fn executable_from_path(path_env: Option<&OsStr>, name: &str) -> Option<PathBuf> {
+    let path_env = path_env?;
+    std::env::split_paths(path_env)
+        .map(|directory| directory.join(name))
+        .find(|candidate| is_executable(candidate))
+}
+
+#[cfg(target_os = "macos")]
+async fn discover_agy_from_login_shell() -> Option<PathBuf> {
+    let script = "printf '\\0__TB_AGY_S__\\0'; command -v -- agy; printf '\\0__TB_AGY_E__\\0'";
+    let future = tokio::process::Command::new(crate::agent_usage::detect_login_shell())
+        .args(["-l", "-i", "-c", script])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), future)
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let start_marker = "\0__TB_AGY_S__\0";
+    let end_marker = "\0__TB_AGY_E__\0";
+    let start = stdout.find(start_marker)? + start_marker.len();
+    let rest = &stdout[start..];
+    let end = rest.find(end_marker)?;
+    rest[..end]
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .find(|candidate| candidate.is_absolute() && is_executable(candidate))
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn discover_agy_from_login_shell() -> Option<PathBuf> {
+    None
+}
+
+fn is_executable(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 fn is_token_byte(b: u8) -> bool {
@@ -1739,6 +2029,18 @@ fn gemini_home_from(
 mod tests {
     use super::*;
     use crate::agent_account_scope::test_support::TestRefreshScope;
+    use crate::agent_usage::SafeTransportDiagnostic;
+
+    fn mark_executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+        #[cfg(not(unix))]
+        let _ = path;
+    }
 
     #[test]
     fn gemini_home_uses_nonempty_configured_root_unchanged() {
@@ -1927,6 +2229,124 @@ mod tests {
     }
 
     #[test]
+    fn discovers_oauth_client_from_agy_on_path_without_installation_assumptions() {
+        let root = tempfile::tempdir().unwrap();
+        let agy = root.path().join("agy");
+        let client_id = ["884354919052", "-abc.apps.googleusercontent.com"].concat();
+        let client_secret = ["GOCSPX-", "abcdefghijklmnopqrstuvwxyz12"].concat();
+        std::fs::write(&agy, format!("agy cli\0{client_id}\0{client_secret}\0")).unwrap();
+        mark_executable(&agy);
+
+        let path_env = root.path().as_os_str();
+        let candidates = agy_cli_artifact_candidates_from(Some(path_env), None);
+        assert_eq!(candidates, vec![agy.clone()]);
+
+        let client = discover_client_from_artifacts(candidates).unwrap();
+        assert_eq!(client.0, client_id);
+        assert_eq!(client.1, client_secret);
+    }
+
+    #[test]
+    fn prefers_ide_artifact_before_agy_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let ide = root.path().join("language_server");
+        let agy = root.path().join("agy");
+        let ide_client_id = ["111111111111", "-ide.apps.googleusercontent.com"].concat();
+        let agy_client_id = ["222222222222", "-agy.apps.googleusercontent.com"].concat();
+        let ide_client_secret = ["GOCSPX-", "abcdefghijklmnopqrstuvwxyz12"].concat();
+        let agy_client_secret = ["GOCSPX-", "zyxwvutsrqponmlkjihgfedcba21"].concat();
+        std::fs::write(&ide, format!("ide {ide_client_id}\0{ide_client_secret}\0")).unwrap();
+        std::fs::write(&agy, format!("agy {agy_client_id}\0{agy_client_secret}\0")).unwrap();
+
+        let client = discover_client_from_artifacts(vec![ide, agy]).unwrap();
+        assert_eq!(client.0, ide_client_id);
+        assert_eq!(client.1, ide_client_secret);
+    }
+
+    #[test]
+    fn parses_agy_usage_json_into_quota_windows() {
+        let now = DateTime::parse_from_rfc3339("2026-08-24T06:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let body = br#"{
+            "status": "SUCCESS",
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Gemini Models",
+                            "buckets": [
+                                {"id": "gemini-weekly", "name": "Weekly Limit Remaining", "remaining_fraction": 0.8837259411811829, "reset_time": "2026-08-28T06:58:51Z"},
+                                {"id": "gemini-5h", "name": "Five Hour Limit Remaining", "remaining_fraction": 1, "reset_time": "2026-08-24T18:14:23Z"}
+                            ]
+                        },
+                        {
+                            "name": "Claude and GPT models",
+                            "buckets": [
+                                {"id": "3p-weekly", "name": "Weekly Limit Remaining", "remaining_fraction": 1, "reset_time": "2026-08-31T13:14:23Z"},
+                                {"id": "3p-5h", "name": "Five Hour Limit Remaining", "remaining_fraction": 1, "reset_time": "2026-08-24T18:14:23Z"}
+                            ]
+                        }
+                    ]
+                }
+            }
+        }"#;
+
+        let fetched = parse_agy_usage(body, now).unwrap();
+        assert_eq!(fetched.source, "agy");
+        assert_eq!(fetched.windows.len(), 4);
+        assert_eq!(
+            fetched.windows[0].label_for_test(),
+            "Gemini Models · Weekly Limit Remaining"
+        );
+        assert!((fetched.windows[0].remaining_for_test() - 88.37259411811829).abs() < f64::EPSILON);
+        assert_eq!(
+            fetched.windows[0].pace_window_key_for_test(),
+            Some("agy.gemini-weekly.v1")
+        );
+        assert_eq!(
+            fetched.windows[2].label_for_test(),
+            "Claude and GPT models · Weekly Limit Remaining"
+        );
+        let wire = serde_json::to_value(&fetched.windows[1]).unwrap();
+        assert_eq!(wire["cardId"], "agy.gemini-5h.v1");
+        let third_wire = serde_json::to_value(&fetched.windows[2]).unwrap();
+        assert_eq!(third_wire["cardId"], "agy.3p-weekly.v1");
+    }
+
+    #[test]
+    fn rejects_agy_usage_without_valid_windows() {
+        let now = Utc::now();
+        let body = br#"{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"buckets":[{"id":"bad","remaining_fraction":2.0}]}]}}}"#;
+        assert!(parse_agy_usage(body, now).is_err());
+    }
+
+    #[test]
+    fn rejects_agy_chat_response_without_usage_command() {
+        let now = Utc::now();
+        let body = br#"{
+            "status": "SUCCESS",
+            "response": "A model-generated answer",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        }"#;
+        assert!(parse_agy_usage(body, now).is_err());
+    }
+
+    #[test]
+    fn login_shell_agy_candidate_is_used_when_path_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let agy = root.path().join("agy");
+        std::fs::write(&agy, b"agy cli").unwrap();
+        mark_executable(&agy);
+
+        assert_eq!(
+            agy_cli_artifact_candidates_from(None, Some(agy.clone())),
+            vec![agy]
+        );
+    }
+
+    #[test]
     fn scans_client_id_glued_to_a_neighbouring_string() {
         // The fixture above separates the id with NUL, which is not a token byte,
         // so the walk-back stops on its own. A real language_server packs strings
@@ -1962,6 +2382,44 @@ mod tests {
             scan_client_ids(glued_digits),
             vec!["99000123-abcDEF_g.apps.googleusercontent.com".to_string()]
         );
+    }
+
+    #[test]
+    fn skips_non_executable_path_candidate_before_shell_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let path_dir = root.path().join("path");
+        std::fs::create_dir_all(&path_dir).unwrap();
+        let path_candidate = path_dir.join("agy");
+        let shell_candidate = root.path().join("shell-agy");
+        std::fs::write(&path_candidate, b"not executable").unwrap();
+        std::fs::write(&shell_candidate, b"agy cli").unwrap();
+        mark_executable(&shell_candidate);
+
+        assert_eq!(
+            agy_cli_artifact_candidates_from(
+                Some(path_candidate.parent().unwrap().as_os_str()),
+                Some(shell_candidate.clone()),
+            ),
+            vec![shell_candidate]
+        );
+    }
+
+    #[test]
+    fn agy_fallback_only_runs_for_terminal_failures() {
+        let transient = ProviderFetchFailure::transient(
+            "temporary",
+            None,
+            SafeTransportDiagnostic::from_facts(TransportErrorFacts::synthetic(
+                true,
+                false,
+                TransportPhase::Request,
+                None,
+            )),
+        );
+        assert!(!should_try_agy_fallback(&transient));
+        assert!(should_try_agy_fallback(&ProviderFetchFailure::terminal(
+            "terminal"
+        )));
     }
 
     #[test]
@@ -2594,7 +3052,12 @@ mod tests {
 
         let transient_recovered = fetch_with(
             || async { LocalAttempt::RouteMiss },
-            || async { PrimaryAttempt::Transient(()) },
+            || async {
+                PrimaryAttempt::Transient {
+                    context: (),
+                    failure: orchestration_transient("primary transient"),
+                }
+            },
             |()| async { Ok(orchestration_fetched("secondary")) },
         )
         .await
@@ -2603,20 +3066,30 @@ mod tests {
 
         let transient_then_terminal = fetch_with(
             || async { LocalAttempt::RouteMiss },
-            || async { PrimaryAttempt::Transient(()) },
+            || async {
+                PrimaryAttempt::Transient {
+                    context: (),
+                    failure: orchestration_transient("primary transient"),
+                }
+            },
             |()| async { Err(ProviderFetchFailure::terminal("secondary terminal")) },
         )
         .await
         .unwrap_err();
         assert!(matches!(
             transient_then_terminal,
-            ProviderFetchFailure::Terminal { ref display }
-                if display == "secondary terminal"
+            ProviderFetchFailure::Transient { ref display, .. }
+                if display == "primary transient"
         ));
 
         let both_transient = fetch_with(
             || async { LocalAttempt::RouteMiss },
-            || async { PrimaryAttempt::Transient(()) },
+            || async {
+                PrimaryAttempt::Transient {
+                    context: (),
+                    failure: orchestration_transient("primary transient"),
+                }
+            },
             |()| async { Err(orchestration_transient("secondary transient")) },
         )
         .await
