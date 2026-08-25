@@ -52,6 +52,23 @@ const MONTHLY_TIMEOUT_SECS: u64 = 5;
 /// exactly (not by substring) so `..._BIWEEKLY` / `..._NOT_WEEKLY` can't pass.
 const WEEKLY_PERIOD_TYPE: &str = "USAGE_PERIOD_TYPE_WEEKLY";
 const WEEKLY_WINDOW_KEY: &str = "billing.weekly.v1";
+/// The weekly pace series, versioned apart from the card id on purpose.
+///
+/// Quota history keys a series by (provider, account scope, window key) and
+/// fits run-out forecasts over that exact series. Every sample recorded before
+/// the pool fix holds the `GrokBuild` product share, and every sample after it
+/// holds the whole weekly credit pool; for anyone who also spends credits
+/// outside the CLI those are different quantities, and a fit spanning the
+/// splice would report a burn rate nothing consumed. `v2` starts a clean
+/// series, and the stale `v1` one falls out through the ordinary
+/// inactive-series eviction.
+///
+/// The card id deliberately stays `v1`: it is what a stored tray or card window
+/// selection is written against, and moving it would leave anyone who pinned
+/// the weekly window pointing at a card that no longer exists. Losing a few
+/// cycles of pace history is the intended cost here; silently unresolving a
+/// saved selection is not.
+const WEEKLY_PACE_SERIES_KEY: &str = "billing.weekly.v2";
 const MONTHLY_WINDOW_KEY: &str = "billing.monthly.v1";
 
 pub(crate) struct GrokData {
@@ -445,7 +462,7 @@ fn weekly_window(config: &BillingConfig, now: DateTime<Utc>) -> Option<UsageWind
     )
     .with_identity(
         WEEKLY_WINDOW_KEY,
-        Some(WEEKLY_WINDOW_KEY.to_string()),
+        Some(WEEKLY_PACE_SERIES_KEY.to_string()),
         period.duration,
         None,
     );
@@ -1194,7 +1211,7 @@ mod tests {
         assert_eq!(data.windows[0].label_for_test(), "Weekly");
         assert_eq!(
             data.windows[0].pace_window_key_for_test(),
-            Some("billing.weekly.v1")
+            Some("billing.weekly.v2")
         );
         assert!((data.windows[0].remaining_for_test() - 96.0).abs() < 0.01);
         // [1] Monthly: 216/15000 = 1.44% used -> 98.56% remaining, resets 2026-08-01.
@@ -1537,7 +1554,7 @@ mod tests {
         assert_eq!(data.windows[0].window_minutes_for_test(), Some(10_080));
         assert_eq!(
             data.windows[0].pace_window_key_for_test(),
-            Some("billing.weekly.v1")
+            Some("billing.weekly.v2")
         );
         assert!((data.windows[0].remaining_for_test() - 96.0).abs() < 0.01);
         assert_eq!(
@@ -1724,7 +1741,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(wire["cardId"], "billing.weekly.v1");
-        assert_eq!(wire["paceStatus"]["windowKey"], "billing.weekly.v1");
+        assert_eq!(wire["paceStatus"]["windowKey"], "billing.weekly.v2");
         assert_eq!(wire["paceStatus"]["state"], "learningDuration");
         assert!(wire["resetsAt"].as_str().is_some());
         assert!(wire["paceStatus"].get("durationSeconds").is_none());
@@ -1751,7 +1768,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(wire["cardId"], "billing.weekly.v1");
-        assert_eq!(wire["paceStatus"]["windowKey"], "billing.weekly.v1");
+        assert_eq!(wire["paceStatus"]["windowKey"], "billing.weekly.v2");
         assert_eq!(wire["paceStatus"]["durationSeconds"], 86_400);
         assert_eq!(wire["paceStatus"]["durationSource"], "provider");
 
@@ -1777,7 +1794,7 @@ mod tests {
                 weekly_window(&config, parse_timestamp("2026-07-17T12:00:00Z").unwrap()).unwrap();
             let wire = serde_json::to_value(&window).unwrap();
             assert_eq!(
-                wire["paceStatus"]["windowKey"], "billing.weekly.v1",
+                wire["paceStatus"]["windowKey"], "billing.weekly.v2",
                 "{label}"
             );
             assert_eq!(wire["paceStatus"]["state"], "unavailable", "{label}");
