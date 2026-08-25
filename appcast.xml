@@ -3,6 +3,23 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>1.14.2</title>
+            <pubDate>Tue, 25 Aug 2026 08:56:38 +0000</pubDate>
+            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.14.2</link>
+            <sparkle:version>849</sparkle:version>
+            <sparkle:shortVersionString>1.14.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>Fixes:</b>
+<ul>
+<li>Antigravity quota keeps updating when the Antigravity IDE is closed, and now appears even when the IDE is not installed. TokenBar reads it from your signed-in Google account, or from the Antigravity command-line tool (agy) when that is what is available, instead of depending on the running IDE.</li>
+<li>Antigravity no longer shows "OAuth client was not found" on a Mac where the IDE is installed. Reading the sign-in client from the installed app could absorb a neighbouring value and reject a valid one, which silently disabled the account route whenever the IDE was closed.</li>
+</ul>
+<p>Thanks: @iF2007</p>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.14.2/TokenBar.app.tar.gz" length="10042698" type="application/octet-stream" sparkle:edSignature="eyK8DJ4b8FOIdcdwJ9J6pcGiSVw8PXu3mNNi8hElG0ou8g79KJU1eP8Fdxcmc6XVY0Oqf+VdjI1Kixhv5BgWBw=="/>
+        </item>
+        <item>
             <title>1.14.1</title>
             <pubDate>Mon, 24 Aug 2026 12:29:50 +0000</pubDate>
             <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.14.1</link>
@@ -103,21 +120,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.13.2/TokenBar.app.tar.gz" length="9109326" type="application/octet-stream" sparkle:edSignature="9TmLyswqwu+/P4YE/Pd0Dg+7caeWvB4PPQ3/2fUsQepPi2GhWBcczRmP8FUvolpsMDqcuisuKYQw405il4mjBQ=="/>
-        </item>
-        <item>
-            <title>1.13.1</title>
-            <pubDate>Sat, 08 Aug 2026 21:53:31 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.13.1</link>
-            <sparkle:version>643</sparkle:version>
-            <sparkle:shortVersionString>1.13.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>Fixes:</b>
-<ul>
-<li>The Discord agent picker no longer lists every agent TokenBar recognises. It used to offer a row for each one, including agents you had never run and agents you had hidden, and naming one of those left the presence empty without saying why.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.13.1/TokenBar.app.tar.gz" length="9102093" type="application/octet-stream" sparkle:edSignature="1Ya2FetXs5MIehPSqhWjYTzSQ6gA7bB8+roq5l7DD5Hf66fd12oAq0zORj9+583UAtTCdOMkcN3OghDQOnCKAA=="/>
         </item>
         <item>
             <title>1.1.1</title>
