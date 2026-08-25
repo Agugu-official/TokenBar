@@ -1645,11 +1645,15 @@ fn scan_client_ids(data: &[u8]) -> Vec<String> {
         }
         // The walk-back is greedy over `-` and `_` as well as alphanumerics, and
         // in a packed binary the bytes in front of a client id belong to whichever
-        // string was laid down next to it. A Google client id is `<digits>-<token>`,
-        // so re-anchor on the first `-` and keep only the digit run immediately
-        // before it; otherwise the neighbour's tail lands in the head and
-        // `valid_client_id` rejects an id that is really there.
-        if let Some(dash) = data[start..end].iter().position(|b| *b == b'-') {
+        // string was laid down next to it. A Google client id is `<digits>-<token>`
+        // with a single hyphen — the token and the `.apps.googleusercontent.com`
+        // suffix carry none — so the id's delimiter is the LAST hyphen in the
+        // segment. Re-anchor there and keep only the digit run immediately before
+        // it. Anchoring on the first hyphen instead would keep a neighbour's own
+        // `…letters<digits>-` tail in the head, and because `valid_client_id` only
+        // checks the digits before the first hyphen it would accept the fabricated
+        // id (e.g. `123-beta456-real.apps…` instead of `456-real.apps…`).
+        if let Some(dash) = data[start..end].iter().rposition(|b| *b == b'-') {
             let mut head = start + dash;
             while head > start && data[head - 1].is_ascii_digit() {
                 head -= 1;
@@ -1936,11 +1940,23 @@ mod tests {
             vec!["123-abcDEF_g.apps.googleusercontent.com".to_string()]
         );
 
-        // ponytail: a neighbour whose own tail is digits is indistinguishable from
-        // the id's numeric head, so the longest digit run wins and those digits are
-        // kept. Nothing in the byte stream marks the boundary; the only stronger
-        // fix would be reading Mach-O string sections instead of scanning bytes,
-        // which is a lot of machinery for a case Google's 12-digit ids make rare.
+        // A neighbour whose own tail is `…<letters><digits>-` puts a second hyphen
+        // in the segment. The id's delimiter is the last one (its token carries
+        // none), so anchoring there recovers the real id; anchoring on the first
+        // hyphen would keep the neighbour's `123-beta` and `valid_client_id` — which
+        // only checks the digits before the first hyphen — would accept it.
+        let two_hyphens = b"label123-beta456-real.apps.googleusercontent.com\x00tail";
+        assert_eq!(
+            scan_client_ids(two_hyphens),
+            vec!["456-real.apps.googleusercontent.com".to_string()]
+        );
+
+        // ponytail: a neighbour whose tail is digits glued straight onto the id's
+        // project number (no intervening hyphen) is indistinguishable from the head,
+        // so the longest digit run wins and those digits are kept. Nothing in the
+        // byte stream marks that boundary; the only stronger fix would be reading
+        // Mach-O string sections instead of scanning bytes, which is a lot of
+        // machinery for a case Google's 12-digit ids make rare.
         let glued_digits = b"prefix99000123-abcDEF_g.apps.googleusercontent.com\x00tail";
         assert_eq!(
             scan_client_ids(glued_digits),
