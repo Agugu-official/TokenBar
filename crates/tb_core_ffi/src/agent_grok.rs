@@ -33,10 +33,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const GROK_TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
-/// Weekly SuperGrok credits meter. Returns `creditUsagePercent` / a `GrokBuild`
-/// product percent over a weekly `currentPeriod`. Right after a weekly reset,
-/// with no usage recorded yet, xAI OMITS those percent fields — the period is
-/// still reported, so that state is a genuine 0%, not an error.
+/// Weekly SuperGrok credits meter. Returns `creditUsagePercent` — the shared
+/// weekly credit pool — plus a `productUsage[]` decomposition of that same pool,
+/// over a weekly `currentPeriod`. Right after a weekly reset, with no usage
+/// recorded yet, xAI OMITS those percent fields — the period is still reported,
+/// so that state is a genuine 0%, not an error.
 const GROK_CREDITS_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 /// Monthly included-allowance meter. The default view reports `monthlyLimit` +
 /// `used` over a monthly billing period (percent = used / monthlyLimit).
@@ -479,10 +480,25 @@ enum WeeklyPercent {
     Invalid,
 }
 
-/// Prefer `GrokBuild.usagePercent`; only when that field is absent (product
-/// missing or key omitted) fall through to `creditUsagePercent`. A present but
-/// unparsable/out-of-range value on the chosen field is `Invalid`, not `Absent`.
+/// Prefer `creditUsagePercent`; only when that field is absent fall through to
+/// the `GrokBuild` product row. A present but unparsable/out-of-range value on
+/// the chosen field is `Invalid`, not `Absent`.
+///
+/// `creditUsagePercent` is the weekly credit *pool* — the meter that decides
+/// when requests start being refused. `productUsage[]` decomposes that same
+/// pool per product (`GrokBuild`, `GrokChat`, `Api`, ...), so a product row is
+/// at most the pool figure and is under it by whatever the other products
+/// spent. Reading `GrokBuild` as the window therefore under-reported depletion
+/// for anyone who also used Grok outside the CLI, and said "4% left" against an
+/// exhausted pool (issue #240). The product row survives only as a fallback for
+/// a payload that omits the pool percent entirely.
 fn weekly_used_percent(config: &BillingConfig) -> WeeklyPercent {
+    if let Some(raw) = config.credit_usage_percent.as_deref() {
+        return match valid_percentage(raw) {
+            Some(pct) => WeeklyPercent::Value(pct),
+            None => WeeklyPercent::Invalid,
+        };
+    }
     if let Some(products) = config.product_usage.as_ref() {
         for product in products {
             let name = product.product.as_deref().unwrap_or("");
@@ -493,18 +509,12 @@ fn weekly_used_percent(config: &BillingConfig) -> WeeklyPercent {
                         None => WeeklyPercent::Invalid,
                     };
                 }
-                // GrokBuild row present but usagePercent key omitted — try overall.
+                // GrokBuild row present but usagePercent key omitted.
                 break;
             }
         }
     }
-    match config.credit_usage_percent.as_deref() {
-        Some(raw) => match valid_percentage(raw) {
-            Some(pct) => WeeklyPercent::Value(pct),
-            None => WeeklyPercent::Invalid,
-        },
-        None => WeeklyPercent::Absent,
-    }
+    WeeklyPercent::Absent
 }
 
 /// Monthly included-allowance window: percent = used / monthlyLimit. Only
@@ -1312,7 +1322,7 @@ mod tests {
     }
 
     #[test]
-    fn prefers_grok_build_product_percent() {
+    fn prefers_overall_credit_percent_over_product_row() {
         let config: BillingConfig = serde_json::from_str(
             r#"{
                 "creditUsagePercent": 50.0,
@@ -1324,19 +1334,54 @@ mod tests {
         )
         .unwrap();
         match weekly_used_percent(&config) {
-            WeeklyPercent::Value(pct) => assert!((pct - 4.0).abs() < 0.01),
-            other => panic!("expected Value(4.0), got {other:?}"),
+            WeeklyPercent::Value(pct) => assert!((pct - 50.0).abs() < 0.01),
+            other => panic!("expected Value(50.0), got {other:?}"),
         }
     }
 
     #[test]
-    fn falls_back_to_overall_credit_percent() {
+    fn exhausted_pool_is_zero_remaining_not_the_product_share() {
+        // Issue #240: the pool is spent, but the CLI's own share of it is 96%,
+        // so reading the product row published "4% left" on a subscription that
+        // was refusing requests.
+        let credits = r#"{
+            "config": {
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "start": "2026-07-15T00:00:00+00:00",
+                    "end": "2026-07-22T00:00:00+00:00"
+                },
+                "creditUsagePercent": 100.0,
+                "productUsage": [
+                    { "product": "GrokChat", "usagePercent": 4.0 },
+                    { "product": "GrokBuild", "usagePercent": 96.0 }
+                ]
+            }
+        }"#;
+        let data = build_grok_data(
+            credits,
+            None,
+            &test_credentials(),
+            now(),
+            scope_none(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(data.windows.len(), 1);
+        assert!(
+            data.windows[0].remaining_for_test().abs() < 0.01,
+            "exhausted weekly pool must publish 0% remaining, got {}",
+            data.windows[0].remaining_for_test()
+        );
+    }
+
+    #[test]
+    fn falls_back_to_product_percent_without_overall_credit() {
         let config: BillingConfig = serde_json::from_str(
             r#"{
-                "creditUsagePercent": 12.5,
                 "productUsage": [
-                    { "product": "GrokChat" },
-                    { "product": "GrokBuild" }
+                    { "product": "GrokChat", "usagePercent": 10.0 },
+                    { "product": "GrokBuild", "usagePercent": 12.5 }
                 ]
             }"#,
         )
@@ -1349,25 +1394,36 @@ mod tests {
 
     #[test]
     fn rejects_invalid_usage_percentages_before_wire() {
-        let invalid_product: BillingConfig = serde_json::from_str(
+        let invalid_credit: BillingConfig = serde_json::from_str(
             r#"{
-                "creditUsagePercent": 12.5,
+                "creditUsagePercent": 150.0,
                 "productUsage": [
-                    { "product": "GrokBuild", "usagePercent": 150.0 }
+                    { "product": "GrokBuild", "usagePercent": 12.5 }
                 ]
             }"#,
         )
         .unwrap();
-        // Present-but-out-of-range GrokBuild fails that field; do not fall back.
-        assert_eq!(
-            weekly_used_percent(&invalid_product),
-            WeeklyPercent::Invalid
-        );
+        // Present-but-out-of-range pool percent fails that field; do not fall back.
+        assert_eq!(weekly_used_percent(&invalid_credit), WeeklyPercent::Invalid);
 
         for invalid in ["1e400", r#""NaN""#] {
+            let malformed_credit: BillingConfig = serde_json::from_str(&format!(
+                r#"{{
+                    "creditUsagePercent": {invalid},
+                    "productUsage": [
+                        {{ "product": "GrokBuild", "usagePercent": 12.5 }}
+                    ]
+                }}"#
+            ))
+            .unwrap();
+            assert_eq!(
+                weekly_used_percent(&malformed_credit),
+                WeeklyPercent::Invalid
+            );
+
+            // Same rule on the fallback field when the pool percent is absent.
             let malformed_product: BillingConfig = serde_json::from_str(&format!(
                 r#"{{
-                    "creditUsagePercent": 12.5,
                     "productUsage": [
                         {{ "product": "GrokBuild", "usagePercent": {invalid} }}
                     ]
@@ -1384,7 +1440,7 @@ mod tests {
             r#"{
                 "creditUsagePercent": -1.0,
                 "productUsage": [
-                    { "product": "GrokBuild", "usagePercent": 150.0 }
+                    { "product": "GrokBuild", "usagePercent": 4.0 }
                 ]
             }"#,
         )
