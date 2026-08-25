@@ -12117,6 +12117,23 @@ enum SelfTest {
                    && Format.money(tokens: 2_100_000, cost: 0.003) == "<$0.01",
                "QH-MONEY tokens with no price get a dash rather than a false total, "
                    + "while a window that genuinely spent nothing still reads $0.00")
+        // FMT-TIER. `compactTokens` picked its unit from the raw value and only
+        // then rounded the mantissa, so a `%.0f` carry out of 999.5 published a
+        // mantissa that had left its own tier: "1000M", "1000K".
+        expect(Format.compactTokens(999_500_000) == "1B"
+                   && Format.compactTokens(999_999_999) == "1B"
+                   && Format.compactTokens(999_500) == "1M"
+                   && Format.compactTokens(999_999) == "1M",
+               "FMT-TIER a mantissa that rounds up to 1000 is promoted to the next "
+                   + "unit rather than printed as \"1000M\" / \"1000K\"")
+        expect(Format.compactTokens(999_499_999) == "999M"
+                   && Format.compactTokens(999_499) == "999K"
+                   && Format.compactTokens(1_000_000_000) == "1B"
+                   && Format.compactTokens(1_234_567) == "1.2M"
+                   && Format.compactTokens(12_345) == "12.3K"
+                   && Format.compactTokens(999) == "999",
+               "FMT-TIER every value outside the two half-unit bands renders exactly "
+                   + "as it did before the promotion was added")
         // QH-REASON. "Not enough history" is a false sentence for three of the
         // states that reach the heatmap tooltip's fallback: their history is
         // sufficient and each fails for its own reason.

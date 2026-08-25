@@ -8,10 +8,17 @@ enum Format {
         let value = Double(count)
         let scaled: Double
         let suffix: String
+        // Tier boundaries sit at the ROUNDING boundary, not at the unit: the
+        // `>= 100` arm below prints `%.0f`, so 999_500_000 scales to 999.5 and
+        // carries to "1000M" — a mantissa that has left its own tier. Promoting
+        // at 999_500 / 999_500_000 renders those bands as "1M" / "1B" instead.
+        // Every value outside the two half-unit bands picks the same tier it
+        // always did. (The top of the B tier has nowhere to promote to, so
+        // 999.5B still prints "1000B".)
         switch value {
-        case 1_000_000_000...:
+        case 999_500_000...:
             (scaled, suffix) = (value / 1_000_000_000, "B")
-        case 1_000_000...:
+        case 999_500...:
             (scaled, suffix) = (value / 1_000_000, "M")
         case 1_000...:
             (scaled, suffix) = (value / 1_000, "K")
