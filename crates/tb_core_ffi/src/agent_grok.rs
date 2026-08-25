@@ -33,10 +33,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const GROK_TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
-/// Weekly SuperGrok credits meter. Returns `creditUsagePercent` / a `GrokBuild`
-/// product percent over a weekly `currentPeriod`. Right after a weekly reset,
-/// with no usage recorded yet, xAI OMITS those percent fields — the period is
-/// still reported, so that state is a genuine 0%, not an error.
+/// Weekly SuperGrok credits meter. Returns `creditUsagePercent` — the shared
+/// weekly credit pool — plus a `productUsage[]` decomposition of that same pool,
+/// over a weekly `currentPeriod`. Right after a weekly reset, with no usage
+/// recorded yet, xAI OMITS those percent fields — the period is still reported,
+/// so that state is a genuine 0%, not an error.
 const GROK_CREDITS_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 /// Monthly included-allowance meter. The default view reports `monthlyLimit` +
 /// `used` over a monthly billing period (percent = used / monthlyLimit).
@@ -51,6 +52,23 @@ const MONTHLY_TIMEOUT_SECS: u64 = 5;
 /// exactly (not by substring) so `..._BIWEEKLY` / `..._NOT_WEEKLY` can't pass.
 const WEEKLY_PERIOD_TYPE: &str = "USAGE_PERIOD_TYPE_WEEKLY";
 const WEEKLY_WINDOW_KEY: &str = "billing.weekly.v1";
+/// The weekly pace series, versioned apart from the card id on purpose.
+///
+/// Quota history keys a series by (provider, account scope, window key) and
+/// fits run-out forecasts over that exact series. Every sample recorded before
+/// the pool fix holds the `GrokBuild` product share, and every sample after it
+/// holds the whole weekly credit pool; for anyone who also spends credits
+/// outside the CLI those are different quantities, and a fit spanning the
+/// splice would report a burn rate nothing consumed. `v2` starts a clean
+/// series, and the stale `v1` one falls out through the ordinary
+/// inactive-series eviction.
+///
+/// The card id deliberately stays `v1`: it is what a stored tray or card window
+/// selection is written against, and moving it would leave anyone who pinned
+/// the weekly window pointing at a card that no longer exists. Losing a few
+/// cycles of pace history is the intended cost here; silently unresolving a
+/// saved selection is not.
+const WEEKLY_PACE_SERIES_KEY: &str = "billing.weekly.v2";
 const MONTHLY_WINDOW_KEY: &str = "billing.monthly.v1";
 
 pub(crate) struct GrokData {
@@ -155,11 +173,13 @@ struct UsagePeriod {
     end: Option<String>,
 }
 
+/// One product's share of the weekly credit pool. The `product` name is
+/// deliberately not decoded: no product is privileged any more, because a
+/// share cannot answer the pool window whichever product it belongs to, and
+/// any product's usage refutes an empty week equally.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProductUsage {
-    #[serde(default)]
-    product: Option<String>,
     #[serde(default)]
     usage_percent: Option<Box<RawValue>>,
 }
@@ -444,7 +464,7 @@ fn weekly_window(config: &BillingConfig, now: DateTime<Utc>) -> Option<UsageWind
     )
     .with_identity(
         WEEKLY_WINDOW_KEY,
-        Some(WEEKLY_WINDOW_KEY.to_string()),
+        Some(WEEKLY_PACE_SERIES_KEY.to_string()),
         period.duration,
         None,
     );
@@ -479,31 +499,44 @@ enum WeeklyPercent {
     Invalid,
 }
 
-/// Prefer `GrokBuild.usagePercent`; only when that field is absent (product
-/// missing or key omitted) fall through to `creditUsagePercent`. A present but
-/// unparsable/out-of-range value on the chosen field is `Invalid`, not `Absent`.
+/// `creditUsagePercent` is the only field that can answer this window. A
+/// present but unparsable/out-of-range value is `Invalid`, not `Absent`.
+///
+/// `creditUsagePercent` is the weekly credit *pool* — the meter that decides
+/// when requests start being refused. `productUsage[]` decomposes that same
+/// pool per product (`GrokBuild`, `GrokChat`, `Api`, ...), so a product row is
+/// at most the pool figure and is under it by whatever the other products
+/// spent. Reading `GrokBuild` as the window therefore under-reported depletion
+/// for anyone who also used Grok outside the CLI, and said "4% left" against an
+/// exhausted pool (issue #240).
+///
+/// That is why no product row is read as a *value*, not even as a fallback: a
+/// share of the pool is not a reading of the pool, and one recorded under the
+/// weekly pace series would splice a second quantity into it the moment a later
+/// refresh restored the pool field.
+///
+/// A product row can still *refute*. Absent percent fields are read as an empty
+/// week further down, and since the pool is at least as full as any single
+/// product's share, a product reporting usage proves the week is not empty. A
+/// present `usagePercent` that is not a parsable zero therefore fails the
+/// reading closed rather than letting a fabricated 0% through.
 fn weekly_used_percent(config: &BillingConfig) -> WeeklyPercent {
-    if let Some(products) = config.product_usage.as_ref() {
-        for product in products {
-            let name = product.product.as_deref().unwrap_or("");
-            if name.eq_ignore_ascii_case("GrokBuild") {
-                if let Some(usage_percent) = product.usage_percent.as_deref() {
-                    return match valid_percentage(usage_percent) {
-                        Some(pct) => WeeklyPercent::Value(pct),
-                        None => WeeklyPercent::Invalid,
-                    };
-                }
-                // GrokBuild row present but usagePercent key omitted — try overall.
-                break;
-            }
-        }
-    }
-    match config.credit_usage_percent.as_deref() {
-        Some(raw) => match valid_percentage(raw) {
+    if let Some(raw) = config.credit_usage_percent.as_deref() {
+        return match valid_percentage(raw) {
             Some(pct) => WeeklyPercent::Value(pct),
             None => WeeklyPercent::Invalid,
-        },
-        None => WeeklyPercent::Absent,
+        };
+    }
+    let usage_seen = config.product_usage.iter().flatten().any(|product| {
+        product
+            .usage_percent
+            .as_deref()
+            .is_some_and(|raw| valid_percentage(raw) != Some(0.0))
+    });
+    if usage_seen {
+        WeeklyPercent::Invalid
+    } else {
+        WeeklyPercent::Absent
     }
 }
 
@@ -1184,7 +1217,7 @@ mod tests {
         assert_eq!(data.windows[0].label_for_test(), "Weekly");
         assert_eq!(
             data.windows[0].pace_window_key_for_test(),
-            Some("billing.weekly.v1")
+            Some("billing.weekly.v2")
         );
         assert!((data.windows[0].remaining_for_test() - 96.0).abs() < 0.01);
         // [1] Monthly: 216/15000 = 1.44% used -> 98.56% remaining, resets 2026-08-01.
@@ -1312,7 +1345,7 @@ mod tests {
     }
 
     #[test]
-    fn prefers_grok_build_product_percent() {
+    fn prefers_overall_credit_percent_over_product_row() {
         let config: BillingConfig = serde_json::from_str(
             r#"{
                 "creditUsagePercent": 50.0,
@@ -1324,50 +1357,118 @@ mod tests {
         )
         .unwrap();
         match weekly_used_percent(&config) {
-            WeeklyPercent::Value(pct) => assert!((pct - 4.0).abs() < 0.01),
-            other => panic!("expected Value(4.0), got {other:?}"),
+            WeeklyPercent::Value(pct) => assert!((pct - 50.0).abs() < 0.01),
+            other => panic!("expected Value(50.0), got {other:?}"),
         }
     }
 
     #[test]
-    fn falls_back_to_overall_credit_percent() {
-        let config: BillingConfig = serde_json::from_str(
-            r#"{
-                "creditUsagePercent": 12.5,
+    fn exhausted_pool_is_zero_remaining_not_the_product_share() {
+        // Issue #240: the pool is spent, but the CLI's own share of it is 96%,
+        // so reading the product row published "4% left" on a subscription that
+        // was refusing requests.
+        let credits = r#"{
+            "config": {
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "start": "2026-07-15T00:00:00+00:00",
+                    "end": "2026-07-22T00:00:00+00:00"
+                },
+                "creditUsagePercent": 100.0,
                 "productUsage": [
-                    { "product": "GrokChat" },
-                    { "product": "GrokBuild" }
+                    { "product": "GrokChat", "usagePercent": 4.0 },
+                    { "product": "GrokBuild", "usagePercent": 96.0 }
+                ]
+            }
+        }"#;
+        let data = build_grok_data(
+            credits,
+            None,
+            &test_credentials(),
+            now(),
+            scope_none(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(data.windows.len(), 1);
+        assert!(
+            data.windows[0].remaining_for_test().abs() < 0.01,
+            "exhausted weekly pool must publish 0% remaining, got {}",
+            data.windows[0].remaining_for_test()
+        );
+    }
+
+    #[test]
+    fn product_rows_refute_an_empty_week_but_never_supply_the_pool() {
+        // No pool percent, but the rows show usage. The old fallback answered
+        // 12.5 here, which would have spliced a product share into the pace
+        // series the next time the pool field came back.
+        let usage_seen: BillingConfig = serde_json::from_str(
+            r#"{
+                "productUsage": [
+                    { "product": "GrokChat", "usagePercent": 10.0 },
+                    { "product": "GrokBuild", "usagePercent": 12.5 }
                 ]
             }"#,
         )
         .unwrap();
-        match weekly_used_percent(&config) {
-            WeeklyPercent::Value(pct) => assert!((pct - 12.5).abs() < 0.01),
-            other => panic!("expected Value(12.5), got {other:?}"),
-        }
+        assert_eq!(weekly_used_percent(&usage_seen), WeeklyPercent::Invalid);
+
+        // A GrokBuild row alone is no more of a pool reading than the pair.
+        let build_only: BillingConfig = serde_json::from_str(
+            r#"{ "productUsage": [ { "product": "GrokBuild", "usagePercent": 12.5 } ] }"#,
+        )
+        .unwrap();
+        assert_eq!(weekly_used_percent(&build_only), WeeklyPercent::Invalid);
+
+        // Explicit zeros do not refute the empty week, so a freshly reset week
+        // that itemizes its products still reads as 0% rather than erroring.
+        let all_zero: BillingConfig = serde_json::from_str(
+            r#"{
+                "productUsage": [
+                    { "product": "GrokChat", "usagePercent": 0.0 },
+                    { "product": "GrokBuild", "usagePercent": 0 }
+                ]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(weekly_used_percent(&all_zero), WeeklyPercent::Absent);
     }
 
     #[test]
     fn rejects_invalid_usage_percentages_before_wire() {
-        let invalid_product: BillingConfig = serde_json::from_str(
+        let invalid_credit: BillingConfig = serde_json::from_str(
             r#"{
-                "creditUsagePercent": 12.5,
+                "creditUsagePercent": 150.0,
                 "productUsage": [
-                    { "product": "GrokBuild", "usagePercent": 150.0 }
+                    { "product": "GrokBuild", "usagePercent": 12.5 }
                 ]
             }"#,
         )
         .unwrap();
-        // Present-but-out-of-range GrokBuild fails that field; do not fall back.
-        assert_eq!(
-            weekly_used_percent(&invalid_product),
-            WeeklyPercent::Invalid
-        );
+        // Present-but-out-of-range pool percent fails that field; do not fall back.
+        assert_eq!(weekly_used_percent(&invalid_credit), WeeklyPercent::Invalid);
 
         for invalid in ["1e400", r#""NaN""#] {
+            let malformed_credit: BillingConfig = serde_json::from_str(&format!(
+                r#"{{
+                    "creditUsagePercent": {invalid},
+                    "productUsage": [
+                        {{ "product": "GrokBuild", "usagePercent": 12.5 }}
+                    ]
+                }}"#
+            ))
+            .unwrap();
+            assert_eq!(
+                weekly_used_percent(&malformed_credit),
+                WeeklyPercent::Invalid
+            );
+
+            // With the pool percent absent, an unreadable product row is not a
+            // parsable zero, so it refutes the empty week rather than passing
+            // a fabricated 0% through.
             let malformed_product: BillingConfig = serde_json::from_str(&format!(
                 r#"{{
-                    "creditUsagePercent": 12.5,
                     "productUsage": [
                         {{ "product": "GrokBuild", "usagePercent": {invalid} }}
                     ]
@@ -1384,7 +1485,7 @@ mod tests {
             r#"{
                 "creditUsagePercent": -1.0,
                 "productUsage": [
-                    { "product": "GrokBuild", "usagePercent": 150.0 }
+                    { "product": "GrokBuild", "usagePercent": 4.0 }
                 ]
             }"#,
         )
@@ -1481,7 +1582,7 @@ mod tests {
         assert_eq!(data.windows[0].window_minutes_for_test(), Some(10_080));
         assert_eq!(
             data.windows[0].pace_window_key_for_test(),
-            Some("billing.weekly.v1")
+            Some("billing.weekly.v2")
         );
         assert!((data.windows[0].remaining_for_test() - 96.0).abs() < 0.01);
         assert_eq!(
@@ -1668,7 +1769,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(wire["cardId"], "billing.weekly.v1");
-        assert_eq!(wire["paceStatus"]["windowKey"], "billing.weekly.v1");
+        assert_eq!(wire["paceStatus"]["windowKey"], "billing.weekly.v2");
         assert_eq!(wire["paceStatus"]["state"], "learningDuration");
         assert!(wire["resetsAt"].as_str().is_some());
         assert!(wire["paceStatus"].get("durationSeconds").is_none());
@@ -1695,7 +1796,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(wire["cardId"], "billing.weekly.v1");
-        assert_eq!(wire["paceStatus"]["windowKey"], "billing.weekly.v1");
+        assert_eq!(wire["paceStatus"]["windowKey"], "billing.weekly.v2");
         assert_eq!(wire["paceStatus"]["durationSeconds"], 86_400);
         assert_eq!(wire["paceStatus"]["durationSource"], "provider");
 
@@ -1721,7 +1822,7 @@ mod tests {
                 weekly_window(&config, parse_timestamp("2026-07-17T12:00:00Z").unwrap()).unwrap();
             let wire = serde_json::to_value(&window).unwrap();
             assert_eq!(
-                wire["paceStatus"]["windowKey"], "billing.weekly.v1",
+                wire["paceStatus"]["windowKey"], "billing.weekly.v2",
                 "{label}"
             );
             assert_eq!(wire["paceStatus"]["state"], "unavailable", "{label}");
