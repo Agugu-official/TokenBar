@@ -3,6 +3,23 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>1.14.3</title>
+            <pubDate>Tue, 25 Aug 2026 12:02:01 +0000</pubDate>
+            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.14.3</link>
+            <sparkle:version>859</sparkle:version>
+            <sparkle:shortVersionString>1.14.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>Fixes:</b>
+<ul>
+<li>Grok weekly usage now reads the whole weekly credit pool instead of the command-line tool's share of it, so an exhausted subscription no longer shows credit remaining. If you also use Grok outside the CLI, the weekly quota shown as remaining drops once after this update, and used rises to match — the old figure was overstating what was left, and nothing new was consumed.</li>
+<li>Grok weekly pace history starts over for the same reason. Samples recorded before this update measured the old per-product share, so keeping them would make run-out forecasts fit two different quantities. It rebuilds over the next few cycles; the monthly meter and your saved window selection are unchanged.</li>
+<li>Token counts just below a unit no longer render as "1000M" or "1000K". A count between 999.5M and 1B now reads 1B, and one between 999.5K and 1M reads 1M. Counts outside those two bands are unchanged.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.14.3/TokenBar.app.tar.gz" length="10041793" type="application/octet-stream" sparkle:edSignature="w3UUpMpARqDSNDr0qQOnYmEr5gZrxleQtNmD2Q2uw/jh4K9c8AyvB++dNCCsM8/pmNquG9Bn3S5c0MIj+q/fCg=="/>
+        </item>
+        <item>
             <title>1.14.2</title>
             <pubDate>Tue, 25 Aug 2026 08:56:38 +0000</pubDate>
             <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.14.2</link>
@@ -95,31 +112,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.13.3/TokenBar.app.tar.gz" length="9139447" type="application/octet-stream" sparkle:edSignature="UkmKzZ2FWjT8k0e3aw4O5UlBZ5+jJOzDwmfmK+ULeN+Wha1MFHBteKf/BpmN9OWr29Q6T6RbtmoXrvUIpfXHDA=="/>
-        </item>
-        <item>
-            <title>1.13.2</title>
-            <pubDate>Sun, 09 Aug 2026 17:36:03 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.13.2</link>
-            <sparkle:version>659</sparkle:version>
-            <sparkle:shortVersionString>1.13.2</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>Note:</b>
-<ul>
-<li>Pace history restarts once with this update. A card returns to "Learning history" and rebuilds unless its provider gives TokenBar a stable account identifier, which today means Codex with an account ID on its credential, and the Antigravity IDE. This is the cost of the identity fix below and it happens only once.</li>
-</ul>
-<b>Fixes:</b>
-<ul>
-<li>Pace history no longer restarts every time another app refreshes a shared login. Providers without a stable account identifier kept losing their learned usage curve whenever the Claude CLI or a sibling tool rotated the credential they share, so Historical pace could never accumulate.</li>
-<li>A pace marker in deficit is now highlighted whether it came from the historical curve or the linear estimate. Previously only a historical result was coloured, so the warning appeared and disappeared as the fit requalified while the deficit itself never moved.</li>
-<li>A clock disagreement no longer discards the whole quota history. A single forward jump of the system clock, from a time sync or a sleep and wake, could leave one window with a timestamp ahead of the next read, which quarantined every provider's history at once. It is now repaired in place, and only genuinely unverifiable data is dropped.</li>
-</ul>
-<b>Improved:</b>
-<ul>
-<li>Updater: the bundled Sparkle framework is now compiled from source as part of the build.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.13.2/TokenBar.app.tar.gz" length="9109326" type="application/octet-stream" sparkle:edSignature="9TmLyswqwu+/P4YE/Pd0Dg+7caeWvB4PPQ3/2fUsQepPi2GhWBcczRmP8FUvolpsMDqcuisuKYQw405il4mjBQ=="/>
         </item>
         <item>
             <title>1.1.1</title>
