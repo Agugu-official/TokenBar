@@ -173,11 +173,13 @@ struct UsagePeriod {
     end: Option<String>,
 }
 
+/// One product's share of the weekly credit pool. The `product` name is
+/// deliberately not decoded: no product is privileged any more, because a
+/// share cannot answer the pool window whichever product it belongs to, and
+/// any product's usage refutes an empty week equally.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProductUsage {
-    #[serde(default)]
-    product: Option<String>,
     #[serde(default)]
     usage_percent: Option<Box<RawValue>>,
 }
@@ -497,9 +499,8 @@ enum WeeklyPercent {
     Invalid,
 }
 
-/// Prefer `creditUsagePercent`; only when that field is absent fall through to
-/// the `GrokBuild` product row. A present but unparsable/out-of-range value on
-/// the chosen field is `Invalid`, not `Absent`.
+/// `creditUsagePercent` is the only field that can answer this window. A
+/// present but unparsable/out-of-range value is `Invalid`, not `Absent`.
 ///
 /// `creditUsagePercent` is the weekly credit *pool* — the meter that decides
 /// when requests start being refused. `productUsage[]` decomposes that same
@@ -507,8 +508,18 @@ enum WeeklyPercent {
 /// at most the pool figure and is under it by whatever the other products
 /// spent. Reading `GrokBuild` as the window therefore under-reported depletion
 /// for anyone who also used Grok outside the CLI, and said "4% left" against an
-/// exhausted pool (issue #240). The product row survives only as a fallback for
-/// a payload that omits the pool percent entirely.
+/// exhausted pool (issue #240).
+///
+/// That is why no product row is read as a *value*, not even as a fallback: a
+/// share of the pool is not a reading of the pool, and one recorded under the
+/// weekly pace series would splice a second quantity into it the moment a later
+/// refresh restored the pool field.
+///
+/// A product row can still *refute*. Absent percent fields are read as an empty
+/// week further down, and since the pool is at least as full as any single
+/// product's share, a product reporting usage proves the week is not empty. A
+/// present `usagePercent` that is not a parsable zero therefore fails the
+/// reading closed rather than letting a fabricated 0% through.
 fn weekly_used_percent(config: &BillingConfig) -> WeeklyPercent {
     if let Some(raw) = config.credit_usage_percent.as_deref() {
         return match valid_percentage(raw) {
@@ -516,22 +527,17 @@ fn weekly_used_percent(config: &BillingConfig) -> WeeklyPercent {
             None => WeeklyPercent::Invalid,
         };
     }
-    if let Some(products) = config.product_usage.as_ref() {
-        for product in products {
-            let name = product.product.as_deref().unwrap_or("");
-            if name.eq_ignore_ascii_case("GrokBuild") {
-                if let Some(usage_percent) = product.usage_percent.as_deref() {
-                    return match valid_percentage(usage_percent) {
-                        Some(pct) => WeeklyPercent::Value(pct),
-                        None => WeeklyPercent::Invalid,
-                    };
-                }
-                // GrokBuild row present but usagePercent key omitted.
-                break;
-            }
-        }
+    let usage_seen = config.product_usage.iter().flatten().any(|product| {
+        product
+            .usage_percent
+            .as_deref()
+            .is_some_and(|raw| valid_percentage(raw) != Some(0.0))
+    });
+    if usage_seen {
+        WeeklyPercent::Invalid
+    } else {
+        WeeklyPercent::Absent
     }
-    WeeklyPercent::Absent
 }
 
 /// Monthly included-allowance window: percent = used / monthlyLimit. Only
@@ -1393,8 +1399,11 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_product_percent_without_overall_credit() {
-        let config: BillingConfig = serde_json::from_str(
+    fn product_rows_refute_an_empty_week_but_never_supply_the_pool() {
+        // No pool percent, but the rows show usage. The old fallback answered
+        // 12.5 here, which would have spliced a product share into the pace
+        // series the next time the pool field came back.
+        let usage_seen: BillingConfig = serde_json::from_str(
             r#"{
                 "productUsage": [
                     { "product": "GrokChat", "usagePercent": 10.0 },
@@ -1403,10 +1412,27 @@ mod tests {
             }"#,
         )
         .unwrap();
-        match weekly_used_percent(&config) {
-            WeeklyPercent::Value(pct) => assert!((pct - 12.5).abs() < 0.01),
-            other => panic!("expected Value(12.5), got {other:?}"),
-        }
+        assert_eq!(weekly_used_percent(&usage_seen), WeeklyPercent::Invalid);
+
+        // A GrokBuild row alone is no more of a pool reading than the pair.
+        let build_only: BillingConfig = serde_json::from_str(
+            r#"{ "productUsage": [ { "product": "GrokBuild", "usagePercent": 12.5 } ] }"#,
+        )
+        .unwrap();
+        assert_eq!(weekly_used_percent(&build_only), WeeklyPercent::Invalid);
+
+        // Explicit zeros do not refute the empty week, so a freshly reset week
+        // that itemizes its products still reads as 0% rather than erroring.
+        let all_zero: BillingConfig = serde_json::from_str(
+            r#"{
+                "productUsage": [
+                    { "product": "GrokChat", "usagePercent": 0.0 },
+                    { "product": "GrokBuild", "usagePercent": 0 }
+                ]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(weekly_used_percent(&all_zero), WeeklyPercent::Absent);
     }
 
     #[test]
@@ -1438,7 +1464,9 @@ mod tests {
                 WeeklyPercent::Invalid
             );
 
-            // Same rule on the fallback field when the pool percent is absent.
+            // With the pool percent absent, an unreadable product row is not a
+            // parsable zero, so it refutes the empty week rather than passing
+            // a fabricated 0% through.
             let malformed_product: BillingConfig = serde_json::from_str(&format!(
                 r#"{{
                     "productUsage": [
