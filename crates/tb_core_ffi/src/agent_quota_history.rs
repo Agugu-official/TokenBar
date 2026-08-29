@@ -1312,15 +1312,18 @@ fn reset_superseded(left: i64, right: i64, duration_seconds: i64) -> bool {
         >= supersede_threshold(duration_seconds)
 }
 
-fn group_already_closed(samples: &[QuotaSample], now: i64) -> bool {
+fn group_already_closed(samples: &[QuotaSample], now: i64, handover_was_on_time: bool) -> bool {
     if samples.is_empty() {
         return true;
     }
     let reset = normalize_reset(samples[0].reset_at, samples[0].duration_seconds);
-    // Coverage completeness does not depend on the caller's clock: a stale
-    // observation `now` still in the advertised window must not restamp an
-    // on-time complete group that a later poll already closed.
-    if cycle_meets_retention_coverage(reset, samples) {
+    // Coverage becomes satisfiable once the newest sample reaches `1 - b`,
+    // which on a weekly window is 90% elapsed, so on its own it cannot tell a
+    // window that finished from one still running with most of a day to go.
+    // Paired with an on-time handover it can, and the pair stays independent of
+    // the caller's clock — which is the property a stale observation needs, and
+    // which no comparison against `now` can offer.
+    if handover_was_on_time && cycle_meets_retention_coverage(reset, samples) {
         return true;
     }
     let quantum = cycle_duration(samples).map(duration_quantum).unwrap_or(60);
@@ -1401,12 +1404,31 @@ fn close_superseded_cycle(
     let Some(old_samples) = grouped_samples(&series.samples).remove(&old_reset) else {
         return false;
     };
-    if old_samples.is_empty() || group_already_closed(&old_samples, now) {
+    if old_samples.is_empty() {
         return false;
     }
     let Some(old_duration) = cycle_duration(&old_samples) else {
         return false;
     };
+    // `repair_closed_cycles` walks every adjacent pair of groups, so a window
+    // that simply finished and handed over to the next one arrives here too.
+    // What separates that from an irregular reset is where the successor
+    // *began*: on time it begins at the old window's advertised end, and an
+    // irregular reset begins before it. Reading the distinction from the
+    // successor rather than from `now` is what lets a stale caller be wrong
+    // about the time without re-opening a cycle that already finished.
+    let handover_was_on_time = match successor_duration
+        .and_then(|duration| successor_reset.checked_sub(duration))
+    {
+        Some(start) => start >= old_reset.saturating_sub(duration_quantum(old_duration)),
+        // Nothing says where the successor began, so the conservative reading
+        // stands and a coverage-complete group counts as finished. Closing on
+        // a guess would restamp healthy cycles.
+        None => true,
+    };
+    if group_already_closed(&old_samples, now, handover_was_on_time) {
+        return false;
+    }
     if !reset_superseded(old_reset, successor_reset, old_duration) {
         return false;
     }
@@ -5850,6 +5872,104 @@ mod tests {
                 ..sample
             })
             .collect()
+    }
+
+    /// T0. A reset in the last tenth of the window is still an irregular reset.
+    ///
+    /// Coverage becomes satisfiable once the newest sample reaches `1 - b`,
+    /// which on a weekly window is 90% elapsed — roughly the final seventeen
+    /// hours. `group_already_closed` accepted that as proof the window had
+    /// finished, but `retention_cycle_descriptor` refuses any group whose reset
+    /// is still more than a quantum ahead of `now`. The two disagreed, so the
+    /// close was skipped as redundant and the following `retain_store` deleted
+    /// the group as incomplete: exactly the loss this change exists to stop,
+    /// surviving in the one part of the cycle where the window is most nearly
+    /// finished and therefore worth the most.
+    #[test]
+    fn a_reset_in_the_final_tenth_of_the_window_still_closes_it() {
+        let (directory, path) = temp_path("late-window-reset");
+        let duration = 7 * DAY;
+        let start = 10_080_000;
+        let reset = start + duration;
+        // Coverage passes on these: seven buckets, first at 0.01, last at 0.95,
+        // widest gap 0.20. The advertised reset is still 8.4 hours away.
+        record_partial_provider_window(
+            &path,
+            "acct",
+            reset,
+            duration,
+            start,
+            &[0.01, 0.15, 0.35, 0.55, 0.75, 0.90, 0.95],
+        );
+        let now = start + (0.95 * duration as f64) as i64;
+        assert!(reset > now, "the advertised reset must still be ahead");
+
+        record_observations_at_path_and_evaluate(
+            std::slice::from_ref(&key("acct")),
+            &[observation(key("acct"), now + duration, 0.0, duration)],
+            now,
+            &path,
+        )
+        .unwrap();
+
+        let store = read_store(&path);
+        let closed = closed_observed_groups(&store.series[0], now);
+        assert_eq!(
+            closed.len(),
+            1,
+            "the window was dropped instead of closed: a coverage-complete group \
+             whose reset has not elapsed is not a finished window"
+        );
+        assert_eq!(closed[0].1.len(), 7, "closing must keep every sample");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// T0b. Guards the other arm of the same decision. When no evidence states
+    /// how long the successor lasts, its start cannot be inferred and the
+    /// handover cannot be dated. The conservative reading has to stand — a
+    /// coverage-complete group counts as finished — because closing on a guess
+    /// restamps healthy cycles, and `apply_observed_duration` reaches this with
+    /// `None` on the path where duration evidence is unavailable.
+    #[test]
+    fn an_undatable_handover_leaves_a_complete_cycle_alone() {
+        let (directory, path) = temp_path("undatable-handover");
+        let duration = 7 * DAY;
+        let completed_reset = 10_080_000 + duration;
+        let mut series = SeriesState::new(&key("acct"), completed_reset);
+        series.active_reset_at = Some(completed_reset);
+        series.last_activity_at = completed_reset;
+        series.samples = complete_cycle(completed_reset, duration, 80.0);
+        let before = series.samples.clone();
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&Store {
+                schema_version: HISTORY_SCHEMA_VERSION,
+                series: vec![series],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        // No provider and no contract evidence: the duration is unavailable, so
+        // nothing can say where the successor window began.
+        let now = completed_reset + DAY;
+        record(&path, "acct", Some(now + duration), 5.0, now, None, None);
+
+        let after = read_store(&path);
+        let kept = after.series[0]
+            .samples
+            .iter()
+            .filter(|sample| {
+                normalize_reset(sample.reset_at, sample.duration_seconds)
+                    == normalize_reset(completed_reset, duration)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kept, before,
+            "an undatable handover restamped a cycle that had already finished"
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     /// T1. `supersede_threshold`'s floor exists so that windows short enough for
