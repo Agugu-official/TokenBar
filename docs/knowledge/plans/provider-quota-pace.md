@@ -4,7 +4,7 @@ id: kb-plan-provider-quota-pace
 kind: plan
 scope: repository
 read_when: implementing or reviewing pace duration and historical pace for provider quota cards
-last_verified: 2026-07-31
+last_verified: 2026-08-28
 sources: ["crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_usage.rs", "crates/tb_core_ffi/src/agent_antigravity.rs", "crates/tb_core_ffi/src/agent_copilot.rs", "crates/tb_core_ffi/src/agent_grok.rs", "Sources/TokenBarCore/AgentUsage.swift", "Sources/TokenBarCore/UsagePace.swift", "Sources/TokenBar/TrayAnimator.swift", "Sources/TokenBar/DashboardModel.swift", "docs/knowledge/plans/codex-historical-pace-v2.md", "docs/knowledge/architecture.md", "docs/knowledge/verification.md", "public TokenBar-Windows PR #7", "public TokenBar PR #114", "public TokenBar-Windows PR #12", "official GitHub Copilot billing documentation", "official Claude usage credits documentation"]
 ---
 
@@ -340,9 +340,12 @@ u = clamp(1 - (resetAt - sampledAt) / durationSeconds, 0, 1)
 | Reset normalization | Quantum `q = clamp(duration / 100, 60s, 300s)`；同一 provider reset 的小 jitter 收斂，但 observed rollover 的原始 boundary 另行保留 |
 | Phase buckets | 每 cycle 48 格；`phaseBucket = min(floor(u * 48), 47)`；reset 改變、進入新 phase bucket，或 usage 改變至少 1 percentage point 才接受 |
 | Sample cap | 每 cycle 最多 48 筆；同 series／normalized reset／phase bucket dedupe |
-| Valid sample | Finite、`0 < usedPercent <= 100`、positive duration、sample 位於 cycle bounds；zero reading 可供當下 Linear 顯示但不持久化 |
+| Valid sample | Finite、`0 <= usedPercent <= 100`、positive duration、sample 位於 cycle bounds。schema 4 把 `usedPercent == 0` 持久化為**該新 cycle 自己的起點**（`add_sample_if_new` 使用 `0.0 <=`），不是舊 cycle 的 close sample，也不得把新 reset 上的 0% 寫回舊 window 當假終點 |
 | Retention-complete group | 至少 6 個 distinct phase buckets，起點／終點 coverage 成立，且最大 phase gap 不超過 `0.30` |
-| Fit-eligible completed cycle | 先符合 retention completeness，且所有 validated samples的 `durationSeconds` exact相同 |
+| Fit-eligible completed cycle | 先符合 retention completeness，且所有 validated samples的 `durationSeconds` exact相同；再者其 `durationSeconds` 不得短於 `advertised_nominal_duration` 的九成 |
+| 被提前重置切短的 cycle | **保留、計數、顯示，但不進擬合**。過濾點在 `evaluate_current_from_series` 內，不在 `historical_cycles`——後者的長度即 `complete_cycles`，會經 FFI 進 Swift 與 cross-check fixture，在那裡過濾等於改動顯示面。判準用 `advertised_nominal_duration`（只取 `duration_source != Observed` 的樣本中位數）而非 `DurationSource::Observed` 本身：`Observed` 同時由 close 與正常的 duration 學習路徑寫入，無法分辨。理由是這種 cycle 結束在 provider 選擇重置之處而非額度耗盡之處（15 次真實重置有 12 次落在 5%–64%），餵進擬合等於把該值當成 `u = 1.0`，教會曲線「跑完一個週期只用掉三成」，估計系統性偏低——實測甚至會把 RMSE 推過品質閘、讓估計整個消失。無任何樣本宣告過 duration 時不過濾 |
+| Supersede 門檻 | 判定「這是另一個窗」用 `supersede_threshold = max(duration × 30min ÷ 7d, duration quantum)`，比較為 `>=`。**不可沿用 normalize 的 duration quantum**：那個量子是用來收斂單一窗內的 provider jitter，週窗上限 300 秒，拿來當窗界判準會把 rolling reset 的漂移全判成重置。10,911 筆真實 Codex 週窗樣本、以「持續性 used% 下降」為獨立基準（15 次真實重置）實測：300 秒觸發 1268 次／誤判 1253；1800 秒觸發 17 次／全中／誤判 2。28 小時以下的窗由 floor 統治，行為與量子時代完全相同。`successor_duration_from_series` 的身分比對**維持量子**，它是 BTreeMap first-match，放寬會取到鍵值最小而非最近的 group |
+| Early / irregular reset | 當 sample group 的 normalized reset 與後繼 reset（live 新 `resetAt`、檔內較新 group、或已寫入的 `activeResetAt`）相差達到 supersede 門檻，且不是 backward reset 時，在更新 `activeResetAt` 與第一次 `retain_store` **之前**，把剩餘樣本 restamp 成 observed duration 關閉舊 window。`close_at = max(min(now, inferred_new_start.unwrap_or(now)), last_old_sample)`，`observed_duration = close_at - advertised_start`；無效 duration 不 restamp。已通過 `retention_cycle_descriptor` 的準時完整 window、以及已經是 Observed 且 `resetAt <= now` 的 group 不 restamp。升級路徑對**每一條** series 做 store-wide `repair_closed_cycles`；舊點已 prune 則不發明 cycle |
 
 Coverage boundary 使用 `b = min(0.10, 24h / duration)`；retention-complete group 必須滿足 `uMin <= b` 與 `uMax >= 1 - b`。最大 gap 在排序後的 `[0, distinct observed phases..., 1]` 上計算。這讓 5h、7d 與 monthly window 都用相同比例規則，又不要求 monthly app 在 reset 後數分鐘內一定在線。Mixed-duration group仍受同一 retention bounds管理，但不進fit。
 
@@ -361,13 +364,13 @@ Retention completeness 與 fit eligibility 是兩個不同判斷。`retention_cy
 | Expected quality gate | Completed history的 out-of-sample `fitRmse <= 6 pp + EPSILON`；沒有合格 completed history時，可由 active current group的 walk-forward `fitRmse <= 6 pp + EPSILON`通過 |
 | Historical risk gate | 至少 5 個 fit-eligible completed cycles、`nEff >= 4`、observation span `>= max(4 * nominalDuration, 7d)`，且 final-quarter holdout quality通過 |
 
-Retention 在每次 locked v3 transaction 完成 duration transition／record 後、atomic save 前執行，並以該 transaction 的 `now` 決定所有 boundary。每個 series 先依 normalized reset分組，規則固定為：
+Retention 在每次 locked v3-family（schema 4）transaction 內執行。交易 body 先對**每一條** series 跑 `repair_closed_cycles`（把仍留在檔裡的被取代 cycle restamp 成 observed duration），再第一次 `retain_store`；live 路徑則在 `apply_known_duration`／`apply_observed_duration` 更新 `activeResetAt` 之前先 `close_groups_superseded_by`。然後才 duration transition／record、第二次 retain、atomic save。所有 boundary 以該 transaction 的 `now` 決定。每個 series 先依 normalized reset分組，規則固定為：
 
 | Group or state | Deterministic retention |
 |---|---|
 | Retention-complete group | 同時滿足「依 `resetAt` 最新的 `R` 個」以及 `resetAt >= now - H` 才保留；mixed-duration group也占同一 slot，超額時依相同順序整組刪除 |
 | Current incomplete group | 只保留一組：每筆 sample必須通過 validity，且以自己的 persisted duration正規化後符合 persisted `activeResetAt`。最多 48 samples |
-| Other incomplete groups | 立即整組刪除，包括 expired、superseded、future fragment與 repeated partial-reset churn；`activeResetAt`缺失時不猜最近或sample最多的group |
+| Other incomplete groups | close／repair 之後仍不完整的 group 立即整組刪除，包括 expired、future fragment與 repeated partial-reset churn；不得為已 prune 的缺口發明 cycle，也不得放寬 completeness 去保留 8-minute pulse 這類樣本過少的碎片。`activeResetAt`缺失時不猜最近或sample最多的group |
 | `watching`／`candidate`／`ready` | Tracked old reset超過 boundary 15 minutes仍未完成合法 adjacent transition即清除；candidate也必須在 `oldResetAt + 15m` 前由 next poll確認。下一個 reading從 fresh `watching` 開始 |
 | Rollover-only series | 沒有 samples／retention-complete groups且 `lastActivityAt < now - 56d` 時刪除；空 series立即刪除 |
 
