@@ -3,6 +3,27 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>1.14.4</title>
+            <pubDate>Sun, 30 Aug 2026 11:21:49 +0000</pubDate>
+            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.14.4</link>
+            <sparkle:version>892</sparkle:version>
+            <sparkle:shortVersionString>1.14.4</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>Fixes:</b>
+<ul>
+<li>Codex quota windows that ended before their advertised reset were deleted instead of recorded. Codex moves its reported weekly reset ahead of schedule, and a window that ended early was neither complete nor the one in progress, so the next save dropped it. On one account's raw sample log the reset moved on 11.6% of consecutive readings, which is why Codex window history stayed near empty while other providers filled in normally. Such a window is now closed at the length it actually ran, and appears in Window history like any other.</li>
+</ul>
+<b>Three limits worth knowing:</b>
+<ul>
+<li>Closing a window does not lower the bar for recording one. It still needs readings spread from near its start to near its end without a long gap, so a window seen only in patches is dropped exactly as before. If TokenBar was not running for much of a window, that window is still lost.</li>
+<li>History lost before this update does not come back. Those samples were deleted at the time, so nothing remains to rebuild from.</li>
+<li>A window cut short by more than a tenth of its length stays out of the pace projection, since one that stopped at 34% used would teach the run-out forecast that a full cycle ends there. A window that still ran nine tenths of its length counts as finished and feeds the projection as before.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.14.4/TokenBar.app.tar.gz" length="10048231" type="application/octet-stream" sparkle:edSignature="69h5qmXt6u+GD86iVzNiz9OEtkOrzBeSIu5wfrar6AshIxMDxFP11C11ilUbuaPj7rxQdZNWhUdJNMys22z5DA=="/>
+        </item>
+        <item>
             <title>1.14.3</title>
             <pubDate>Tue, 25 Aug 2026 12:02:01 +0000</pubDate>
             <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.14.3</link>
@@ -84,34 +105,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.14.0/TokenBar.app.tar.gz" length="9999391" type="application/octet-stream" sparkle:edSignature="dFxjhhg/jhcj8eqPP+yN9vPoXaeUnbNyHpiAmOS1sf0cTruo8vQ/u2msRblWVhSkgvtMW/Pn3pODSfPXFK6SAA=="/>
-        </item>
-        <item>
-            <title>1.13.3</title>
-            <pubDate>Sat, 15 Aug 2026 20:43:47 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.13.3</link>
-            <sparkle:version>707</sparkle:version>
-            <sparkle:shortVersionString>1.13.3</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>Note:</b>
-<ul>
-<li>Amp, Cursor, OpenClaw, MiMoCode, and Mux rescan once after this update. Their cached data is rebuilt from scratch on the first refresh because the engine update advances their parser identity. Expect one slower scan for those clients; other clients keep their cache.</li>
-</ul>
-<b>Fixes:</b>
-<ul>
-<li>A Claude credential store that holds no login no longer blocks the setup-token fallback. A "Claude Code-credentials" Keychain item that exists but carries no claudeAiOauth key, such as one holding only MCP server OAuth data, was read as a damaged credential and failed closed, so the documented tokenbar-claude-oauth-token path was never tried and the card stayed on "Claude credentials could not be loaded." Such a store is now treated as absence, while a credential whose claudeAiOauth is present but unusable still fails closed.</li>
-<li>Manual refresh now retries a model report that failed. The Refresh button and Command-R refreshed the graph and any loaded Hourly or Agents report but stopped short of the model report, so a transient failure stayed on screen until the next 60-second poll even right after the user asked for fresh data. A refresh that wanted a model report now retries it in the same pass, provided the graph itself refreshed successfully.</li>
-<li>Reopening the popover no longer shows the previous window's data. Closing it during a scan let the retiring view finish and write its result into the shared reopen cache after a newer view had already committed, so the next open rendered the older payload.</li>
-<li>Entries with no usage are no longer offered for classification. Usage attribution listed a row for every observed source key, so a row reading 0 tokens and $0.00 asked which subscription had paid for nothing. An entry with no tokens and no cost is now dropped, per entry and before entries are folded into a source, and a range left with nothing says so instead. An entry with zero tokens but non-zero cost is kept, and a source whose entries cancel out still appears, because each of those entries is real.</li>
-</ul>
-<b>Changes:</b>
-<ul>
-<li>Three client names no longer claim a surface their data does not distinguish: Codex CLI becomes Codex, Copilot CLI becomes Copilot, and Cursor IDE becomes Cursor. Each card reads a source that covers several surfaces at once. Across 1,733 local Codex session files the actual CLI was roughly 4% of what the card labelled "Codex CLI".</li>
-<li>Usage attribution now says that some clients merge related routes before the page sees them, with Vertex AI arriving as Anthropic and Codex as OpenAI. A row that arrived already merged cannot be split there, and whether a row is affected depends on the client that produced it. The page previously told only the exact-comparison half.</li>
-<li>Engine update: the shared usage engine advances to a reviewed revision carrying local-first graph pricing, embedded and partial cost provenance, message-only cost coverage, and preservation of Kilo's provider-reported cost. The cache format, the FFI boundary, and result decoding are unchanged. One part is visible in your numbers: a Trae row whose payload carries no usable dollar amount was previously left unpriced and is now estimated under the default best-effort pricing, so a Trae total can rise without your usage having changed. Provider-reported values remain authoritative.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.13.3/TokenBar.app.tar.gz" length="9139447" type="application/octet-stream" sparkle:edSignature="UkmKzZ2FWjT8k0e3aw4O5UlBZ5+jJOzDwmfmK+ULeN+Wha1MFHBteKf/BpmN9OWr29Q6T6RbtmoXrvUIpfXHDA=="/>
         </item>
         <item>
             <title>1.1.1</title>
