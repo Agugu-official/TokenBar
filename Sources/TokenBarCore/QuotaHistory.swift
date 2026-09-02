@@ -501,6 +501,22 @@ public enum QuotaHistoryFold {
         zip(readings, readings.dropFirst()).reduce(0.0) { $0 + max(0, $1.1 - $1.0) }
     }
 
+    /// How many separately measured rises `consumed` summed: one, plus one
+    /// more for every decline between consecutive readings.
+    ///
+    /// The provider reports whole percents, so each rise carries the same
+    /// ±0.5 quantisation whether it spans 3 points or 90. Summing two rises
+    /// sums their uncertainty as well, and a ratio built on `[0, 3, 0, 3]`
+    /// is not a 6-point measurement at ±0.5 — it is two 3-point measurements
+    /// at ±0.5 each, neither of which clears the bar on its own. Callers that
+    /// quote an error or gate on a minimum delta scale both by this count, so
+    /// a group that crossed a reset does not come out looking more precise
+    /// than a group that did not.
+    public static func risingRuns(_ readings: [Double]) -> Int {
+        guard readings.count >= 2 else { return readings.isEmpty ? 0 : 1 }
+        return 1 + zip(readings, readings.dropFirst()).filter { $0.1 < $0.0 }.count
+    }
+
     /// The messages a scoped window may count. One statement of the rule, so
     /// the three surfaces of a window cannot apply it differently.
     public static func inScope(_ messages: [WindowMessage], _ scope: String?) -> [WindowMessage] {

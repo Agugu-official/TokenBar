@@ -177,8 +177,17 @@ public enum WindowEquivalence {
         // sides of it — which is how a window that consumed 93 points came to
         // divide by 8 and report eleven times the true rate. One statement of
         // the rule, shared with the pooled path.
-        let delta = QuotaHistoryFold.consumed(samples.map(\.usedPercent))
+        let readings = samples.map(\.usedPercent)
+        let delta = QuotaHistoryFold.consumed(readings)
         guard delta > 0 else { return .notMoved }
+        // Every rise `consumed` summed was quantised on its own, so both the
+        // error quoted below and the admission bar scale with how many there
+        // were. `minimumDelta` is the single-rise delta at which the error
+        // reaches `tolerance`; a group that crossed a reset has to clear it
+        // once per rise to make the same claim. Without this, `[0, 3, 0, 3]`
+        // read as a 6-point measurement at ±8% — two rises of 3 that each
+        // fell short, presented as one that did not.
+        let runs = Double(QuotaHistoryFold.risingRuns(readings))
 
         // Numerator and denominator must cover the same interval or the ratio
         // means nothing — hence the span between samples, not the whole window.
@@ -187,14 +196,14 @@ public enum WindowEquivalence {
         }
         let tokens = inSpan.reduce(Int64(0)) { $0.saturatingAdding(ratioTokens($1)) }
         let cost = inSpan.reduce(0.0) { $0 + $1.cost }
-        let error = Int((quantisationHalfStep / delta * 100).rounded())
+        let error = Int((quantisationHalfStep * runs / delta * 100).rounded())
 
         // "Recorded" means either kind of evidence. A provider row can carry a
         // cost with no token components, and the pooled path already admits
         // one; requiring tokens here made the single-window footer say "none of
         // it recorded on this machine" about usage sitting in the same scan.
         guard tokens > 0 || cost > 0 else { return .unaccounted(deltaPercent: delta) }
-        guard delta >= minimumDelta else {
+        guard delta >= minimumDelta * runs else {
             return .insufficient(deltaPercent: delta, errorPercent: error)
         }
         // Clamping, not truncating: a saturated token count over a small delta

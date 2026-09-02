@@ -12230,9 +12230,42 @@ enum SelfTest {
                        + "numerator's two windows meet a denominator that counted both")
             expect(distError == 1,
                    "QH-DIST and the quoted error follows the same denominator — "
-                       + "0.5/93, not the 6% that 0.5/8 printed on the card")
+                       + "two rises at 0.5 each over 93, not the 6% that 0.5/8 printed")
         } else {
             expect(false, "QH-DIST the crossing fixture still produces a ratio row")
+        }
+
+        // QH-RUNS. Each rise `consumed` sums was quantised on its own, so a
+        // group that crossed a reset carries the uncertainty of every rise, not
+        // of one. [0,3,0,3] is two 3-point rises: 6 consumed, but neither rise
+        // clears the single-rise bar and their summed error is ±1 on 6, about
+        // 17% — over tolerance. It must come back insufficient, not as a ratio
+        // quoted at ±8%.
+        expect(QuotaHistoryFold.risingRuns([0, 3, 0, 3]) == 2,
+               "QH-RUNS one decline separates two rises")
+        expect(QuotaHistoryFold.risingRuns([1, 12, 30]) == 1
+                   && QuotaHistoryFold.risingRuns([7]) == 1
+                   && QuotaHistoryFold.risingRuns([]) == 0,
+               "QH-RUNS a monotonic run is one rise; a lone reading is one; nothing is none")
+        let runsSamples = [0.0, 3, 0, 3].enumerated().map {
+            QuotaSample(atMs: Int64($0.offset + 1) * 1_000_000, usedPercent: $0.element)
+        }
+        let runsMessages = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":1500000,"client":"c","providerId":"p",
+              "modelId":"m","input":60,"output":0,"cacheRead":0,"cacheWrite":0,
+              "reasoning":0,"cost":0.6,"isTurnStart":true}]
+            """.utf8))
+        if case let .insufficient(runsDelta, runsError) =
+            WindowEquivalence.row(samples: runsSamples, messages: runsMessages)
+        {
+            expect(abs(runsDelta - 6) < 1e-9,
+                   "QH-RUNS the consumption is still the full 6 — the gate scales, the sum does not")
+            expect(runsError == 17,
+                   "QH-RUNS and the error is 0.5 × 2 rises over 6, not 0.5 over 6")
+        } else {
+            expect(false, "QH-RUNS two sub-threshold rises must not be admitted as one measurement")
         }
         // The pooled site, same readings, same answer.
         let distCycles = QuotaHistoryFold.cycles(points: distResetReadings.enumerated().map {
