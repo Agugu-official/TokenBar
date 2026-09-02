@@ -98,8 +98,10 @@ public enum QuotaOverviewFold {
             let consumption = ordered.map(\.usedPercent)
             let peaks = ordered.map(\.peakUsedPercent)
             // Consumption for the strip, absolute reading for the ceiling.
-            // `usedPercent` is a span, so a cycle first observed at 40% and
-            // last at 100% has a span of 60 and would have been called quiet.
+            // `usedPercent` is the distance travelled, so a cycle first observed
+            // at 40% and last at 100% consumed 60 and would have been called
+            // quiet. It can also exceed 100 where a group holds more than one
+            // window, which the strip's bars clamp and its sentence does not.
             let peak = window.cycles.map(\.peakUsedPercent).max() ?? 0
             return QuotaWindowSummary(
                 clientId: window.clientId, accountKey: window.accountKey,

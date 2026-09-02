@@ -12197,6 +12197,70 @@ enum SelfTest {
             expect(false, "QH-CACHE-LIVE the live fixture produces a ratio row")
         }
 
+        // QH-DIST. A reset inside a group makes the two old denominators
+        // disagree with each other and with the truth: the readings return to
+        // zero, so the displacement collapses while the range saturates at the
+        // highest reading. Both call sites now measure the distance travelled.
+        //
+        // Worked from the group behind a card that read 4.2B per 10% where the
+        // volume implied 0.35B: first 0%, last 8%, peak 85%, 93 points actually
+        // consumed. Dividing by 8 rather than 93 is the whole 11.6x.
+        let distResetReadings: [Double] = [0, 40, 85, 0, 3, 8]
+        expect(abs(QuotaHistoryFold.consumed(distResetReadings) - 93) < 1e-9,
+               "QH-DIST a run crossing one reset consumed 93, not the 8 it ended on "
+                   + "nor the 85 it reached")
+        let distSamples = distResetReadings.enumerated().map {
+            QuotaSample(atMs: Int64($0.offset + 1) * 1_000_000, usedPercent: $0.element)
+        }
+        let distMessages = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":1500000,"client":"c","providerId":"p",
+              "modelId":"m","input":930,"output":0,"cacheRead":0,"cacheWrite":0,
+              "reasoning":0,"cost":9.3,"isTurnStart":true}]
+            """.utf8))
+        // 930 tokens over 93 points is 10 per point, so per-tenth is 100. The
+        // same fixture under the old displacement of 8 divides by 11.6x less
+        // and reports 11.6x more, which is the defect's whole size.
+        if case let .ratio(distTokens, _, distError) =
+            WindowEquivalence.row(samples: distSamples, messages: distMessages)
+        {
+            expect(distTokens == 100,
+                   "QH-DIST the live path divides by the distance travelled, so the "
+                       + "numerator's two windows meet a denominator that counted both")
+            expect(distError == 1,
+                   "QH-DIST and the quoted error follows the same denominator — "
+                       + "0.5/93, not the 6% that 0.5/8 printed on the card")
+        } else {
+            expect(false, "QH-DIST the crossing fixture still produces a ratio row")
+        }
+        // The pooled site, same readings, same answer.
+        let distCycles = QuotaHistoryFold.cycles(points: distResetReadings.enumerated().map {
+            heatPoint(1_767_600_000 + Int64($0.offset) * 3_600, $0.element, reset: monReset)
+        })
+        expect(distCycles.first.map { abs($0.usedPercent - 93) < 1e-9 } == true,
+               "QH-DIST the pooled site agrees with the live one, which is the point "
+                   + "of stating the rule once")
+        expect(distCycles.first.map { abs($0.peakUsedPercent - 85) < 1e-9 } == true,
+               "QH-DIST and the peak is untouched — still the highest reading")
+        // Two resets accumulate rather than saturating. Asserting past 100 is
+        // the deliberate outcome: a group holding three windows consumed three
+        // windows' worth of one allowance.
+        expect(abs(QuotaHistoryFold.consumed([0, 60, 99, 0, 50, 99, 0, 20]) - 218) < 1e-9,
+               "QH-DIST consumption accumulates across every reset in the group and "
+                   + "may exceed 100, where the range would have saturated at 99")
+        // The no-op that guards the regression. Compared against the old
+        // expressions computed here rather than against literals, so what is
+        // asserted is the equality itself.
+        let distRising: [Double] = [1, 12, 30, 55, 88, 99]
+        expect(abs(QuotaHistoryFold.consumed(distRising)
+                   - ((distRising.max() ?? 0) - (distRising.min() ?? 0))) < 1e-9,
+               "QH-DIST on readings that only rise the distance equals the old range")
+        expect(abs(QuotaHistoryFold.consumed(distRising)
+                   - ((distRising.last ?? 0) - (distRising.first ?? 0))) < 1e-9,
+               "QH-DIST and equals the old displacement, so every clean cycle is "
+                   + "left exactly where it was")
+
         // QH-B. Exhaustion is an absolute reading, not the observed span. A
         // cycle first seen at 40% and last at 100% consumed 60 points as far as
         // this machine can tell, and reached the ceiling; deriving the ceiling

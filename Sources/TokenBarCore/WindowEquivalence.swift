@@ -171,7 +171,13 @@ public enum WindowEquivalence {
               samples.count >= 2
         else { return .unavailable }
 
-        let delta = last.usedPercent - first.usedPercent
+        // The distance the readings travelled, not `last - first`. A reset
+        // inside the span returns them to zero, and the displacement then
+        // collapses while the numerator below keeps every message from both
+        // sides of it — which is how a window that consumed 93 points came to
+        // divide by 8 and report eleven times the true rate. One statement of
+        // the rule, shared with the pooled path.
+        let delta = QuotaHistoryFold.consumed(samples.map(\.usedPercent))
         guard delta > 0 else { return .notMoved }
 
         // Numerator and denominator must cover the same interval or the ratio
