@@ -480,6 +480,23 @@ public enum QuotaHistoryFold {
     /// Order-dependent where the range was not. Every caller passes readings
     /// already sorted by sample time; one that did not used to get the right
     /// answer by accident and now gets a wrong one.
+    ///
+    /// Every rise counts, including one that only undoes a provider's downward
+    /// correction: `[0, 40, 35, 40]` returns 45 where 40 was consumed. That is
+    /// a known overstatement and it is not fixable from the readings — a
+    /// decline does not say whether the quota was refilled or the earlier
+    /// number was wrong, and neither its size nor where it lands separates the
+    /// two. Measured across every series in a real store: persistent drops run
+    /// 2 to 100 points and bounce-backs 2 to 22, fully overlapping; real resets
+    /// land anywhere from 0% to 21%, with bounce-backs landing at 0% as well.
+    ///
+    /// It is kept because the bound is small and the alternative costs more.
+    /// Over 121 groups in that store, this and the range agreed on 119 — every
+    /// cycle whose readings only rise — and differed by at most 3.5% on the
+    /// two that had been refilled, where the range prices the window at its
+    /// widest excursion rather than at what it consumed. The residual also
+    /// leans the safe way: overstating the denominator understates the ratio,
+    /// so a quota reads as worth less rather than more.
     public static func consumed(_ readings: [Double]) -> Double {
         zip(readings, readings.dropFirst()).reduce(0.0) { $0 + max(0, $1.1 - $1.0) }
     }
