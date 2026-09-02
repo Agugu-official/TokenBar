@@ -47,14 +47,33 @@ pub(crate) fn cache_key(account: &Account, from_ms: i64, until_ms: i64) -> Cache
 /// `<dir>/transcripts` locally keeps this honest about paths the setter
 /// refused: a root that is not registered is not scanned for anybody, and
 /// listing it here would claim otherwise.
+///
+/// **Direct children only, not every descendant.** Nothing stops a user
+/// configuring both `/work` and `/work/sub` as accounts — `isRejectedRoot`
+/// refuses only the empty path, `/` and the home directory
+/// (`ClaudeExtraRoots.swift:53`) — and a prefix test would then hand `/work`
+/// the roots of `/work/sub`, folding one account's transcripts into the
+/// other's allowance. That is the defect this file exists to fix, reappearing
+/// on the selection side after being fixed on the exclusion side.
+///
+/// A parent comparison rather than a rebuilt `{projects, transcripts}` set,
+/// because every registry entry is written by `ClaudeExtraRoots.expand` and is
+/// a direct child of the directory it belongs to; restating that list here
+/// would be a second copy of it that could drift. The coupling is to the
+/// *shape* of the expansion, not to its contents.
+///
+/// Note the asymmetry with `primary_exclusions`, which is deliberate: the
+/// exclusion wants every descendant, because anything under a configured
+/// directory is not the primary's. The selection wants exactly this account's,
+/// because a nested account is somebody else's.
 fn registered_roots_under(dir: &str) -> Vec<PathBuf> {
-    let prefix = PathBuf::from(dir);
+    let owner = PathBuf::from(dir);
     crate::extra_scan_paths::snapshot()
         .get(CLAUDE)
         .map(|paths| {
             paths
                 .iter()
-                .filter(|path| path.starts_with(&prefix))
+                .filter(|path| path.parent() == Some(owner.as_path()))
                 .cloned()
                 .collect()
         })
@@ -761,6 +780,75 @@ mod tests {
             output_tokens(&d),
             D_OUTPUT,
             "an environment-named root was folded into account D's window: {d}"
+        );
+        reset_registries();
+    }
+
+    /// Two CONFIGURED accounts where one directory sits inside the other.
+    ///
+    /// Settings permits it — `isRejectedRoot` refuses only the empty path, `/`
+    /// and the home directory — so `/work` and `/work/sub` can both be real
+    /// accounts with real credentials. Selecting an account's roots by prefix
+    /// would give the outer one the inner one's transcripts, which is this
+    /// issue's defect reappearing on the selection side after being fixed on
+    /// the exclusion side.
+    ///
+    /// Distinct from the nested case in `an_extra_account_window_is_exactly_that_account`:
+    /// there the inner directory is registered with neither registry and
+    /// belongs to no window, and it takes the other branch entirely.
+    #[test]
+    fn a_nested_configured_account_is_not_folded_into_the_outer_one() {
+        let _guards = lock_registries();
+        reset_registries();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        let outer = home.join("work");
+        let inner = outer.join("sub");
+        write_session(&home.join(".claude"), "primary", PRIMARY_OUTPUT);
+        write_session(&outer, "outer", D_OUTPUT);
+        write_session(&inner, "inner", E_OUTPUT);
+
+        let roots: Vec<String> = [&outer, &inner]
+            .iter()
+            .flat_map(|d| {
+                [
+                    d.join("projects").display().to_string(),
+                    d.join("transcripts").display().to_string(),
+                ]
+            })
+            .collect();
+        crate::extra_scan_paths::set_from_json(
+            &serde_json::json!({ "claude": roots }).to_string(),
+        )
+        .unwrap();
+        crate::claude_config_dirs::set_from_json(
+            &serde_json::json!([
+                outer.display().to_string(),
+                inner.display().to_string()
+            ])
+            .to_string(),
+        )
+        .unwrap();
+
+        let context = crate::LocalSourceContext::for_home(home.clone());
+        let outer_window = scan(&context, &Some(outer.display().to_string()));
+        let inner_window = scan(&context, &Some(inner.display().to_string()));
+        let primary = scan(&context, &PRIMARY);
+
+        assert_eq!(
+            output_tokens(&outer_window),
+            D_OUTPUT,
+            "the outer account folded the nested account's transcripts: {outer_window}"
+        );
+        assert_eq!(
+            output_tokens(&inner_window),
+            E_OUTPUT,
+            "the nested account's window is not its own roots: {inner_window}"
+        );
+        assert_eq!(
+            output_tokens(&primary),
+            PRIMARY_OUTPUT,
+            "the primary folded a configured account: {primary}"
         );
         reset_registries();
     }
