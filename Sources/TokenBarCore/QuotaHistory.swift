@@ -498,6 +498,20 @@ public enum QuotaHistoryFold {
     /// 2 to 100 points and bounce-backs 2 to 22, fully overlapping; real resets
     /// land anywhere from 0% to 21%, with bounce-backs landing at 0% as well.
     ///
+    /// The numerator has the twin of this, and it is left in place for the
+    /// same reason. A declining interval contributes nothing here while every
+    /// message inside it still counts above the line, so whatever was consumed
+    /// between the last reading before a reset and the reset itself is divided
+    /// by the rises around it. Excluding those messages is right when the
+    /// decline was a reset and wrong twice over when it was a correction —
+    /// numerator down, denominator already up — and the paragraph above is the
+    /// measurement saying the two cannot be told apart. Bound, from the same
+    /// store: 2 of 128 groups contain any decline at all, declining intervals
+    /// hold 0.17% of all observed time, 4.08% in the worst single group and
+    /// 0.92% in the merged group this whole change was written for. Time, not
+    /// messages — the message share is not measured, and a gap denser than
+    /// average carries proportionally more.
+    ///
     /// It is kept because the bound is small and the alternative costs more.
     /// Over 121 groups in that store, this and the range agreed on 119 — every
     /// cycle whose readings only rise — and differed by at most 3.5% on the
@@ -509,8 +523,9 @@ public enum QuotaHistoryFold {
         zip(readings, readings.dropFirst()).reduce(0.0) { $0 + max(0, $1.1 - $1.0) }
     }
 
-    /// How many separately measured rises `consumed` summed: one, plus one
-    /// more for every decline between consecutive readings.
+    /// How many separately measured rises `consumed` summed: the number of
+    /// times the readings started going up after not going up. Zero on
+    /// readings that never rose.
     ///
     /// The provider reports whole percents, so each rise carries the same
     /// ±0.5 quantisation whether it spans 3 points or 90. Summing two rises

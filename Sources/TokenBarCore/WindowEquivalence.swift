@@ -213,6 +213,14 @@ public enum WindowEquivalence {
 
         // Numerator and denominator must cover the same interval or the ratio
         // means nothing — hence the span between samples, not the whole window.
+        //
+        // Held exactly at the ends and approximately in the middle: a
+        // declining interval inside the span contributes to the numerator and
+        // not to `consumed`. See `QuotaHistoryFold.consumed` for why that is
+        // not fixed here — briefly, dropping those messages is right for a
+        // reset and wrong for a correction, and the readings do not say which
+        // — and for the measured size of it, which is 0.9% of the span on the
+        // group that produced the defect this function was rewritten for.
         let inSpan = messages.filter {
             $0.timestamp > first.atMs && $0.timestamp <= last.atMs
         }
