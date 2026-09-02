@@ -264,9 +264,30 @@ public enum TBCore {
     /// serving a curve.
     ///
     /// Returns nil when the series exists but has no stored history yet.
-    /// PROTOTYPE — usage inside an absolute [from, until) window.
-    public static func windowUsage(from: Int64, until: Int64) throws -> WindowUsage {
-        try unwrap(tb_window_usage(from, until))
+    /// PROTOTYPE — usage inside an absolute [from, until) window, for one
+    /// account.
+    ///
+    /// `accountKey` is the same value `quotaCurve` takes: `nil` for the primary
+    /// account, an extra Claude account's config directory otherwise. It scopes
+    /// which transcripts are read, so the usage folded into a window and the
+    /// quota that window reports come from one account.
+    ///
+    /// There is no argument for "every account", and no default for this one.
+    /// A window belongs to an account; a total spanning accounts has no quota
+    /// reading to divide by, and a caller that omitted the argument would get
+    /// every account's usage measured against one account's allowance — which
+    /// is the defect in issue #258, and the reason the compiler is made to ask.
+    public static func windowUsage(
+        accountKey: String?, from: Int64, until: Int64
+    ) throws -> WindowUsage {
+        // `withCString` on an Optional would bind a temporary that dies before
+        // the call; the nil case has to pass a real NULL.
+        if let accountKey {
+            return try accountKey.withCString { account in
+                try unwrap(tb_window_usage(account, from, until))
+            }
+        }
+        return try unwrap(tb_window_usage(nil, from, until))
     }
 
     /// `accountKey` selects which account's series to read. `nil` is the

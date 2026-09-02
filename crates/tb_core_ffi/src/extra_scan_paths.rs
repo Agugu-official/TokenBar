@@ -41,6 +41,15 @@ pub(crate) fn snapshot() -> BTreeMap<String, Vec<PathBuf>> {
 /// client.
 const SUPPORTED_CLIENTS: &[&str] = &["claude"];
 
+/// Clear the registry. Test seam: the statics are process-wide, so a test that
+/// leaves one populated changes the next test's answer.
+#[cfg(test)]
+pub(crate) fn reset_for_test() {
+    *EXTRA_SCAN_PATHS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = BTreeMap::new();
+}
+
 /// What a configured path can become, which is not the same question as
 /// whether it is usable right now.
 enum PathShape {

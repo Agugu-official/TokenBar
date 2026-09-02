@@ -106,8 +106,15 @@ char *tb_quota_curve(const char *client_id, const char *account_key, const char 
  * later call can be up to a minute short of its own end. Deliberate, and
  * tested (`window_usage::tests::quantised_window_calls_scan_once`) — the sole
  * consumer already serves its own scan for 30s before asking again, so exact
- * ends would buy precision nobody reads at the cost of a 0% hit rate. */
-char *tb_window_usage(int64_t from_ms, int64_t until_ms);
+ * ends would buy precision nobody reads at the cost of a 0% hit rate.
+ *
+ * `account_key` selects whose transcripts are read: NULL for the primary
+ * account, an extra Claude account's `CLAUDE_CONFIG_DIR` otherwise — the same
+ * value `tb_quota_curve` takes, so a window's usage and the quota it is
+ * divided against are scoped by one string. There is no "every account"
+ * argument: a quota window belongs to an account, and a total spanning
+ * accounts has no quota reading to divide by. */
+char *tb_window_usage(const char *account_key, int64_t from_ms, int64_t until_ms);
 // Replace the process-wide extra-scan-paths registry used by every
 // subsequent report/parse call (no restart needed). `json` is an object of
 // `{"<public-client-id>": ["<absolute-dir-path>", ...]}`, full-replace

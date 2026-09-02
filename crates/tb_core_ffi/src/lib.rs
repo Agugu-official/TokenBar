@@ -1159,7 +1159,7 @@ mod tests {
         );
         assert!(
             !window_usage::publish(
-                (0, 60_000),
+                (None, 0, 60_000),
                 generation_at_scan_start,
                 (Instant::now(), 1234, serde_json::json!({"from": "old roots"})),
             ),
@@ -1191,7 +1191,7 @@ mod tests {
         );
         assert!(
             window_usage::publish(
-                (0, 60_000),
+                (None, 0, 60_000),
                 current,
                 (Instant::now(), 5678, serde_json::json!({"from": "new roots"})),
             ),
@@ -1236,7 +1236,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert(
-                (0, 60_000),
+                (None, 0, 60_000),
                 (Instant::now(), 1234, serde_json::json!({"from": "old roots"})),
             );
 
@@ -2478,16 +2478,35 @@ mod tests {
     }
 }
 
-/// Usage inside an absolute [from_ms, until_ms) window.
+/// Usage inside an absolute [from_ms, until_ms) window, for one account.
 ///
 /// `until_ms` is quantised to the minute by `window_usage::cache_key`, so the
 /// answer can be up to a minute short of the requested end when an earlier call
 /// in the same minute already scanned. See the header for why that is the
 /// deliberate trade.
+///
+/// `account_key` is NULL for the primary account and an extra Claude account's
+/// `CLAUDE_CONFIG_DIR` otherwise — the same value `tb_quota_curve` takes, so
+/// the usage and the quota it is divided against are scoped to one account by
+/// one string. Passing NULL where an extra account was meant returns the
+/// primary's usage, not everybody's; there is no "all accounts" argument,
+/// because a window belongs to an account and a total across accounts has no
+/// quota to divide by.
+///
+/// # Safety
+/// `account_key` must be NULL or a valid NUL-terminated string.
 #[no_mangle]
-pub extern "C" fn tb_window_usage(from_ms: i64, until_ms: i64) -> *mut c_char {
+pub unsafe extern "C" fn tb_window_usage(
+    account_key: *const c_char,
+    from_ms: i64,
+    until_ms: i64,
+) -> *mut c_char {
     guarded("tb_window_usage", || {
+        let account = match unsafe { optional_string_from(account_key) } {
+            Ok(account) => account,
+            Err(message) => return envelope(Err::<serde_json::Value, String>(message)),
+        };
         let context = LocalSourceContext::current();
-        envelope(window_usage::cached(&context, from_ms, until_ms))
+        envelope(window_usage::cached(&context, &account, from_ms, until_ms))
     })
 }
