@@ -1352,7 +1352,7 @@ private struct DashboardSnapshot {
                         // `collected` keeps the full list for the lifetime
                         // summaries below.
                         let admitted = QuotaHistoryFold.considered(window.cycles).filter {
-                            $0.usedPercent >= WindowEquivalence.minimumDelta
+                            WindowEquivalence.deltaQualifies($0.usedPercent, runs: $0.risingRuns)
                                 && $0.observedFraction >= WindowEquivalence.minimumObservedFraction
                         }
                         guard admitted.count >= WindowEquivalence.minimumCycles else { return nil }
@@ -1458,7 +1458,8 @@ private struct DashboardSnapshot {
                 cycles: zip(cycles, spans).map { cycle, span in
                     WindowEquivalence.Cycle(
                         deltaPercent: cycle.usedPercent, spanTokens: span.tokens,
-                        spanCost: span.cost, observedFraction: cycle.observedFraction)
+                        spanCost: span.cost, observedFraction: cycle.observedFraction,
+                        risingRuns: cycle.risingRuns)
                 })
         }
         quotaEquivalences = built

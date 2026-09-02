@@ -176,7 +176,7 @@ enum WindowProbe {
                     let confirmed = UsageAttribution.confirmed().records
                     func estimate(_ set: [QuotaCycle]) -> WindowEquivalence.Row {
                         let admitted = set.filter {
-                            $0.usedPercent >= WindowEquivalence.minimumDelta
+                            WindowEquivalence.deltaQualifies($0.usedPercent, runs: $0.risingRuns)
                                 && $0.observedFraction >= WindowEquivalence.minimumObservedFraction
                         }
                         let spans = QuotaHistoryFold.spans(
@@ -193,7 +193,8 @@ enum WindowProbe {
                                 WindowEquivalence.Cycle(
                                     deltaPercent: cycle.usedPercent,
                                     spanTokens: span.tokens, spanCost: span.cost,
-                                    observedFraction: cycle.observedFraction)
+                                    observedFraction: cycle.observedFraction,
+                                    risingRuns: cycle.risingRuns)
                             })
                     }
                     // The sweep that set `consideredCycles`. Re-run it before

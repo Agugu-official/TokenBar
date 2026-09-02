@@ -37,6 +37,28 @@ public enum WindowEquivalence {
     /// Derived, not chosen: ±0.5/Δ ≤ tolerance ⇒ Δ ≥ 5.
     public static var minimumDelta: Double { quantisationHalfStep / tolerance }
 
+    /// The one statement of whether a measured consumption is large enough to
+    /// divide by. `minimumDelta` is the single-rise delta at which the ±0.5
+    /// quantisation reaches `tolerance`; a delta summed over several rises
+    /// carries that uncertainty once per rise, so it has to clear the bar once
+    /// per rise to make the same claim.
+    ///
+    /// Four sites admit cycles — the live row, the pooled aggregate, the
+    /// dashboard's qualifying-window filter and the probe — and this rule used
+    /// to be written out at each of them. Scaling it at one and not the others
+    /// is how `[0, 3, 0, 3]` came to be rejected by the live row as two
+    /// sub-threshold rises and admitted by the pooled path as one 6-point
+    /// cycle in the same build. It lives here so that cannot recur.
+    ///
+    /// `delta > 0` is load-bearing, not defensive: `consumed` returns a
+    /// positive value only when at least one rise exists, so a positive delta
+    /// implies `runs >= 1` and the product below cannot be zero. Without the
+    /// guard, `runs == 0` would make the threshold zero and admit a cycle that
+    /// never moved.
+    public static func deltaQualifies(_ delta: Double, runs: Int) -> Bool {
+        delta > 0 && delta >= minimumDelta * Double(runs)
+    }
+
     public enum Row: Equatable, Sendable {
         /// Tokens and cost equivalent to one tenth of the window's quota.
         case ratio(tokensPerTenth: Int64, costPerTenth: Double, errorPercent: Int)
@@ -187,7 +209,7 @@ public enum WindowEquivalence {
         // once per rise to make the same claim. Without this, `[0, 3, 0, 3]`
         // read as a 6-point measurement at ±8% — two rises of 3 that each
         // fell short, presented as one that did not.
-        let runs = Double(QuotaHistoryFold.risingRuns(readings))
+        let runs = QuotaHistoryFold.risingRuns(readings)
 
         // Numerator and denominator must cover the same interval or the ratio
         // means nothing — hence the span between samples, not the whole window.
@@ -196,14 +218,14 @@ public enum WindowEquivalence {
         }
         let tokens = inSpan.reduce(Int64(0)) { $0.saturatingAdding(ratioTokens($1)) }
         let cost = inSpan.reduce(0.0) { $0 + $1.cost }
-        let error = Int((quantisationHalfStep * runs / delta * 100).rounded())
+        let error = Int((quantisationHalfStep * Double(runs) / delta * 100).rounded())
 
         // "Recorded" means either kind of evidence. A provider row can carry a
         // cost with no token components, and the pooled path already admits
         // one; requiring tokens here made the single-window footer say "none of
         // it recorded on this machine" about usage sitting in the same scan.
         guard tokens > 0 || cost > 0 else { return .unaccounted(deltaPercent: delta) }
-        guard delta >= minimumDelta * runs else {
+        guard deltaQualifies(delta, runs: runs) else {
             return .insufficient(deltaPercent: delta, errorPercent: error)
         }
         // Clamping, not truncating: a saturated token count over a small delta
@@ -233,15 +255,19 @@ public enum WindowEquivalence {
         public let spanTokens: Int64
         public let spanCost: Double
         public let observedFraction: Double
+        /// How many separately measured rises `deltaPercent` sums; the
+        /// admission bar scales by it. See `deltaQualifies`.
+        public let risingRuns: Int
 
         public init(
             deltaPercent: Double, spanTokens: Int64, spanCost: Double,
-            observedFraction: Double
+            observedFraction: Double, risingRuns: Int = 1
         ) {
             self.deltaPercent = deltaPercent
             self.spanTokens = spanTokens
             self.spanCost = spanCost
             self.observedFraction = observedFraction
+            self.risingRuns = risingRuns
         }
     }
 
@@ -293,7 +319,7 @@ public enum WindowEquivalence {
         // as "none of it recorded on this machine", which is false about the
         // one thing it could see.
         let admitted = cycles.filter {
-            $0.deltaPercent >= minimumDelta
+            deltaQualifies($0.deltaPercent, runs: $0.risingRuns)
                 && $0.observedFraction >= minimumObservedFraction
                 && ($0.spanCost > 0 || $0.spanTokens > 0)
         }
@@ -313,7 +339,13 @@ public enum WindowEquivalence {
             }
             return .insufficient(
                 deltaPercent: anyMovement,
-                errorPercent: Int((quantisationHalfStep * Double(cycles.count)
+                // One half-step per RISE, summed over every cycle offered —
+                // not per cycle. A merged cycle carries several quantised
+                // rises and its error is that many half-steps wide. Over
+                // `cycles`, not `admitted`: inside this branch `admitted` is
+                // empty by construction, and a sum over it would quote ±0%.
+                errorPercent: Int((quantisationHalfStep
+                    * Double(cycles.reduce(0) { $0 + $1.risingRuns })
                     / anyMovement * 100).rounded()))
         }
         // Count, not size: these cycles each cleared `minimumDelta` on their

@@ -43,6 +43,11 @@ public struct QuotaCycle: Equatable, Sendable {
     /// its reset time rather than splitting it at a reset the provider never
     /// reported.
     public let usedPercent: Double
+    /// How many separately measured rises `usedPercent` sums. One on a cycle
+    /// whose readings only rose; more when a reset fell inside the group. The
+    /// admission bar and the quoted error scale by it, because each rise was
+    /// quantised on its own. See `QuotaHistoryFold.risingRuns`.
+    public let risingRuns: Int
     /// The highest absolute reading seen in this cycle.
     ///
     /// Separate from `usedPercent`, which is the observed SPAN. The two answer
@@ -87,9 +92,11 @@ public struct QuotaCycle: Equatable, Sendable {
         resetAtMs: Int64, startMs: Int64, usedPercent: Double,
         sampleCount: Int, observedFraction: Double,
         firstSampleMs: Int64 = 0, lastSampleMs: Int64 = 0,
-        peakUsedPercent: Double? = nil
+        peakUsedPercent: Double? = nil,
+        risingRuns: Int = 1
     ) {
         self.peakUsedPercent = peakUsedPercent ?? usedPercent
+        self.risingRuns = risingRuns
         self.resetAtMs = resetAtMs
         self.startMs = startMs
         self.usedPercent = usedPercent
@@ -255,7 +262,8 @@ public enum QuotaHistoryFold {
                     / Double(last.durationSeconds))),
                 firstSampleMs: first.sampledAt * 1000,
                 lastSampleMs: last.sampledAt * 1000,
-                peakUsedPercent: used.max() ?? 0)
+                peakUsedPercent: used.max() ?? 0,
+                risingRuns: risingRuns(used))
         }
         .sorted { $0.resetAtMs > $1.resetAtMs }
     }
@@ -513,8 +521,23 @@ public enum QuotaHistoryFold {
     /// a group that crossed a reset does not come out looking more precise
     /// than a group that did not.
     public static func risingRuns(_ readings: [Double]) -> Int {
-        guard readings.count >= 2 else { return readings.isEmpty ? 0 : 1 }
-        return 1 + zip(readings, readings.dropFirst()).filter { $0.1 < $0.0 }.count
+        // A positive delta starts a run iff no earlier delta was positive, or
+        // the most recent non-zero delta before it was negative. A zero delta
+        // is transparent: a plateau inside a rise is still one measurement
+        // span under the ±0.5-per-reading model, so it neither starts nor ends
+        // a run. Counting declines instead — the first cut here — charged a
+        // trailing decline as a run that contributed no rise.
+        var runs = 0
+        var lastNonZeroWasNegative = true
+        for (before, after) in zip(readings, readings.dropFirst()) {
+            if after > before {
+                if lastNonZeroWasNegative { runs += 1 }
+                lastNonZeroWasNegative = false
+            } else if after < before {
+                lastNonZeroWasNegative = true
+            }
+        }
+        return runs
     }
 
     /// The messages a scoped window may count. One statement of the rule, so
