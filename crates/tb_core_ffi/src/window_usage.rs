@@ -136,11 +136,34 @@ fn primary_exclusions() -> Vec<PathBuf> {
 /// A declaration names a client, a provider and a model and carries no account,
 /// so there is no answer to which of two Claude accounts it belonged to;
 /// counting it once, for the primary, beats today's counting it for both.
+/// An extra account with no registered scan root cannot be answered for, and
+/// says so instead of reporting an empty window.
+///
+/// The two registries are installed by separate FFI calls and
+/// `ClaudeExtraRoots.install` deliberately wakes the quota pollers between them
+/// — a stalled mount would otherwise hold the cards on the previous account set
+/// for the whole filesystem timeout. So a just-added account is briefly present
+/// in `claude_config_dirs` and absent from `extra_scan_paths`, and an account
+/// whose roots the setter refused outright is in that state permanently.
+///
+/// Reporting zero rows there would be the same class of mistake this file
+/// exists to fix, in the other direction: an empty scan means "nothing was
+/// read", and rendering it as a window means "this account used nothing". A
+/// failed read leaves the previous estimate standing, which is stale but was
+/// once true; a zero is confidently wrong.
+///
+/// Deliberately not fixed by making the two registries atomic. They are two
+/// FFI calls, so no reader-side snapshot can span them, and making the wake
+/// wait for both reintroduces exactly the stall that ordering was chosen to
+/// remove (`ClaudeExtraRoots.install`).
+const NO_REGISTERED_ROOTS: &str =
+    "This Claude account has no registered scan root yet, so its window cannot be read.";
+
 fn account_options(
     context: &crate::LocalSourceContext,
     account: &Account,
-) -> tokscale_core::ReportOptions {
-    match account {
+) -> Result<tokscale_core::ReportOptions, String> {
+    Ok(match account {
         None => {
             let mut options = context.report_options(None, None);
             let excluded = primary_exclusions();
@@ -152,19 +175,22 @@ fn account_options(
             }
             options
         }
-        Some(dir) => tokscale_core::ReportOptions {
-            home_dir: Some(dir.clone()),
-            use_env_roots: false,
-            scanner_settings: tokscale_core::scanner::ScannerSettings {
-                extra_scan_paths: BTreeMap::from([(
-                    CLAUDE.to_string(),
-                    registered_roots_under(dir),
-                )]),
+        Some(dir) => {
+            let roots = registered_roots_under(dir);
+            if roots.is_empty() {
+                return Err(NO_REGISTERED_ROOTS.to_string());
+            }
+            tokscale_core::ReportOptions {
+                home_dir: Some(dir.clone()),
+                use_env_roots: false,
+                scanner_settings: tokscale_core::scanner::ScannerSettings {
+                    extra_scan_paths: BTreeMap::from([(CLAUDE.to_string(), roots)]),
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
-        },
-    }
+            }
+        }
+    })
 }
 
 /// The change token that decides whether a cached window is still good, read
@@ -176,14 +202,14 @@ fn account_options(
 fn account_parse_options(
     context: &crate::LocalSourceContext,
     account: &Account,
-) -> tokscale_core::LocalParseOptions {
-    let report = account_options(context, account);
-    tokscale_core::LocalParseOptions {
+) -> Result<tokscale_core::LocalParseOptions, String> {
+    let report = account_options(context, account)?;
+    Ok(tokscale_core::LocalParseOptions {
         home_dir: report.home_dir,
         use_env_roots: report.use_env_roots,
         scanner_settings: report.scanner_settings,
         ..Default::default()
-    }
+    })
 }
 
 pub(crate) fn scan_count() -> usize {
@@ -218,8 +244,8 @@ pub(crate) fn cached(
 
     // Probe with the cache lock released, matching graph_cached. An unchanged
     // source only refreshes the timestamp; it does not re-run the scan.
-    if let Ok(probe_token) =
-        tokscale_core::local_source_change_token(&account_parse_options(context, account))
+    if let Ok(probe_token) = account_parse_options(context, account)
+        .and_then(|options| tokscale_core::local_source_change_token(&options))
     {
         if probe_token == token {
             let mut cache = crate::WINDOW_USAGE_CACHE
@@ -272,7 +298,8 @@ fn compute(
         }
     }
     let generation = crate::root_generation();
-    let token = tokscale_core::local_source_change_token(&account_parse_options(context, account))
+    let token = account_parse_options(context, account)
+        .and_then(|options| tokscale_core::local_source_change_token(&options))
         .unwrap_or(0);
     let data = run(context, account, from_ms, until_ms)?;
     // The caller still gets this payload when `publish` refuses it: it answers
@@ -353,7 +380,7 @@ pub(crate) fn run(
     from_ms: i64,
     until_ms: i64,
 ) -> Result<Value, String> {
-    let options = account_options(context, account);
+    let options = account_options(context, account)?;
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -850,6 +877,59 @@ mod tests {
             PRIMARY_OUTPUT,
             "the primary folded a configured account: {primary}"
         );
+        reset_registries();
+    }
+
+    /// A configured account whose roots are not registered yet gets a failure,
+    /// not an empty window.
+    ///
+    /// `ClaudeExtraRoots.install` installs the two registries in separate FFI
+    /// calls and wakes the quota pollers between them, so a just-added account
+    /// is briefly in `claude_config_dirs` and absent from `extra_scan_paths`;
+    /// an account whose roots the scan setter refused outright stays that way.
+    /// Rendering the empty scan would state that the account used nothing,
+    /// which is the same class of wrong answer this file exists to remove.
+    #[test]
+    fn an_account_with_no_registered_roots_fails_rather_than_reporting_zero() {
+        let _guards = lock_registries();
+        reset_registries();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        let pending = home.join("work-pending");
+        write_session(&home.join(".claude"), "primary", PRIMARY_OUTPUT);
+        write_session(&pending, "pending", D_OUTPUT);
+
+        // The account is configured; its scan roots have not landed.
+        crate::claude_config_dirs::set_from_json(
+            &serde_json::json!([pending.display().to_string()]).to_string(),
+        )
+        .unwrap();
+        assert!(
+            crate::extra_scan_paths::snapshot().is_empty(),
+            "the fixture is meant to leave the scan registry empty"
+        );
+
+        let context = crate::LocalSourceContext::for_home(home.clone());
+        let account = Some(pending.display().to_string());
+        let refused = run(&context, &account, WINDOW_FROM, WINDOW_UNTIL);
+
+        assert!(
+            refused.is_err(),
+            "an unscannable account reported a window instead of failing: {refused:?}"
+        );
+
+        // The control: once the roots are registered the same account answers,
+        // so the refusal above is about the missing registry entry and not
+        // about the account being unreadable in general.
+        crate::extra_scan_paths::set_from_json(
+            &serde_json::json!({
+                "claude": [pending.join("projects").display().to_string()]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let answered = run(&context, &account, WINDOW_FROM, WINDOW_UNTIL).expect("registered");
+        assert_eq!(output_tokens(&answered), D_OUTPUT);
         reset_registries();
     }
 
