@@ -59,7 +59,9 @@ struct SettingsPanel: View {
     @AppStorage(TrayMode.storageKey) private var trayModeRaw = TrayMode.todayTokens.rawValue
     @AppStorage(MenuBarTextColor.storageKey) private var textColorMode = MenuBarTextColor.automatic.rawValue
     @AppStorage(MenuBarTextColor.customColorKey) private var textColorHex = MenuBarTextColor.defaultHex
-    @State private var showTextColorPopover = false
+    @AppStorage(MenuBarTextColor.warningColorKey) private var warningTextColorHex = QuotaColorLevel.warning.defaultHex
+    @AppStorage(MenuBarTextColor.criticalColorKey) private var criticalTextColorHex = QuotaColorLevel.critical.defaultHex
+    @State private var editingTextColor: QuotaColorLevel?
     @AppStorage(TrayAnimator.animateKey) private var animateTray = true
     @AppStorage(TrayAnimator.styleKey) private var animationStyle = "cat"
     @AppStorage(IconColoring.storageKey) private var iconColoringRaw = IconColoring.warningOnly.rawValue
@@ -266,23 +268,19 @@ struct SettingsPanel: View {
                 options: MenuBarTextColor.allCases.map { ($0.rawValue, $0.label) })
             if textColorMode == MenuBarTextColor.custom.rawValue {
                 row("Custom color") {
-                    Button { showTextColorPopover.toggle() } label: {
-                        Capsule()
-                            .fill(Color(hex: MenuBarTextColor.normalizedHex(textColorHex) ?? MenuBarTextColor.defaultHex))
-                            .frame(width: 42, height: 18)
-                            .padding(3)
-                            .background(.quaternary, in: Capsule())
+                    HStack(spacing: 14) {
+                        ForEach(QuotaColorLevel.allCases, id: \.self) { level in
+                            MenuBarTextColorControl(
+                                level: level, hex: textColorBinding(level), editingLevel: $editingTextColor)
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Menu bar font color".localized)
-                    .accessibilityValue(textColorHex)
-                    .accessibilityIdentifier("settings.menuBar.textColor")
-                    .popover(isPresented: $showTextColorPopover, arrowEdge: .bottom) {
-                        MenuBarTextColorPopover(hex: $textColorHex)
+                    .popover(item: $editingTextColor, arrowEdge: .bottom) { level in
+                        MenuBarTextColorPopover(hex: textColorBinding(level), level: level)
+                            .id(level)
                     }
                 }
             }
-            hint("Custom color applies to text in the main and individual menu bar items. Automatic uses quota colors for the main percentage and system colors for other text.")
+            hint("Custom colors follow each item's remaining quota: normal above 25%, low above 10% through 25%, and very low at 10% or below. Other text and unavailable quota use the normal color. Automatic keeps the original colors.")
         }
 
         section("Menubar icon") {
@@ -336,6 +334,14 @@ struct SettingsPanel: View {
                 }
                 .glassCard(cornerRadius: 8)
             }
+        }
+    }
+
+    private func textColorBinding(_ level: QuotaColorLevel) -> Binding<String> {
+        switch level {
+        case .normal: $textColorHex
+        case .warning: $warningTextColorHex
+        case .critical: $criticalTextColorHex
         }
     }
 
@@ -1317,19 +1323,51 @@ struct SettingsPanel: View {
     }
 }
 
+/// The three chips select a level in one shared editor below the color row.
+private struct MenuBarTextColorControl: View {
+    let level: QuotaColorLevel
+    @Binding var hex: String
+    @Binding var editingLevel: QuotaColorLevel?
+
+    var body: some View {
+        VStack(spacing: 3) {
+            Text(level.label.localized)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Button { editingLevel = editingLevel == level ? nil : level } label: {
+                Capsule()
+                    .fill(Color(hex: MenuBarTextColor.normalizedHex(hex) ?? level.defaultHex))
+                    .frame(width: 42, height: 18)
+                    .padding(3)
+                    .background(.quaternary, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .help(level.hint.localized)
+            .accessibilityLabel(level.label.localized)
+            .accessibilityValue(hex)
+            .accessibilityIdentifier("settings.menuBar.textColor." + level.rawValue)
+        }
+    }
+}
+
 /// A compact editor attached to the color chip; incomplete input stays local.
 private struct MenuBarTextColorPopover: View {
     @Binding var hex: String
+    let level: QuotaColorLevel
     @State private var input: String
     @FocusState private var inputFocused: Bool
 
-    init(hex: Binding<String>) {
+    init(hex: Binding<String>, level: QuotaColorLevel) {
         _hex = hex
+        self.level = level
         _input = State(initialValue: hex.wrappedValue)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            Text(level.label.localized)
+                .font(.caption)
+                .foregroundStyle(.secondary)
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 8), spacing: 6) {
                 ForEach(MenuBarTextColor.presets, id: \.hex) { preset in
                     presetButton(name: preset.name, colorHex: preset.hex)

@@ -898,30 +898,60 @@ enum SelfTest {
             return try? box.result?.get()
         }
 
-        // A saved override must survive reopening, and Automatic must restore
-        // the original quota/native policy without discarding the saved color.
+        // Per-level overrides survive reopening; Automatic restores the
+        // original quota/native policy without discarding any saved colors.
         let textColorSuite = "com.tokenbar.selftest.menu-bar-text-color"
         if let defaults = UserDefaults(suiteName: textColorSuite) {
             defaults.removePersistentDomain(forName: textColorSuite)
             defer { defaults.removePersistentDomain(forName: textColorSuite) }
-            let automatic = TrayMode.quotaLeft.titleColor(quotaRemaining: 8)
-            expect(MenuBarTextColor.resolve(automatic: automatic, defaults: defaults) == automatic,
+            let automatic = TrayIcons.gaugeColor(remaining: 8)
+            expect(MenuBarTextColor.resolve(automatic: automatic, quotaRemaining: 8, defaults: defaults) == automatic,
                 "menu bar font defaults preserve quota warning colors")
             expect(MenuBarTextColor.resolve(automatic: nil, defaults: defaults) == nil,
                 "menu bar font defaults preserve native text")
             defaults.set("custom", forKey: MenuBarTextColor.storageKey)
             defaults.set("#B35CFF", forKey: MenuBarTextColor.customColorKey)
             let reopened = UserDefaults(suiteName: textColorSuite)!
-            let custom = MenuBarTextColor.resolve(automatic: automatic, defaults: reopened)
+            let custom = MenuBarTextColor.resolve(automatic: nil, quotaRemaining: 80, defaults: reopened)
             expect(custom.flatMap { MenuBarTextColor.hex(color: $0) } == "#B35CFF",
-                "menu bar custom font color persists and overrides a quota warning")
+                "the existing custom font color persists as the normal color")
             expect(MenuBarTextColor.resolve(automatic: nil, defaults: reopened) == custom,
-                "main and individual menu bar text share the same custom color")
+                "non-quota and unavailable text use the normal custom color")
+            expect(MenuBarTextColor.resolve(automatic: automatic, quotaRemaining: 20, defaults: reopened)
+                    .flatMap { MenuBarTextColor.hex(color: $0) } == "#F59E0B"
+                && MenuBarTextColor.resolve(automatic: automatic, quotaRemaining: 8, defaults: reopened)
+                    .flatMap { MenuBarTextColor.hex(color: $0) } == "#EF4444",
+                "new warning and critical preferences have separate defaults")
+            defaults.set("#123456", forKey: MenuBarTextColor.warningColorKey)
+            defaults.set("#FF0066", forKey: MenuBarTextColor.criticalColorKey)
+            for (remaining, expectedHex) in [
+                (100.0, "#B35CFF"), (25.01, "#B35CFF"),
+                (25.0, "#123456"), (10.01, "#123456"),
+                (10.0, "#FF0066"), (0.0, "#FF0066"),
+            ] {
+                let resolved = MenuBarTextColor.resolve(
+                    automatic: nil, quotaRemaining: remaining, defaults: reopened)
+                expect(resolved.flatMap { MenuBarTextColor.hex(color: $0) } == expectedHex,
+                    "custom quota text selects the saved level at \(remaining)%")
+            }
+            expect(TrayIcons.gaugeColor(remaining: 25.01)
+                    == NSColor(srgbRed: 0.13, green: 0.77, blue: 0.37, alpha: 1)
+                && TrayIcons.gaugeColor(remaining: 25)
+                    == NSColor(srgbRed: 0.96, green: 0.62, blue: 0.04, alpha: 1)
+                && TrayIcons.gaugeColor(remaining: 10)
+                    == NSColor(srgbRed: 0.94, green: 0.27, blue: 0.27, alpha: 1),
+                "shared quota levels preserve the automatic palette and thresholds")
+            defaults.set("invalid", forKey: MenuBarTextColor.warningColorKey)
+            expect(MenuBarTextColor.resolve(automatic: automatic, quotaRemaining: 20, defaults: defaults) == automatic
+                && MenuBarTextColor.resolve(automatic: nil, quotaRemaining: 8, defaults: defaults)
+                    .flatMap { MenuBarTextColor.hex(color: $0) } == "#FF0066",
+                "an invalid saved level falls back without affecting other levels")
             defaults.set("automatic", forKey: MenuBarTextColor.storageKey)
-            expect(MenuBarTextColor.resolve(automatic: automatic, defaults: defaults) == automatic
+            expect(MenuBarTextColor.resolve(automatic: automatic, quotaRemaining: 8, defaults: defaults) == automatic
                 && MenuBarTextColor.resolve(automatic: nil, defaults: defaults) == nil
-                && defaults.string(forKey: MenuBarTextColor.customColorKey) == "#B35CFF",
-                "automatic restores quota and native colors while retaining the saved custom color")
+                && defaults.string(forKey: MenuBarTextColor.customColorKey) == "#B35CFF"
+                && defaults.string(forKey: MenuBarTextColor.criticalColorKey) == "#FF0066",
+                "automatic restores quota and native colors while retaining the custom palette")
             defaults.set("custom", forKey: MenuBarTextColor.storageKey)
             defaults.set("#notRGB", forKey: MenuBarTextColor.customColorKey)
             expect(MenuBarTextColor.resolve(automatic: automatic, defaults: defaults) == automatic,

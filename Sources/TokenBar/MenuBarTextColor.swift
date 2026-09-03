@@ -9,6 +9,8 @@ enum MenuBarTextColor: String, CaseIterable {
     static let storageKey = "tokenbar.tray.textColor.mode"
     static let customColorKey = "tokenbar.tray.textColor.hex"
     static let defaultHex = "#21C55E"
+    static let warningColorKey = "tokenbar.tray.textColor.warning.hex"
+    static let criticalColorKey = "tokenbar.tray.textColor.critical.hex"
 
     static let presets: [(name: String, hex: String)] = [
         ("Black", "#000000"), ("Dark gray", "#52525B"),
@@ -28,10 +30,13 @@ enum MenuBarTextColor: String, CaseIterable {
         }
     }
 
-    static func resolve(automatic: NSColor?, defaults: UserDefaults = .standard) -> NSColor? {
-        resolve(automatic: automatic,
+    static func resolve(
+        automatic: NSColor?, quotaRemaining: Double? = nil, defaults: UserDefaults = .standard
+    ) -> NSColor? {
+        let level = quotaRemaining.map(QuotaColorLevel.init(remaining:)) ?? .normal
+        return resolve(automatic: automatic,
             modeRaw: defaults.string(forKey: storageKey) ?? MenuBarTextColor.automatic.rawValue,
-            hex: defaults.string(forKey: customColorKey) ?? defaultHex)
+            hex: defaults.string(forKey: level.customColorKey) ?? level.defaultHex)
     }
 
     static func resolve(automatic: NSColor?, modeRaw: String, hex: String) -> NSColor? {
@@ -61,5 +66,40 @@ enum MenuBarTextColor: String, CaseIterable {
         guard components.allSatisfy(\.isFinite) else { return nil }
         let bytes = components.map { Int((min(1, max(0, $0)) * 255).rounded()) }
         return String(format: "#%02X%02X%02X", bytes[0], bytes[1], bytes[2])
+    }
+}
+
+extension QuotaColorLevel {
+    var customColorKey: String {
+        switch self {
+        // Preserve the existing single-color preference as the normal color.
+        case .normal: MenuBarTextColor.customColorKey
+        case .warning: MenuBarTextColor.warningColorKey
+        case .critical: MenuBarTextColor.criticalColorKey
+        }
+    }
+
+    var defaultHex: String {
+        switch self {
+        case .normal: MenuBarTextColor.defaultHex
+        case .warning: "#F59E0B"
+        case .critical: "#EF4444"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .normal: "Normal"
+        case .warning: "Low"
+        case .critical: "Very low"
+        }
+    }
+
+    var hint: String {
+        switch self {
+        case .normal: "More than 25% remaining, other text, or unavailable quota"
+        case .warning: "More than 10% and up to 25% remaining"
+        case .critical: "10% or less remaining"
+        }
     }
 }

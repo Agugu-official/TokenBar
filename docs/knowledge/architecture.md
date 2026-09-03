@@ -246,7 +246,9 @@ Restore requires schema, bundle identifier, short version and exact build to all
 
 ### Menu bar text color
 
-Menu bar 的「Font color」由 [`MenuBarTextColor`](../../Sources/TokenBar/MenuBarTextColor.swift) 管理偏好與輸入驗證，沿用 `ClientRegistry`／`ModelColors` 的 `#RRGGBB` 格式與 [`Color(hex:)`](../../Sources/TokenBar/ColorHex.swift) 解析器，實際 status item 透過 `NSColor` 橋接使用。`tokenbar.tray.textColor.mode` 預設為 `automatic`，維持主項目百分比的額度健康色與其他文字的系統色；`custom` 使用 `tokenbar.tray.textColor.hex` 儲存的不透明 sRGB `#RRGGBB`，未設定時預設為 `#21C55E`。無效顏色或未知模式回到自動策略。自訂色套用至主項目與獨立用戶端文字，切回自動仍保留已選顏色。自訂色塊下方的小面板提供 16 個常用色與 HEX 輸入；色碼可省略 `#`、使用小寫或帶首尾空白，通過六位 RGB 驗證後正規化為 `#RRGGBB` 並立即套用，未完成或無效輸入不覆寫已保存顏色，失去焦點時清空無效草稿。設定預覽共用解析器；現有 defaults observer 立即更新實際 status items，個別項目的差異判定納入字色，數值不變時也會更新，無須新增輪詢。圖示配色維持獨立。
+Menu bar 的「Font color」由 [`MenuBarTextColor`](../../Sources/TokenBar/MenuBarTextColor.swift) 管理偏好與輸入驗證，沿用 `ClientRegistry`／`ModelColors` 的 `#RRGGBB` 格式與 [`Color(hex:)`](../../Sources/TokenBar/ColorHex.swift) 解析器，實際 status item 透過 `NSColor` 橋接使用。`tokenbar.tray.textColor.mode` 預設為 `automatic`，維持主項目百分比的額度健康色與其他文字的系統色；`custom` 依各項目的剩餘額度選擇正常（>25%）、偏低（>10% 且 ≤25%）、不足（≤10%）三色，與 [`TrayIcons`](../../Sources/TokenBar/TrayIcons.swift) 的自動 gauge 共用 `QuotaColorLevel` 門檻。主項目傳入目前額度，用戶端各自使用其 `remainingPercent`；非額度文字與無法取得的額度使用正常色。
+
+正常色沿用 `tokenbar.tray.textColor.hex` 與預設 `#21C55E`，保留舊版的單色設定；偏低與不足分別儲存於 `tokenbar.tray.textColor.warning.hex`、`tokenbar.tray.textColor.critical.hex`，預設 `#F59E0B`、`#EF4444`。無效顏色只讓該檔位回到原本自動策略；未知模式也回到自動。切回自動仍保留三個已選顏色。自訂顏色列顯示三個獨立色塊，共用位於該列下方的小面板，切換色塊只更新編輯檔位，不疊加面板；面板提供 16 個常用色與 HEX 輸入；色碼可省略 `#`、使用小寫或帶首尾空白，通過六位 RGB 驗證後正規化為 `#RRGGBB` 並立即套用，未完成或無效輸入不覆寫已保存顏色，失去焦點時清空無效草稿。設定預覽共用門檻與解析器；現有 defaults observer 立即更新實際 status items，個別項目的差異判定納入各自字色，數值不變時也會更新，無須新增輪詢。圖示配色維持獨立。
 
 ## Localization
 

@@ -130,7 +130,7 @@ Live account-scope smoke必須在hermetic security suite通過後才執行，且
 
 Provider quota pace 以 `swift run TokenBar --demo --open-popover` 提供 deterministic 人工驗收面；snapshot badge 明示 `FIXTURE`，且 `DemoUsageDataSource` 不呼叫 live FFI、不讀寫 quota cache。Historical／Linear／Off 都要實際呈現；驗收時必須區分低 remaining 觸發的 quota 長條黃／紅健康色，與 deficit stage 觸發的 pace marker／footer 橘色。橘色只看 actual 有沒有越過 expected 線，不看是哪個 estimator 畫出那條線——Historical 與 Linear 的 deficit 同色，狀態文案仍必須分辨兩者。舊規則（只有 `available` 可上色）已廢止：`available` 由每次 refresh 重跑的 out-of-sample fit gate 決定，同一張卡會在 Historical 與 `learningHistory` 之間來回，把顏色綁在 basis 上會讓使用者看到預測「一下子就不見了」，而底層 deficit 其實一直存在。
 
-Menu bar 的「Font color」驗收涵蓋 Automatic／Custom 切換、色塊下方的 16 色面板與 HEX 輸入、深淺預覽、主項目與獨立用戶端數值未改變時立即換色，以及切回 Automatic 後恢復額度／系統字色。以獨立 UserDefaults suite 驗證保存後重讀、主項目與用戶端共用字色、恢復自動時保留自訂值、無效儲存值回退；這些 selftest 不取代實際互動。GUI 需確認面板附著於原色塊、沒有系統調色盤，並驗證點選色塊、輸入 `#000000`、小寫與省略 `#` 的正規化，以及未完成／無效輸入不改動上一個有效顏色，並在輸入框失去焦點時清空。Argument Domain 注入可驗初始配色，不代表互動寫入或跨 process 持久化已驗證。
+Menu bar 的「Font color」驗收涵蓋 Automatic／Custom 切換、正常／偏低／不足三個獨立色塊下方的 16 色面板與 HEX 輸入、深淺預覽、主項目與獨立用戶端數值未改變時立即換色，以及切回 Automatic 後恢復額度／系統字色。以獨立 UserDefaults suite 驗證舊單色設定保留為正常色、另外兩色的預設、三色保存後重讀、25%／10% 邊界與邊界上方的色階選擇、非額度文字／無額度使用正常色、無效儲存值只回退該檔位，以及恢復自動時保留自訂值；同時鎖定自動 gauge 的原始色值。這些 selftest 不取代實際互動。GUI 需確認面板位於自訂顏色列下方、沒有系統調色盤，連續切換三個色塊會更新同一面板的編輯檔位，分別換色不改動其他兩色，並驗證輸入 `#000000`、小寫與省略 `#` 的正規化，以及未完成／無效輸入不改動上一個有效顏色，並在輸入框失去焦點時清空。Argument Domain 注入可驗初始配色，不代表互動寫入或跨 process 持久化已驗證。
 
 Individual client items的deterministic Settings檢查以Argument Domain注入初始偏好；這只驗visual state與initial routing，不在同一process宣稱toggle persistence：
 

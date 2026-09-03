@@ -361,6 +361,8 @@ private struct MenuBarMock: View {
     @AppStorage(TrayMode.storageKey) private var trayModeRaw = TrayMode.todayTokens.rawValue
     @AppStorage(MenuBarTextColor.storageKey) private var textColorMode = MenuBarTextColor.automatic.rawValue
     @AppStorage(MenuBarTextColor.customColorKey) private var textColorHex = MenuBarTextColor.defaultHex
+    @AppStorage(MenuBarTextColor.warningColorKey) private var warningTextColorHex = QuotaColorLevel.warning.defaultHex
+    @AppStorage(MenuBarTextColor.criticalColorKey) private var criticalTextColorHex = QuotaColorLevel.critical.defaultHex
     @AppStorage(TrayAnimator.styleKey) private var animationStyle = "cat"
     @AppStorage(TrayAnimator.animateKey) private var animateTray = true
     @AppStorage(IconColoring.storageKey) private var iconColoringRaw = IconColoring.warningOnly.rawValue
@@ -371,6 +373,13 @@ private struct MenuBarMock: View {
         let remaining = quotaRemaining
         let title = mode.title(
             graph: graph, tokensPerMin: tokensPerMin, quotaRemaining: remaining)
+        let level = (mode == .quotaLeft ? remaining : nil)
+            .map(QuotaColorLevel.init(remaining:)) ?? .normal
+        let customHex: String = switch level {
+        case .normal: textColorHex
+        case .warning: warningTextColorHex
+        case .critical: criticalTextColorHex
+        }
         let ink: Color = dark ? .white : .black
 
         HStack(spacing: 10) {
@@ -387,7 +396,7 @@ private struct MenuBarMock: View {
                         .foregroundStyle(
                             MenuBarTextColor.resolve(
                                 automatic: mode.titleColor(quotaRemaining: remaining),
-                                modeRaw: textColorMode, hex: textColorHex)
+                                modeRaw: textColorMode, hex: customHex)
                                 .map(Color.init(nsColor:)) ?? ink)
                 }
             }

@@ -18,7 +18,7 @@ final class StatusItemController: NSObject {
     private var hasPresentedIcon = false
     private var clientStatusItems: [String: NSStatusItem] = [:]
     private var lastClientPresentations: [String: ClientTray.Presentation] = [:]
-    private var lastClientTextColor: NSColor?
+    private var lastClientTextColors: [String: NSColor] = [:]
     private let routeMemory: StatusItemRouteMemory
     private var popoverAnchorIdentity: String?
 
@@ -157,9 +157,9 @@ final class StatusItemController: NSObject {
     /// Sets the text shown next to the menu-bar icon ("" = icon only). A
     /// color renders as an attributed title, with the user's text override
     /// taking precedence over the automatic quota color.
-    func updateTitle(_ title: String, color: NSColor? = nil) {
+    func updateTitle(_ title: String, color: NSColor? = nil, quotaRemaining: Double? = nil) {
         guard let button = statusItem.button else { return }
-        let color = MenuBarTextColor.resolve(automatic: color)
+        let color = MenuBarTextColor.resolve(automatic: color, quotaRemaining: quotaRemaining)
         // Leading space keeps a gap between the template icon and the text.
         let value = title.isEmpty ? "" : " \(title)"
         let key = "\(value)|\(color?.description ?? "")"
@@ -249,9 +249,12 @@ final class StatusItemController: NSObject {
     func reconcileClientItems(_ presentations: [ClientTray.Presentation]) {
         let ordered = presentations.sorted { $0.clientId < $1.clientId }
         let next = Dictionary(uniqueKeysWithValues: ordered.map { ($0.clientId, $0) })
-        let textColor = MenuBarTextColor.resolve(automatic: nil)
-        let colorChanged = textColor != lastClientTextColor
-        guard next != lastClientPresentations || colorChanged else { return }
+        var textColors: [String: NSColor] = [:]
+        for presentation in ordered {
+            textColors[presentation.clientId] = MenuBarTextColor.resolve(
+                automatic: nil, quotaRemaining: presentation.remainingPercent)
+        }
+        guard next != lastClientPresentations || textColors != lastClientTextColors else { return }
 
         for id in Array(clientStatusItems.keys) where next[id] == nil {
             removeClientItem(id)
@@ -260,8 +263,11 @@ final class StatusItemController: NSObject {
         // icon failed to render stays absent and the next pass retries it.
         var reconciled: [String: ClientTray.Presentation] = [:]
         for presentation in ordered {
+            let textColor = textColors[presentation.clientId]
             if let item = clientStatusItems[presentation.clientId] {
-                if lastClientPresentations[presentation.clientId] != presentation || colorChanged {
+                if lastClientPresentations[presentation.clientId] != presentation
+                    || lastClientTextColors[presentation.clientId] != textColor
+                {
                     updateClientItem(item, presentation: presentation, textColor: textColor)
                 }
             } else if !createClientItem(presentation, textColor: textColor) {
@@ -270,7 +276,7 @@ final class StatusItemController: NSObject {
             reconciled[presentation.clientId] = presentation
         }
         lastClientPresentations = reconciled
-        lastClientTextColor = textColor
+        lastClientTextColors = textColors
     }
 
     private func createClientItem(_ presentation: ClientTray.Presentation, textColor: NSColor?) -> Bool {

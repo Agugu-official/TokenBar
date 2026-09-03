@@ -544,4 +544,10 @@
 "Indigo" = "靛藍色";
 "Purple" = "紫色";
 "Pink" = "粉紅色";
-"Custom color applies to text in the main and individual menu bar items. Automatic uses quota colors for the main percentage and system colors for other text." = "自訂顏色適用於主項目與各用戶端選單列項目的文字。自動模式會依額度為主項目百分比上色，其餘文字使用系統顏色。";
+"Normal" = "正常";
+"Low" = "偏低";
+"Very low" = "不足";
+"More than 25% remaining, other text, or unavailable quota" = "剩餘超過 25%、其他文字，或額度無法取得";
+"More than 10% and up to 25% remaining" = "剩餘超過 10% 至 25%";
+"10% or less remaining" = "剩餘 10% 或以下";
+"Custom colors follow each item's remaining quota: normal above 25%, low above 10% through 25%, and very low at 10% or below. Other text and unavailable quota use the normal color. Automatic keeps the original colors." = "自訂顏色依各項目的剩餘額度套用：超過 25% 為正常，超過 10% 至 25% 為偏低，10% 或以下為不足。其他文字與無法取得的額度使用正常色。自動模式維持原有配色。";
