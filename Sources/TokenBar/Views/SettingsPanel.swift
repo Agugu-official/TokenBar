@@ -57,6 +57,9 @@ struct SettingsPanel: View {
     var reportLoading = false
 
     @AppStorage(TrayMode.storageKey) private var trayModeRaw = TrayMode.todayTokens.rawValue
+    @AppStorage(MenuBarTextColor.storageKey) private var textColorMode = MenuBarTextColor.automatic.rawValue
+    @AppStorage(MenuBarTextColor.customColorKey) private var textColorHex = MenuBarTextColor.defaultHex
+    @State private var showTextColorPopover = false
     @AppStorage(TrayAnimator.animateKey) private var animateTray = true
     @AppStorage(TrayAnimator.styleKey) private var animationStyle = "cat"
     @AppStorage(IconColoring.storageKey) private var iconColoringRaw = IconColoring.warningOnly.rawValue
@@ -255,6 +258,31 @@ struct SettingsPanel: View {
             radioGroup(
                 selection: $trayModeRaw,
                 options: TrayMode.allCases.map { ($0.rawValue, $0.label) })
+        }
+
+        section("Font color") {
+            radioGroup(
+                selection: $textColorMode,
+                options: MenuBarTextColor.allCases.map { ($0.rawValue, $0.label) })
+            if textColorMode == MenuBarTextColor.custom.rawValue {
+                row("Custom color") {
+                    Button { showTextColorPopover.toggle() } label: {
+                        Capsule()
+                            .fill(Color(hex: MenuBarTextColor.normalizedHex(textColorHex) ?? MenuBarTextColor.defaultHex))
+                            .frame(width: 42, height: 18)
+                            .padding(3)
+                            .background(.quaternary, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Menu bar font color".localized)
+                    .accessibilityValue(textColorHex)
+                    .accessibilityIdentifier("settings.menuBar.textColor")
+                    .popover(isPresented: $showTextColorPopover, arrowEdge: .bottom) {
+                        MenuBarTextColorPopover(hex: $textColorHex)
+                    }
+                }
+            }
+            hint("Custom color applies to text in the main and individual menu bar items. Automatic uses quota colors for the main percentage and system colors for other text.")
         }
 
         section("Menubar icon") {
@@ -1286,6 +1314,83 @@ struct SettingsPanel: View {
             .font(.caption2)
             .foregroundStyle(.tertiary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// A compact editor attached to the color chip; incomplete input stays local.
+private struct MenuBarTextColorPopover: View {
+    @Binding var hex: String
+    @State private var input: String
+    @FocusState private var inputFocused: Bool
+
+    init(hex: Binding<String>) {
+        _hex = hex
+        _input = State(initialValue: hex.wrappedValue)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 8), spacing: 6) {
+                ForEach(MenuBarTextColor.presets, id: \.hex) { preset in
+                    presetButton(name: preset.name, colorHex: preset.hex)
+                }
+            }
+            HStack(spacing: 8) {
+                Text("HEX").font(.caption)
+                TextField("#000000", text: $input)
+                    .font(.system(.caption, design: .monospaced))
+                    .textFieldStyle(.roundedBorder)
+                    .focused($inputFocused)
+                    .accessibilityLabel("Hex color".localized)
+                    .accessibilityIdentifier("settings.menuBar.textColor.hex")
+                    .onSubmit {
+                        if let normalized = MenuBarTextColor.normalizedHex(input) {
+                            input = normalized
+                        }
+                    }
+            }
+            if !input.isEmpty, MenuBarTextColor.normalizedHex(input) == nil {
+                Text("Enter a 6-digit hex color, e.g. #000000.")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(width: 224)
+        .padding(12)
+        .onAppear { input = hex }
+        .onChange(of: input) { _, next in
+            if let normalized = MenuBarTextColor.normalizedHex(next), normalized != hex {
+                hex = normalized
+            }
+        }
+        .onChange(of: hex) { _, next in input = next }
+        .onChange(of: inputFocused) { _, focused in
+            if !focused, MenuBarTextColor.normalizedHex(input) == nil {
+                input = ""
+            }
+        }
+    }
+
+    private func presetButton(name: String, colorHex: String) -> some View {
+        let selected = MenuBarTextColor.normalizedHex(hex) == colorHex
+        let color = Color(hex: colorHex)
+        return Button {
+            hex = colorHex
+            input = colorHex
+        } label: {
+            Circle()
+                .fill(color)
+                .overlay(Circle().strokeBorder(Color.primary.opacity(0.2), lineWidth: 1))
+                .frame(width: 18, height: 18)
+                .padding(2)
+                .background(Circle().stroke(selected ? Color.accentColor : Color.clear, lineWidth: 2))
+        }
+        .buttonStyle(.plain)
+        .help(name.localized + " " + colorHex)
+        .accessibilityLabel(name.localized + " " + colorHex)
+        .accessibilityIdentifier("settings.menuBar.textColor." + String(colorHex.dropFirst()))
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 

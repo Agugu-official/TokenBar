@@ -898,6 +898,38 @@ enum SelfTest {
             return try? box.result?.get()
         }
 
+        // A saved override must survive reopening, and Automatic must restore
+        // the original quota/native policy without discarding the saved color.
+        let textColorSuite = "com.tokenbar.selftest.menu-bar-text-color"
+        if let defaults = UserDefaults(suiteName: textColorSuite) {
+            defaults.removePersistentDomain(forName: textColorSuite)
+            defer { defaults.removePersistentDomain(forName: textColorSuite) }
+            let automatic = TrayMode.quotaLeft.titleColor(quotaRemaining: 8)
+            expect(MenuBarTextColor.resolve(automatic: automatic, defaults: defaults) == automatic,
+                "menu bar font defaults preserve quota warning colors")
+            expect(MenuBarTextColor.resolve(automatic: nil, defaults: defaults) == nil,
+                "menu bar font defaults preserve native text")
+            defaults.set("custom", forKey: MenuBarTextColor.storageKey)
+            defaults.set("#B35CFF", forKey: MenuBarTextColor.customColorKey)
+            let reopened = UserDefaults(suiteName: textColorSuite)!
+            let custom = MenuBarTextColor.resolve(automatic: automatic, defaults: reopened)
+            expect(custom.flatMap { MenuBarTextColor.hex(color: $0) } == "#B35CFF",
+                "menu bar custom font color persists and overrides a quota warning")
+            expect(MenuBarTextColor.resolve(automatic: nil, defaults: reopened) == custom,
+                "main and individual menu bar text share the same custom color")
+            defaults.set("automatic", forKey: MenuBarTextColor.storageKey)
+            expect(MenuBarTextColor.resolve(automatic: automatic, defaults: defaults) == automatic
+                && MenuBarTextColor.resolve(automatic: nil, defaults: defaults) == nil
+                && defaults.string(forKey: MenuBarTextColor.customColorKey) == "#B35CFF",
+                "automatic restores quota and native colors while retaining the saved custom color")
+            defaults.set("custom", forKey: MenuBarTextColor.storageKey)
+            defaults.set("#notRGB", forKey: MenuBarTextColor.customColorKey)
+            expect(MenuBarTextColor.resolve(automatic: automatic, defaults: defaults) == automatic,
+                "malformed saved font colors fall back to automatic")
+        } else {
+            expect(false, "menu bar text-color defaults suite")
+        }
+
         // THROTTLE. Three independent callers fetch the OAuth quota payload
         // fetch-first, and the popover's loop is remounted by a `.task` on every
         // reopen — so opening and closing ten times issued ten requests, which

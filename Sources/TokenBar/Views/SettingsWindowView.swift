@@ -359,6 +359,8 @@ private struct MenuBarMock: View {
     let agentUsage: AgentUsagePayload?
 
     @AppStorage(TrayMode.storageKey) private var trayModeRaw = TrayMode.todayTokens.rawValue
+    @AppStorage(MenuBarTextColor.storageKey) private var textColorMode = MenuBarTextColor.automatic.rawValue
+    @AppStorage(MenuBarTextColor.customColorKey) private var textColorHex = MenuBarTextColor.defaultHex
     @AppStorage(TrayAnimator.styleKey) private var animationStyle = "cat"
     @AppStorage(TrayAnimator.animateKey) private var animateTray = true
     @AppStorage(IconColoring.storageKey) private var iconColoringRaw = IconColoring.warningOnly.rawValue
@@ -383,7 +385,9 @@ private struct MenuBarMock: View {
                     Text(title)
                         .font(.system(size: 12).monospacedDigit())
                         .foregroundStyle(
-                            mode.titleColor(quotaRemaining: remaining)
+                            MenuBarTextColor.resolve(
+                                automatic: mode.titleColor(quotaRemaining: remaining),
+                                modeRaw: textColorMode, hex: textColorHex)
                                 .map(Color.init(nsColor:)) ?? ink)
                 }
             }
