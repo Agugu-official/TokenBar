@@ -202,7 +202,15 @@ private struct DashboardSnapshot {
     ///
     /// In memory only, never on disk: it holds local usage rows, and the disk
     /// envelope structurally refuses that class of data.
-    private static var lastUnionScan: UnionScan?
+    /// One scan per account, keyed by `accountKey` — nil for the primary,
+    /// spelled `""` here because a dictionary cannot key on nil.
+    ///
+    /// Per account rather than one shared scan: a quota window belongs to one
+    /// account, and a scan that spans accounts folds another account's work
+    /// into the allowance this one reports (issue #258). The engine narrows
+    /// each scan to its account's roots, so selecting the right entry here is
+    /// the whole of the Swift side's job.
+    private static var lastUnionScans: [String: UnionScan] = [:]
     private static var lastSnapshotOwner: ObjectIdentifier?
     /// Reopen cache for the expensive hourly fold. Multiple slices coexist so
     /// Daily/Monthly's Codex+Claude report cannot evict Hourly's all-client one.
@@ -232,7 +240,7 @@ private struct DashboardSnapshot {
         // guard drop it — the guard already existed, it was simply never told
         // that a root change also overtakes a scan.
         windowScanToken &+= 1
-        lastUnionScan = nil
+        lastUnionScans.removeAll()
         lastSnapshot = nil
         lastSnapshotOwner = nil
         // The PERSISTED snapshot needs no clearing here, and deliberately gets
@@ -1129,12 +1137,35 @@ private struct DashboardSnapshot {
     /// loading case is a state, not a nil.
     var windowCards: [String: WindowCardState] = [:]
 
-    /// The one scan that serves every card, restored from the shared cache so
-    /// a reopen renders bars immediately instead of spinning.
-    private var unionScan: UnionScan? {
-        get { Self.lastUnionScan }
-        set { Self.lastUnionScan = newValue }
+    /// The scan for one account, restored from the shared cache so a reopen
+    /// renders bars immediately instead of spinning.
+    ///
+    /// `accountKey` is the card's own — `nil` is the primary, which is what
+    /// every client but an extra Claude account has. There is deliberately no
+    /// accessor that returns "the scan", because there is no longer one scan
+    /// and a caller reaching for it would silently get the primary's.
+    private func unionScan(for accountKey: String?) -> UnionScan? {
+        Self.lastUnionScans[Self.scanSlot(accountKey)]
     }
+
+    private func setUnionScan(_ scan: UnionScan?, for accountKey: String?) {
+        Self.lastUnionScans[Self.scanSlot(accountKey)] = scan
+    }
+
+    /// Dictionary key for an account. The empty string is the primary, which no
+    /// real config directory can collide with: `claude_config_dirs` refuses an
+    /// empty path, and Settings refuses one too.
+    static func scanSlot(_ accountKey: String?) -> String { accountKey ?? "" }
+
+    /// The account a window CARD is about, which is always the primary.
+    ///
+    /// Not a decision made here: `WindowCardLoader` selects
+    /// `accountKey == nil` in `select`, `pickForHistory` and `quotaHalf`, so a
+    /// client tab can only ever show the primary's windows. Named rather than
+    /// written as a bare `nil` at four call sites, so the day an extra account
+    /// gets a tab there is one place that has to change and a grep that finds
+    /// it.
+    static let cardAccountKey: String? = nil
 
     /// How long a scan is served before being refreshed. Matched to the
     /// engine's own oneshot age so the two layers do not disagree about what
@@ -1194,7 +1225,7 @@ private struct DashboardSnapshot {
             // this branch winning over the failure branch below, so the card
             // returned to `.ready` with arbitrarily stale totals instead of
             // saying the refresh failed. Freshness is what `.ready` claims.
-            if case let .quotaOnly(q, _) = state, let scan = unionScan,
+            if case let .quotaOnly(q, _) = state, let scan = unionScan(for: Self.cardAccountKey),
                Date().timeIntervalSince(scan.capturedAt) < Self.unionScanMaxAge
                    || !windowScanFailed(for: clientId),
                let (settled, usage) = WindowCardLoader.usageHalf(
@@ -1313,7 +1344,7 @@ private struct DashboardSnapshot {
                 quotaHeatmapWindows = heatmapWindows.sorted { $0.total > $1.total }
                 qualifyingCycles = Dictionary(
                     uniqueKeysWithValues: collected.compactMap {
-                        window -> (String, [QuotaCycle])? in
+                        window -> (String, QualifyingWindow)? in
                         // Capped BEFORE admitting, which is what the probe
                         // sweep measured and what actually bounds the scan:
                         // capping the admitted count instead would let 32
@@ -1334,7 +1365,8 @@ private struct DashboardSnapshot {
                             AccountIdentity(
                                 clientId: window.clientId, accountKey: window.accountKey
                             ).windowKey(cardId: window.cardId),
-                            admitted
+                            QualifyingWindow(
+                                accountKey: window.accountKey, cycles: admitted)
                         )
                     })
             }
@@ -1393,11 +1425,17 @@ private struct DashboardSnapshot {
     /// usage from a stretch nobody sampled against movement nobody saw is the
     /// misalignment that cost 8 points of spread on live data.
     private func rebuildQuotaEquivalences() {
-        guard let scan = unionScan else { return }
         var built: [String: WindowEquivalence.Row] = [:]
         let confirmed = UsageAttribution.confirmed().records
-        for (key, cycles) in qualifyingCycles {
-            guard let client = key.split(separator: "|").first.map(String.init),
+        for (key, window) in qualifyingCycles {
+            let cycles = window.cycles
+            // Each row reads ITS OWN account's scan. One shared scan is what
+            // issue #258 reports: every row divided every account's usage by
+            // its own quota movement, which overstated the primary's estimate
+            // by 1.40x and the extra account's by 3.51x on the reporting
+            // machine, because the numerator was the same for both.
+            guard let scan = unionScan(for: window.accountKey),
+                  let client = key.split(separator: "|").first.map(String.init),
                   let oldest = cycles.last, scan.covers(start: oldest.evidenceStartMs)
             else { continue }
             // `declared` carries the empty-declaration case into the fold,
@@ -1427,7 +1465,8 @@ private struct DashboardSnapshot {
     }
 
     private func rebuildQuotaHistory() {
-        guard let client = windowUsageClient, let scan = unionScan,
+        guard let client = windowUsageClient,
+              let scan = unionScan(for: Self.cardAccountKey),
               let oldest = quotaCycles.last, scan.covers(start: oldest.evidenceStartMs)
         else {
             quotaHistory = []
@@ -1509,7 +1548,20 @@ private struct DashboardSnapshot {
     var quotaLensAllAgents = false
     /// Cycles per qualifying window, kept from stage 1 so the scan can be
     /// scoped to exactly what an estimate needs and no further.
-    @ObservationIgnored private var qualifyingCycles: [String: [QuotaCycle]] = [:]
+    @ObservationIgnored private var qualifyingCycles: [String: QualifyingWindow] = [:]
+
+    /// One window that has enough admitted history to produce an estimate,
+    /// plus the account it belongs to.
+    ///
+    /// The account is carried rather than parsed back out of the dictionary
+    /// key. The key is an `AccountIdentity.windowKey`, whose whole point is
+    /// that the primary and an extra account spell it with different segment
+    /// counts; re-deriving the account from it here would be a second parser
+    /// for a fact the builder already had in hand, and the two would drift.
+    struct QualifyingWindow {
+        let accountKey: String?
+        let cycles: [QuotaCycle]
+    }
 
     /// Identifies the newest window scan any model has started.
     ///
@@ -1538,23 +1590,47 @@ private struct DashboardSnapshot {
         // its history; the all-agent Quota lens needs only the windows that can
         // actually produce an estimate, which on live data is one of six.
         let equivalenceStart = quotaLensAllAgents
-            ? qualifyingCycles.values.compactMap { $0.last?.evidenceStartMs }.min() : nil
+            ? qualifyingCycles.values.compactMap { $0.cycles.last?.evidenceStartMs }.min() : nil
         guard let client = windowUsageClient else {
             guard let from = equivalenceStart else { return }
-            if let cached = unionScan, cached.covers(start: from),
-               Date().timeIntervalSince(cached.capturedAt) < Self.unionScanMaxAge
-            { rebuildQuotaEquivalences(); return }
-            // Deliberately does NOT touch `windowScanFailedClients`: this branch
-            // serves the all-agent equivalence, which draws no window card. The
-            // first version set the shared flag here, so an equivalence scan
-            // failing on the lens made every client's card claim its own scan
-            // had failed the moment the user opened a tab.
-            guard let usage = try? await source.windowUsage(from: from, until: now)
-            else { return }
-            guard Self.windowScanToken == scanToken else { return }
-            unionScan = UnionScan(
-                fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages,
-                undatedCount: usage.undatedCount)
+            // One scan per account with a qualifying window, not one scan for
+            // all of them. Each account's estimate divides its own usage by its
+            // own quota movement; a shared scan is the conflation issue #258
+            // reports. The accounts partition the roots between them, so this
+            // is the same files read once each rather than N passes over
+            // everything — measured at 1232ms + 424ms against 2130ms for the
+            // single wide scan it replaces.
+            let accounts = Set(qualifyingCycles.values.map { Self.scanSlot($0.accountKey) })
+            var scanned = false
+            for slot in accounts {
+                let accountKey = slot.isEmpty ? nil : slot
+                if let cached = unionScan(for: accountKey), cached.covers(start: from),
+                   Date().timeIntervalSince(cached.capturedAt) < Self.unionScanMaxAge
+                { continue }
+                // Deliberately does NOT touch `windowScanFailedClients`: this
+                // branch serves the all-agent equivalence, which draws no window
+                // card. The first version set the shared flag here, so an
+                // equivalence scan failing on the lens made every client's card
+                // claim its own scan had failed the moment the user opened a tab.
+                //
+                // One account failing does not abandon the others: their rows
+                // are independent, and a rate-limited or unreadable account
+                // silently removing every other account's estimate is a worse
+                // answer than the estimates it could still give.
+                guard let usage = try? await source.windowUsage(
+                    accountKey: accountKey, from: from, until: now)
+                else { continue }
+                guard Self.windowScanToken == scanToken else { return }
+                setUnionScan(
+                    UnionScan(
+                        fromMs: from, untilMs: now, capturedAt: Date(),
+                        messages: usage.messages, undatedCount: usage.undatedCount),
+                    for: accountKey)
+                scanned = true
+            }
+            // Rebuild even when every account was already cached: the caller
+            // reached this branch because something wants the estimate now.
+            _ = scanned
             rebuildQuotaEquivalences()
             return
         }
@@ -1569,7 +1645,7 @@ private struct DashboardSnapshot {
         // Serve the cached scan while it still covers the range and is fresh.
         // Rescanning on every reopen was the whole complaint: the staging made
         // the wait visible, it did not make it rare.
-        if let cached = unionScan, cached.covers(start: from),
+        if let cached = unionScan(for: Self.cardAccountKey), cached.covers(start: from),
            Date().timeIntervalSince(cached.capturedAt) < Self.unionScanMaxAge {
             // A fresh scan that covers this window IS an answer for it, whoever
             // ran it. Returning without clearing left the card reporting a
@@ -1587,7 +1663,9 @@ private struct DashboardSnapshot {
         // drawn chart for as long as the failure lasted, which is a spinner
         // that will never stop. The token check keeps an overtaken scan's
         // failure from settling a newer request, exactly as its success is.
-        guard let usage = try? await source.windowUsage(from: from, until: now) else {
+        guard let usage = try? await source.windowUsage(
+            accountKey: Self.cardAccountKey, from: from, until: now)
+        else {
             guard Self.windowScanToken == scanToken else { return }
             windowScanFailedClients.insert(client)
             refreshWindowQuotaHalves()
@@ -1601,9 +1679,11 @@ private struct DashboardSnapshot {
         // recorded, which is neither of those things.
         windowScanFailedClients = Self.scanFailures(
             windowScanFailedClients, resolvedBy: client)
-        unionScan = UnionScan(
-            fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages,
-            undatedCount: usage.undatedCount)
+        setUnionScan(
+            UnionScan(
+                fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages,
+                undatedCount: usage.undatedCount),
+            for: Self.cardAccountKey)
         refreshWindowQuotaHalves()
         rebuildQuotaHistory()
         rebuildQuotaEquivalences()

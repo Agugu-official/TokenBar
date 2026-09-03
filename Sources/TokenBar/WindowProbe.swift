@@ -163,7 +163,14 @@ enum WindowProbe {
                     // measurable while the cap sits above it.
                     guard full.count >= 8 else { continue }
                     // `evidenceStartMs` is already milliseconds; `nowS` is not.
+                    // This agent's own account, not every account's. The
+                    // sweep tunes `consideredCycles` against the shipping
+                    // estimate, and the shipping estimate divides one
+                    // account's usage by that account's quota movement; a
+                    // wider scan here would tune the constant against a
+                    // numerator the app never uses.
                     guard let messages = try? TBCore.windowUsage(
+                        accountKey: agent.accountKey,
                         from: oldestUncapped, until: nowS * 1000).messages
                     else { continue }
                     let confirmed = UsageAttribution.confirmed().records
@@ -279,7 +286,11 @@ enum WindowProbe {
             for a in payload.agents where a.error != nil || a.windows.isEmpty {
                 print("    ⚠️ \(a.clientId): error=\(a.error ?? "nil") windows=\(a.windows.count)")
             }
-            var resolved: [(String, String, WindowResolution)] = []
+            // The account travels with the window. It used to be dropped here,
+            // and the SCAN COST section below carried a comment admitting it
+            // read the primary account only — an admission is not a fix when
+            // the payload lists an extra account's windows two lines up.
+            var resolved: [(String, String?, String, WindowResolution)] = []
             var windowKeys: [String: String?] = [:]
 
             for agent in payload.agents {
@@ -301,14 +312,15 @@ enum WindowProbe {
                     // become legal — .idle means R is past but within one D.
                     var final = pre
                     if case .idle = pre, let r = resetMs, let d = durMs {
-                        let usage = try TBCore.windowUsage(from: r, until: now)
+                        let usage = try TBCore.windowUsage(
+                            accountKey: agent.accountKey, from: r, until: now)
                         let t0 = WindowResolver.firstUsageAfterReset(
                             messages: usage.messages, resetMs: r)
                         final = WindowResolver.resolve(
                             resetsAtMs: r, durationMs: d, now: now,
                             firstUsageAfterReset: t0)
                     }
-                    resolved.append((agent.clientId, w.cardId, final))
+                    resolved.append((agent.clientId, agent.accountKey, w.cardId, final))
                     windowKeys["\(agent.clientId)|\(w.cardId)"] = w.paceStatus.windowKey
                 }
             }
@@ -328,9 +340,12 @@ enum WindowProbe {
             for (k, v) in windowKeys.sorted(by: { $0.key < $1.key }) {
                 print("    \(k)  →  \(v ?? "nil")")
             }
-            for (client, card, state) in resolved {
-                print(String(format: "  %-16@ %-22@ %@",
-                             client as NSString, card as NSString,
+            for (client, accountKey, card, state) in resolved {
+                print(String(format: "  %-16@ %-10@ %-22@ %@",
+                             client as NSString,
+                             (accountKey.map { ($0 as NSString).lastPathComponent }
+                                ?? "primary") as NSString,
+                             card as NSString,
                              describe(state, now: now) as NSString))
             }
 
@@ -453,15 +468,26 @@ enum WindowProbe {
             // One scan over the widest window, then filter per card in memory.
             print("=== UNION SCAN（掃一次最寬範圍，各卡自行過濾）===")
             var widest = now
-            for (_, _, st) in resolved { if let (a, _) = interval(st) { widest = min(widest, a) } }
+            for (_, _, _, st) in resolved { if let (a, _) = interval(st) { widest = min(widest, a) } }
+            // One scan PER ACCOUNT over the widest window, then filter per
+            // card in memory. Not one scan for everybody: a window belongs to
+            // an account, and the app no longer has a scan that spans them.
             var t0 = Date()
-            let all = try TBCore.windowUsage(from: widest, until: now)
-            let unionMs = Date().timeIntervalSince(t0) * 1000
-            print(String(format: "  一次掃描 %.0f 分鐘範圍：%ld 筆，%.0f ms",
-                         Double(now - widest) / 60000, all.messages.count, unionMs))
+            var unionMs = 0.0
+            var byAccount: [String: WindowUsage] = [:]
+            for account in Set(resolved.map { $0.1 ?? "" }) {
+                t0 = Date()
+                byAccount[account] = try TBCore.windowUsage(
+                    accountKey: account.isEmpty ? nil : account, from: widest, until: now)
+                unionMs += Date().timeIntervalSince(t0) * 1000
+            }
+            let unionCount = byAccount.values.reduce(0) { $0 + $1.messages.count }
+            print(String(format: "  掃描 %d 個帳號 × %.0f 分鐘範圍：%ld 筆，%.0f ms",
+                         byAccount.count, Double(now - widest) / 60000, unionCount, unionMs))
             var filterTotal = 0.0
-            for (cl, cd, st) in resolved {
-                guard let (a, b) = interval(st) else { continue }
+            for (cl, ak, cd, st) in resolved {
+                guard let (a, b) = interval(st),
+                      let all = byAccount[ak ?? ""] else { continue }
                 t0 = Date()
                 let sub = all.messages.filter { $0.timestamp > a && $0.timestamp <= min(b, now) }
                 let ms = Date().timeIntervalSince(t0) * 1000
@@ -472,12 +498,11 @@ enum WindowProbe {
             print(String(format: "  合計：%.0f ms（vs 逐窗各掃一次）", unionMs + filterTotal))
 
             print("\n=== SCAN COST（每次載入一次，非每次 hover）===")
-            // `resolved` carries no account key, so this section reads the
-            // primary account only — stated rather than defaulted.
-            for (client, card, state) in resolved {
+            for (client, accountKey, card, state) in resolved {
                 guard let (start, end) = interval(state) else { continue }
                 var t0 = Date()
-                let usage = try TBCore.windowUsage(from: start, until: min(end, now))
+                let usage = try TBCore.windowUsage(
+                    accountKey: accountKey, from: start, until: min(end, now))
                 let scanMs = Date().timeIntervalSince(t0) * 1000
                 let conf = UsageAttribution.confirmed().records
                 t0 = Date()

@@ -20,7 +20,14 @@ protocol UsageDataSource: Sendable {
     func agentUsage() async throws -> AgentUsagePayload
     func usageTrace(windowSecs: Int64) async throws -> [TraceBucket]
     func tokensPerMin() async throws -> Double
-    func windowUsage(from: Int64, until: Int64) async throws -> WindowUsage
+    /// `accountKey` selects whose transcripts are folded into the window —
+    /// nil is the primary account, an extra Claude account passes its config
+    /// directory. Required for the same reason `quotaCurve`'s is: a window is
+    /// one account's, and a caller that omitted it would measure every
+    /// account's usage against one account's allowance.
+    func windowUsage(
+        accountKey: String?, from: Int64, until: Int64
+    ) async throws -> WindowUsage
     /// `accountKey` selects which account of `clientId` to read — nil is the
     /// primary account. Required (not defaulted) so a conformer that forgets
     /// it fails to compile against the protocol instead of silently falling
@@ -41,7 +48,9 @@ extension UsageDataSource {
     /// "no window data", which the card renders as its unavailable state —
     /// asserting the card through a double that predates it would test the
     /// double. The live and demo sources both override.
-    func windowUsage(from: Int64, until: Int64) async throws -> WindowUsage {
+    func windowUsage(
+        accountKey: String?, from: Int64, until: Int64
+    ) async throws -> WindowUsage {
         WindowUsage(messages: [], undatedCount: 0, processingTimeMs: 0)
     }
 
@@ -160,9 +169,11 @@ actor AgentUsageThrottle {
 struct LiveUsageDataSource: UsageDataSource {
     let allowsQuotaCachePersistence = true
 
-    func windowUsage(from: Int64, until: Int64) async throws -> WindowUsage {
+    func windowUsage(
+        accountKey: String?, from: Int64, until: Int64
+    ) async throws -> WindowUsage {
         try await Task.detached(priority: .userInitiated) {
-            try TBCore.windowUsage(from: from, until: until)
+            try TBCore.windowUsage(accountKey: accountKey, from: from, until: until)
         }.value
     }
 

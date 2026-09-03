@@ -434,6 +434,13 @@ private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendab
     private let inner = DashboardModelTestSource(failingGraphYear: "")
     private let payload: AgentUsagePayload
     var scans = 0
+    /// Which account each scan asked for, in order. `SC1` only needs the count;
+    /// the per-account cases need to see that the right accounts were asked.
+    var scannedAccounts: [String?] = []
+    /// Rows served per account, keyed the way the model keys its scans (the
+    /// empty string is the primary). Empty means "no messages", which is the
+    /// pre-existing behaviour every other case relies on.
+    var messagesByAccount: [String: [WindowMessage]] = [:]
     /// Served for every window, so a case about the strip summaries has
     /// something to summarise. Nil keeps the pre-existing behaviour.
     var curve: QuotaCurve?
@@ -489,9 +496,22 @@ private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendab
         try await inner.usageTrace(windowSecs: windowSecs)
     }
     func tokensPerMin() async throws -> Double { try await inner.tokensPerMin() }
-    func windowUsage(from: Int64, until: Int64) async throws -> WindowUsage {
+    /// Counts a scan per ACCOUNT, because the shipping code now issues one
+    /// call per account rather than one call for all of them.
+    ///
+    /// The signature has to track the protocol's exactly. An outdated one still
+    /// compiles — the conformance falls through to the extension's default,
+    /// which returns empty and counts nothing — and the counter then reads zero
+    /// for a model that scanned. That is how this double stopped observing
+    /// anything while `SC1` still ran.
+    func windowUsage(
+        accountKey: String?, from: Int64, until: Int64
+    ) async throws -> WindowUsage {
         scans += 1
-        return WindowUsage(messages: [], undatedCount: 0, processingTimeMs: 0)
+        scannedAccounts.append(accountKey)
+        return WindowUsage(
+            messages: messagesByAccount[accountKey ?? ""] ?? [],
+            undatedCount: 0, processingTimeMs: 0)
     }
 }
 
@@ -564,7 +584,9 @@ private final class RegistryRaceSource: UsageDataSource, @unchecked Sendable {
         try await inner.usageTrace(windowSecs: windowSecs)
     }
     func tokensPerMin() async throws -> Double { try await inner.tokensPerMin() }
-    func windowUsage(from: Int64, until: Int64) async throws -> WindowUsage {
+    func windowUsage(
+        accountKey: String?, from: Int64, until: Int64
+    ) async throws -> WindowUsage {
         WindowUsage(messages: [], undatedCount: 0, processingTimeMs: 0)
     }
 }
@@ -14080,6 +14102,172 @@ enum SelfTest {
                 + "keys with two distinct sets of readings, rather than one account's "
                 + "data silently overwriting the other's under a shared "
                 + "\"clientId|cardId\" key")
+
+
+        // M3-q. The defect issue #258 reports, at the layer this side owns:
+        // every account's equivalence row folding one shared scan.
+        //
+        // Asserted on WHICH accounts were scanned, not on how many. A count
+        // alone passes when the model issues two scans for the primary and none
+        // for the extra account, which is the shape a wrong selector produces.
+        // Point `unionScan(for:)` at `Self.cardAccountKey` and this goes red.
+        func m3qCurve(accountUsed: [Double]) -> QuotaCurve {
+            // Three completed cycles, each moving more than `minimumDelta` and
+            // sampled across most of the window, so all three are admitted.
+            var points: [String] = []
+            for (index, used) in accountUsed.enumerated() {
+                let reset = m3fNow - Int64(3 - index) * 18_000
+                for (offset, pct) in [(-17_000, 0.0), (-1_000, used)] {
+                    points.append("""
+                        {"sampledAt":\(reset + Int64(offset)),"usedPercent":\(pct),
+                         "resetAt":\(reset),"durationSeconds":18000,
+                         "durationSource":"provider","origin":"liveV3",
+                         "isActiveGroup":false}
+                        """)
+                }
+            }
+            let json = """
+                {"points":[\(points.joined(separator: ","))],
+                 "coverage":{"oldestSampledAt":\(m3fNow - 71_000),
+                             "newestSampledAt":\(m3fNow - 19_000),
+                             "sampleCount":\(points.count)},
+                 "activeResetAt":null,"generation":11}
+                """
+            return try! JSONDecoder().decode(QuotaCurve.self, from: Data(json.utf8))
+        }
+        let m3qAccounts: [String?]? = awaitMainActorValue {
+            let src = WindowScanCountingSource(payload: m3fPayload)
+            src.curveByAccount = [
+                nil: m3qCurve(accountUsed: [40, 45, 50]),
+                m3ExtraKey: m3qCurve(accountUsed: [20, 25, 30]),
+            ]
+            let m = DashboardModel(source: src, initialYear: nil)
+            m.windowCardClients = ["claude"]
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while !m.agentUsageAttempted, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            poll.cancel()
+            _ = await poll.value
+            // The all-agent lens: no card on screen, only the estimates.
+            m.windowUsageClient = nil
+            m.quotaLensAllAgents = true
+            src.scans = 0
+            src.scannedAccounts = []
+            await m.refreshWindowUsage()
+            return src.scannedAccounts
+        }
+        // The same run again, this time serving each account a DIFFERENT set of
+        // rows, so the estimate itself has to differ. `m3qAccounts` above
+        // observes which scans were issued; only this observes which one each
+        // row read, and a selector that issued two scans and then folded the
+        // primary's into both rows would pass the first and fail here.
+        func m3qMessage(atSecs: Int64, cost: Double) -> WindowMessage {
+            try! JSONDecoder().decode(WindowMessage.self, from: Data("""
+            {"timestamp":\(atSecs * 1000),"client":"claude",
+             "providerId":"anthropic","modelId":"claude-opus-5",
+             "input":\(Int(cost * 1_000_000)),"output":0,"cacheRead":0,
+             "cacheWrite":0,"reasoning":0,"cost":\(cost),"isTurnStart":true}
+            """.utf8))
+        }
+        // The fold attributes through the user's declarations, and an
+        // undeclared row is `.unassigned` — which would leave both accounts
+        // reporting "none of it recorded here" and make the comparison below
+        // vacuous. Installed and restored around the block, the same way the
+        // attribution card's case above does it.
+        let m3qSavedAttribution = UserDefaults.standard.object(
+            forKey: UsageAttribution.confirmedKey)
+        UserDefaults.standard.set(
+            UsageAttribution.confirmedRaw(
+                updating: nil,
+                record: UsageAttribution.Record(
+                    client: "claude", provider: "anthropic", model: nil,
+                    state: .assigned("claude"))),
+            forKey: UsageAttribution.confirmedKey)
+        defer {
+            UserDefaults.standard.set(
+                m3qSavedAttribution, forKey: UsageAttribution.confirmedKey)
+        }
+        func m3qRowsFor(cost: Double) -> [WindowMessage] {
+            [63_000, 45_000, 27_000].map { m3qMessage(atSecs: m3fNow - $0, cost: cost) }
+        }
+        let m3qPrimaryRows = m3qRowsFor(cost: 100)
+        let m3qExtraRows = m3qRowsFor(cost: 1)
+        let m3qRows: [String: WindowEquivalence.Row]? = awaitMainActorValue {
+            let src = WindowScanCountingSource(payload: m3fPayload)
+            // The SAME quota movement for both accounts, deliberately. The
+            // denominators being equal leaves the rows differing only by which
+            // scan each one folded, which is the property under test; two
+            // different curves would also produce two different rows and prove
+            // nothing about the scan.
+            src.curveByAccount = [
+                nil: m3qCurve(accountUsed: [40, 45, 50]),
+                m3ExtraKey: m3qCurve(accountUsed: [40, 45, 50]),
+            ]
+            // One row inside EVERY admitted cycle's observed span, because an
+            // estimate is a fold across all of them and a cycle with no usage
+            // reports as unaccounted rather than as a number.
+            //
+            // Two orders of magnitude apart between the accounts, so no
+            // rounding can make the two rows agree by accident.
+            src.messagesByAccount = [
+                "": m3qPrimaryRows,
+                m3ExtraKey: m3qExtraRows,
+            ]
+            let m = DashboardModel(source: src, initialYear: nil)
+            m.windowCardClients = ["claude"]
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while !m.agentUsageAttempted, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            poll.cancel()
+            _ = await poll.value
+            m.windowUsageClient = nil
+            m.quotaLensAllAgents = true
+            await m.refreshWindowUsage()
+            return m.quotaEquivalences
+        }
+        func m3qCost(_ row: WindowEquivalence.Row?) -> Double? {
+            switch row {
+            case let .ratio(_, cost, _): return cost
+            case let .costOnly(cost, _): return cost
+            default: return nil
+            }
+        }
+        let m3qPrimaryRow = m3qRows?["claude|session.v1"]
+        let m3qExtraRow = m3qRows?["claude|\(m3ExtraKey)|session.v1"]
+        expect(
+            m3qCost(m3qPrimaryRow) != nil && m3qCost(m3qExtraRow) != nil,
+            "M3-q both accounts produce a priced estimate, so the comparison "
+                + "below is between two real numbers rather than a nil and a "
+                + "number, which would pass while measuring nothing")
+        // The RATIO, not two pinned floats. The fixture serves the primary
+        // rows costing 100x the extra account's, so a hundredfold gap is the
+        // property; the absolute figures are an artefact of the delta values
+        // and would have to be re-pinned every time the fixture moved.
+        let m3qRatio = zip([m3qCost(m3qPrimaryRow)], [m3qCost(m3qExtraRow)])
+            .compactMap { primary, extra -> Double? in
+                guard let primary, let extra, extra > 0 else { return nil }
+                return primary / extra
+            }
+            .first
+        expect(
+            (m3qRatio.map { abs($0 - 100) < 0.001 }) == true,
+            "M3-q each account's estimate is built from its OWN account's rows; "
+                + "reading one shared scan gives both accounts the same "
+                + "numerator, which is what issue #258 reports")
+        expect(
+            Set((m3qAccounts ?? []).map { $0 ?? "" }) == Set(["", m3ExtraKey]),
+            "M3-q each account's equivalence reads a scan of its OWN transcripts; "
+                + "one shared scan divides every account's usage by each account's "
+                + "own quota movement")
+        expect(
+            (m3qAccounts ?? []).count == 2,
+            "M3-q the two accounts are scanned once each, not once per window")
 
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
