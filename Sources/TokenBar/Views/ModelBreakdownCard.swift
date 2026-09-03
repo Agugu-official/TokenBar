@@ -172,9 +172,14 @@ struct ModelBreakdownCard: View {
                 Text(Format.compactTokens(entry.total))
                     .font(.caption.monospacedDigit())
                 HStack(spacing: 3) {
-                    if entry.implausibleCostRatio != nil {
+                    if let ratio = entry.implausibleCostRatio {
                         Image(systemName: CostPlausibility.symbol)
                             .foregroundStyle(Color(hex: CostPlausibility.warningColor))
+                            // See ModelsView: the tooltip carrying this
+                            // explanation is pointer-only, so the icon needs
+                            // to say it itself.
+                            .accessibilityLabel(
+                                CostPlausibility.warningText(ratio))
                     }
                     Text(Format.usd(entry.cost))
                         .foregroundStyle(Color(hex: "#22c55e"))
@@ -280,15 +285,28 @@ struct ModelUsageTooltip: View {
                     .padding(.top, 3)
                 // Wraps instead of truncating: the rows themselves have to
                 // middle-truncate (a fixed-width column), so this is the only
-                // place a long identifier can be read in full —
-                // `deepseek/deepseek-v4-flash-vision-exp` and other provider-
-                // prefixed OpenRouter names exceed the 210pt panel on one
-                // line. Three lines is roughly 90 characters, past any real
-                // model id, with middle truncation still the last resort so
-                // corrupt input cannot grow the panel without bound.
+                // place a long identifier can be read in full.
+                //
+                // Measured, not estimated — caption1 is 10pt and the text has
+                // 183pt after the panel's padding, the dot and the spacing,
+                // giving a 12pt line height:
+                //
+                //     deepseek/deepseek-v4-flash-vision-exp   37 chars, 2 lines
+                //     nousresearch/hermes-3-llama-3.1-405b-…  45 chars, 2 lines
+                //     4-line capacity                         76 chars worst
+                //                                             case (all 'm'),
+                //                                             102 for a mixed
+                //                                             model-id alphabet
+                //
+                // The longest identifiers in circulation are around 45
+                // characters, so four lines clears them by more than half
+                // again. The cap stays because middle truncation is the last
+                // resort against corrupt input growing the panel without
+                // bound; `lineLimit` costs nothing on the ordinary one- and
+                // two-line names.
                 Text(model)
                     .font(.caption.weight(.semibold))
-                    .lineLimit(3)
+                    .lineLimit(4)
                     .truncationMode(.middle)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -306,8 +324,7 @@ struct ModelUsageTooltip: View {
                 // Named in multiples rather than "wrong": the app cannot know
                 // the client's real rate, only that this is far off any price
                 // the local table can justify.
-                Text("Cost reported by the client, about %@x the local price estimate"
-                    .localized(Format.compactRatio(costRatio)))
+                Text(CostPlausibility.warningText(costRatio))
                     .font(.caption2)
                     .foregroundStyle(Color(hex: CostPlausibility.warningColor))
                     .fixedSize(horizontal: false, vertical: true)
@@ -337,5 +354,19 @@ struct ModelUsageTooltip: View {
 extension ModelReportEntry {
     /// Stable row identity across re-sorts (client+model+provider triple).
     var rowID: String { "\(client)|\(model)|\(provider)" }
+}
+
+extension CostPlausibility {
+    /// The one wording for a flagged cost, used by the tooltip line and by the
+    /// icon's accessibility label. Both have to say the same thing, and the
+    /// icon is the only channel a VoiceOver or keyboard user has — the tooltip
+    /// that carries this text is summoned by a pointer and nothing else.
+    ///
+    /// Lives here rather than beside the threshold in TokenBarCore because it
+    /// needs `Format` and `.localized`, which are TokenBar-side.
+    static func warningText(_ ratio: Double) -> String {
+        "Cost reported by the client, about %@x the local price estimate"
+            .localized(Format.compactRatio(ratio))
+    }
 }
 

@@ -1214,6 +1214,12 @@ enum SelfTest {
                 .costEstimate == nil,
             "one unpriceable component makes the merged estimate a partial denominator, "
                 + "which would overstate the ratio — the merged row reports no estimate instead")
+        expect(
+            CostPlausibility.warningText(308.4).contains("308")
+                && !CostPlausibility.warningText(308.4).contains("308.4"),
+            "the warning names the multiple as a whole number — one wording shared by the "
+                + "tooltip line and the icon's accessibility label, which is the only channel "
+                + "a VoiceOver user has because the tooltip is pointer-only")
 
         // Usage attribution: declarations are explicit, provider-level by
         // default, and model overrides are more specific. Suggestions never

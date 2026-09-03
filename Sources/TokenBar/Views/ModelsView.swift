@@ -139,9 +139,15 @@ struct ModelsView: View {
                 Text(Format.compactTokens(entry.total))
                     .font(.caption.monospacedDigit())
                 HStack(spacing: 3) {
-                    if entry.implausibleCostRatio != nil {
+                    if let ratio = entry.implausibleCostRatio {
                         Image(systemName: CostPlausibility.symbol)
                             .foregroundStyle(Color(hex: CostPlausibility.warningColor))
+                            // The explanation otherwise lives only in the
+                            // hover tooltip, which a pointer is the only way
+                            // to summon — so without this the icon is the
+                            // whole message and it says nothing.
+                            .accessibilityLabel(
+                                CostPlausibility.warningText(ratio))
                     }
                     Text(Format.usd(entry.cost))
                         .foregroundStyle(Color(hex: "#22c55e"))
