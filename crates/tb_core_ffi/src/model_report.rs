@@ -28,6 +28,13 @@ struct ModelEntry {
     /// Milliseconds per 1K tokens, when tokscale could time the model. `None`
     /// when no message in the rollup carried a usable duration.
     ms_per_1k_tokens: Option<f64>,
+    /// How many times larger this row's cost is than what the local pricing
+    /// table would charge for the same tokens — set ONLY when that multiple
+    /// clears `IMPLAUSIBLE_COST_RATIO`, so a value here means "this number is
+    /// not trustworthy", not "here is a ratio". `None` is the normal case and
+    /// also covers every row the check could not evaluate. See
+    /// `implausible_cost_ratio`.
+    cost_ratio: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -74,8 +81,74 @@ pub(crate) fn run(context: &crate::LocalSourceContext, year: &str) -> Result<Val
         .map_err(|e| format!("build runtime: {}", e))?;
     let report = runtime.block_on(tokscale_core::get_model_report(options))?;
 
-    let data = map_report(report);
+    // Read-only, no network: `get_model_report` has already refreshed and
+    // written this cache on its own path, and a cold cache (first ever run,
+    // offline) simply yields None, which disables the check rather than
+    // reporting on a table that isn't there.
+    let pricing = tokscale_core::pricing::PricingService::load_cached_any_age();
+
+    let data = map_report(report, pricing.as_ref());
     serde_json::to_value(data).map_err(|e| format!("serialize model report: {}", e))
+}
+
+/// A provider-reported cost this many times the local pricing table's estimate
+/// is treated as broken rather than expensive.
+///
+/// Clients that record their own per-message cost (OpenCode, MiMo Code) have
+/// it taken verbatim: tokscale-core's `apply_pricing_if_available` returns
+/// early on `has_authoritative_cost()`, so no pricing table ever sees those
+/// rows. That is the right default — the client knows its own contract — but
+/// it also means a unit error upstream (a per-1K rate applied per-token, a
+/// non-USD figure) reaches the UI with nothing in between.
+///
+/// Measured on real local data, LiteLLM estimate vs OpenCode's own figure:
+///
+/// | row                              | reported | estimate | ratio  |
+/// |----------------------------------|----------|----------|--------|
+/// | deepseek-v4-flash (default)      |   0.7139 |   2.5719 |   0.3x |
+/// | deepseek-v4-flash (low)          |   0.2943 |   1.0470 |   0.3x |
+/// | deepseek-v4-pro                  |   3.9039 |  26.4468 |   0.1x |
+/// | deepseek-v4-flash (user report)  | 8647.24  |  27.8316 | 310.7x |
+///
+/// Healthy rows sit at 0.1-0.3x (the table runs a few times dearer than what
+/// OpenCode actually bills), so the floor is not near 1.0 and the threshold
+/// must not be either. 50x leaves two orders of magnitude of headroom above
+/// every healthy row while still catching the 310x case, which matters
+/// because the estimate itself is only approximate: the lookup can match a
+/// near-miss key (`deepseek-v4-flash-free` resolves to `deepseek-v4-flash`)
+/// or a row missing cache rates, and either skews it by single-digit
+/// multiples. Nothing short of a unit-scale error clears 50x.
+const IMPLAUSIBLE_COST_RATIO: f64 = 50.0;
+
+/// The multiple by which `cost` exceeds the local pricing estimate, when that
+/// is high enough to call the cost broken; `None` otherwise.
+///
+/// Deliberately one-directional. A row costing *less* than the estimate is the
+/// normal case above, and a genuinely free model (`deepseek-v4-flash-free`
+/// reports 0.0 against a 0.0384 estimate) would be flagged forever by a
+/// two-sided check. An absent or zero estimate means the table cannot price
+/// these tokens at all, which is not evidence about the reported cost.
+fn implausible_cost_ratio(
+    pricing: Option<&tokscale_core::pricing::PricingService>,
+    entry: &tokscale_core::ModelUsage,
+) -> Option<f64> {
+    let pricing = pricing?;
+    if !entry.cost.is_finite() || entry.cost <= 0.0 {
+        return None;
+    }
+    let usage = tokscale_core::TokenBreakdown {
+        input: entry.input,
+        output: entry.output,
+        cache_read: entry.cache_read,
+        cache_write: entry.cache_write,
+        reasoning: entry.reasoning,
+    };
+    let estimate = pricing.calculate_cost_with_provider(&entry.model, Some(&entry.provider), &usage);
+    if !estimate.is_finite() || estimate <= 0.0 {
+        return None;
+    }
+    let ratio = entry.cost / estimate;
+    (ratio > IMPLAUSIBLE_COST_RATIO).then_some(ratio)
 }
 
 fn normalize_year(year: &str) -> Result<Option<String>, String> {
@@ -90,12 +163,16 @@ fn normalize_year(year: &str) -> Result<Option<String>, String> {
     }
 }
 
-fn map_report(report: tokscale_core::ModelReport) -> ModelReportData {
+fn map_report(
+    report: tokscale_core::ModelReport,
+    pricing: Option<&tokscale_core::pricing::PricingService>,
+) -> ModelReportData {
     ModelReportData {
         entries: report
             .entries
             .into_iter()
             .map(|e| {
+                let cost_ratio = implausible_cost_ratio(pricing, &e);
                 // saturating_add so #766's i64::MAX-clamped buckets (corrupt
                 // Antigravity DB) can't overflow this FFI-exposed total in
                 // debug/release (see agents_report.rs's map_report for the
@@ -119,6 +196,7 @@ fn map_report(report: tokscale_core::ModelReport) -> ModelReportData {
                     message_count: e.message_count,
                     cost: e.cost,
                     ms_per_1k_tokens: e.performance.ms_per_1k_tokens,
+                    cost_ratio,
                 }
             })
             .collect(),
@@ -513,7 +591,7 @@ mod tests {
     #[test]
     fn total_saturates_on_overlarge_buckets() {
         let report = wrap(vec![entry(i64::MAX, i64::MAX, 0, 0, 0)]);
-        let mapped = map_report(report);
+        let mapped = map_report(report, None);
         assert_eq!(mapped.entries[0].total, i64::MAX);
     }
 
@@ -524,7 +602,7 @@ mod tests {
     #[test]
     fn total_saturates_when_cache_write_is_overlarge() {
         let report = wrap(vec![entry(10, 20, i64::MAX, i64::MAX, 5)]);
-        let mapped = map_report(report);
+        let mapped = map_report(report, None);
         assert_eq!(mapped.entries[0].total, i64::MAX);
     }
 
@@ -534,7 +612,113 @@ mod tests {
     #[test]
     fn total_includes_every_token_field() {
         let report = wrap(vec![entry(1, 2, 4, 8, 16)]);
-        let mapped = map_report(report);
+        let mapped = map_report(report, None);
         assert_eq!(mapped.entries[0].total, 31);
+    }
+
+    // MARK: - Implausible-cost guard
+
+    /// A hermetic stand-in for the LiteLLM table: one priced model at
+    /// $1.00 per 1M input tokens and nothing else, so every estimate below is
+    /// a number this test states rather than one the shipping dataset supplies
+    /// (which would drift with upstream and make the assertions meaningless).
+    fn priced_service(model: &str) -> tokscale_core::pricing::PricingService {
+        let mut litellm = std::collections::HashMap::new();
+        litellm.insert(
+            model.to_string(),
+            tokscale_core::pricing::litellm::ModelPricing {
+                input_cost_per_token: Some(1e-6),
+                ..Default::default()
+            },
+        );
+        tokscale_core::pricing::PricingService::new(litellm, std::collections::HashMap::new())
+    }
+
+    /// 1M input tokens against the table above estimates to exactly $1.00, so
+    /// `cost` doubles as the ratio and each case below states its own multiple.
+    fn priced_entry(model: &str, cost: f64) -> tokscale_core::ModelUsage {
+        let mut e = entry(1_000_000, 0, 0, 0, 0);
+        e.model = model.to_string();
+        e.provider = "deepseek".to_string();
+        e.cost = cost;
+        e
+    }
+
+    #[test]
+    fn implausible_cost_is_flagged_with_its_ratio() {
+        let service = priced_service("m");
+        // The shape of the user report: a per-1K rate billed per-token.
+        let ratio = implausible_cost_ratio(Some(&service), &priced_entry("m", 1000.0));
+        assert_eq!(ratio, Some(1000.0));
+    }
+
+    #[test]
+    fn plausible_cost_is_not_flagged() {
+        let service = priced_service("m");
+        // Every healthy row measured on real data sat at or below 1.0x; even a
+        // client billing 10x the table's rate stays quiet.
+        for cost in [0.1, 1.0, 10.0, IMPLAUSIBLE_COST_RATIO] {
+            assert_eq!(
+                implausible_cost_ratio(Some(&service), &priced_entry("m", cost)),
+                None,
+                "{cost} should not be flagged"
+            );
+        }
+        // Just past the threshold it is. Pins the boundary from both sides, so
+        // a comparison flipped to `>=`/`<` cannot pass this pair.
+        assert!(
+            implausible_cost_ratio(
+                Some(&service),
+                &priced_entry("m", IMPLAUSIBLE_COST_RATIO + 0.5)
+            )
+            .is_some(),
+            "just above the threshold should be flagged"
+        );
+    }
+
+    #[test]
+    fn unpriced_model_is_never_flagged() {
+        let service = priced_service("m");
+        // The table cannot price this model at all, so an enormous cost is not
+        // evidence of anything. Without the estimate > 0 guard the division
+        // would be by zero and every unpriced row would be flagged.
+        assert_eq!(
+            implausible_cost_ratio(Some(&service), &priced_entry("other", 99_999.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn free_and_absent_costs_are_never_flagged() {
+        let service = priced_service("m");
+        // A genuinely free model reports 0.0 against a positive estimate; a
+        // two-sided check would flag it on every refresh forever.
+        assert_eq!(
+            implausible_cost_ratio(Some(&service), &priced_entry("m", 0.0)),
+            None
+        );
+        assert_eq!(
+            implausible_cost_ratio(Some(&service), &priced_entry("m", f64::NAN)),
+            None
+        );
+        // No cached table (first run, offline): the check disables itself
+        // rather than reporting against a table that isn't there.
+        assert_eq!(implausible_cost_ratio(None, &priced_entry("m", 1000.0)), None);
+    }
+
+    #[test]
+    fn flagged_ratio_reaches_the_serialized_entry() {
+        // The three cases above test the predicate directly; this one proves
+        // map_report actually carries it onto the wire shape the UI decodes,
+        // under the key Swift reads.
+        let service = priced_service("m");
+        let report = wrap(vec![priced_entry("m", 1000.0), priced_entry("m", 1.0)]);
+        let mapped = map_report(report, Some(&service));
+        assert_eq!(mapped.entries[0].cost_ratio, Some(1000.0));
+        assert_eq!(mapped.entries[1].cost_ratio, None);
+
+        let json = serde_json::to_value(&mapped).unwrap();
+        assert_eq!(json["entries"][0]["costRatio"], serde_json::json!(1000.0));
+        assert!(json["entries"][1]["costRatio"].is_null());
     }
 }

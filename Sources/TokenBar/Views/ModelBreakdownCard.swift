@@ -171,9 +171,15 @@ struct ModelBreakdownCard: View {
             VStack(alignment: .trailing, spacing: 2) {
                 Text(Format.compactTokens(entry.total))
                     .font(.caption.monospacedDigit())
-                Text(Format.usd(entry.cost))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(Color(hex: "#22c55e"))
+                HStack(spacing: 3) {
+                    if entry.costRatio != nil {
+                        Image(systemName: CostPlausibility.symbol)
+                            .foregroundStyle(Color(hex: CostPlausibility.warningColor))
+                    }
+                    Text(Format.usd(entry.cost))
+                        .foregroundStyle(Color(hex: "#22c55e"))
+                }
+                .font(.caption2.monospacedDigit())
             }
         }
         // Float the rich tooltip near the cursor anywhere on the row — the
@@ -233,6 +239,7 @@ struct ModelBreakdownCard: View {
             reasoning: entry.reasoning,
             total: entry.total,
             cost: entry.cost,
+            costRatio: entry.costRatio,
             measuredSize: $tooltipSize)
     }
 }
@@ -251,6 +258,9 @@ struct ModelUsageTooltip: View {
     let reasoning: Int64
     let total: Int64
     let cost: Double
+    /// See `ModelReportEntry.costRatio`. Defaults to nil so the day/month
+    /// slice callers, which have no pricing comparison, need not pass it.
+    var costRatio: Double? = nil
     @Binding var measuredSize: CGSize
 
     private var kinds: [(label: String, color: String, value: Int64)] {
@@ -280,6 +290,16 @@ struct ModelUsageTooltip: View {
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
+            if let costRatio {
+                // Named in multiples rather than "wrong": the app cannot know
+                // the client's real rate, only that this is far off any price
+                // the local table can justify.
+                Text("Cost reported by the client, about %@x the local price estimate"
+                    .localized(Format.compactRatio(costRatio)))
+                    .font(.caption2)
+                    .foregroundStyle(Color(hex: CostPlausibility.warningColor))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             ForEach(kinds, id: \.label) { kind in
                 HStack(spacing: 4) {
                     RoundedRectangle(cornerRadius: 1.5)
@@ -305,4 +325,16 @@ struct ModelUsageTooltip: View {
 extension ModelReportEntry {
     /// Stable row identity across re-sorts (client+model+provider triple).
     var rowID: String { "\(client)|\(model)|\(provider)" }
+}
+
+/// Presentation for a cost the local pricing table cannot justify. The
+/// decision itself is made in Rust (`implausible_cost_ratio`); this only says
+/// how it looks.
+enum CostPlausibility {
+    /// Amber, not red: the row is untrustworthy, not broken — the tokens are
+    /// still real and the client may yet be right about its own rate.
+    static let warningColor = "#f59e0b"
+
+    /// Shown beside the cost on a flagged row.
+    static let symbol = "exclamationmark.triangle.fill"
 }

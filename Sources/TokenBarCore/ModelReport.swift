@@ -17,6 +17,17 @@ public struct ModelReportEntry: Decodable, Sendable {
     public let messageCount: Int
     public let cost: Double
     public let msPer1kTokens: Double?
+    /// Set only when `cost` exceeds the local pricing estimate by an
+    /// implausible multiple — a client that reports its own cost (OpenCode,
+    /// MiMo Code) has that figure taken verbatim, so a unit error upstream
+    /// reaches this row unchallenged. The value is that multiple. `nil` is the
+    /// normal case and also covers rows the check could not evaluate (no
+    /// cached pricing table, or a model the table cannot price at all). See
+    /// `implausible_cost_ratio` in crates/tb_core_ffi/src/model_report.rs.
+    ///
+    /// Optional so a report serialized before this field existed still
+    /// decodes.
+    public let costRatio: Double?
 }
 
 public struct ModelReport: Decodable, Sendable {
@@ -73,7 +84,14 @@ public extension ModelReport {
                     ? Int.max
                     : messageCount.partialValue,
                 cost: current.cost + entry.cost,
-                msPer1kTokens: nil
+                msPer1kTokens: nil,
+                // The merged cost is a sum across providers, so no single
+                // ratio describes it any more. Keep the largest of the
+                // contributing rows: the flag has to survive the fold (one
+                // broken provider still makes the merged total wrong), and the
+                // worst multiple is the honest thing to name when the row is
+                // pointed at.
+                costRatio: [current.costRatio, entry.costRatio].compactMap { $0 }.max()
             )
         }
         return folded

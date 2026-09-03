@@ -138,9 +138,15 @@ struct ModelsView: View {
             VStack(alignment: .trailing, spacing: 2) {
                 Text(Format.compactTokens(entry.total))
                     .font(.caption.monospacedDigit())
-                Text(Format.usd(entry.cost))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(Color(hex: "#22c55e"))
+                HStack(spacing: 3) {
+                    if entry.costRatio != nil {
+                        Image(systemName: CostPlausibility.symbol)
+                            .foregroundStyle(Color(hex: CostPlausibility.warningColor))
+                    }
+                    Text(Format.usd(entry.cost))
+                        .foregroundStyle(Color(hex: "#22c55e"))
+                }
+                .font(.caption2.monospacedDigit())
             }
         }
         // Whole-row hit area and a hand-drawn tooltip, matching
@@ -176,6 +182,7 @@ struct ModelsView: View {
             reasoning: entry.reasoning,
             total: entry.total,
             cost: entry.cost,
+            costRatio: entry.costRatio,
             measuredSize: $tooltipSize)
     }
 }
