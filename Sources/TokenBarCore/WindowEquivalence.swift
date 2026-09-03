@@ -35,7 +35,17 @@ public enum WindowEquivalence {
     /// How much relative error the displayed ratio may carry.
     static let tolerance = 0.10
     /// Derived, not chosen: ±0.5/Δ ≤ tolerance ⇒ Δ ≥ 5.
-    public static var minimumDelta: Double { quantisationHalfStep / tolerance }
+    ///
+    /// Internal on purpose. `deltaQualifies` below is the whole admission rule
+    /// and this is only its single-rise half; a caller holding the bare number
+    /// can write `delta >= minimumDelta` and silently drop the run scaling,
+    /// which is exactly what happened at two sites in the `TokenBar` target and
+    /// took a review round to find. Keeping it inside this module makes that
+    /// comparison fail to compile out there rather than fail review. The
+    /// previous guard was a `git grep` showing one comparison, which is a
+    /// statement about the text at the moment it ran and not about the
+    /// repository — an edit relocates around it without touching it.
+    static var minimumDelta: Double { quantisationHalfStep / tolerance }
 
     /// The one statement of whether a measured consumption is large enough to
     /// divide by. `minimumDelta` is the single-rise delta at which the ±0.5
