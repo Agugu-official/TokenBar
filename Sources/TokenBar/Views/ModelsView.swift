@@ -139,7 +139,7 @@ struct ModelsView: View {
                 Text(Format.compactTokens(entry.total))
                     .font(.caption.monospacedDigit())
                 HStack(spacing: 3) {
-                    if entry.costRatio != nil {
+                    if entry.implausibleCostRatio != nil {
                         Image(systemName: CostPlausibility.symbol)
                             .foregroundStyle(Color(hex: CostPlausibility.warningColor))
                     }
@@ -182,7 +182,7 @@ struct ModelsView: View {
             reasoning: entry.reasoning,
             total: entry.total,
             cost: entry.cost,
-            costRatio: entry.costRatio,
+            costRatio: entry.implausibleCostRatio,
             measuredSize: $tooltipSize)
     }
 }

@@ -172,7 +172,7 @@ struct ModelBreakdownCard: View {
                 Text(Format.compactTokens(entry.total))
                     .font(.caption.monospacedDigit())
                 HStack(spacing: 3) {
-                    if entry.costRatio != nil {
+                    if entry.implausibleCostRatio != nil {
                         Image(systemName: CostPlausibility.symbol)
                             .foregroundStyle(Color(hex: CostPlausibility.warningColor))
                     }
@@ -239,7 +239,7 @@ struct ModelBreakdownCard: View {
             reasoning: entry.reasoning,
             total: entry.total,
             cost: entry.cost,
-            costRatio: entry.costRatio,
+            costRatio: entry.implausibleCostRatio,
             measuredSize: $tooltipSize)
     }
 }
@@ -258,7 +258,7 @@ struct ModelUsageTooltip: View {
     let reasoning: Int64
     let total: Int64
     let cost: Double
-    /// See `ModelReportEntry.costRatio`. Defaults to nil so the day/month
+    /// See `ModelReportEntry.implausibleCostRatio`. Defaults to nil so the day/month
     /// slice callers, which have no pricing comparison, need not pass it.
     var costRatio: Double? = nil
     @Binding var measuredSize: CGSize
@@ -327,14 +327,3 @@ extension ModelReportEntry {
     var rowID: String { "\(client)|\(model)|\(provider)" }
 }
 
-/// Presentation for a cost the local pricing table cannot justify. The
-/// decision itself is made in Rust (`implausible_cost_ratio`); this only says
-/// how it looks.
-enum CostPlausibility {
-    /// Amber, not red: the row is untrustworthy, not broken — the tokens are
-    /// still real and the client may yet be right about its own rate.
-    static let warningColor = "#f59e0b"
-
-    /// Shown beside the cost on a flagged row.
-    static let symbol = "exclamationmark.triangle.fill"
-}
