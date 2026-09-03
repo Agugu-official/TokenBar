@@ -271,14 +271,26 @@ struct ModelUsageTooltip: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 5) {
+            HStack(alignment: .top, spacing: 5) {
                 Circle()
                     .fill(Color(hex: color))
                     .frame(width: 6, height: 6)
+                    // Keeps the dot on the first line's optical centre once
+                    // the name below wraps to a second one.
+                    .padding(.top, 3)
+                // Wraps instead of truncating: the rows themselves have to
+                // middle-truncate (a fixed-width column), so this is the only
+                // place a long identifier can be read in full —
+                // `deepseek/deepseek-v4-flash-vision-exp` and other provider-
+                // prefixed OpenRouter names exceed the 210pt panel on one
+                // line. Three lines is roughly 90 characters, past any real
+                // model id, with middle truncation still the last resort so
+                // corrupt input cannot grow the panel without bound.
                 Text(model)
                     .font(.caption.weight(.semibold))
-                    .lineLimit(1)
+                    .lineLimit(3)
                     .truncationMode(.middle)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Text([context, provider].compactMap { $0 }.joined(separator: " · "))
                 .font(.caption2)
