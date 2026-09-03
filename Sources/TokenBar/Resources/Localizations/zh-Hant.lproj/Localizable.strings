@@ -122,6 +122,7 @@
 "Show more" = "顯示更多";
 "Prices updated %@" = "價格更新於 %@";
 "LiteLLM pricing data; refreshes automatically about once an hour" = "LiteLLM 價格資料，大約每小時自動更新一次";
+"Cost reported by the client, about %@x the local price estimate" = "費用由用戶端自行回報，約為本機價格估算的 %@ 倍";
 "Timeline" = "時間軸";
 "Profile" = "分布";
 "peak %02lld:00 · %@" = "尖峰 %1$02lld:00 · %2$@";

@@ -34,6 +34,17 @@ enum Format {
         String(format: "$%.2f", amount)
     }
 
+    /// A "this many times over" multiple, for the implausible-cost warning.
+    ///
+    /// Whole numbers only. The value exists to say a cost is wrong by orders
+    /// of magnitude, and a decimal place would imply a precision the estimate
+    /// behind it does not have: the pricing lookup can land on a near-miss key
+    /// or a row missing cache rates, either of which moves the ratio by
+    /// single-digit multiples without changing what it is telling you.
+    static func compactRatio(_ ratio: Double) -> String {
+        String(format: "%.0f", ratio)
+    }
+
     /// `usd`, except that a real amount too small to show is said to be small
     /// rather than rendered as nothing.
     ///

@@ -14,6 +14,18 @@ struct ModelsView: View {
     /// fetch is not the same as a completed fetch that found nothing.
     var loading = false
 
+    @State private var hover: HoverState?
+    @State private var tooltipSize: CGSize = .zero
+    @Environment(\.popoverScrollViewport) private var popoverScrollViewport
+
+    private struct HoverState {
+        let entry: ModelReportEntry
+        /// Cursor location in the rows container's coordinate space.
+        let point: CGPoint
+    }
+
+    private static let rowsSpace = "models-rows"
+
     private static let kinds: [(label: String, pick: (ModelReportEntry) -> Int64)] = [
         ("In", { $0.input }),
         ("Out", { $0.output }),
@@ -63,23 +75,52 @@ struct ModelsView: View {
                         row(entry, totalCost: totalCost)
                     }
                 }
+                .coordinateSpace(name: Self.rowsSpace)
+                .overlay(alignment: .topLeading) {
+                    if let hover {
+                        GeometryReader { geo in
+                            let measuredSize = tooltipSize == .zero
+                                ? CGSize(width: ModelUsageTooltip.width, height: 120)
+                                : tooltipSize
+                            let offset = PopoverTooltipPlacement.offset(
+                                anchor: hover.point,
+                                tooltipSize: measuredSize,
+                                containerFrame: geo.frame(in: .global),
+                                viewport: popoverScrollViewport)
+                            tooltip(hover.entry)
+                                .offset(offset ?? .zero)
+                        }
+                        // GeometryReader fills the rows; keep hits on the rows
+                        // so continuous hover does not end while the tooltip
+                        // is up.
+                        .allowsHitTesting(false)
+                    }
+                }
             }
         }
     }
 
     private func row(_ entry: ModelReportEntry, totalCost: Double) -> some View {
         let share = totalCost > 0 ? entry.cost / totalCost * 100 : 0
+        let isHovered = hover?.entry.rowID == entry.rowID
         return HStack(spacing: 8) {
             Circle()
                 .fill(Color(hex: colors.color(entry.provider, entry.model)))
                 .frame(width: 8, height: 8)
+                .overlay {
+                    Circle().stroke(
+                        Color.primary.opacity(isHovered ? 0.85 : 0),
+                        lineWidth: 1)
+                }
+                .shadow(
+                    color: Color.primary.opacity(isHovered ? 0.65 : 0),
+                    radius: isHovered ? 3 : 0)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(entry.model)
                         .font(.caption)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                        .help("\(entry.model) · \(ClientRegistry.style(entry.client).displayName)")
                     Text(String(format: "%.1f%%", share))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.tertiary)
@@ -97,10 +138,57 @@ struct ModelsView: View {
             VStack(alignment: .trailing, spacing: 2) {
                 Text(Format.compactTokens(entry.total))
                     .font(.caption.monospacedDigit())
-                Text(Format.usd(entry.cost))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(Color(hex: "#22c55e"))
+                HStack(spacing: 3) {
+                    if let ratio = entry.implausibleCostRatio {
+                        Image(systemName: CostPlausibility.symbol)
+                            .foregroundStyle(Color(hex: CostPlausibility.warningColor))
+                            // The explanation otherwise lives only in the
+                            // hover tooltip, which a pointer is the only way
+                            // to summon — so without this the icon is the
+                            // whole message and it says nothing.
+                            .accessibilityLabel(
+                                CostPlausibility.warningText(ratio))
+                    }
+                    Text(Format.usd(entry.cost))
+                        .foregroundStyle(Color(hex: "#22c55e"))
+                }
+                .font(.caption2.monospacedDigit())
             }
         }
+        // Whole-row hit area and a hand-drawn tooltip, matching
+        // ModelBreakdownCard/DailyView. The old `.help` only covered the model
+        // name's glyph rect and carried AppKit's tooltip delay.
+        .contentShape(Rectangle())
+        .onContinuousHover(coordinateSpace: .named(Self.rowsSpace)) { phase in
+            switch phase {
+            case let .active(point):
+                hover = HoverState(entry: entry, point: point)
+            case .ended:
+                // Guard on identity: this list scrolls, so an `.ended` from a
+                // row the cursor already left must not clear the current one.
+                if hover?.entry.rowID == entry.rowID {
+                    hover = nil
+                }
+            }
+        }
+    }
+
+    // MARK: - Hover tooltip
+
+    private func tooltip(_ entry: ModelReportEntry) -> some View {
+        ModelUsageTooltip(
+            model: entry.model,
+            provider: entry.provider,
+            context: ClientRegistry.style(entry.client).displayName,
+            color: colors.color(entry.provider, entry.model),
+            input: entry.input,
+            output: entry.output,
+            cacheRead: entry.cacheRead,
+            cacheWrite: entry.cacheWrite,
+            reasoning: entry.reasoning,
+            total: entry.total,
+            cost: entry.cost,
+            costRatio: entry.implausibleCostRatio,
+            measuredSize: $tooltipSize)
     }
 }

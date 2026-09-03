@@ -1141,6 +1141,86 @@ enum SelfTest {
             modelLevelEntries.first { $0.model == "shared-model" }?.msPer1kTokens == nil,
             "provider-split model fold omits unrecomputable throughput")
 
+        // Implausible self-reported cost. A client that records its own cost
+        // (OpenCode, MiMo Code) has it taken verbatim by tokscale-core and
+        // never priced, so this comparison against the local estimate is the
+        // only thing between a unit error upstream and the number on screen.
+        func costEntry(_ cost: Double, _ estimate: Double?, provider: String = "p") -> String {
+            """
+            {"client":"c","model":"m","provider":"\(provider)",
+             "input":1,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+             "total":1,"messageCount":1,"cost":\(cost),"msPer1kTokens":null,
+             "costEstimate":\(estimate.map { "\($0)" } ?? "null")}
+            """
+        }
+        func costReport(_ entries: [String]) -> ModelReport {
+            let json = """
+            {"entries":[\(entries.joined(separator: ","))],
+             "totalInput":1,"totalOutput":0,"totalCacheRead":0,"totalCacheWrite":0,
+             "totalMessages":\(entries.count),"totalCost":0.0}
+            """
+            return try! JSONDecoder().decode(ModelReport.self, from: Data(json.utf8))
+        }
+        func onlyRow(_ entries: [String]) -> ModelReportEntry {
+            costReport(entries).modelLevelEntries[0]
+        }
+
+        expect(
+            onlyRow([costEntry(1000, 1)]).implausibleCostRatio == 1000,
+            "a cost 1000x the local estimate is flagged, with that multiple — the shape of "
+                + "the user report where a per-1K rate was billed per-token")
+        expect(
+            onlyRow([costEntry(CostPlausibility.threshold, 1)]).implausibleCostRatio == nil
+                && onlyRow([costEntry(CostPlausibility.threshold + 0.5, 1)])
+                    .implausibleCostRatio != nil,
+            "the threshold is pinned from both sides, so a comparison flipped to >= or < "
+                + "cannot pass this pair")
+        expect(
+            onlyRow([costEntry(0.3, 1)]).implausibleCostRatio == nil,
+            "a row costing LESS than the estimate is never flagged — every healthy row "
+                + "measured on real data sits at 0.1-0.3x, so a two-sided check would flag "
+                + "all of them forever")
+        expect(
+            onlyRow([costEntry(0, 1)]).implausibleCostRatio == nil,
+            "a genuinely free model reports 0.0 against a positive estimate and must stay quiet")
+        expect(
+            onlyRow([costEntry(99_999, nil)]).implausibleCostRatio == nil,
+            "no estimate means the table cannot price these tokens at all, which is not "
+                + "evidence about the reported cost — and must not divide by nil")
+        expect(
+            onlyRow([costEntry(99_999, 0)]).implausibleCostRatio == nil,
+            "a zero estimate is not a usable denominator")
+
+        // The fold is where a pre-fold ratio would go wrong (PR #264 review):
+        // one broken component merged with a larger healthy row is NOT the
+        // component's multiple. 100/1 + 1000/1000 = 1100/1001 = 1.1x.
+        let mergedMostlyHealthy = onlyRow([
+            costEntry(100, 1, provider: "a"), costEntry(1000, 1000, provider: "b"),
+        ])
+        expect(
+            mergedMostlyHealthy.cost == 1100 && mergedMostlyHealthy.costEstimate == 1001,
+            "the fold sums cost and estimate together, so the ratio describes the merged row")
+        expect(
+            mergedMostlyHealthy.implausibleCostRatio == nil,
+            "a merged row at 1.1x is not flagged, even though one component alone was 100x — "
+                + "carrying the component's ratio onto the aggregate would be materially false")
+        expect(
+            onlyRow([costEntry(100_000, 1, provider: "a"), costEntry(1000, 1000, provider: "b")])
+                .implausibleCostRatio != nil,
+            "a component broken badly enough to distort the merged total still flags after "
+                + "the fold — the warning is not lost by summing")
+        expect(
+            onlyRow([costEntry(100_000, nil, provider: "a"), costEntry(1, 1, provider: "b")])
+                .costEstimate == nil,
+            "one unpriceable component makes the merged estimate a partial denominator, "
+                + "which would overstate the ratio — the merged row reports no estimate instead")
+        expect(
+            CostPlausibility.warningText(308.4).contains("308")
+                && !CostPlausibility.warningText(308.4).contains("308.4"),
+            "the warning names the multiple as a whole number — one wording shared by the "
+                + "tooltip line and the icon's accessibility label, which is the only channel "
+                + "a VoiceOver user has because the tooltip is pointer-only")
+
         // Usage attribution: declarations are explicit, provider-level by
         // default, and model overrides are more specific. Suggestions never
         // participate in effective-state resolution.

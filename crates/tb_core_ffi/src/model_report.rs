@@ -28,6 +28,16 @@ struct ModelEntry {
     /// Milliseconds per 1K tokens, when tokscale could time the model. `None`
     /// when no message in the rollup carried a usable duration.
     ms_per_1k_tokens: Option<f64>,
+    /// What the local pricing table would charge for this row's tokens, or
+    /// `None` when it cannot price them at all.
+    ///
+    /// Reported rather than judged here on purpose. The frontend folds these
+    /// provider-split rows together by client+model, and a ratio computed
+    /// before that fold cannot describe the merged cost — one component at
+    /// 100x combined with a larger healthy one is a merged 1.1x, not 100x. So
+    /// this ships the estimate and the comparison happens after the fold, in
+    /// `ModelReportEntry.implausibleCostRatio`.
+    cost_estimate: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -74,8 +84,47 @@ pub(crate) fn run(context: &crate::LocalSourceContext, year: &str) -> Result<Val
         .map_err(|e| format!("build runtime: {}", e))?;
     let report = runtime.block_on(tokscale_core::get_model_report(options))?;
 
-    let data = map_report(report);
+    // Read-only, no network: `get_model_report` has already refreshed and
+    // written this cache on its own path, and a cold cache (first ever run,
+    // offline) simply yields None, which disables the check rather than
+    // reporting on a table that isn't there.
+    let pricing = tokscale_core::pricing::PricingService::load_cached_any_age();
+
+    let data = map_report(report, pricing.as_ref());
     serde_json::to_value(data).map_err(|e| format!("serialize model report: {}", e))
+}
+
+/// What the local pricing table would charge for this row's tokens, or `None`
+/// when it cannot price them.
+///
+/// This exists because clients that record their own per-message cost
+/// (OpenCode, MiMo Code) have it taken verbatim: tokscale-core's
+/// `apply_pricing_if_available` returns early on `has_authoritative_cost()`,
+/// so no pricing table ever sees those rows. That default is right — the
+/// client knows its own billing contract — but it also means a unit error
+/// upstream (a per-1K rate applied per-token, a non-USD figure, a mispriced
+/// custom provider) reaches the UI with nothing in between. Shipping the
+/// estimate alongside the cost gives the frontend something to compare
+/// against; what counts as implausible is decided there, after the
+/// provider-split rows have been folded together.
+///
+/// A zero or non-finite estimate is reported as `None`: the table cannot
+/// price these tokens at all, which is not evidence about the reported cost
+/// and must not become a division by zero downstream.
+fn local_cost_estimate(
+    pricing: Option<&tokscale_core::pricing::PricingService>,
+    entry: &tokscale_core::ModelUsage,
+) -> Option<f64> {
+    let pricing = pricing?;
+    let usage = tokscale_core::TokenBreakdown {
+        input: entry.input,
+        output: entry.output,
+        cache_read: entry.cache_read,
+        cache_write: entry.cache_write,
+        reasoning: entry.reasoning,
+    };
+    let estimate = pricing.calculate_cost_with_provider(&entry.model, Some(&entry.provider), &usage);
+    (estimate.is_finite() && estimate > 0.0).then_some(estimate)
 }
 
 fn normalize_year(year: &str) -> Result<Option<String>, String> {
@@ -90,12 +139,16 @@ fn normalize_year(year: &str) -> Result<Option<String>, String> {
     }
 }
 
-fn map_report(report: tokscale_core::ModelReport) -> ModelReportData {
+fn map_report(
+    report: tokscale_core::ModelReport,
+    pricing: Option<&tokscale_core::pricing::PricingService>,
+) -> ModelReportData {
     ModelReportData {
         entries: report
             .entries
             .into_iter()
             .map(|e| {
+                let cost_estimate = local_cost_estimate(pricing, &e);
                 // saturating_add so #766's i64::MAX-clamped buckets (corrupt
                 // Antigravity DB) can't overflow this FFI-exposed total in
                 // debug/release (see agents_report.rs's map_report for the
@@ -119,6 +172,7 @@ fn map_report(report: tokscale_core::ModelReport) -> ModelReportData {
                     message_count: e.message_count,
                     cost: e.cost,
                     ms_per_1k_tokens: e.performance.ms_per_1k_tokens,
+                    cost_estimate,
                 }
             })
             .collect(),
@@ -513,7 +567,7 @@ mod tests {
     #[test]
     fn total_saturates_on_overlarge_buckets() {
         let report = wrap(vec![entry(i64::MAX, i64::MAX, 0, 0, 0)]);
-        let mapped = map_report(report);
+        let mapped = map_report(report, None);
         assert_eq!(mapped.entries[0].total, i64::MAX);
     }
 
@@ -524,7 +578,7 @@ mod tests {
     #[test]
     fn total_saturates_when_cache_write_is_overlarge() {
         let report = wrap(vec![entry(10, 20, i64::MAX, i64::MAX, 5)]);
-        let mapped = map_report(report);
+        let mapped = map_report(report, None);
         assert_eq!(mapped.entries[0].total, i64::MAX);
     }
 
@@ -534,7 +588,91 @@ mod tests {
     #[test]
     fn total_includes_every_token_field() {
         let report = wrap(vec![entry(1, 2, 4, 8, 16)]);
-        let mapped = map_report(report);
+        let mapped = map_report(report, None);
         assert_eq!(mapped.entries[0].total, 31);
+    }
+
+    // MARK: - Implausible-cost guard
+
+    /// A hermetic stand-in for the LiteLLM table: one priced model at
+    /// $1.00 per 1M input tokens and nothing else, so every estimate below is
+    /// a number this test states rather than one the shipping dataset supplies
+    /// (which would drift with upstream and make the assertions meaningless).
+    fn priced_service(model: &str) -> tokscale_core::pricing::PricingService {
+        let mut litellm = std::collections::HashMap::new();
+        litellm.insert(
+            model.to_string(),
+            tokscale_core::pricing::litellm::ModelPricing {
+                input_cost_per_token: Some(1e-6),
+                ..Default::default()
+            },
+        );
+        tokscale_core::pricing::PricingService::new(litellm, std::collections::HashMap::new())
+    }
+
+    /// 1M input tokens, which the table above prices at exactly $1.00 — so
+    /// every expected estimate below is a round number this test states.
+    fn priced_entry(model: &str, cost: f64) -> tokscale_core::ModelUsage {
+        let mut e = entry(1_000_000, 0, 0, 0, 0);
+        e.model = model.to_string();
+        e.provider = "deepseek".to_string();
+        e.cost = cost;
+        e
+    }
+
+    #[test]
+    fn priced_model_reports_the_table_estimate() {
+        let service = priced_service("m");
+        // Independent of `cost`: the estimate describes the tokens, and the
+        // comparison against cost happens downstream, after the fold.
+        for cost in [0.0, 1.0, 1000.0, f64::NAN] {
+            assert_eq!(
+                local_cost_estimate(Some(&service), &priced_entry("m", cost)),
+                Some(1.0),
+                "cost {cost} must not change the estimate"
+            );
+        }
+    }
+
+    #[test]
+    fn estimate_scales_with_the_tokens() {
+        // Pins that the tokens actually reach the pricing call: a version that
+        // priced a fixed or empty breakdown would return Some(1.0) here too.
+        let service = priced_service("m");
+        let mut e = priced_entry("m", 1.0);
+        e.input = 3_000_000;
+        assert_eq!(local_cost_estimate(Some(&service), &e), Some(3.0));
+    }
+
+    #[test]
+    fn unpriceable_rows_report_no_estimate() {
+        let service = priced_service("m");
+        // A model the table does not carry. Reported as None rather than 0.0
+        // so the frontend cannot divide by it.
+        assert_eq!(
+            local_cost_estimate(Some(&service), &priced_entry("other", 99_999.0)),
+            None
+        );
+        // No cached table at all (first run, offline).
+        assert_eq!(local_cost_estimate(None, &priced_entry("m", 1000.0)), None);
+        // Zero tokens price to 0.0, which is not a usable denominator either.
+        let mut empty = priced_entry("m", 1000.0);
+        empty.input = 0;
+        assert_eq!(local_cost_estimate(Some(&service), &empty), None);
+    }
+
+    #[test]
+    fn estimate_reaches_the_serialized_entry() {
+        // The cases above test the function directly; this one proves
+        // map_report carries it onto the wire shape, under the key Swift reads.
+        let service = priced_service("m");
+        let report = wrap(vec![priced_entry("m", 1000.0), priced_entry("other", 1.0)]);
+        let mapped = map_report(report, Some(&service));
+        assert_eq!(mapped.entries[0].cost_estimate, Some(1.0));
+        assert_eq!(mapped.entries[1].cost_estimate, None);
+
+        let json = serde_json::to_value(&mapped).unwrap();
+        assert_eq!(json["entries"][0]["costEstimate"], serde_json::json!(1.0));
+        assert!(json["entries"][1]["costEstimate"].is_null());
     }
 }
