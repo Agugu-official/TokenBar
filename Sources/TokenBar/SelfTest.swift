@@ -13201,8 +13201,15 @@ enum SelfTest {
         expect(Set(LimitsLayout.allCases.map(\.rawValue)) == ["full", "classic", "chart"],
                "LL2 three layouts are offered, and Settings enumerates allCases")
 
+        // Stated in behaviour rather than by reading the constant, because the
+        // constant is no longer reachable from this target: `minimumDelta` is
+        // internal to `TokenBarCore` so the admission comparison cannot be
+        // written outside `deltaQualifies`. Bracketing the boundary is also a
+        // stronger claim than the equality it replaces — it says where the bar
+        // is AND that it admits at it, which an `== 5` on the constant did not.
         expect(
-            WindowEquivalence.minimumDelta == 5,
+            !WindowEquivalence.deltaQualifies(4.999, runs: 1)
+                && WindowEquivalence.deltaQualifies(5, runs: 1),
             "V15 the threshold follows from the tolerance, not from a chosen number")
 
         // Every row string is rendered, not just constructed. A literal `%` in
