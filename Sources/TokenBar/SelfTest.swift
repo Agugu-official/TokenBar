@@ -12197,6 +12197,179 @@ enum SelfTest {
             expect(false, "QH-CACHE-LIVE the live fixture produces a ratio row")
         }
 
+        // QH-DIST. A reset inside a group makes the two old denominators
+        // disagree with each other and with the truth: the readings return to
+        // zero, so the displacement collapses while the range saturates at the
+        // highest reading. Both call sites now measure the distance travelled.
+        //
+        // Worked from the group behind a card that read 4.2B per 10% where the
+        // volume implied 0.35B: first 0%, last 8%, peak 85%, 93 points actually
+        // consumed. Dividing by 8 rather than 93 is the whole 11.6x.
+        let distResetReadings: [Double] = [0, 40, 85, 0, 3, 8]
+        expect(abs(QuotaHistoryFold.consumed(distResetReadings) - 93) < 1e-9,
+               "QH-DIST a run crossing one reset consumed 93, not the 8 it ended on "
+                   + "nor the 85 it reached")
+        let distSamples = distResetReadings.enumerated().map {
+            QuotaSample(atMs: Int64($0.offset + 1) * 1_000_000, usedPercent: $0.element)
+        }
+        let distMessages = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":1500000,"client":"c","providerId":"p",
+              "modelId":"m","input":930,"output":0,"cacheRead":0,"cacheWrite":0,
+              "reasoning":0,"cost":9.3,"isTurnStart":true}]
+            """.utf8))
+        // 930 tokens over 93 points is 10 per point, so per-tenth is 100. The
+        // same fixture under the old displacement of 8 divides by 11.6x less
+        // and reports 11.6x more, which is the defect's whole size.
+        if case let .ratio(distTokens, _, distError) =
+            WindowEquivalence.row(samples: distSamples, messages: distMessages)
+        {
+            expect(distTokens == 100,
+                   "QH-DIST the live path divides by the distance travelled, so the "
+                       + "numerator's two windows meet a denominator that counted both")
+            expect(distError == 1,
+                   "QH-DIST and the quoted error follows the same denominator — "
+                       + "two rises at 0.5 each over 93, not the 6% that 0.5/8 printed")
+        } else {
+            expect(false, "QH-DIST the crossing fixture still produces a ratio row")
+        }
+
+        // QH-RUNS. Each rise `consumed` sums was quantised on its own, so a
+        // group that crossed a reset carries the uncertainty of every rise, not
+        // of one. [0,3,0,3] is two 3-point rises: 6 consumed, but neither rise
+        // clears the single-rise bar and their summed error is ±1 on 6, about
+        // 17% — over tolerance. It must come back insufficient, not as a ratio
+        // quoted at ±8%.
+        expect(QuotaHistoryFold.risingRuns([0, 3, 0, 3]) == 2,
+               "QH-RUNS one decline separates two rises")
+        expect(QuotaHistoryFold.risingRuns([1, 12, 30]) == 1
+                   && QuotaHistoryFold.risingRuns([7]) == 0
+                   && QuotaHistoryFold.risingRuns([]) == 0,
+               "QH-RUNS a monotonic run is one rise; a lone reading has none; nothing is none")
+        let runsSamples = [0.0, 3, 0, 3].enumerated().map {
+            QuotaSample(atMs: Int64($0.offset + 1) * 1_000_000, usedPercent: $0.element)
+        }
+        let runsMessages = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":1500000,"client":"c","providerId":"p",
+              "modelId":"m","input":60,"output":0,"cacheRead":0,"cacheWrite":0,
+              "reasoning":0,"cost":0.6,"isTurnStart":true}]
+            """.utf8))
+        if case let .insufficient(runsDelta, runsError) =
+            WindowEquivalence.row(samples: runsSamples, messages: runsMessages)
+        {
+            expect(abs(runsDelta - 6) < 1e-9,
+                   "QH-RUNS the consumption is still the full 6 — the gate scales, the sum does not")
+            expect(runsError == 17,
+                   "QH-RUNS and the error is 0.5 × 2 rises over 6, not 0.5 over 6")
+        } else {
+            expect(false, "QH-RUNS two sub-threshold rises must not be admitted as one measurement")
+        }
+
+        // QH-RUNS-A1. The run count under one rule: a positive delta starts a
+        // run iff no earlier delta was positive or the most recent non-zero
+        // delta was negative; zero deltas are transparent. The first cut
+        // counted declines and charged [0,9,0]'s trailing decline as a rise.
+        for (readings, want) in [([0.0, 9, 0], 1), ([0, 3, 0, 3], 2), ([0, 5, 5, 9], 1),
+                                 ([0, 9, 8, 9], 2), ([1, 12, 30, 55], 1), ([7], 0),
+                                 ([], 0), ([5, 5, 5], 0)] as [([Double], Int)] {
+            expect(QuotaHistoryFold.risingRuns(readings) == want,
+                   "QH-RUNS-A1 risingRuns(\(readings)) == \(want)")
+        }
+        // QH-RUNS-A2. The one statement of the admission rule. `delta > 0`
+        // is what keeps `runs == 0` from turning the threshold into zero.
+        expect(!WindowEquivalence.deltaQualifies(6, runs: 2)
+                   && WindowEquivalence.deltaQualifies(9, runs: 1)
+                   && !WindowEquivalence.deltaQualifies(0, runs: 0)
+                   && WindowEquivalence.deltaQualifies(93, runs: 2)
+                   && !WindowEquivalence.deltaQualifies(4.9, runs: 1),
+               "QH-RUNS-A2 deltaQualifies clears the bar once per rise and never at zero")
+        // QH-RUNS-A3. A trailing decline is not a rise: [0,9,0] is one
+        // 9-point measurement, admitted at threshold 5 with error 0.5/9.
+        let trailSamples = [0.0, 9, 0].enumerated().map {
+            QuotaSample(atMs: Int64($0.offset + 1) * 1_000_000, usedPercent: $0.element)
+        }
+        let trailMessages = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":1500000,"client":"c","providerId":"p",
+              "modelId":"m","input":90,"output":0,"cacheRead":0,"cacheWrite":0,
+              "reasoning":0,"cost":0.9,"isTurnStart":true}]
+            """.utf8))
+        if case let .ratio(trailTokens, _, trailError) =
+            WindowEquivalence.row(samples: trailSamples, messages: trailMessages)
+        {
+            expect(trailTokens == 100, "QH-RUNS-A3 90 tokens over one 9-point rise is 100 per tenth")
+            expect(trailError == 6, "QH-RUNS-A3 and its error is 0.5 over 9, one rise not two")
+        } else {
+            expect(false, "QH-RUNS-A3 a single rise followed by a decline is still admitted")
+        }
+        // QH-RUNS-A4. The same rule at the pooled site. A merged [0,3,0,3]
+        // cycle carries delta 6 over 2 rises; beside two clean qualifying
+        // cycles it must NOT be admitted, so the pool sees two, not three.
+        let mergedCycle = QuotaHistoryFold.cycles(points: [0.0, 3, 0, 3].enumerated().map {
+            heatPoint(1_767_600_000 + Int64($0.offset) * 3_600, $0.element, reset: monReset)
+        }).first!
+        expect(abs(mergedCycle.usedPercent - 6) < 1e-9 && mergedCycle.risingRuns == 2,
+               "QH-RUNS-A4 the merged cycle carries both its consumption and its run count")
+        let poolRow = WindowEquivalence.aggregate(cycles: [
+            WindowEquivalence.Cycle(deltaPercent: 50, spanTokens: 5_000, spanCost: 5,
+                                    observedFraction: 1, risingRuns: 1),
+            WindowEquivalence.Cycle(deltaPercent: 40, spanTokens: 4_000, spanCost: 4,
+                                    observedFraction: 1, risingRuns: 1),
+            WindowEquivalence.Cycle(deltaPercent: mergedCycle.usedPercent, spanTokens: 600,
+                                    spanCost: 0.6, observedFraction: 1,
+                                    risingRuns: mergedCycle.risingRuns),
+        ])
+        if case let .tooFewCycles(poolCount, poolNeeded) = poolRow {
+            expect(poolCount == 2 && poolNeeded == 3,
+                   "QH-RUNS-A4 the pool admits the two clean cycles and rejects the merged one")
+        } else {
+            expect(false, "QH-RUNS-A4 the merged cycle must not make a third admitted cycle")
+        }
+        // QH-RUNS-A9. The insufficient row's error sums half-steps over every
+        // rise in every cycle offered — not over admitted cycles, which are
+        // empty by construction in that branch, and not per cycle.
+        if case let .insufficient(insDelta, insError) = WindowEquivalence.aggregate(cycles: [
+            WindowEquivalence.Cycle(deltaPercent: 2, spanTokens: 100, spanCost: 0.1,
+                                    observedFraction: 1, risingRuns: 1),
+            WindowEquivalence.Cycle(deltaPercent: 3, spanTokens: 100, spanCost: 0.1,
+                                    observedFraction: 1, risingRuns: 2),
+        ]) {
+            expect(abs(insDelta - 5) < 1e-9 && insError == 30,
+                   "QH-RUNS-A9 three rises at 0.5 over 5 points is 30%, not 20% per-cycle nor 0% over admitted")
+        } else {
+            expect(false, "QH-RUNS-A9 two sub-threshold cycles produce the insufficient row")
+        }
+        // The pooled site, same readings, same answer.
+        let distCycles = QuotaHistoryFold.cycles(points: distResetReadings.enumerated().map {
+            heatPoint(1_767_600_000 + Int64($0.offset) * 3_600, $0.element, reset: monReset)
+        })
+        expect(distCycles.first.map { abs($0.usedPercent - 93) < 1e-9 } == true,
+               "QH-DIST the pooled site agrees with the live one, which is the point "
+                   + "of stating the rule once")
+        expect(distCycles.first.map { abs($0.peakUsedPercent - 85) < 1e-9 } == true,
+               "QH-DIST and the peak is untouched — still the highest reading")
+        // Two resets accumulate rather than saturating. Asserting past 100 is
+        // the deliberate outcome: a group holding three windows consumed three
+        // windows' worth of one allowance.
+        expect(abs(QuotaHistoryFold.consumed([0, 60, 99, 0, 50, 99, 0, 20]) - 218) < 1e-9,
+               "QH-DIST consumption accumulates across every reset in the group and "
+                   + "may exceed 100, where the range would have saturated at 99")
+        // The no-op that guards the regression. Compared against the old
+        // expressions computed here rather than against literals, so what is
+        // asserted is the equality itself.
+        let distRising: [Double] = [1, 12, 30, 55, 88, 99]
+        expect(abs(QuotaHistoryFold.consumed(distRising)
+                   - ((distRising.max() ?? 0) - (distRising.min() ?? 0))) < 1e-9,
+               "QH-DIST on readings that only rise the distance equals the old range")
+        expect(abs(QuotaHistoryFold.consumed(distRising)
+                   - ((distRising.last ?? 0) - (distRising.first ?? 0))) < 1e-9,
+               "QH-DIST and equals the old displacement, so every clean cycle is "
+                   + "left exactly where it was")
+
         // QH-B. Exhaustion is an absolute reading, not the observed span. A
         // cycle first seen at 40% and last at 100% consumed 60 points as far as
         // this machine can tell, and reached the ceiling; deriving the ceiling
@@ -14103,6 +14276,74 @@ enum SelfTest {
                 + "data silently overwriting the other's under a shared "
                 + "\"clientId|cardId\" key")
 
+
+        // QH-RUNS-A5. The dashboard's qualifying-window filter applies the same
+        // rule as the pooled aggregate and the live row. Three completed
+        // cycles, the third a merged [0,3,0,3]: it carries 6 points over two
+        // rises, which clears a single-rise bar and fails a two-rise one. With
+        // it rejected the window has two admitted cycles, not three, and
+        // `rebuildQuotaEquivalences` builds no row for it at all — not a
+        // `.tooFewCycles` row, no key. Drop the run factor from
+        // `deltaQualifies` and the key appears.
+        func runsCurve(cycles: [[Double]]) -> QuotaCurve {
+            var points: [String] = []
+            var oldest = Int64.max, newest = Int64.min
+            for (index, readings) in cycles.enumerated() {
+                let reset = m3fNow - Int64(cycles.count - index) * 18_000
+                // Spread from 17,000s before reset towards 1,000s before, so
+                // every cycle's observed fraction is about 16,000 / 18,000.
+                // Integer division means a 4-reading cycle ends a second or two
+                // short of -1,000, so coverage is derived from the points
+                // actually emitted — the decoder rejects a coverage block that
+                // does not match them.
+                let step = readings.count > 1 ? 16_000 / (readings.count - 1) : 0
+                for (slot, pct) in readings.enumerated() {
+                    let at = reset - 17_000 + Int64(slot * step)
+                    oldest = min(oldest, at); newest = max(newest, at)
+                    points.append("""
+                        {"sampledAt":\(at),"usedPercent":\(pct),
+                         "resetAt":\(reset),"durationSeconds":18000,
+                         "durationSource":"provider","origin":"liveV3",
+                         "isActiveGroup":false}
+                        """)
+                }
+            }
+            let json = """
+                {"points":[\(points.joined(separator: ","))],
+                 "coverage":{"oldestSampledAt":\(oldest),
+                             "newestSampledAt":\(newest),
+                             "sampleCount":\(points.count)},
+                 "activeResetAt":null,"generation":11}
+                """
+            return try! JSONDecoder().decode(QuotaCurve.self, from: Data(json.utf8))
+        }
+        let runsA5Keys: [String]? = awaitMainActorValue {
+            let src = WindowScanCountingSource(payload: m3fPayload)
+            src.curveByAccount = [
+                nil: runsCurve(cycles: [[0, 40], [0, 45], [0, 3, 0, 3]]),
+                m3ExtraKey: runsCurve(cycles: [[0, 20], [0, 25], [0, 30]]),
+            ]
+            let m = DashboardModel(source: src, initialYear: nil)
+            m.windowCardClients = ["claude"]
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while !m.agentUsageAttempted, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            poll.cancel()
+            _ = await poll.value
+            m.windowUsageClient = nil
+            m.quotaLensAllAgents = true
+            await m.refreshWindowUsage()
+            return Array(m.quotaEquivalences.keys).sorted()
+        }
+        expect(runsA5Keys?.contains("claude|session.v1") == false,
+               "QH-RUNS-A5 a window whose third cycle is a merged two-rise 6 does not "
+                   + "qualify at the dashboard filter, so no equivalence row is built for it")
+        expect(runsA5Keys?.contains("claude|\(m3ExtraKey)|session.v1") == true,
+               "QH-RUNS-A5 and the control window with three clean cycles does qualify, "
+                   + "so the absence above is the filter and not a broken fixture")
 
         // M3-q. The defect issue #258 reports, at the layer this side owns:
         // every account's equivalence row folding one shared scan.

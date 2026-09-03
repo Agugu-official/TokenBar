@@ -15,20 +15,39 @@ public struct QuotaCycle: Equatable, Sendable {
     /// its samples by exactly this value.
     public let resetAtMs: Int64
     public let startMs: Int64
-    /// How much of the allowance this cycle consumed: the span between the
-    /// lowest and highest reading in it, NOT the highest reading alone.
+    /// How much of the allowance this cycle consumed: the distance the readings
+    /// travelled, summed over their rises, NOT the highest reading alone and
+    /// NOT the range between the lowest and the highest.
     ///
-    /// The distinction is not cosmetic. Sampling starts whenever the app
-    /// happens to be running, so a cycle first observed at 40% used would
-    /// report 40% as its consumption when the app only witnessed the last few
-    /// points of it. The span is what this app can honestly claim to have seen.
+    /// Counting only rises is not cosmetic. Sampling starts whenever the app
+    /// happens to be running, so a cycle first observed at 40% used would report
+    /// 40% as its consumption when the app only witnessed the last few points of
+    /// it. What travelled between readings is what this app can honestly claim
+    /// to have seen.
+    ///
+    /// The range was the earlier answer and agrees with this one on every cycle
+    /// whose readings only rise. It stops agreeing when a reset falls inside the
+    /// group: the readings return to zero and the range then saturates at the
+    /// highest reading while the consumption keeps going. See
+    /// `QuotaHistoryFold.consumed`, which states the rule once for both this and
+    /// the live single-window path.
     ///
     /// Note the floor this leaves: `QuotaCurvePoint` rejects `usedPercent == 0`
-    /// at decode, so a cycle's first reading is always above zero and the span
-    /// necessarily omits whatever was consumed before it. That understates, and
-    /// understating is the right direction — the alternative assumes the app
-    /// witnessed a window it may have joined late.
+    /// at decode, so a cycle's first reading is always above zero and the
+    /// distance necessarily omits whatever was consumed before it. That
+    /// understates, and understating is the right direction — the alternative
+    /// assumes the app witnessed a window it may have joined late.
+    ///
+    /// May exceed 100 when a group holds more than one window's worth of
+    /// consumption, which is the deliberate outcome of keeping a window keyed by
+    /// its reset time rather than splitting it at a reset the provider never
+    /// reported.
     public let usedPercent: Double
+    /// How many separately measured rises `usedPercent` sums. One on a cycle
+    /// whose readings only rose; more when a reset fell inside the group. The
+    /// admission bar and the quoted error scale by it, because each rise was
+    /// quantised on its own. See `QuotaHistoryFold.risingRuns`.
+    public let risingRuns: Int
     /// The highest absolute reading seen in this cycle.
     ///
     /// Separate from `usedPercent`, which is the observed SPAN. The two answer
@@ -73,9 +92,11 @@ public struct QuotaCycle: Equatable, Sendable {
         resetAtMs: Int64, startMs: Int64, usedPercent: Double,
         sampleCount: Int, observedFraction: Double,
         firstSampleMs: Int64 = 0, lastSampleMs: Int64 = 0,
-        peakUsedPercent: Double? = nil
+        peakUsedPercent: Double? = nil,
+        risingRuns: Int = 1
     ) {
         self.peakUsedPercent = peakUsedPercent ?? usedPercent
+        self.risingRuns = risingRuns
         self.resetAtMs = resetAtMs
         self.startMs = startMs
         self.usedPercent = usedPercent
@@ -235,13 +256,14 @@ public enum QuotaHistoryFold {
             return QuotaCycle(
                 resetAtMs: resetAt * 1000,
                 startMs: start * 1000,
-                usedPercent: (used.max() ?? 0) - (used.min() ?? 0),
+                usedPercent: consumed(used),
                 sampleCount: sorted.count,
                 observedFraction: min(1, max(0, Double(last.sampledAt - first.sampledAt)
                     / Double(last.durationSeconds))),
                 firstSampleMs: first.sampledAt * 1000,
                 lastSampleMs: last.sampledAt * 1000,
-                peakUsedPercent: used.max() ?? 0)
+                peakUsedPercent: used.max() ?? 0,
+                risingRuns: risingRuns(used))
         }
         .sorted { $0.resetAtMs > $1.resetAtMs }
     }
@@ -443,6 +465,94 @@ public enum QuotaHistoryFold {
         return spanTotals(
             cycles: cycles, sorted: sorted, stamps: sorted.map(\.timestamp),
             subscription: subscription, confirmed: confirmed)
+    }
+
+    /// How much allowance a run of readings records consuming: the distance
+    /// they travelled, summed over the rises between consecutive readings.
+    ///
+    /// Neither the range nor the displacement, though on a cycle whose readings
+    /// only rise all three are the same number. They stop agreeing the moment a
+    /// reset falls inside the group: the readings return to zero, so the
+    /// displacement collapses toward nothing while the range saturates at
+    /// whatever the highest reading happened to be. Measured on a real merged
+    /// group — 8 by displacement, 85 by range, 93 actually travelled. The
+    /// numerator keeps every message from both sides of that reset whichever
+    /// denominator is used, so one that does not accumulate makes the ratio
+    /// report a multiple of the truth: 11.6x on that group, which is where a
+    /// card reading `$2974.92` came from.
+    ///
+    /// Only rises count, which keeps the property the range was chosen for.
+    /// Sampling starts whenever the app happens to be running, so a cycle first
+    /// seen at 40% must not claim the 40% nobody watched.
+    ///
+    /// Order-dependent where the range was not. Every caller passes readings
+    /// already sorted by sample time; one that did not used to get the right
+    /// answer by accident and now gets a wrong one.
+    ///
+    /// Every rise counts, including one that only undoes a provider's downward
+    /// correction: `[0, 40, 35, 40]` returns 45 where 40 was consumed. That is
+    /// a known overstatement and it is not fixable from the readings — a
+    /// decline does not say whether the quota was refilled or the earlier
+    /// number was wrong, and neither its size nor where it lands separates the
+    /// two. Measured across every series in a real store: persistent drops run
+    /// 2 to 100 points and bounce-backs 2 to 22, fully overlapping; real resets
+    /// land anywhere from 0% to 21%, with bounce-backs landing at 0% as well.
+    ///
+    /// The numerator has the twin of this, and it is left in place for the
+    /// same reason. A declining interval contributes nothing here while every
+    /// message inside it still counts above the line, so whatever was consumed
+    /// between the last reading before a reset and the reset itself is divided
+    /// by the rises around it. Excluding those messages is right when the
+    /// decline was a reset and wrong twice over when it was a correction —
+    /// numerator down, denominator already up — and the paragraph above is the
+    /// measurement saying the two cannot be told apart. Bound, from the same
+    /// store: 2 of 128 groups contain any decline at all, declining intervals
+    /// hold 0.17% of all observed time, 4.08% in the worst single group and
+    /// 0.92% in the merged group this whole change was written for. Time, not
+    /// messages — the message share is not measured, and a gap denser than
+    /// average carries proportionally more.
+    ///
+    /// It is kept because the bound is small and the alternative costs more.
+    /// Over 121 groups in that store, this and the range agreed on 119 — every
+    /// cycle whose readings only rise — and differed by at most 3.5% on the
+    /// two that had been refilled, where the range prices the window at its
+    /// widest excursion rather than at what it consumed. The residual also
+    /// leans the safe way: overstating the denominator understates the ratio,
+    /// so a quota reads as worth less rather than more.
+    public static func consumed(_ readings: [Double]) -> Double {
+        zip(readings, readings.dropFirst()).reduce(0.0) { $0 + max(0, $1.1 - $1.0) }
+    }
+
+    /// How many separately measured rises `consumed` summed: the number of
+    /// times the readings started going up after not going up. Zero on
+    /// readings that never rose.
+    ///
+    /// The provider reports whole percents, so each rise carries the same
+    /// ±0.5 quantisation whether it spans 3 points or 90. Summing two rises
+    /// sums their uncertainty as well, and a ratio built on `[0, 3, 0, 3]`
+    /// is not a 6-point measurement at ±0.5 — it is two 3-point measurements
+    /// at ±0.5 each, neither of which clears the bar on its own. Callers that
+    /// quote an error or gate on a minimum delta scale both by this count, so
+    /// a group that crossed a reset does not come out looking more precise
+    /// than a group that did not.
+    public static func risingRuns(_ readings: [Double]) -> Int {
+        // A positive delta starts a run iff no earlier delta was positive, or
+        // the most recent non-zero delta before it was negative. A zero delta
+        // is transparent: a plateau inside a rise is still one measurement
+        // span under the ±0.5-per-reading model, so it neither starts nor ends
+        // a run. Counting declines instead — the first cut here — charged a
+        // trailing decline as a run that contributed no rise.
+        var runs = 0
+        var lastNonZeroWasNegative = true
+        for (before, after) in zip(readings, readings.dropFirst()) {
+            if after > before {
+                if lastNonZeroWasNegative { runs += 1 }
+                lastNonZeroWasNegative = false
+            } else if after < before {
+                lastNonZeroWasNegative = true
+            }
+        }
+        return runs
     }
 
     /// The messages a scoped window may count. One statement of the rule, so
