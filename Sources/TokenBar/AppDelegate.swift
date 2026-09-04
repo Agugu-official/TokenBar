@@ -500,7 +500,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let rate = trayAnimator?.tokensPerMinRate ?? lastRate
         statusController?.updateTitle(
             mode.title(graph: lastGraph, tokensPerMin: rate, quotaRemaining: quotaRemaining),
-            color: mode.titleColor(quotaRemaining: quotaRemaining))
+            color: mode.titleColor(quotaRemaining: quotaRemaining),
+            quotaRemaining: mode == .quotaLeft ? quotaRemaining : nil)
 
         statusController?.reconcileClientItems(ClientTray.runtimePresentations(
             graph: lastGraph,

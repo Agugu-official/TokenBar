@@ -520,3 +520,35 @@
 "Excluded usage in the same hours:" = "同一時段的已排除用量：";
 "Other and excluded usage in the same hours:" = "同一時段的其他與已排除用量：";
 "%@ %@" = "%1$@%2$@";
+
+/* Menu bar text appearance */
+"Font color" = "字體顏色";
+"Automatic" = "自動";
+"Custom" = "自訂";
+"Custom color" = "自訂顏色";
+"Menu bar font color" = "選單列字體顏色";
+"Hex color" = "十六進位色碼";
+"Enter a 6-digit hex color, e.g. #000000." = "請輸入 6 位色碼，例如 #000000。";
+"Black" = "黑色";
+"Dark gray" = "深灰色";
+"Light gray" = "淺灰色";
+"White" = "白色";
+"Red" = "紅色";
+"Orange" = "橙色";
+"Amber" = "琥珀色";
+"Yellow" = "黃色";
+"Lime" = "萊姆綠";
+"Green" = "綠色";
+"Emerald" = "翠綠色";
+"Cyan" = "青色";
+"Blue" = "藍色";
+"Indigo" = "靛藍色";
+"Purple" = "紫色";
+"Pink" = "粉紅色";
+"Normal" = "正常";
+"Low" = "偏低";
+"Very low" = "不足";
+"More than 25% remaining, other text, or unavailable quota" = "剩餘超過 25%、其他文字，或額度無法取得";
+"More than 10% and up to 25% remaining" = "剩餘超過 10% 至 25%";
+"10% or less remaining" = "剩餘 10% 或以下";
+"Custom colors follow each item's remaining quota: normal above 25%, low above 10% through 25%, and very low at 10% or below. Other text and unavailable quota use the normal color. Automatic keeps the original colors." = "自訂顏色依各項目的剩餘額度套用：超過 25% 為正常，超過 10% 至 25% 為偏低，10% 或以下為不足。其他文字與無法取得的額度使用正常色。自動模式維持原有配色。";

@@ -1,5 +1,18 @@
 import AppKit
 
+/// Shared quota thresholds for automatic gauges and custom menu-bar text.
+enum QuotaColorLevel: String, CaseIterable, Identifiable {
+    case normal, warning, critical
+
+    var id: String { rawValue }
+
+    init(remaining: Double) {
+        if remaining <= 10 { self = .critical }
+        else if remaining <= 25 { self = .warning }
+        else { self = .normal }
+    }
+}
+
 /// Quota-gauge icon styles for the status item (the cat/parrot frame sets
 /// live in TrayAnimator's resources; these are drawn programmatically).
 enum QuotaIconStyle: String, CaseIterable {
@@ -37,9 +50,11 @@ enum IconColoring: String, CaseIterable {
 enum TrayIcons {
     /// limits-card gauge palette: green / amber under 25% left / red under 10%.
     static func gaugeColor(remaining: Double) -> NSColor {
-        if remaining <= 10 { return NSColor(srgbRed: 0.94, green: 0.27, blue: 0.27, alpha: 1) }
-        if remaining <= 25 { return NSColor(srgbRed: 0.96, green: 0.62, blue: 0.04, alpha: 1) }
-        return NSColor(srgbRed: 0.13, green: 0.77, blue: 0.37, alpha: 1)
+        switch QuotaColorLevel(remaining: remaining) {
+        case .critical: NSColor(srgbRed: 0.94, green: 0.27, blue: 0.27, alpha: 1)
+        case .warning: NSColor(srgbRed: 0.96, green: 0.62, blue: 0.04, alpha: 1)
+        case .normal: NSColor(srgbRed: 0.13, green: 0.77, blue: 0.37, alpha: 1)
+        }
     }
 
     /// The fill ink for a gauge icon under the chosen coloring policy.
@@ -49,7 +64,7 @@ enum TrayIcons {
         switch coloring {
         case .never: return mono
         case .always: return gaugeColor(remaining: remaining)
-        case .warningOnly: return remaining <= 25 ? gaugeColor(remaining: remaining) : mono
+        case .warningOnly: return QuotaColorLevel(remaining: remaining) != .normal ? gaugeColor(remaining: remaining) : mono
         }
     }
 
