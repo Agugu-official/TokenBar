@@ -307,7 +307,7 @@
 
 /* ===== 设置：说明文字 ===== */
 "Spins faster as the live token rate climbs (idle 2 fps, 1M tokens/min tops out at 40 fps)." = "实时 token 速率越高，转得越快（空闲时 2 fps；达到每分钟 100 万 token 时，上限为 40 fps）。";
-"Gauge icons drain as the selected quota window empties. \"Color on warning only\" stays monochrome until under 25% left (amber) and 10% (red), like the battery icon." = "仪表图标会随所选额度窗口逐渐耗尽。“仅在警告时着色”会保持单色，直到剩余低于 25%（琥珀色）或 10%（红色），与电池图标一致。";
+"Gauge icons drain as the selected quota window empties. \"Color on warning only\" stays monochrome until under 25% left (amber) and 10% (red), like the battery icon." = "仪表图标会随所选额度窗口逐渐耗尽。“仅警示时上色”会保持单色，直到剩余低于 25%（琥珀色）或 10%（红色），与电池图标一致。";
 "Feeds the gauge icons and the \"Quota left\" title. Auto follows whichever window is closest to running out." = "决定仪表图标和“剩余额度”标题的数据源。自动模式会跟踪最接近用完的窗口。";
 "Keep the main TokenBar item. Optional client items show each client's selected quota window; Auto chooses the tightest healthy window for that client." = "保留 TokenBar 主项目。可选的客户端独立项目会显示各自选定的额度窗口；自动模式会选择该客户端剩余最少且状态正常的窗口。";
 "Off hides the Agent-limits quota card everywhere — the Overview summary, every client's own tab, and this preview. Cost/token data is unaffected." = "关闭后会在所有位置隐藏 Agent 额度卡片，包括概览摘要、各客户端标签页和此预览。费用和 token 数据不受影响。";
