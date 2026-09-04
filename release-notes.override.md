@@ -16,7 +16,7 @@ Nothing was lost and nothing needs rebuilding.
 
   Settings gains a Font color section under Menu bar, offering Automatic and Custom. Automatic is unchanged: quota remaining keeps the built-in green / amber / red, and other titles keep the system color. Custom sets three colors of your own against the thresholds the gauge already uses — above 25% remaining, above 10% through 25%, and 10% or below — with 16 presets and a `#RRGGBB` field. Each individual client item uses its own remaining value, so they can differ from one another.
 
-  An existing single custom color becomes the first of the three. Switching back to Automatic keeps all three for later.
+  Switching back to Automatic keeps all three colors for later.
 
 - **A reported cost the local pricing table cannot justify is now flagged.** [#264](https://github.com/Nanako0129/TokenBar/pull/264)
 
@@ -30,7 +30,9 @@ Nothing was lost and nothing needs rebuilding.
 
   Every quota-window surface folded both accounts' transcripts into whichever account's allowance it was dividing by. Measured against a reporting store, the primary account's figures ran 1.40x high and the second account's 3.51x — the smaller account is hit harder, because it receives the same numerator against much less quota movement.
 
-  Each account is now scanned separately and sees only its own transcripts. Single-account installs are unaffected, and no stored data changes format.
+  Each account is now scanned separately, against its own registered root. Single-account installs are unaffected, and no stored data changes format.
+
+  Two limits are left in place rather than papered over. A transcript sitting under both accounts' roots is counted for both, because nothing in it says which account produced it — measured at 2 messages in 10,389 on the machine this was built against. And usage you attributed to Claude from another client stays with the primary account: an attribution names a client, a provider and a model, and carries no account for it to follow.
 
 - **Consumption measured across a drop now has to clear the estimate's bar once per rise.** [#260](https://github.com/Nanako0129/TokenBar/pull/260)
 
