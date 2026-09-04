@@ -3,6 +3,33 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>1.15.0</title>
+            <pubDate>Fri, 04 Sep 2026 13:20:12 +0000</pubDate>
+            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.15.0</link>
+            <sparkle:version>921</sparkle:version>
+            <sparkle:shortVersionString>1.15.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>Before you update:</b>
+<ul>
+<li>The "10% of quota ~ ..." line will read lower on some windows, and that is the fix. That line divides the usage recorded during a window by how much quota the window consumed, and it was measuring that consumption two different ways depending on where the line appeared: the single-window row took the distance between the first and the last reading, and the pooled historical estimate took the gap between the highest and the lowest. When a reading goes down - a reset, or the provider correcting a number it reported earlier - the first collapses while the second stops at whatever the highest reading happened to be, and the usage above the line still counts everything on both sides of the drop either way. Both now count the distance the readings actually travelled. On one real window that is 95 points, against 10 by the old single-window measure and 85 by the old pooled one, so the single-window row was dividing a full window of usage by 10 while the pooled estimate was only slightly high. Only windows whose readings went down at some point are affected; where the readings only rose, the two measurements are the same number and nothing changes. Nothing was lost and nothing needs rebuilding.</li>
+</ul>
+<b>Features:</b>
+<ul>
+<li>The menu-bar text color is configurable. Settings gains a Font color section under Menu bar, offering Automatic and Custom. Automatic is unchanged: quota remaining keeps the built-in green / amber / red, and other titles keep the system color. Custom sets three colors of your own against the thresholds the gauge already uses - above 25% remaining, above 10% through 25%, and 10% or below - with 16 presets and a #RRGGBB field. Each individual client item uses its own remaining value. Switching back to Automatic keeps all three colors for later.</li>
+<li>A reported cost the local pricing table cannot justify is now flagged. Some clients record their own per-message cost, which TokenBar ships as reported rather than pricing the tokens itself, so a unit error upstream reaches the screen with nothing in between. One report showed a model at $8,647 for 74M tokens. Such a row now carries an amber warning beside the cost, and the tooltip names the multiple it is of the local estimate. The figure itself is not corrected. The threshold is 50x, so a normal row cannot reach it, and a model the table cannot price produces no flag rather than a false one.</li>
+</ul>
+<b>Fixes:</b>
+<ul>
+<li>With a second Claude account, each account's usage was counted against every account's quota. Every quota-window surface folded both accounts' transcripts into whichever account's allowance it was dividing by. Measured against a reporting store, the primary account's figures ran 1.40x high and the second account's 3.51x, the smaller account being hit harder because it receives the same numerator against much less quota movement. Each account is now scanned separately, against its own registered root. Single-account installs are unaffected, and no stored data changes format. Two limits are left in place rather than papered over: a transcript sitting under both accounts' roots is counted for both, because nothing in it says which account produced it, measured at 2 messages in 10,389 on the machine this was built against; and usage you attributed to Claude from another client stays with the primary account, because an attribution names a client, a provider and a model and carries no account for it to follow.</li>
+<li>Consumption measured across a drop now has to clear the estimate's bar once per rise. This is the other half of the same correction. Usage summed across a drop is several separate measurements added together, each carrying its own rounding, so the quoted plus-or-minus is now one rounding step per rise over the whole consumption rather than one step over the displacement. It can come out either narrower or wider than the figure you saw before, depending on which of the two moved more. A window with enough movement still gets its estimate; one that no longer clears the bar reads "too little to estimate" instead of a confident number.</li>
+<li>The Models list now shows the same detailed hover tooltip as the other cards. It already had a plain one naming the model and its client; the shared tooltip adds the token breakdown and the cost, and it is where the cost warning above names its multiple.</li>
+</ul>
+<p>Thanks: @Agugu-official</p>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.15.0/TokenBar.app.tar.gz" length="10155107" type="application/octet-stream" sparkle:edSignature="iEkLUx39Wu1L88is0YwWamAkATgbE0rb1IZw35Kt+GuCedfDVfbu2xRPxaEyU0+df7VXHRY5Deh4iHMm85N5Bw=="/>
+        </item>
+        <item>
             <title>1.14.4</title>
             <pubDate>Sun, 30 Aug 2026 11:21:49 +0000</pubDate>
             <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.14.4</link>
@@ -71,40 +98,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.14.1/TokenBar.app.tar.gz" length="9999406" type="application/octet-stream" sparkle:edSignature="JzIAGrbsGyFs3zRbtp7Mw9pKSxpqRsNTeGpb+vi26hXLdAzf8cz46Ev4A8tFjP2/bBG+Mva/XqkBX5jf7jzlAw=="/>
-        </item>
-        <item>
-            <title>1.14.0</title>
-            <pubDate>Mon, 24 Aug 2026 09:14:35 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.14.0</link>
-            <sparkle:version>831</sparkle:version>
-            <sparkle:shortVersionString>1.14.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>Note:</b>
-<ul>
-<li>The dashboard rebuilds once on the first launch after updating. The saved snapshot now records which scan roots produced it, so a snapshot written by the previous version is not restored. Expect one cold start and nothing else.</li>
-<li>Downgrading after this release sets your quota pace history aside. The store that records those readings moves to a new format, and an older TokenBar cannot read it — it moves the file to a quarantine copy beside it and starts over, so the pace cards go back to learning. Nothing is deleted: that copy holds the complete history and the data is recoverable. Usage totals are unaffected either way, because those are read from your logs. The conversion happens on the next write the app had a reason to make, so a file still reading schemaVersion 3 for a while after updating is normal and not a failed migration.</li>
-</ul>
-<b>Features:</b>
-<ul>
-<li>Quota gets its own lens. A window card draws the subscription's quota over time with the local usage that moved it underneath, so a flat stretch of quota can be read against the work that was or was not happening. Alongside it: Window history lists recent reset cycles for the open subscription, each expandable to a per-model breakdown; Past windows on the all-agent view shows a strip of cycle bars per quota window; an estimate says what 10% of the allowance is worth in tokens and dollars; a weekday heatmap shows when the allowance is spent; and a summary card carries the shape of it to Overview. Quota window rows also carry a recent-trend indicator, and Overview cards can be hidden individually apart from the usage chart, which stays as the lens's anchor.</li>
-<li>A model-scoped quota window now counts only its model. Claude reports scoped weekly limits such as "Fable only", and the usage drawn under those windows was the whole subscription's. The bars, the history rows and the cost estimate now all narrow to the model the allowance charges. When nothing local matches that model the card says so, rather than drawing an empty week.</li>
-<li>Claude scan roots can be added in Settings. A second Claude account kept under its own CLAUDE_CONFIG_DIR is invisible to a scan that only reads the default location. Those directories can now be registered, and unreachable ones are kept and retried rather than dropped.</li>
-<li>A second Claude account gets its own quota card and its own history. An account kept under its own CLAUDE_CONFIG_DIR is fetched, identified and recorded separately, so each card carries its own plan label and its own recorded cycles. One limit is deliberate: when an additional account's token expires TokenBar does not refresh it in place, and the card says so and asks you to run claude under that CLAUDE_CONFIG_DIR. Refreshing it in place would write that account's token over your main account's stored credential and log you out of the main account, so it fails closed instead.</li>
-<li>A weekly quota window now records a reading about every hour instead of about every 3.5 hours, and a window sitting at its full allowance records that starting point instead of waiting for the first spend.</li>
-</ul>
-<b>Fixes:</b>
-<ul>
-<li>Opening and closing the popover repeatedly no longer risks Anthropic's rate limit. Three independent callers fetched the quota payload, each written to call first and sleep after, and the popover's loop restarted on every open — so ten opens issued ten requests with nothing in between. Requests now share a floor and concurrent callers share one request. A slow request is timed from when it returned, not from when it was asked, so the protection does not dissolve exactly while the endpoint is struggling.</li>
-<li>Usage from a previous account no longer survives a change of credential target. Switching the durable authentication target left the prior account's usage on screen until something else replaced it.</li>
-<li>The cycle still running no longer appears under past windows. It was listed beside completed cycles and counted toward the estimate while still filling, so an estimate could move while being read.</li>
-<li>A source you excluded is no longer reported back as unclassified. Excluding a source is a classification, and the line that names what else was in a window said the opposite.</li>
-<li>Launching no longer throws away work it had already done. Registering your Claude directories with the engine happens at every launch and on every settings save, not only when something changed, and it dropped every cached scan result, forced a reload, and re-fetched every quota — regardless. So an ordinary launch paid to rebuild what it already had, and spent provider requests doing it. All of that now happens only when the registered directories actually differ, with one deliberate exception: the first registration after a launch still refreshes the quota cards, because the engine starts each run with none registered and the menu bar can otherwise show a reading taken before your extra account was known.</li>
-<li>Two Claude accounts no longer interfere with each other's rate-limit backoff or profile cache. A shared cooldown meant one account clearing it lifted it for the other, and a shared profile entry collapsed its one-hour lifetime into a fetch on every poll. Single-account users are unaffected.</li>
-<li>A count of zero is no longer shown where nothing was counted. A source that reports a price with no token counts rendered as a measured zero beside a real dollar amount, in the quota history rows, their expanded per-model rows, and the subscription trend under its token metric.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.14.0/TokenBar.app.tar.gz" length="9999391" type="application/octet-stream" sparkle:edSignature="dFxjhhg/jhcj8eqPP+yN9vPoXaeUnbNyHpiAmOS1sf0cTruo8vQ/u2msRblWVhSkgvtMW/Pn3pODSfPXFK6SAA=="/>
         </item>
         <item>
             <title>1.1.1</title>
