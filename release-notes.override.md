@@ -1,17 +1,41 @@
+## Before you update
+
+**The "10% of quota ~ …" line will read lower on some windows, and that is the fix.** [#260](https://github.com/Nanako0129/TokenBar/pull/260)
+
+That line divides the usage recorded during a window by how much quota the window consumed. It was measuring the consumption as the distance between the first and the last reading. When a quota reset falls inside a window, the readings return to zero and that distance collapses, while the usage above the line still counts everything on both sides of the reset. The smaller the leftover distance, the larger the number.
+
+On one real window the readings travelled 95 points and ended 10 above where they started, so a full window of usage was being divided by 10. The line read several thousand dollars.
+
+Only windows whose readings crossed a reset are affected. Where the readings only rose, the two measurements are the same number, and nothing changes — not the estimate, not the error bar, not whether the row appears at all.
+
+Nothing was lost and nothing needs rebuilding. The readings were always right; the arithmetic over them was not.
+
+## Features
+
+- **The menu-bar text color is configurable.** [#265](https://github.com/Nanako0129/TokenBar/pull/265) — thanks @Agugu-official
+
+  Settings → Menu bar → Font color offers Automatic and Custom. Automatic is unchanged: quota remaining keeps the built-in green / amber / red, and other titles keep the system color. Custom sets three colors of your own against the thresholds the gauge already uses — above 25% remaining, above 10% through 25%, and 10% or below — with 16 presets and a `#RRGGBB` field that accepts a missing `#`, lowercase, or stray spaces. Each individual client item uses its own remaining value, so they can differ from one another.
+
+  An existing single custom color becomes the first of the three. Switching back to Automatic keeps all three for later.
+
+- **A reported cost the local pricing table cannot justify is now flagged.** [#264](https://github.com/Nanako0129/TokenBar/pull/264)
+
+  Some clients record their own per-message cost, and TokenBar ships those figures as reported rather than pricing the tokens itself. That is the right default — the client knows its own billing contract — but it means a unit error upstream arrives with nothing standing between it and the screen. One report showed a model at $8,647 for 74M tokens.
+
+  Such a row now carries an amber warning beside the cost, and the tooltip names the multiple it is of the local estimate. The figure itself is not corrected: the app cannot know your real rate, only that this one is far from any price it can justify. The threshold is 50x, two orders of magnitude above where healthy rows sit, so a normal row cannot reach it. A model the table cannot price produces no flag rather than a false one.
+
 ## Fixes
 
-- **Codex quota windows that ended before their advertised reset were deleted rather than recorded.** [#256](https://github.com/Nanako0129/TokenBar/pull/256)
+- **With a second Claude account, each account's usage was counted against every account's quota.** [#261](https://github.com/Nanako0129/TokenBar/pull/261)
 
-  A sample survived a save only if it belonged to a window that had run to its advertised end, or to the window currently in progress. Codex moves its reported weekly reset ahead of schedule, and a window that ended early matched neither: it never reached completeness, and the moment the reset moved it stopped being the current one. It was dropped in the same save that admitted the new reading, so nothing ever had an interval in which to rescue it.
+  Every quota-window surface folded both accounts' transcripts into whichever account's allowance it was dividing by. Measured against a reporting store, the primary account's figures ran 1.40x high and the second account's 3.51x — the smaller account is hit harder, because it receives the same numerator against much less quota movement.
 
-  Such a window is now closed at the length it actually ran, before that save, so it can qualify as a completed cycle rather than being cleared as a fragment. The retention rule itself is unchanged. A genuine fragment is still dropped.
+  Each account is now scanned separately and sees only its own transcripts. Single-account installs are unaffected, and no stored data changes format.
 
-  How often this bit depends on how often the provider moves its reset, which is server-side behaviour rather than anything local. Measured against one account's raw Codex sample log — 10,911 readings that predate this work and have no retention applied — the reported reset moved beyond the old five-minute tolerance on **11.6% of consecutive readings**. On the same machine over the same period, Claude accumulated 49 completed cycles and Codex accumulated one. That gap is the bug, not a difference in how the two were used.
+- **A window whose readings crossed a reset now says so, rather than quoting a confident estimate.** [#260](https://github.com/Nanako0129/TokenBar/pull/260)
 
-  The tolerance was the other half of it. Deciding "this is a different window" reused the quantum that smooths the jitter a provider reports *inside* one window, capped at five minutes, so a rolling reset that drifts continuously read as a new window almost every poll. The threshold now scales with the window it judges — thirty minutes on a weekly one, chosen against that sample log. Windows shorter than 28 hours keep exactly the tolerance they had.
+  The other half of the correction above. Consumption measured across a reset is several separate measurements added together, each carrying its own rounding, so it has to clear the estimate's confidence bar once per measurement rather than once in total. A window that cannot clear it reads "too little to estimate" with a wider error bar, which is what it should have said all along.
 
-  Closing a window does not lower the bar for recording one. It still needs readings at six or more distinct points, the first near its start and the last near its end, with no gap wider than about a third of it. One example from the account above: a window that collected six readings starting three hours in, and nothing before them, fails that bar even when closed at its best possible length. If TokenBar is not running for much of a window, that window is still lost.
+- **The Models list gained the hover tooltip every other card already had.** [#264](https://github.com/Nanako0129/TokenBar/pull/264)
 
-  History lost before this update does not come back either. Those samples were deleted at the time rather than mis-recorded, so nothing remains to rebuild from. A Codex window history that is near empty today stays that way and refills from here.
-
-  One exclusion is deliberate. A window cut short by more than a tenth of its length stays out of the pace projection — the deficit marker and run-out forecast that Historical mode learns — because fitting one that stopped at 34% used teaches the projection that a completed cycle ends there, and every forecast after it reads low. Across the fifteen resets measured, twelve ended between 5% and 64%. A window that still ran nine tenths of its advertised length counts as finished and feeds the projection exactly as before, so an early reset in the last few hours of a week costs nothing. Everywhere other than the projection, these windows are shown and counted like any other.
+  A long model name in that tooltip now wraps instead of being truncated.
