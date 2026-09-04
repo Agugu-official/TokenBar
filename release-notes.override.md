@@ -2,9 +2,9 @@
 
 **The "10% of quota ~ …" line will read lower on some windows, and that is the fix.** [#260](https://github.com/Nanako0129/TokenBar/pull/260)
 
-That line divides the usage recorded during a window by how much quota the window consumed. It was measuring the consumption as the distance between the first and the last reading. When a reading goes down — a reset, or the provider correcting a number it reported earlier — that distance collapses, while the usage above the line still counts everything on both sides of the drop. The smaller the leftover distance, the larger the number.
+That line divides the usage recorded during a window by how much quota the window consumed, and it was measuring that consumption two different ways depending on where the line appeared. The single-window row took the distance between the first and the last reading. The pooled historical estimate took the gap between the highest and the lowest. When a reading goes down — a reset, or the provider correcting a number it reported earlier — the first collapses, while the second stops at whatever the highest reading happened to be. The usage above the line still counts everything on both sides of the drop either way.
 
-On one real window the readings travelled 95 points and ended 10 above where they started, so a full window of usage was being divided by 10. The line read several thousand dollars.
+Both now count the distance the readings actually travelled. On one real window that is 95 points, against 10 by the old single-window measure and 85 by the old pooled one. So the single-window row was dividing a full window of usage by 10 and reading several thousand dollars, while the pooled estimate was only slightly high and moves by about a tenth.
 
 Only windows whose readings went down at some point are affected. Where the readings only rose, the two measurements are the same number and nothing changes.
 
