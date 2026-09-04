@@ -14,6 +14,7 @@ import TokenBarCore
 enum AppLanguage: String, CaseIterable {
     case system
     case english = "en"
+    case simplifiedChinese = "zh-Hans"
     case traditionalChinese = "zh-Hant"
 
     static let storageKey = "tokenbar.language"
@@ -23,6 +24,7 @@ enum AppLanguage: String, CaseIterable {
         switch self {
         case .system: return "System".localized
         case .english: return "English"
+        case .simplifiedChinese: return "简体中文"
         case .traditionalChinese: return "繁體中文"
         }
     }
@@ -57,7 +59,7 @@ enum AppLanguage: String, CaseIterable {
         else { return }
 
         let fileManager = FileManager.default
-        for locale in ["en", "zh-Hant"] {
+        for locale in ["en", "zh-Hans", "zh-Hant"] {
             let source = packageResourceURL.appendingPathComponent("\(locale).lproj")
             let destination = resourceURL.appendingPathComponent("\(locale).lproj")
             guard fileManager.fileExists(atPath: source.path) else { continue }

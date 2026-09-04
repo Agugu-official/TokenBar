@@ -97,6 +97,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleLocalizations</key>
     <array>
         <string>en</string>
+        <string>zh-Hans</string>
         <string>zh-Hant</string>
     </array>
     <key>LSMinimumSystemVersion</key>

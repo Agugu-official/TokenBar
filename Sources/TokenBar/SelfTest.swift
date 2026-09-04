@@ -1071,6 +1071,9 @@ enum SelfTest {
             AppLanguage.requiresRelaunch(from: "en", to: "zh-Hant"),
             "language change prompts for relaunch")
         expect(
+            AppLanguage.requiresRelaunch(from: "en", to: "zh-Hans"),
+            "Simplified Chinese language change prompts for relaunch")
+        expect(
             !AppLanguage.requiresRelaunch(from: "en", to: "unsupported"),
             "invalid language does not prompt for relaunch")
 
