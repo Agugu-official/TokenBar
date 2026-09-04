@@ -72,7 +72,7 @@
 /* ===== 统计数字 ===== */
 "Total" = "总计";
 "Tokens" = "token";
-"Best day" = "最高单日";
+"Best day" = "单日最高";
 "Total tokens" = "token 总数";
 "Total spend" = "总支出";
 "Active days" = "活跃天数";
