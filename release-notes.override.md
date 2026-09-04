@@ -34,7 +34,7 @@ Nothing was lost and nothing needs rebuilding.
 
 - **Consumption measured across a drop now has to clear the estimate's bar once per rise.** [#260](https://github.com/Nanako0129/TokenBar/pull/260)
 
-  The other half of the same correction. Usage summed across a drop is several separate measurements added together, each carrying its own rounding, so both the confidence bar and the quoted error scale with how many there are. A window with enough movement still gets its estimate, with a wider error bar than before; one that no longer clears the bar reads "too little to estimate" instead of a confident number.
+  The other half of the same correction. Usage summed across a drop is several separate measurements added together, each carrying its own rounding, so the quoted ± is now one rounding step per rise over the whole consumption rather than one step over the displacement. It can come out either narrower or wider than the figure you saw before, depending on which of the two moved more. A window with enough movement still gets its estimate; one that no longer clears the bar reads "too little to estimate" instead of a confident number.
 
 - **The Models list gained the hover tooltip every other card already had.** [#264](https://github.com/Nanako0129/TokenBar/pull/264)
 
