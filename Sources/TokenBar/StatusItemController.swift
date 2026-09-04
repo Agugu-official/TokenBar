@@ -18,6 +18,7 @@ final class StatusItemController: NSObject {
     private var hasPresentedIcon = false
     private var clientStatusItems: [String: NSStatusItem] = [:]
     private var lastClientPresentations: [String: ClientTray.Presentation] = [:]
+    private var lastClientTextColors: [String: NSColor] = [:]
     private let routeMemory: StatusItemRouteMemory
     private var popoverAnchorIdentity: String?
 
@@ -154,27 +155,34 @@ final class StatusItemController: NSObject {
     private var lastTitleKey = ""
 
     /// Sets the text shown next to the menu-bar icon ("" = icon only). A
-    /// color (the quota gauge) renders as an attributed title.
-    func updateTitle(_ title: String, color: NSColor? = nil) {
+    /// color renders as an attributed title, with the user's text override
+    /// taking precedence over the automatic quota color.
+    func updateTitle(_ title: String, color: NSColor? = nil, quotaRemaining: Double? = nil) {
         guard let button = statusItem.button else { return }
+        let color = MenuBarTextColor.resolve(automatic: color, quotaRemaining: quotaRemaining)
         // Leading space keeps a gap between the template icon and the text.
         let value = title.isEmpty ? "" : " \(title)"
         let key = "\(value)|\(color?.description ?? "")"
         if key != lastTitleKey {
             lastTitleKey = key
-            if let color, !value.isEmpty {
-                button.attributedTitle = NSAttributedString(
-                    string: value,
-                    attributes: [
-                        .font: NSFont.menuBarFont(ofSize: 0),
-                        .foregroundColor: color,
-                    ])
-            } else {
-                button.title = value
-            }
+            Self.setTitle(value, color: color, on: button)
         }
         button.imagePosition = value.isEmpty ? .imageOnly : .imageLeft
         animationSurface?.scheduleLayout()
+    }
+
+    private static func setTitle(_ value: String, color: NSColor?, on button: NSStatusBarButton) {
+        if let color, !value.isEmpty {
+            button.attributedTitle = NSAttributedString(string: value, attributes: [
+                .font: NSFont.menuBarFont(ofSize: 0),
+                .foregroundColor: color,
+            ])
+        } else {
+            // Explicitly discard a previous custom foreground before returning
+            // the title to AppKit's appearance-aware native text rendering.
+            button.attributedTitle = NSAttributedString(string: value)
+            button.title = value
+        }
     }
 
     func showPopover() {
@@ -241,7 +249,12 @@ final class StatusItemController: NSObject {
     func reconcileClientItems(_ presentations: [ClientTray.Presentation]) {
         let ordered = presentations.sorted { $0.clientId < $1.clientId }
         let next = Dictionary(uniqueKeysWithValues: ordered.map { ($0.clientId, $0) })
-        guard next != lastClientPresentations else { return }
+        var textColors: [String: NSColor] = [:]
+        for presentation in ordered {
+            textColors[presentation.clientId] = MenuBarTextColor.resolve(
+                automatic: nil, quotaRemaining: presentation.remainingPercent)
+        }
+        guard next != lastClientPresentations || textColors != lastClientTextColors else { return }
 
         for id in Array(clientStatusItems.keys) where next[id] == nil {
             removeClientItem(id)
@@ -250,39 +263,44 @@ final class StatusItemController: NSObject {
         // icon failed to render stays absent and the next pass retries it.
         var reconciled: [String: ClientTray.Presentation] = [:]
         for presentation in ordered {
+            let textColor = textColors[presentation.clientId]
             if let item = clientStatusItems[presentation.clientId] {
-                if lastClientPresentations[presentation.clientId] != presentation {
-                    updateClientItem(item, presentation: presentation)
+                if lastClientPresentations[presentation.clientId] != presentation
+                    || lastClientTextColors[presentation.clientId] != textColor
+                {
+                    updateClientItem(item, presentation: presentation, textColor: textColor)
                 }
-            } else if !createClientItem(presentation) {
+            } else if !createClientItem(presentation, textColor: textColor) {
                 continue
             }
             reconciled[presentation.clientId] = presentation
         }
         lastClientPresentations = reconciled
+        lastClientTextColors = textColors
     }
 
-    private func createClientItem(_ presentation: ClientTray.Presentation) -> Bool {
+    private func createClientItem(_ presentation: ClientTray.Presentation, textColor: NSColor?) -> Bool {
         guard let image = AgentIconView.statusItemImage(clientId: presentation.clientId) else {
             return false
         }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.autosaveName = presentation.autosaveName
         clientStatusItems[presentation.clientId] = item
-        updateClientItem(item, presentation: presentation, image: image)
+        updateClientItem(item, presentation: presentation, textColor: textColor, image: image)
         return true
     }
 
     private func updateClientItem(
         _ item: NSStatusItem,
         presentation: ClientTray.Presentation,
+        textColor: NSColor?,
         image: NSImage? = nil
     ) {
         guard let button = item.button else { return }
         if let image { button.image = image }
         button.imagePosition = .imageLeft
         button.imageScaling = .scaleNone
-        button.title = " \(presentation.valueText)"
+        Self.setTitle(" \(presentation.valueText)", color: textColor, on: button)
         button.toolTip = presentation.toolTip
         button.setAccessibilityLabel(presentation.accessibilityLabel)
         button.setAccessibilityIdentifier(presentation.processIdentity)

@@ -57,6 +57,11 @@ struct SettingsPanel: View {
     var reportLoading = false
 
     @AppStorage(TrayMode.storageKey) private var trayModeRaw = TrayMode.todayTokens.rawValue
+    @AppStorage(MenuBarTextColor.storageKey) private var textColorMode = MenuBarTextColor.automatic.rawValue
+    @AppStorage(MenuBarTextColor.customColorKey) private var textColorHex = MenuBarTextColor.defaultHex
+    @AppStorage(MenuBarTextColor.warningColorKey) private var warningTextColorHex = QuotaColorLevel.warning.defaultHex
+    @AppStorage(MenuBarTextColor.criticalColorKey) private var criticalTextColorHex = QuotaColorLevel.critical.defaultHex
+    @State private var editingTextColor: QuotaColorLevel?
     @AppStorage(TrayAnimator.animateKey) private var animateTray = true
     @AppStorage(TrayAnimator.styleKey) private var animationStyle = "cat"
     @AppStorage(IconColoring.storageKey) private var iconColoringRaw = IconColoring.warningOnly.rawValue
@@ -257,6 +262,27 @@ struct SettingsPanel: View {
                 options: TrayMode.allCases.map { ($0.rawValue, $0.label) })
         }
 
+        section("Font color") {
+            radioGroup(
+                selection: $textColorMode,
+                options: MenuBarTextColor.allCases.map { ($0.rawValue, $0.label) })
+            if textColorMode == MenuBarTextColor.custom.rawValue {
+                row("Custom color") {
+                    HStack(spacing: 14) {
+                        ForEach(QuotaColorLevel.allCases, id: \.self) { level in
+                            MenuBarTextColorControl(
+                                level: level, hex: textColorBinding(level), editingLevel: $editingTextColor)
+                        }
+                    }
+                    .popover(item: $editingTextColor, arrowEdge: .bottom) { level in
+                        MenuBarTextColorPopover(hex: textColorBinding(level), level: level)
+                            .id(level)
+                    }
+                }
+            }
+            hint("Custom colors follow each item's remaining quota: normal above 25%, low above 10% through 25%, and very low at 10% or below. Other text and unavailable quota use the normal color. Automatic keeps the original colors.")
+        }
+
         section("Menubar icon") {
             radioGroup(
                 selection: $animationStyle,
@@ -308,6 +334,14 @@ struct SettingsPanel: View {
                 }
                 .glassCard(cornerRadius: 8)
             }
+        }
+    }
+
+    private func textColorBinding(_ level: QuotaColorLevel) -> Binding<String> {
+        switch level {
+        case .normal: $textColorHex
+        case .warning: $warningTextColorHex
+        case .critical: $criticalTextColorHex
         }
     }
 
@@ -1286,6 +1320,115 @@ struct SettingsPanel: View {
             .font(.caption2)
             .foregroundStyle(.tertiary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// The three chips select a level in one shared editor below the color row.
+private struct MenuBarTextColorControl: View {
+    let level: QuotaColorLevel
+    @Binding var hex: String
+    @Binding var editingLevel: QuotaColorLevel?
+
+    var body: some View {
+        VStack(spacing: 3) {
+            Text(level.label.localized)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Button { editingLevel = editingLevel == level ? nil : level } label: {
+                Capsule()
+                    .fill(Color(hex: MenuBarTextColor.normalizedHex(hex) ?? level.defaultHex))
+                    .frame(width: 42, height: 18)
+                    .padding(3)
+                    .background(.quaternary, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .help(level.hint.localized)
+            .accessibilityLabel(level.label.localized)
+            .accessibilityValue(hex)
+            .accessibilityIdentifier("settings.menuBar.textColor." + level.rawValue)
+        }
+    }
+}
+
+/// A compact editor shown from the color row; incomplete input stays local.
+private struct MenuBarTextColorPopover: View {
+    @Binding var hex: String
+    let level: QuotaColorLevel
+    @State private var input: String
+    @FocusState private var inputFocused: Bool
+
+    init(hex: Binding<String>, level: QuotaColorLevel) {
+        _hex = hex
+        self.level = level
+        _input = State(initialValue: hex.wrappedValue)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(level.label.localized)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 8), spacing: 6) {
+                ForEach(MenuBarTextColor.presets, id: \.hex) { preset in
+                    presetButton(name: preset.name, colorHex: preset.hex)
+                }
+            }
+            HStack(spacing: 8) {
+                Text("HEX").font(.caption)
+                TextField("#000000", text: $input)
+                    .font(.system(.caption, design: .monospaced))
+                    .textFieldStyle(.roundedBorder)
+                    .focused($inputFocused)
+                    .accessibilityLabel("Hex color".localized)
+                    .accessibilityIdentifier("settings.menuBar.textColor.hex")
+                    .onSubmit {
+                        if let normalized = MenuBarTextColor.normalizedHex(input) {
+                            input = normalized
+                        }
+                    }
+            }
+            if !input.isEmpty, MenuBarTextColor.normalizedHex(input) == nil {
+                Text("Enter a 6-digit hex color, e.g. #000000.")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(width: 224)
+        .padding(12)
+        .onAppear { input = hex }
+        .onChange(of: input) { _, next in
+            if let normalized = MenuBarTextColor.normalizedHex(next), normalized != hex {
+                hex = normalized
+            }
+        }
+        .onChange(of: hex) { _, next in input = next }
+        .onChange(of: inputFocused) { _, focused in
+            if !focused, MenuBarTextColor.normalizedHex(input) == nil {
+                input = ""
+            }
+        }
+    }
+
+    private func presetButton(name: String, colorHex: String) -> some View {
+        let selected = MenuBarTextColor.normalizedHex(hex) == colorHex
+        let color = Color(hex: colorHex)
+        return Button {
+            hex = colorHex
+            input = colorHex
+        } label: {
+            Circle()
+                .fill(color)
+                .overlay(Circle().strokeBorder(Color.primary.opacity(0.2), lineWidth: 1))
+                .frame(width: 18, height: 18)
+                .padding(2)
+                .background(Circle().stroke(selected ? Color.accentColor : Color.clear, lineWidth: 2))
+        }
+        .buttonStyle(.plain)
+        .help(name.localized + " " + colorHex)
+        .accessibilityLabel(name.localized + " " + colorHex)
+        .accessibilityIdentifier("settings.menuBar.textColor." + String(colorHex.dropFirst()))
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
