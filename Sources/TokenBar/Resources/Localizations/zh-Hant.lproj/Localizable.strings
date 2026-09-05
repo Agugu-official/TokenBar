@@ -29,6 +29,7 @@
 "Refresh usage data (⌘R) — showing data from %@" = "重新整理用量資料（⌘R）— 顯示的是%@的資料";
 "Updating usage data" = "正在更新用量資料";
 "Loading usage…" = "正在載入用量…";
+"Failed to load usage: %@" = "載入用量失敗：%@";
 "Loading…" = "載入中…";
 "Settings" = "設定";
 "Quit" = "結束";
@@ -55,6 +56,7 @@
 "Token Usage" = "Token 用量";
 "Streaks" = "連續紀錄";
 "Agent limits" = "Agent 額度";
+"OAuth quota" = "OAuth 額度";
 "Live session" = "即時工作階段";
 "Models by cost" = "模型費用排行";
 "Agents by cost" = "Agent 費用排行";
@@ -119,6 +121,7 @@
 "Price" = "費用";
 "Show less" = "收合";
 "Show %lld more" = "再顯示 %lld 筆";
+"Show %lld more · %lld of %lld" = "再顯示 %1$lld 筆 · 已顯示 %2$lld／共 %3$lld 筆";
 "Show more" = "顯示更多";
 "Prices updated %@" = "價格更新於 %@";
 "LiteLLM pricing data; refreshes automatically about once an hour" = "LiteLLM 價格資料，大約每小時自動更新一次";

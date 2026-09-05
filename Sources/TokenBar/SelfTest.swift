@@ -1077,11 +1077,11 @@ enum SelfTest {
             !AppLanguage.requiresRelaunch(from: "en", to: "unsupported"),
             "invalid language does not prompt for relaunch")
 
-        let zhHansBundles = [
+        let localizationBundles = [
             (name: "main bundle", bundle: Bundle.main),
             (name: "SwiftPM resource bundle", bundle: Bundle.tokenBarResources),
         ]
-        for (bundleName, bundle) in zhHansBundles {
+        for (bundleName, bundle) in localizationBundles {
             let zhHansWindow = AppLanguage.localizedString(
                 "Session", locale: "zh-Hans", bundle: bundle)
             let zhHansWindowFormat = AppLanguage.localizedString(
@@ -1122,6 +1122,22 @@ enum SelfTest {
                         "Suggested: not a subscription", locale: "zh-Hans", bundle: bundle)
                         == "建议：不计入订阅",
                 "Simplified Chinese attribution terms resolve from the \(bundleName)")
+
+            // The three keys zh-Hans introduced. A missing entry renders as
+            // English rather than breaking, so nothing else in this suite can
+            // notice one catalog carrying a key the other does not.
+            let zhHantMore = AppLanguage.localizedString(
+                "Show %lld more · %lld of %lld", locale: "zh-Hant", bundle: bundle)
+            let zhHantError = AppLanguage.localizedString(
+                "Failed to load usage: %@", locale: "zh-Hant", bundle: bundle)
+            expect(
+                zhHantMore.map { String(format: $0, Int64(7), Int64(20), Int64(27)) }
+                    == "再顯示 7 筆 · 已顯示 20／共 27 筆"
+                    && zhHantError.map { String(format: $0, "offline") }
+                        == "載入用量失敗：offline"
+                    && AppLanguage.localizedString(
+                        "OAuth quota", locale: "zh-Hant", bundle: bundle) == "OAuth 額度",
+                "Traditional Chinese carries the keys zh-Hans added, from the \(bundleName)")
         }
 
         let popoverResizeResult = MainActor.assumeIsolated { () -> (Bool, Bool) in
