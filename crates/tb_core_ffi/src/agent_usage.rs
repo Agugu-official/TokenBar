@@ -981,10 +981,6 @@ impl UsageWindow {
         self.pace_status.window_key.as_deref()
     }
 
-    #[cfg(test)]
-    pub(crate) fn pace_reason_for_test(&self) -> Option<&str> {
-        self.pace_status.reason.as_deref()
-    }
 }
 
 #[derive(Debug, Clone)]
