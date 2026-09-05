@@ -3,6 +3,27 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>1.16.0</title>
+            <pubDate>Sat, 05 Sep 2026 19:19:32 +0000</pubDate>
+            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.16.0</link>
+            <sparkle:version>935</sparkle:version>
+            <sparkle:shortVersionString>1.16.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>Features:</b>
+<ul>
+<li>TokenBar speaks Simplified Chinese. 简体中文 joins English and 繁體中文 under Settings > Language. The catalog covers 488 strings: tabs, dashboard cards, quota windows, statistics, charts, contribution tooltips, settings, and the menu-bar item. As with the other two languages, the choice takes effect on the next launch, because macOS resolves the interface language once at startup. It is reviewed copy rather than a character conversion of the Traditional Chinese catalog: terminology, counters and word order were adapted, and a sentence Chinese reorders is translated as one unit rather than assembled from parts. Some values are built while the app runs - window titles, the pagination line, token totals, streak lengths, the usage-loading error - and those never reached the translation table at all. They do now, in every language.</li>
+</ul>
+<b>Fixes:</b>
+<ul>
+<li>Each menu-bar color swatch now opens its own editor. The Font color section that arrived in 1.15.0 shows three swatches - normal, low, very low - and all three shared a single popover anchored to the row containing them. Whichever swatch you clicked, the editor's arrow pointed at the middle one. Each swatch now anchors its own.</li>
+<li>Three Traditional Chinese strings were still falling back to English. The usage-loading error, the "show more" pagination line and the OAuth quota label had no Traditional Chinese entries. Both Chinese catalogs now carry the same 488 keys.</li>
+</ul>
+<p>Thanks: @Agugu-official</p>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.16.0/TokenBar.app.tar.gz" length="10186129" type="application/octet-stream" sparkle:edSignature="Dkux+tyVDNs2ZL6d7l/7ISp3QozMP6uvzbMMOziJH47HGFPWrSPhqn+khj7g7s0VnEFdaREgJJgPFI5tdexUDA=="/>
+        </item>
+        <item>
             <title>1.15.0</title>
             <pubDate>Fri, 04 Sep 2026 13:20:12 +0000</pubDate>
             <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.15.0</link>
@@ -83,21 +104,6 @@
 <p>Thanks: @iF2007</p>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.14.2/TokenBar.app.tar.gz" length="10042698" type="application/octet-stream" sparkle:edSignature="eyK8DJ4b8FOIdcdwJ9J6pcGiSVw8PXu3mNNi8hElG0ou8g79KJU1eP8Fdxcmc6XVY0Oqf+VdjI1Kixhv5BgWBw=="/>
-        </item>
-        <item>
-            <title>1.14.1</title>
-            <pubDate>Mon, 24 Aug 2026 12:29:50 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.14.1</link>
-            <sparkle:version>837</sparkle:version>
-            <sparkle:shortVersionString>1.14.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>Fixes:</b>
-<ul>
-<li>The quota equivalence counted fewer tokens than it priced. The estimate under a quota window, and the heatmap tooltip that scales from it, print a token count beside a dollar amount as two descriptions of the same work. The count left out cache reads while the amount included their cost, so dividing one by the other gave a price several times higher than any model's list rate: one reading showed 72 quota points as 4.8M tokens and $172.25, which works out to $36 per million. Cache reads are most of the volume in a Claude Code session, so most of the tokens were missing from the count while all of their cost stayed in the price. The count now covers everything the price covers. The dollar figure does not change; the token figure grows, and the implied rate falls back to something near list.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.14.1/TokenBar.app.tar.gz" length="9999406" type="application/octet-stream" sparkle:edSignature="JzIAGrbsGyFs3zRbtp7Mw9pKSxpqRsNTeGpb+vi26hXLdAzf8cz46Ev4A8tFjP2/bBG+Mva/XqkBX5jf7jzlAw=="/>
         </item>
         <item>
             <title>1.1.1</title>
