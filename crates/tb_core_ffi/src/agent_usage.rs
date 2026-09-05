@@ -668,24 +668,6 @@ impl Serialize for UsageWindow {
 }
 
 impl UsageWindow {
-    /// Build a window from a "remaining fraction" (0..1) — the shape Antigravity
-    /// reports per model. Used-percent is derived; identity and duration are
-    /// attached by the provider adapter before the snapshot is emitted.
-    pub(crate) fn from_fraction(
-        label: String,
-        remaining_fraction: f64,
-        resets_at: Option<DateTime<Utc>>,
-        now: DateTime<Utc>,
-    ) -> Self {
-        Self::from_used_percent(
-            label,
-            (1.0 - remaining_fraction) * 100.0,
-            resets_at,
-            now,
-            None,
-        )
-    }
-
     /// Build a window from an absolute used-percent (0..100), with an optional
     /// legacy duration hint. The hint is retained only for existing tests and
     /// converted to exact seconds before any wire serialization.
@@ -999,10 +981,6 @@ impl UsageWindow {
         self.pace_status.window_key.as_deref()
     }
 
-    #[cfg(test)]
-    pub(crate) fn pace_reason_for_test(&self) -> Option<&str> {
-        self.pace_status.reason.as_deref()
-    }
 }
 
 #[derive(Debug, Clone)]

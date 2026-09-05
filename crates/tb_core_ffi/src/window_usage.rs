@@ -212,6 +212,9 @@ fn account_parse_options(
     })
 }
 
+/// Test instrumentation: the counter exists in every build so `cached` can
+/// increment it, but reading it is only ever a test's business.
+#[cfg(test)]
 pub(crate) fn scan_count() -> usize {
     SCAN_COUNT.load(Ordering::Relaxed)
 }
