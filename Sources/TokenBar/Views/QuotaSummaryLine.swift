@@ -65,8 +65,9 @@ struct QuotaSummaryLine: View {
                         // models sums to exactly zero, so "5.2K tokens · $0.00"
                         // — the case the first version of this comment claimed
                         // to have fixed — survived it untouched.
-                        Text(verbatim: "\(Format.compactTokens(today.tokens)) tokens · "
-                             + Format.money(tokens: today.tokens, cost: today.cost))
+                        Text(verbatim: "%@ tokens".localized(
+                            Format.compactTokens(today.tokens)) + " · "
+                            + Format.money(tokens: today.tokens, cost: today.cost))
                             .font(.caption)
                     }
                 }

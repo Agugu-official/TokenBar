@@ -1077,6 +1077,53 @@ enum SelfTest {
             !AppLanguage.requiresRelaunch(from: "en", to: "unsupported"),
             "invalid language does not prompt for relaunch")
 
+        let zhHansBundles = [
+            (name: "main bundle", bundle: Bundle.main),
+            (name: "SwiftPM resource bundle", bundle: Bundle.tokenBarResources),
+        ]
+        for (bundleName, bundle) in zhHansBundles {
+            let zhHansWindow = AppLanguage.localizedString(
+                "Session", locale: "zh-Hans", bundle: bundle)
+            let zhHansWindowFormat = AppLanguage.localizedString(
+                "%@ window", locale: "zh-Hans", bundle: bundle)
+            expect(
+                zhHansWindow == "会话"
+                    && zhHansWindowFormat.map { String(format: $0, zhHansWindow ?? "") }
+                        == "会话窗口",
+                "Simplified Chinese window labels resolve from the \(bundleName)")
+
+            let zhHansMore = AppLanguage.localizedString(
+                "Show %lld more · %lld of %lld", locale: "zh-Hans", bundle: bundle)
+            expect(
+                zhHansMore.map { String(format: $0, Int64(7), Int64(20), Int64(27)) }
+                    == "再显示 7 项 · 已显示 20／共 27 项",
+                "Simplified Chinese pagination resolves from the \(bundleName)")
+            let zhHansError = AppLanguage.localizedString(
+                "Failed to load usage: %@", locale: "zh-Hans", bundle: bundle)
+            expect(
+                AppLanguage.localizedString(
+                    "OAuth quota", locale: "zh-Hans", bundle: bundle) == "OAuth 额度"
+                    && zhHansError.map { String(format: $0, "offline") }
+                        == "加载用量失败：offline",
+                "Simplified Chinese dynamic usage copy resolves from the \(bundleName)")
+            let zhHansDays = AppLanguage.localizedString(
+                "%lldd", locale: "zh-Hans", bundle: bundle)
+            let zhHansTokens = AppLanguage.localizedString(
+                "%@ tokens", locale: "zh-Hans", bundle: bundle)
+            expect(
+                zhHansDays.map { String(format: $0, Int64(3)) } == "3天"
+                    && zhHansTokens.map { String(format: $0, "5.2K") } == "5.2K token",
+                "Simplified Chinese streak and token formats resolve from the \(bundleName)")
+            expect(
+                AppLanguage.localizedString(
+                    "Not a subscription", locale: "zh-Hans", bundle: bundle)
+                    == "不计入订阅"
+                    && AppLanguage.localizedString(
+                        "Suggested: not a subscription", locale: "zh-Hans", bundle: bundle)
+                        == "建议：不计入订阅",
+                "Simplified Chinese attribution terms resolve from the \(bundleName)")
+        }
+
         let popoverResizeResult = MainActor.assumeIsolated { () -> (Bool, Bool) in
             let defaults = UserDefaults.standard
             let savedHeight = defaults.object(forKey: PopoverChrome.heightKey)

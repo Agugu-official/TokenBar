@@ -118,8 +118,10 @@ struct HourlyView: View {
                     }
                 }
                 if timeline.count > visible {
+                    let remaining = min(Self.timelineStep, timeline.count - visible)
                     Button(
-                        "Show \(min(Self.timelineStep, timeline.count - visible)) more · \(visible) of \(timeline.count)"
+                        "Show %lld more · %lld of %lld".localized(
+                            Int64(remaining), Int64(visible), Int64(timeline.count))
                     ) {
                         visible = min(visible + Self.timelineStep, timeline.count)
                     }

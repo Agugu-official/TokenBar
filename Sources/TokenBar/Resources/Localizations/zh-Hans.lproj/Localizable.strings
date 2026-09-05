@@ -28,6 +28,7 @@
 "Refresh usage data (⌘R) — showing data from %@" = "刷新用量数据（⌘R）— 当前显示%@的数据";
 "Updating usage data" = "正在刷新用量数据";
 "Loading usage…" = "正在加载用量…";
+"Failed to load usage: %@" = "加载用量失败：%@";
 "Loading…" = "加载中…";
 "Settings" = "设置";
 "Quit" = "退出";
@@ -54,6 +55,7 @@
 "Token Usage" = "token 用量";
 "Streaks" = "连续天数";
 "Agent limits" = "Agent 额度";
+"OAuth quota" = "OAuth 额度";
 "Live session" = "实时会话";
 "Models by cost" = "模型费用排行";
 "Agents by cost" = "Agent 费用排行";
@@ -118,6 +120,7 @@
 "Price" = "费用";
 "Show less" = "收起";
 "Show %lld more" = "再显示 %lld 项";
+"Show %lld more · %lld of %lld" = "再显示 %1$lld 项 · 已显示 %2$lld／共 %3$lld 项";
 "Show more" = "显示更多";
 "Prices updated %@" = "价格更新于 %@";
 "LiteLLM pricing data; refreshes automatically about once an hour" = "LiteLLM 价格数据，约每小时自动刷新一次";
@@ -225,7 +228,7 @@
 "Not a subscription" = "不计入订阅";
 "Counts toward %@" = "计入 %@";
 "Suggested: counts toward %@" = "建议：计入 %@";
-"Suggested: not a subscription" = "建议：不是订阅";
+"Suggested: not a subscription" = "建议：不计入订阅";
 "Usage could not be loaded, so there is nothing to classify yet." = "无法加载用量，暂时没有可分类的内容。";
 "Usage breakdown is unavailable right now." = "暂时无法显示用量明细。";
 "Unspecified provider" = "未指定提供商";
@@ -365,7 +368,7 @@
 "Loading" = "加载中";
 "Waiting for quota…" = "正在等待额度…";
 "Waiting for quota" = "等待额度";
-"%@ window" = "%@ 窗口";
+"%@ window" = "%@窗口";
 "No quota history" = "没有额度历史";
 "This window has no recorded quota history, so there is no line to draw." = "此窗口没有额度历史记录，因此无法绘制曲线。";
 "Remaining" = "剩余";

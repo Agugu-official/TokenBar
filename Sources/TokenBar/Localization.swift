@@ -35,6 +35,21 @@ enum AppLanguage: String, CaseIterable {
         currentRawValue != nextRawValue && Self(rawValue: nextRawValue) != nil
     }
 
+    /// Reads one locale explicitly from a bundle so selftest can prove that
+    /// each packaged localization copy exists without changing AppleLanguages.
+    static func localizedString(
+        _ key: String, locale: String, bundle: Bundle = .tokenBarResources
+    ) -> String? {
+        guard let url = bundle.url(
+            forResource: locale, withExtension: "lproj"),
+            let bundle = Bundle(url: url)
+        else { return nil }
+
+        let missing = "__TOKENBAR_MISSING_LOCALIZATION__"
+        let value = bundle.localizedString(forKey: key, value: missing, table: nil)
+        return value == missing ? nil : value
+    }
+
     /// Writes (or clears) the `AppleLanguages` override.
     func apply(to defaults: UserDefaults = .standard) {
         switch self {
