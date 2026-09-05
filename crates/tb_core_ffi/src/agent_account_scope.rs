@@ -107,6 +107,12 @@ impl AuthoritativeIdKind {
 pub(crate) enum AccountScopeError {
     NoTrustedEvidence,
     InvalidEvidence,
+    /// Returned by `SystemBackend::random_bytes` on a target neither secure
+    /// storage path covers, so it is unreachable on macOS and Windows — the
+    /// only two the app ships for. Matching it in `Display` does not count as
+    /// constructing it, which is what the warning is about. Cfg-gating the
+    /// variant would force the same cfg onto that arm for no gain.
+    #[allow(dead_code)]
     UnsupportedPlatform,
     InstallationKeyRead,
     InvalidInstallationKey,
@@ -171,9 +177,15 @@ trait Backend {
     fn random_bytes(&self, length: usize) -> Result<Vec<u8>, AccountScopeError>;
     fn storage_dir(&self) -> Result<PathBuf, AccountScopeError>;
     fn now_seconds(&self) -> i64;
-    fn uses_windows_secure_storage(&self) -> bool {
-        false
-    }
+    /// Every caller sits under `#[cfg(target_os = "windows")]`, so on macOS
+    /// this method is declared and implemented but never reached. Cfg-gating it
+    /// would mean the same cfg on both impls for no gain.
+    ///
+    /// Required rather than defaulted: both implementations answer it, so a
+    /// default body would be code no build can reach. `before_fs` below keeps
+    /// its default because `SystemBackend` does take that one.
+    #[allow(dead_code)]
+    fn uses_windows_secure_storage(&self) -> bool;
     fn before_fs(&self, _operation: FsOperation) -> io::Result<()> {
         Ok(())
     }
