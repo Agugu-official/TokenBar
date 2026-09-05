@@ -426,8 +426,13 @@ struct WindowUsageCard: View {
     @ViewBuilder
     private func scopeNote(_ usage: WindowUsageHalf?, label: String) -> some View {
         if let usage, usage.scopeMatchedNothing {
+            // The label is a window identifier, so it arrives in English like
+            // every other stored value — the third display site in this file
+            // that has to translate it, alongside the two DashCard titles and
+            // `hoverSubtitle`. Resolving it inside this helper rather than at
+            // the single call site keeps the next caller from missing it.
             Text("No local usage matched %@, though this subscription has other usage in this window"
-                .localized(label))
+                .localized(label.localized))
                 .font(.system(size: 9))
                 .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
