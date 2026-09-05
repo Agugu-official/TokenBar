@@ -54,8 +54,8 @@ struct StatsView: View {
                 ("Total spend", Format.usd(stats.totalCost), true),
                 ("Active days", String(stats.activeDays), false),
                 ("Avg / day", Format.usd(stats.averagePerDay), false),
-                ("Current streak", "\(stats.streaks.current)d", false),
-                ("Longest streak", "\(stats.streaks.longest)d", false),
+                ("Current streak", "%lldd".localized(stats.streaks.current), false),
+                ("Longest streak", "%lldd".localized(stats.streaks.longest), false),
             ]
             LazyVGrid(
                 columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 3),

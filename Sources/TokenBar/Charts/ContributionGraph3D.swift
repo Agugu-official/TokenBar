@@ -285,8 +285,9 @@ final class ContributionGraphView: SCNView {
                 m.emission.intensity = 0.35
             }
         }
+        let tokenLine = "%@ tokens".localized(Format.compactTokens(cell.tokens))
         tooltip.stringValue =
-            "\(Format.monthDay(cell.date))\n\(Format.compactTokens(cell.tokens)) tokens\n\(Format.usd(cell.cost))"
+            "\(Format.monthDay(cell.date))\n\(tokenLine)\n\(Format.usd(cell.cost))"
         tooltip.sizeToFit()
         tooltip.frame = tooltip.frame.insetBy(dx: -7, dy: -5)
         var origin = CGPoint(x: p.x + 12, y: p.y - tooltip.frame.height - 12)

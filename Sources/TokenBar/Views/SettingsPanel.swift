@@ -272,11 +272,14 @@ struct SettingsPanel: View {
                         ForEach(QuotaColorLevel.allCases, id: \.self) { level in
                             MenuBarTextColorControl(
                                 level: level, hex: textColorBinding(level), editingLevel: $editingTextColor)
+                                .popover(
+                                    isPresented: textColorEditorPresented(level), arrowEdge: .bottom
+                                ) {
+                                    MenuBarTextColorPopover(
+                                        hex: textColorBinding(level), level: level)
+                                        .id(level)
+                                }
                         }
-                    }
-                    .popover(item: $editingTextColor, arrowEdge: .bottom) { level in
-                        MenuBarTextColorPopover(hex: textColorBinding(level), level: level)
-                            .id(level)
                     }
                 }
             }
@@ -343,6 +346,16 @@ struct SettingsPanel: View {
         case .warning: $warningTextColorHex
         case .critical: $criticalTextColorHex
         }
+    }
+
+    private func textColorEditorPresented(_ level: QuotaColorLevel) -> Binding<Bool> {
+        Binding(
+            get: { editingTextColor == level },
+            set: { presented in
+                if !presented, editingTextColor == level {
+                    editingTextColor = nil
+                }
+            })
     }
 
     private func individualItemRow(_ row: ClientTray.SettingsRow) -> some View {

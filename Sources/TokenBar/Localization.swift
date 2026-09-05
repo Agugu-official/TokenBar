@@ -14,6 +14,7 @@ import TokenBarCore
 enum AppLanguage: String, CaseIterable {
     case system
     case english = "en"
+    case simplifiedChinese = "zh-Hans"
     case traditionalChinese = "zh-Hant"
 
     static let storageKey = "tokenbar.language"
@@ -23,6 +24,7 @@ enum AppLanguage: String, CaseIterable {
         switch self {
         case .system: return "System".localized
         case .english: return "English"
+        case .simplifiedChinese: return "简体中文"
         case .traditionalChinese: return "繁體中文"
         }
     }
@@ -31,6 +33,21 @@ enum AppLanguage: String, CaseIterable {
     /// again (or receiving a malformed raw value) must not prompt.
     static func requiresRelaunch(from currentRawValue: String, to nextRawValue: String) -> Bool {
         currentRawValue != nextRawValue && Self(rawValue: nextRawValue) != nil
+    }
+
+    /// Reads one locale explicitly from a bundle so selftest can prove that
+    /// each packaged localization copy exists without changing AppleLanguages.
+    static func localizedString(
+        _ key: String, locale: String, bundle: Bundle = .tokenBarResources
+    ) -> String? {
+        guard let url = bundle.url(
+            forResource: locale, withExtension: "lproj"),
+            let bundle = Bundle(url: url)
+        else { return nil }
+
+        let missing = "__TOKENBAR_MISSING_LOCALIZATION__"
+        let value = bundle.localizedString(forKey: key, value: missing, table: nil)
+        return value == missing ? nil : value
     }
 
     /// Writes (or clears) the `AppleLanguages` override.
@@ -57,7 +74,7 @@ enum AppLanguage: String, CaseIterable {
         else { return }
 
         let fileManager = FileManager.default
-        for locale in ["en", "zh-Hant"] {
+        for locale in ["en", "zh-Hans", "zh-Hant"] {
             let source = packageResourceURL.appendingPathComponent("\(locale).lproj")
             let destination = resourceURL.appendingPathComponent("\(locale).lproj")
             guard fileManager.fileExists(atPath: source.path) else { continue }

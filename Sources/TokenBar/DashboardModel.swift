@@ -717,7 +717,7 @@ private struct DashboardSnapshot {
             // Keep showing stale data over an error screen when a previous
             // load succeeded — a transient failure must not blank the UI.
             if payload == nil {
-                phase = .failed("Failed to load usage: \(error)")
+                phase = .failed("Failed to load usage: %@".localized(String(describing: error)))
             }
         }
     }
@@ -870,7 +870,7 @@ private struct DashboardSnapshot {
             // "looking for clients". Once ready, keep the stale-data-over-error
             // behavior a manual refresh relies on.
             if case .loading = phase {
-                phase = .failed("Failed to load usage: \(error)")
+                phase = .failed("Failed to load usage: %@".localized(String(describing: error)))
             }
             return
         }

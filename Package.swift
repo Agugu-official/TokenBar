@@ -37,6 +37,7 @@ let package = Package(
                 // root so direct `swift run` can stage them beside the
                 // executable for Bundle.main/SwiftUI lookup.
                 .copy("Resources/Localizations/en.lproj"),
+                .copy("Resources/Localizations/zh-Hans.lproj"),
                 .copy("Resources/Localizations/zh-Hant.lproj"),
             ],
             linkerSettings: rustLinkerSettings

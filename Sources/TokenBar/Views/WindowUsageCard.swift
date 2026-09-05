@@ -17,7 +17,7 @@ struct WindowUsageCard: View {
     private var hoverMessages: [WindowMessage] { state.usageHalf?.mine ?? [] }
     private var hoverSubtitle: String {
         guard let q = state.quotaHalf else { return "" }
-        return "\(ClientRegistry.style(q.clientId).displayName) · \(q.windowLabel)"
+        return "\(ClientRegistry.style(q.clientId).displayName) · \(q.windowLabel.localized)"
     }
 
     @AppStorage("tokenbar.limits.asUsed") private var asUsed = false
@@ -72,7 +72,7 @@ struct WindowUsageCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         case let .noQuotaHistory(_, label, candidates, cardId):
-            DashCard("%@ window".localized(label), subtitle: "No quota history") {
+            DashCard("%@ window".localized(label.localized), subtitle: "No quota history") {
                 windowButtons(candidates: candidates, cardId: cardId)
                 Text("This window has no recorded quota history, so there is no line to draw.".localized)
                     .font(.caption)
@@ -93,7 +93,7 @@ struct WindowUsageCard: View {
     private func card(
         _ quota: WindowQuotaHalf, usage: WindowUsageHalf?, scanFailed: Bool
     ) -> some View {
-        DashCard("%@ window".localized(quota.windowLabel), subtitle: stateLine(quota)) {
+        DashCard("%@ window".localized(quota.windowLabel.localized), subtitle: stateLine(quota)) {
             SegmentedPicker(
                 selection: Binding(get: { asUsed }, set: { asUsed = $0 }),
                 options: [(value: false, label: "Remaining"), (value: true, label: "Used")])
