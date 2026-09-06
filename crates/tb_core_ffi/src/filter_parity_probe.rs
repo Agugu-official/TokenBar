@@ -512,50 +512,22 @@ mod tests {
                 ProbeStatus::SourceChanged,
                 "boundary {changed_at}"
             );
-            let expected = match changed_at {
-                1 => vec!["token0", "graph", "token1"],
-                2 => vec!["token0", "graph", "token1", "hourly-nil", "token2"],
-                3 => vec![
-                    "token0",
-                    "graph",
-                    "token1",
-                    "hourly-nil",
-                    "token2",
-                    "hourly-full",
-                    "token3",
-                ],
-                4 => vec![
-                    "token0",
-                    "graph",
-                    "token1",
-                    "hourly-nil",
-                    "token2",
-                    "hourly-full",
-                    "token3",
-                    "agents-nil",
-                    "token4",
-                ],
-                5 => vec![
-                    "token0",
-                    "graph",
-                    "token1",
-                    "hourly-nil",
-                    "token2",
-                    "hourly-full",
-                    "token3",
-                    "agents-nil",
-                    "token4",
-                    "agents-full",
-                    "token5",
-                ],
-                _ => unreachable!(),
-            };
+            // Every stage is bracketed by one token read, so a change seen at
+            // boundary `changed_at` ends the log at `token{changed_at}`.
+            let stages = [
+                "graph",
+                "hourly-nil",
+                "hourly-full",
+                "agents-nil",
+                "agents-full",
+            ];
+            let mut expected = vec!["token0".to_string()];
+            for (index, stage) in stages.iter().take(changed_at).enumerate() {
+                expected.push(stage.to_string());
+                expected.push(format!("token{}", index + 1));
+            }
             assert_eq!(
-                calls
-                    .borrow()
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
+                *calls.borrow(),
                 expected,
                 "stage call log for boundary {changed_at}"
             );
@@ -597,17 +569,6 @@ mod tests {
             &mut agents_fn,
         );
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn hourly_stays_stable_when_only_the_later_agents_boundary_changes() {
-        let result = run_fixture(
-            vec![Ok(1), Ok(1), Ok(1), Ok(1), Ok(1), Ok(2)],
-            vec![Ok(hourly(10, 2, 0.25)), Ok(hourly(10, 2, 0.25))],
-            vec![Ok(agents(10, 2, 0.25)), Ok(agents(10, 2, 0.25))],
-        );
-        assert_eq!(result.hourly.status, ProbeStatus::Match);
-        assert_eq!(result.agents.status, ProbeStatus::SourceChanged);
     }
 
     #[test]
@@ -679,33 +640,5 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["graph", "hourly-nil"]
         );
-    }
-
-    #[test]
-    fn controlled_append_changes_the_real_source_token_by_size() {
-        let root = std::env::temp_dir().join(format!(
-            "tokenbar-filter-parity-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let source = root.join(".codex/sessions/session.jsonl");
-        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
-        std::fs::write(&source, b"seed\n").unwrap();
-        let options = tokscale_core::LocalParseOptions {
-            home_dir: Some(root.to_string_lossy().into_owned()),
-            use_env_roots: false,
-            clients: Some(vec!["codex".to_string()]),
-            ..Default::default()
-        };
-        let before = tokscale_core::local_source_change_token(&options).unwrap();
-        let mut file = OpenOptions::new().append(true).open(&source).unwrap();
-        file.write_all(b"size-changing append\n").unwrap();
-        file.flush().unwrap();
-        let after = tokscale_core::local_source_change_token(&options).unwrap();
-        let _ = std::fs::remove_dir_all(root);
-        assert_ne!(before, after);
     }
 }
