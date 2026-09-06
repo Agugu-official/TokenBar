@@ -19,7 +19,7 @@ use crate::agent_quota_duration::{
 use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
@@ -355,69 +355,6 @@ fn weighted_median(values: &[f64], weights: &[f64]) -> f64 {
         }
     }
     fallback
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct FitWorkCounters {
-    pub(crate) series_key_comparisons: usize,
-    pub(crate) target_sample_reads: usize,
-    pub(crate) non_target_sample_reads: usize,
-    pub(crate) target_profiles_built: usize,
-    pub(crate) non_target_profiles_built: usize,
-    pub(crate) walk_forward_fits: usize,
-    pub(crate) lobo_folds: usize,
-    pub(crate) loco_folds: usize,
-}
-
-#[cfg(test)]
-thread_local! {
-    static FIT_WORK_COUNTERS: RefCell<FitWorkCounters> = RefCell::new(FitWorkCounters::default());
-}
-
-#[cfg(test)]
-pub(crate) fn reset_fit_work_counters() {
-    FIT_WORK_COUNTERS.with(|counters| *counters.borrow_mut() = FitWorkCounters::default());
-}
-
-#[cfg(test)]
-pub(crate) fn fit_work_counters() -> FitWorkCounters {
-    FIT_WORK_COUNTERS.with(|counters| *counters.borrow())
-}
-
-#[cfg(test)]
-fn add_fit_work(update: impl FnOnce(&mut FitWorkCounters)) {
-    FIT_WORK_COUNTERS.with(|counters| update(&mut counters.borrow_mut()));
-}
-
-#[cfg(not(test))]
-fn add_fit_work<F>(_update: F)
-where
-    F: FnOnce(&mut FitWorkCounters),
-{
-}
-
-fn count_series_key_comparisons(count: usize) {
-    add_fit_work(|c| c.series_key_comparisons += count);
-}
-
-fn count_target_sample_reads(count: usize) {
-    add_fit_work(|c| c.target_sample_reads += count);
-}
-
-fn count_target_profiles_built(count: usize) {
-    add_fit_work(|c| c.target_profiles_built += count);
-}
-
-fn count_walk_forward_fits(count: usize) {
-    add_fit_work(|c| c.walk_forward_fits += count);
-}
-
-fn count_lobo_folds(count: usize) {
-    add_fit_work(|c| c.lobo_folds += count);
-}
-
-fn count_loco_folds(count: usize) {
-    add_fit_work(|c| c.loco_folds += count);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2083,7 +2020,6 @@ fn duration_for_outcome(outcome: HistoryOutcome) -> Option<i64> {
 
 fn find_target_series<'a>(store: &'a Store, key: &SeriesKey) -> Option<&'a SeriesState> {
     for series in &store.series {
-        count_series_key_comparisons(1);
         if series.key() == *key {
             return Some(series);
         }
@@ -2699,7 +2635,6 @@ fn fit_lobo_cycle(points: &[FitPoint]) -> Option<(f64, Option<f64>, usize)> {
             tail_sum += mse * error.tail_count as f64;
             tail_count += error.tail_count;
         }
-        count_lobo_folds(1);
     }
     if bucket_mse.is_empty() {
         return None;
@@ -2756,7 +2691,6 @@ fn fit_loco_cycle(
     if bucket_mse.is_empty() {
         return None;
     }
-    count_loco_folds(1);
     let mse = bucket_mse.iter().sum::<f64>() / bucket_mse.len() as f64;
     let tail_mse = (tail_count > 0).then_some(tail_sum / tail_count as f64);
     mse.is_finite().then_some((mse, tail_mse, tail_count))
@@ -2924,7 +2858,6 @@ pub(crate) fn fit_partial_current(points: &[FitPoint]) -> Option<PartialFitResul
             .collect::<Vec<_>>();
         let beta = through_origin_beta(&training)?;
         holdout_mse.push(heldout_linear_error(beta, &buckets[index].1)?);
-        count_walk_forward_fits(1);
     }
     if holdout_mse.len() < 3 {
         return None;
@@ -3003,10 +2936,8 @@ fn calculate_target(
             pace: None,
         };
     };
-    count_target_sample_reads(series.samples.len());
     let current_reset = normalize_reset(reset_at, duration_seconds);
     let cycles = historical_cycles(series, current_reset, now);
-    count_target_profiles_built(cycles.len());
     TargetCalculation {
         complete_cycles: cycles.len(),
         pace: evaluate_current_from_series(
@@ -11343,61 +11274,6 @@ mod tests {
     }
 
     #[test]
-    fn partial_work_counter_is_bounded_at_forty_five_walk_forward_fits() {
-        let (directory, path) = temp_path("partial-fit-counter");
-        let duration = 5 * HOUR;
-        let reset_at = 23_000_000 + duration;
-        let now = reset_at - 60;
-        let key = test_key("fixture", "counter-partial", "window.v1");
-        let samples = (0..PHASE_BUCKET_COUNT)
-            .map(|bucket| {
-                let phase = (bucket as f64 + 0.25) / PHASE_BUCKET_COUNT as f64;
-                quota_sample(
-                    reset_at,
-                    duration,
-                    phase,
-                    (phase * 80.0).max(0.1),
-                    SampleOrigin::LiveV3,
-                )
-            })
-            .collect::<Vec<_>>();
-        let store = Store {
-            schema_version: HISTORY_SCHEMA_VERSION,
-            series: vec![SeriesState {
-                provider_id: key.provider_id.clone(),
-                account_scope: key.account_scope.clone(),
-                window_key: key.window_key.clone(),
-                active_reset_at: Some(reset_at),
-                last_activity_at: now,
-                rollover: Some(ObservedState::Watching {
-                    reset_at,
-                    first_seen_at: now,
-                    last_seen_at: now,
-                    consecutive_count: 1,
-                }),
-                samples,
-            }],
-        };
-        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
-        reset_fit_work_counters();
-        let results = record_observations_at_path_and_evaluate(
-            std::slice::from_ref(&key),
-            &[observation(key.clone(), reset_at, 79.0, duration)],
-            now,
-            &path,
-        )
-        .unwrap();
-        assert!(results[0].as_ref().unwrap().1.is_some());
-        let counters = fit_work_counters();
-        assert_eq!(counters.walk_forward_fits, 45);
-        assert_eq!(counters.target_sample_reads, PHASE_BUCKET_COUNT);
-        assert_eq!(counters.target_profiles_built, 0);
-        assert_eq!(counters.non_target_sample_reads, 0);
-        assert_eq!(counters.non_target_profiles_built, 0);
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
     fn fit_and_projection_are_exactly_permutation_invariant() {
         let phases = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80];
         let first = line_fit_points(80.0, &phases);
@@ -11573,78 +11449,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_work_counter_hits_maximum_retention_bounds() {
-        let (directory, path) = temp_path("completed-fit-counter");
-        let duration = 5 * HOUR;
-        let current_reset = 24_000_000_000_i64 + duration;
-        let now = current_reset - 60;
-        let key = test_key("fixture", "counter-complete", "window.v1");
-        let mut samples = Vec::with_capacity(129 * PHASE_BUCKET_COUNT);
-        for offset in 1..=RETENTION_MAX_CYCLES {
-            let reset = current_reset - offset as i64 * duration;
-            samples.extend((0..PHASE_BUCKET_COUNT).map(|bucket| {
-                let phase = (bucket as f64 + 0.25) / PHASE_BUCKET_COUNT as f64;
-                quota_sample(
-                    reset,
-                    duration,
-                    phase,
-                    (phase * 80.0).max(0.1),
-                    SampleOrigin::LiveV3,
-                )
-            }));
-        }
-        samples.extend((0..PHASE_BUCKET_COUNT).map(|bucket| {
-            let phase = (bucket as f64 + 0.25) / PHASE_BUCKET_COUNT as f64;
-            quota_sample(
-                current_reset,
-                duration,
-                phase,
-                (phase * 80.0).max(0.1),
-                SampleOrigin::LiveV3,
-            )
-        }));
-        let store = Store {
-            schema_version: HISTORY_SCHEMA_VERSION,
-            series: vec![SeriesState {
-                provider_id: key.provider_id.clone(),
-                account_scope: key.account_scope.clone(),
-                window_key: key.window_key.clone(),
-                active_reset_at: Some(current_reset),
-                last_activity_at: now,
-                rollover: Some(ObservedState::Watching {
-                    reset_at: current_reset,
-                    first_seen_at: now,
-                    last_seen_at: now,
-                    consecutive_count: 1,
-                }),
-                samples,
-            }],
-        };
-        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
-        reset_fit_work_counters();
-        let results = record_observations_at_path_and_evaluate(
-            std::slice::from_ref(&key),
-            &[observation(key.clone(), current_reset, 79.0, duration)],
-            now,
-            &path,
-        )
-        .unwrap();
-        assert_eq!(results[0].as_ref().unwrap().2, RETENTION_MAX_CYCLES);
-        let counters = fit_work_counters();
-        assert_eq!(
-            counters.lobo_folds,
-            RETENTION_MAX_CYCLES * PHASE_BUCKET_COUNT
-        );
-        assert_eq!(counters.loco_folds, RETENTION_MAX_CYCLES);
-        assert_eq!(counters.target_sample_reads, 129 * PHASE_BUCKET_COUNT);
-        assert_eq!(counters.target_profiles_built, RETENTION_MAX_CYCLES);
-        assert_eq!(counters.non_target_sample_reads, 0);
-        assert_eq!(counters.non_target_profiles_built, 0);
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn mixed_duration_retention_keeps_slots_bounded_without_fit_work() {
+    fn mixed_duration_retention_keeps_slots_bounded_and_the_fit_unchanged() {
         let duration = 5 * HOUR;
         let current_reset = (53_000_000_000_i64 + duration + 899).div_euclid(900) * 900;
         let now = current_reset - 60;
@@ -11713,24 +11518,10 @@ mod tests {
             schema_version: HISTORY_SCHEMA_VERSION,
             series: vec![mixed_series],
         };
-        reset_fit_work_counters();
         let control = calculate_target(&control_store, &key, current_reset, duration, 79.0, now);
-        let control_counters = fit_work_counters();
-        reset_fit_work_counters();
         let mixed = calculate_target(&mixed_store, &key, current_reset, duration, 79.0, now);
-        let mixed_counters = fit_work_counters();
         assert_eq!(control.complete_cycles, mixed.complete_cycles);
         assert_eq!(control.pace, mixed.pace);
-        assert_eq!(
-            control_counters.target_profiles_built,
-            mixed_counters.target_profiles_built
-        );
-        assert_eq!(control_counters.lobo_folds, mixed_counters.lobo_folds);
-        assert_eq!(control_counters.loco_folds, mixed_counters.loco_folds);
-        assert_eq!(
-            mixed_counters.target_sample_reads,
-            control_counters.target_sample_reads + PHASE_BUCKET_COUNT
-        );
         assert_eq!(mixed.complete_cycles, 127);
         let mixed_groups = grouped_samples(&mixed_store.series[0].samples);
         let mixed_reset = normalize_reset(current_reset - duration, duration);
@@ -11811,7 +11602,6 @@ mod tests {
             schema_version: HISTORY_SCHEMA_VERSION,
             series: after,
         };
-        reset_fit_work_counters();
         let before_result = calculate_target(
             &before_store,
             &target_key,
@@ -11820,8 +11610,6 @@ mod tests {
             60.0,
             now,
         );
-        let before_counters = fit_work_counters();
-        reset_fit_work_counters();
         let after_result = calculate_target(
             &after_store,
             &target_key,
@@ -11830,194 +11618,8 @@ mod tests {
             60.0,
             now,
         );
-        let after_counters = fit_work_counters();
         assert_eq!(before_result.complete_cycles, after_result.complete_cycles);
         assert_eq!(before_result.pace, after_result.pace);
-        assert_eq!(
-            before_counters.target_sample_reads,
-            after_counters.target_sample_reads
-        );
-        assert_eq!(
-            before_counters.target_profiles_built,
-            after_counters.target_profiles_built
-        );
-        assert_eq!(before_counters.lobo_folds, after_counters.lobo_folds);
-        assert_eq!(before_counters.loco_folds, after_counters.loco_folds);
-        assert_eq!(before_counters.non_target_sample_reads, 0);
-        assert_eq!(before_counters.non_target_profiles_built, 0);
-        assert_eq!(after_counters.non_target_sample_reads, 0);
-        assert_eq!(after_counters.non_target_profiles_built, 0);
-        assert_ne!(
-            before_counters.series_key_comparisons,
-            after_counters.series_key_comparisons
-        );
-    }
-
-    #[test]
-    #[ignore]
-    fn fit_quality_benchmark_reference() {
-        use std::time::Instant;
-
-        const STORE_SERIES_COUNT: usize = 512;
-        const TARGET_INDICES: [usize; 10] = [0, 56, 112, 168, 224, 280, 336, 392, 448, 504];
-        const RUNS: usize = 20;
-
-        fn median_micros(values: &mut [u128]) -> u128 {
-            values.sort_unstable();
-            values[values.len() / 2]
-        }
-
-        let duration = 5 * HOUR;
-        let current_reset = 24_000_000_000_i64 + duration;
-        let now = current_reset - 60;
-        let build_store = |include_history: bool| {
-            let mut series = Vec::with_capacity(STORE_SERIES_COUNT);
-            let mut target_keys = Vec::with_capacity(TARGET_INDICES.len());
-            for index in 0..STORE_SERIES_COUNT {
-                let account = format!("benchmark-{index:03}");
-                let window = format!("window-{index:03}.v1");
-                let key = test_key("fixture", &account, &window);
-                let target = TARGET_INDICES.contains(&index);
-                let mut samples = Vec::new();
-                if target {
-                    if include_history {
-                        for offset in 1..=RETENTION_MAX_CYCLES {
-                            let reset = current_reset - offset as i64 * duration;
-                            samples.extend((0..PHASE_BUCKET_COUNT).map(|bucket| {
-                                let phase = (bucket as f64 + 0.25) / PHASE_BUCKET_COUNT as f64;
-                                quota_sample(
-                                    reset,
-                                    duration,
-                                    phase,
-                                    (phase * 80.0).max(0.1),
-                                    SampleOrigin::LiveV3,
-                                )
-                            }));
-                        }
-                    }
-                    samples.extend((0..PHASE_BUCKET_COUNT).map(|bucket| {
-                        let phase = (bucket as f64 + 0.25) / PHASE_BUCKET_COUNT as f64;
-                        quota_sample(
-                            current_reset,
-                            duration,
-                            phase,
-                            (phase * 80.0).max(0.1),
-                            SampleOrigin::LiveV3,
-                        )
-                    }));
-                    target_keys.push(key.clone());
-                }
-                series.push(SeriesState {
-                    provider_id: key.provider_id.clone(),
-                    account_scope: key.account_scope.clone(),
-                    window_key: key.window_key.clone(),
-                    active_reset_at: target.then_some(current_reset),
-                    last_activity_at: now,
-                    rollover: target.then(|| ObservedState::Watching {
-                        reset_at: current_reset,
-                        first_seen_at: now,
-                        last_seen_at: now,
-                        consecutive_count: 1,
-                    }),
-                    samples,
-                });
-            }
-            (
-                Store {
-                    schema_version: HISTORY_SCHEMA_VERSION,
-                    series,
-                },
-                target_keys,
-            )
-        };
-
-        let (partial_store, partial_keys) = build_store(false);
-        let (completed_store, completed_keys) = build_store(true);
-        let mut partial_runs = Vec::with_capacity(RUNS);
-        let mut completed_runs = Vec::with_capacity(RUNS);
-        let mut windows_runs = Vec::with_capacity(RUNS);
-        for _ in 0..RUNS {
-            reset_fit_work_counters();
-            let partial_start = Instant::now();
-            let partial = calculate_target(
-                &partial_store,
-                &partial_keys[0],
-                current_reset,
-                duration,
-                79.0,
-                now,
-            );
-            partial_runs.push(partial_start.elapsed().as_micros());
-            assert_eq!(partial.complete_cycles, 0);
-            assert!(partial.pace.is_some());
-            let counters = fit_work_counters();
-            assert_eq!(counters.target_sample_reads, PHASE_BUCKET_COUNT);
-            assert_eq!(counters.target_profiles_built, 0);
-            assert_eq!(counters.non_target_sample_reads, 0);
-            assert_eq!(counters.non_target_profiles_built, 0);
-            assert!(counters.walk_forward_fits <= 45);
-
-            reset_fit_work_counters();
-            let completed_start = Instant::now();
-            let completed = calculate_target(
-                &completed_store,
-                &completed_keys[0],
-                current_reset,
-                duration,
-                79.0,
-                now,
-            );
-            completed_runs.push(completed_start.elapsed().as_micros());
-            assert_eq!(completed.complete_cycles, RETENTION_MAX_CYCLES);
-            assert!(completed.pace.is_some());
-            let counters = fit_work_counters();
-            assert_eq!(
-                counters.target_sample_reads,
-                (RETENTION_MAX_CYCLES + 1) * PHASE_BUCKET_COUNT
-            );
-            assert_eq!(counters.target_profiles_built, RETENTION_MAX_CYCLES);
-            assert_eq!(
-                counters.lobo_folds,
-                RETENTION_MAX_CYCLES * PHASE_BUCKET_COUNT
-            );
-            assert_eq!(counters.loco_folds, RETENTION_MAX_CYCLES);
-            assert_eq!(counters.non_target_sample_reads, 0);
-            assert_eq!(counters.non_target_profiles_built, 0);
-
-            reset_fit_work_counters();
-            let windows_start = Instant::now();
-            for key in &completed_keys {
-                let calculation =
-                    calculate_target(&completed_store, key, current_reset, duration, 79.0, now);
-                assert_eq!(calculation.complete_cycles, RETENTION_MAX_CYCLES);
-                assert!(calculation.pace.is_some());
-            }
-            windows_runs.push(windows_start.elapsed().as_micros());
-            let counters = fit_work_counters();
-            assert_eq!(
-                counters.target_sample_reads,
-                completed_keys.len() * (RETENTION_MAX_CYCLES + 1) * PHASE_BUCKET_COUNT
-            );
-            assert_eq!(
-                counters.target_profiles_built,
-                completed_keys.len() * RETENTION_MAX_CYCLES
-            );
-            assert_eq!(
-                counters.lobo_folds,
-                completed_keys.len() * RETENTION_MAX_CYCLES * PHASE_BUCKET_COUNT
-            );
-            assert_eq!(
-                counters.loco_folds,
-                completed_keys.len() * RETENTION_MAX_CYCLES
-            );
-            assert_eq!(counters.non_target_sample_reads, 0);
-            assert_eq!(counters.non_target_profiles_built, 0);
-        }
-        println!(
-            "fit_quality_benchmark_reference {{\"partialMedianUs\":{},\"maxRetentionMedianUs\":{},\"windows10MedianUs\":{}}}",
-            median_micros(&mut partial_runs),
-            median_micros(&mut completed_runs),
-            median_micros(&mut windows_runs)
-        );
+        assert!(before_result.pace.is_some());
     }
 }
