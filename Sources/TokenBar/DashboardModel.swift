@@ -1220,14 +1220,23 @@ private struct DashboardSnapshot {
                 curve: readCurve, nowMs: now)
             // Fold in a usage half we already hold, so a stage-1 refresh does
             // not throw away a completed scan and blink back to loading.
-            // The scan's AGE, not just its existence. A covering scan that has
-            // aged past `unionScanMaxAge` and whose replacement then threw left
-            // this branch winning over the failure branch below, so the card
-            // returned to `.ready` with arbitrarily stale totals instead of
-            // saying the refresh failed. Freshness is what `.ready` claims.
-            if case let .quotaOnly(q, _) = state, let scan = unionScan(for: Self.cardAccountKey),
-               Date().timeIntervalSince(scan.capturedAt) < Self.unionScanMaxAge
-                   || !windowScanFailed(for: clientId),
+            //
+            // A settled failure wins over any scan, at any age. This used to
+            // test the scan's AGE instead — admitting a fresh scan even for a
+            // client already marked failed — which held while the only way to
+            // be marked failed was a throw from a scan of THIS range. It is no
+            // longer: an unscannable range settles as failed without the
+            // engine being asked, and `usageHalf` answers an unresolvable
+            // window with an EMPTY usage half rather than `nil`, so this
+            // branch published `.ready` with zero usage over a span nothing
+            // had looked at — the exact claim the failure flag exists to stop.
+            //
+            // The age test is deleted rather than kept beside this one: it was
+            // only ever reached with the flag set, so it stated this same rule
+            // more weakly, and a redundant check that can disagree is a second
+            // failure mode rather than a second line of defence.
+            if case let .quotaOnly(q, _) = state, !windowScanFailed(for: clientId),
+               let scan = unionScan(for: Self.cardAccountKey),
                let (settled, usage) = WindowCardLoader.usageHalf(
                    quota: q, scan: scan, confirmed: UsageAttribution.confirmed().records) {
                 windowCards[clientId] = .ready(settled, usage)
