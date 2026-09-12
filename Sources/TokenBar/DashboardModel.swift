@@ -1264,6 +1264,31 @@ private struct DashboardSnapshot {
                 // navigated away from while the picker highlighted the new one.
                 continue
             } else {
+                // A card holding a scan that cannot answer for the window it
+                // shows lands here, as `.quotaOnly(scanFailed: false)` —
+                // "Reading local usage…" under a chart that is already drawn.
+                // Deliberate, and bounded; both were measured, not assumed.
+                //
+                // Reachable when the selected window opens after the scan ended
+                // while the union `from` still precedes `now`. `from` is the
+                // MINIMUM start across every candidate window and the oldest
+                // cycle, so the range guard in `refreshWindowUsage` passes, the
+                // scan completes, and `usageHalf` then declines — `covers`
+                // tests both ends.
+                //
+                // Bounded by two constants rather than by hope: the cached scan
+                // stops being reused 30 seconds after capture
+                // (`unionScanMaxAge`, tested at the cached branch) and
+                // `pollAgentUsage` calls `refreshWindowUsage` at most 60 seconds
+                // apart, so the next rescan carries `untilMs` past the window
+                // and the card resolves itself inside about one poll interval.
+                //
+                // Deliberate because NOTHING FAILED. The scan succeeded; it was
+                // taken before this window opened, which is the only true thing
+                // to say about it. Settling as `scanFailed: true` would render
+                // an error for a failure that did not occur and then silently
+                // correct itself — a worse claim than "a scan is pending",
+                // which is what is actually happening.
                 windowCards[clientId] = state
             }
         }
