@@ -1605,7 +1605,15 @@ private struct DashboardSnapshot {
             // span that was never scanned. `from` is the oldest qualifying
             // cycle's `evidenceStartMs` and the bound is `now`, so reaching
             // here means a cycle claims to start in the future.
-            guard from < now else { return }
+            guard from < now else {
+                // Rebuild before leaving: a previously published equivalence
+                // for this window key would otherwise stay on the lens next to
+                // the newly refreshed future-dated cycles, which is a stale row
+                // presented as current. The normal path below ends in the same
+                // call for the same reason.
+                rebuildQuotaEquivalences()
+                return
+            }
             // One scan per account with a qualifying window, not one scan for
             // all of them. Each account's estimate divides its own usage by its
             // own quota movement; a shared scan is the conflation issue #258
@@ -1668,6 +1676,25 @@ private struct DashboardSnapshot {
                 payload: agentUsage, clients: [client], nowMs: now),
             quotaCycles.last?.evidenceStartMs,
         ].compactMap({ $0 }).min() else { return }
+        // Inverted range, settled before anything else can answer for it.
+        // Before engine PR #27 the engine rejected `from >= until` outright and
+        // the call below threw, so the card said the scan had failed; it now
+        // returns an empty list, which would make the card assert zero usage
+        // for a range it never looked at — the "no data" versus "could not get
+        // data" conflation issue #320 and selftest V15/V16/V17 are about.
+        //
+        // This sits ABOVE the cached-scan branch on purpose. `UnionScan.covers`
+        // tests only the lower bound, so a normal scan cached moments earlier
+        // satisfies it for a future `from`, and that branch would then clear
+        // the failure and render the future window as zero usage — the very
+        // outcome this guard exists to prevent, reached without ever calling
+        // the engine. Guarding after it left the hole open on the only path
+        // that does not need a scan.
+        guard from < now else {
+            windowScanFailedClients.insert(client)
+            refreshWindowQuotaHalves()
+            return
+        }
         // Serve the cached scan while it still covers the range and is fresh.
         // Rescanning on every reopen was the whole complaint: the staging made
         // the wait visible, it did not make it rare.
@@ -1682,19 +1709,6 @@ private struct DashboardSnapshot {
                     windowScanFailedClients, resolvedBy: client)
                 refreshWindowQuotaHalves()
             }
-            return
-        }
-        // Same inverted-range guard as the all-agent branch above, settled the
-        // way this branch settles things. Before engine PR #27 the engine
-        // rejected `from >= until` outright and this call threw, so the card
-        // said the scan had failed; it now returns an empty list, which would
-        // make the card assert zero usage for a range it never looked at. That
-        // is the "no data" versus "could not get data" conflation issue #320
-        // and selftest V15/V16/V17 are about, so the guard keeps the honest
-        // answer and keeps this consumer's behaviour identical across the pin.
-        guard from < now else {
-            windowScanFailedClients.insert(client)
-            refreshWindowQuotaHalves()
             return
         }
         // A throw here is a SETTLED answer, not a slow one. Returning silently

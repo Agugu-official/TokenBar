@@ -12100,6 +12100,50 @@ enum SelfTest {
         expect(invPast?.failed == false,
                "SC-INV and a normal range does not settle as failed")
 
+        // SC-INV-CACHE. The guard has to sit above the cached-scan branch, not
+        // beside the engine call. `UnionScan.covers` tests only the lower
+        // bound, so a normal scan cached moments earlier satisfies it for a
+        // future `from`; that branch then CLEARS the failure and renders the
+        // window from data that never covered it. Reaching the bad state needs
+        // no engine call at all, which is why the cases above could not see it
+        // — they only ever exercised the uncached path.
+        let invCached: (scans: Int, failed: Bool)? = awaitMainActorValue {
+            let src = WindowScanCountingSource(payload: invPayload)
+            let nowS = Int64(Date().timeIntervalSince1970)
+            src.curve = windowCurve(
+                resetAtSecs: nowS + 3_600, durationSecs: 18_000,
+                at: [(nowS - 3_000, 4), (nowS - 2_400, 9)], isActive: false)
+            let m = DashboardModel(source: src, initialYear: nil)
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while m.agentUsage == nil, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            poll.cancel()
+            _ = await poll.value
+            m.windowCardClients = ["codex"]
+            m.windowUsageClient = "codex"
+            m.refreshWindowQuotaHalves()
+            // Phase 1: a normal range, so a scan lands in the cache.
+            await m.refreshWindowUsage()
+            // Phase 2: the provider now reports a cycle that starts in the
+            // future, while the scan cached a moment ago is still fresh.
+            let ahead = Int64(Date().timeIntervalSince1970) + 86_400
+            src.curve = windowCurve(
+                resetAtSecs: ahead + 3_600, durationSecs: 18_000,
+                at: [(ahead, 4), (ahead + 600, 9)], isActive: false)
+            m.refreshWindowQuotaHalves()
+            src.scans = 0
+            await m.refreshWindowUsage()
+            return (scans: src.scans,
+                    failed: m.windowScanFailedClients.contains("codex"))
+        }
+        expect(invCached?.scans == 0,
+               "SC-INV-CACHE a future range issues no scan even with a fresh cache present")
+        expect(invCached?.failed == true,
+               "SC-INV-CACHE and the fresh cache does not clear the failure for a range it never covered")
+
 
         // SS1. `windowCardClients` is assigned from `displayClients`, which
         // arrives with graph data, so it is briefly empty on every top-level
