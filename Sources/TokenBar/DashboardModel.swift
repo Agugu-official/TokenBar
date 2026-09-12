@@ -1597,6 +1597,15 @@ private struct DashboardSnapshot {
             ? qualifyingCycles.values.compactMap { $0.cycles.last?.evidenceStartMs }.min() : nil
         guard let client = windowUsageClient else {
             guard let from = equivalenceStart else { return }
+            // An inverted range is a fault upstream, not an empty window. The
+            // engine answers `from >= until` with an empty list rather than an
+            // error (`get_window_usage`, engine PR #27), so without this the
+            // loop below would cache an empty `UnionScan` and every estimate
+            // drawn from it would read as "this account spent nothing" for a
+            // span that was never scanned. `from` is the oldest qualifying
+            // cycle's `evidenceStartMs` and the bound is `now`, so reaching
+            // here means a cycle claims to start in the future.
+            guard from < now else { return }
             // One scan per account with a qualifying window, not one scan for
             // all of them. Each account's estimate divides its own usage by its
             // own quota movement; a shared scan is the conflation issue #258
@@ -1673,6 +1682,19 @@ private struct DashboardSnapshot {
                     windowScanFailedClients, resolvedBy: client)
                 refreshWindowQuotaHalves()
             }
+            return
+        }
+        // Same inverted-range guard as the all-agent branch above, settled the
+        // way this branch settles things. Before engine PR #27 the engine
+        // rejected `from >= until` outright and this call threw, so the card
+        // said the scan had failed; it now returns an empty list, which would
+        // make the card assert zero usage for a range it never looked at. That
+        // is the "no data" versus "could not get data" conflation issue #320
+        // and selftest V15/V16/V17 are about, so the guard keeps the honest
+        // answer and keeps this consumer's behaviour identical across the pin.
+        guard from < now else {
+            windowScanFailedClients.insert(client)
+            refreshWindowQuotaHalves()
             return
         }
         // A throw here is a SETTLED answer, not a slow one. Returning silently

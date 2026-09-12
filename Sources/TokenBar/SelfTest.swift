@@ -12045,6 +12045,62 @@ enum SelfTest {
         expect(durationlessScan?.rows == 1,
                "SC2 and the scan reaches the history rows rather than only running")
 
+        // SC-INV. An inverted scan range must not read as an empty window.
+        // Engine PR #27 answers `from >= until` with an empty list where the
+        // previous pin returned an error, so this consumer now has to decide
+        // what that means instead of inheriting it. A range that ends before
+        // it begins was never scanned, and reporting zero usage for it is the
+        // "no data" versus "could not get data" conflation that issue #320 and
+        // V15/V16/V17 are about. The guard keeps this consumer's behaviour
+        // identical across the pin advance rather than letting the engine's
+        // new contract change what the card says.
+        let invFuture = Int64(Date().timeIntervalSince1970) + 86_400
+        let invIso = ISO8601DateFormatter().string(
+            from: Date(timeIntervalSince1970: Double(invFuture + 3_600)))
+        let invPayload = windowPayload([
+            (client: "codex", windows: [(card: "session.v1", key: "session.v1",
+                                         resetsAt: invIso, durationSecs: 18_000)]),
+        ])
+        func invRun(sampleAt: Int64, resetAt: Int64) -> (scans: Int, failed: Bool)? {
+            awaitMainActorValue {
+                let src = WindowScanCountingSource(payload: invPayload)
+                src.curve = windowCurve(
+                    resetAtSecs: resetAt, durationSecs: 18_000,
+                    at: [(sampleAt, 4), (sampleAt + 600, 9)], isActive: false)
+                let m = DashboardModel(source: src, initialYear: nil)
+                let poll = Task { await m.pollAgentUsage() }
+                var spins = 0
+                while m.agentUsage == nil, spins < 2_000 {
+                    try? await Task.sleep(nanoseconds: 1_000_000)
+                    spins += 1
+                }
+                poll.cancel()
+                _ = await poll.value
+                m.windowCardClients = ["codex"]
+                m.windowUsageClient = "codex"
+                m.refreshWindowQuotaHalves()
+                src.scans = 0
+                await m.refreshWindowUsage()
+                return (scans: src.scans,
+                        failed: m.windowScanFailedClients.contains("codex"))
+            }
+        }
+        let invAhead = invRun(sampleAt: invFuture, resetAt: invFuture + 3_600)
+        expect(invAhead?.scans == 0,
+               "SC-INV a range whose start is in the future issues no scan at all")
+        expect(invAhead?.failed == true,
+               "SC-INV and the card settles on scan-failed rather than reporting zero usage")
+        // Without this control the two bounds above are satisfied by a model
+        // that never scans and always reports failure, which is the shape this
+        // guard could produce if it were written one comparison wrong.
+        let invNow = Int64(Date().timeIntervalSince1970)
+        let invPast = invRun(sampleAt: invNow - 3_000, resetAt: invNow + 3_600)
+        expect((invPast?.scans ?? 0) >= 1,
+               "SC-INV a normal range still scans, so the guard is not swallowing every range")
+        expect(invPast?.failed == false,
+               "SC-INV and a normal range does not settle as failed")
+
+
         // SS1. `windowCardClients` is assigned from `displayClients`, which
         // arrives with graph data, so it is briefly empty on every top-level
         // view change. Recomputing the strip summaries from an empty client set
