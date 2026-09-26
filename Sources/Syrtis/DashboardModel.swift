@@ -171,6 +171,9 @@ private struct DashboardSnapshot {
     /// the model's own generation keeps the restore honest, so a lagging report
     /// is re-requested instead of being mistaken for current.
     let modelGeneratedAt: String?
+    /// When this process fetched `modelReport`, so a reopen does not reset
+    /// the hourly pricing refresh in `ensureModelReport` (#191).
+    let modelFetchedAt: Date?
     let colors: ModelColorMap
     let knownYears: [String]
     let year: String?
@@ -443,7 +446,9 @@ private struct DashboardSnapshot {
             if snap.modelReport != nil {
                 modelYear = Self.identityYear(initialYear)
                 modelPayloadGeneratedAt = snap.modelGeneratedAt
+                modelFetchedAt = snap.modelFetchedAt
                 modelCurrent = snap.modelGeneratedAt == snap.payload.meta.generatedAt
+                    && Self.isFresh(modelFetchedAt: snap.modelFetchedAt)
             }
             agentUsage = snap.agentUsage.map {
                 AgentUsagePublicationCoordinator.resolve($0)
@@ -547,6 +552,32 @@ private struct DashboardSnapshot {
     /// exactly the misreading the feature exists to prevent.
     @ObservationIgnored private(set) var modelYear: String?
     @ObservationIgnored private var modelPayloadGeneratedAt: String?
+    /// When the displayed report was fetched. The payload generation alone
+    /// cannot key the report: `tb_graph` keeps returning the same generation
+    /// while logs are idle, but the report also carries prices, which refresh
+    /// independently of the logs (#191). So a report current for its
+    /// generation still expires after `modelReportMaxAge`, and the 60-second
+    /// `retryModelIfStale` in `pollGraph` re-fetches it.
+    ///
+    /// The cost is one warm `tb_model_report` scan per hour while the poll
+    /// runs: what #187 removed from every poll, bounded to the pricing cache's
+    /// TTL. An FFI entry reporting the pricing timestamp alone would avoid the
+    /// scan; #191 chose the hourly re-fetch over adding one.
+    @ObservationIgnored private var modelFetchedAt: Date?
+    /// Matches the engine's pricing cache TTL (`CACHE_TTL_SECS` and
+    /// `REMOTE_PRICING_TTL_SECS`, both 3600 in the pinned tokscale-core): a
+    /// re-fetch sooner could not observe new prices anyway.
+    static let modelReportMaxAge: TimeInterval = 3600
+    private static func isFresh(modelFetchedAt: Date?) -> Bool {
+        modelFetchedAt.map { Date().timeIntervalSince($0) < modelReportMaxAge } ?? false
+    }
+    /// Moves the fetch time back, so a case can cross `modelReportMaxAge`
+    /// without waiting an hour. Re-caches the snapshot so a reopen restores
+    /// the aged time too.
+    func ageModelReportForTesting(by seconds: TimeInterval) {
+        modelFetchedAt = modelFetchedAt?.addingTimeInterval(-seconds)
+        cacheSnapshot()
+    }
     @ObservationIgnored private var modelRequestToken = 0
     /// The slice a model scan is currently running for, used to coalesce
     /// re-entry. Nil when nothing is in flight.
@@ -888,6 +919,7 @@ private struct DashboardSnapshot {
         colors = ModelColorMap(report: nil)
         modelYear = nil
         modelPayloadGeneratedAt = nil
+        modelFetchedAt = nil
         modelLoading = false
         // Release the coalescing slot too: the in-flight scan belongs to the
         // slice being discarded, and leaving its identity set would let it
@@ -909,6 +941,7 @@ private struct DashboardSnapshot {
         colors = ModelColorMap(report: report)
         modelYear = Self.identityYear(year)
         modelPayloadGeneratedAt = generation
+        modelFetchedAt = Date()
         cacheSnapshot()
     }
 
@@ -1092,6 +1125,7 @@ private struct DashboardSnapshot {
             payload: payload, stats: stats, payloadCapturedAt: payloadCapturedAt,
             modelReport: modelReport,
             modelGeneratedAt: modelPayloadGeneratedAt,
+            modelFetchedAt: modelFetchedAt,
             colors: colors, knownYears: knownYears, year: year,
             agentUsage: agentUsage, trace: trace,
             quotaCards: DashboardSnapshot.QuotaCards(
@@ -1155,6 +1189,7 @@ private struct DashboardSnapshot {
             payload: snap.payload, stats: snap.stats, payloadCapturedAt: snap.payloadCapturedAt,
             modelReport: snap.modelReport,
             modelGeneratedAt: snap.modelGeneratedAt,
+            modelFetchedAt: snap.modelFetchedAt,
             colors: snap.colors, knownYears: snap.knownYears, year: snap.year,
             agentUsage: agentUsage, trace: trace,
             // From the model, not from `snap`: this path republishes the cache
@@ -2441,7 +2476,8 @@ private struct DashboardSnapshot {
         let identity = ModelSliceIdentity(year: Self.identityYear(year), generation: generation)
         if modelReport != nil,
            modelYear == identity.year,
-           modelPayloadGeneratedAt == generation
+           modelPayloadGeneratedAt == generation,
+           Self.isFresh(modelFetchedAt: modelFetchedAt)
         {
             // A report can land from another task while this one waits on the
             // graph gate above, so the flag raised there has to come back down
