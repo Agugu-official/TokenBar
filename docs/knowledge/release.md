@@ -4,8 +4,8 @@ id: kb-release
 kind: canonical
 scope: repository
 read_when: changing release scripts, code signing, appcast, Sparkle, Homebrew, Pages, packaged Info.plist, or post-release notes
-last_verified: 2026-09-21
-sources: [".github/workflows/release.yml", ".github/workflows/ci.yml", ".github/workflows/pages.yml", ".github/workflows/update-install-count.yml", "scripts/bundle.sh", "scripts/build-sparkle.sh", "appcast.xml", "Makefile", "docs/knowledge/plans/provider-quota-pace.md", "Sources/Syrtis/SelfTest.swift", "public release history"]
+last_verified: 2026-09-27
+sources: [".github/workflows/release.yml", ".github/workflows/ci.yml", ".github/workflows/pages.yml", ".github/workflows/update-install-count.yml", "scripts/bundle.sh", "scripts/build-sparkle.sh", "scripts/make_appcast.sh", "scripts/render_notes_html.sh", "appcast.xml", "Makefile", "docs/knowledge/plans/provider-quota-pace.md", "Sources/Syrtis/SelfTest.swift", "public release history"]
 ---
 
 # Release and delivery
@@ -133,9 +133,9 @@ The release notes path has two forms and two published surfaces: the GitHub Rele
 
 The two bodies are hand-written and bound to the tag by filename (`release-notes/<tag>.{md,txt}`), so they are deterministic and a missing one fails the release job rather than inheriting the previous version's text. What is still assembled at run time is the contributor credit line and GitHub's changelog tail: both come from the API under `GH_TOKEN` and are silently absent without it. So local preview text is still not proof of the CI artifact — the bodies will match, the credit and tail may not.
 
-A durable escaping regression occurred when a note first contained literal `<`: awk replacement semantics turned `&lt;` into `<lt;`. Changes to **the awk renderer in `scripts/make_appcast.sh`, or to anything else on the path from `release-notes.txt` to the appcast `<description>`**, must use fixtures containing literal `<`, `&`, and `>` and verify the HTML round-trip. Writing the notes themselves does not touch that path.
+A durable escaping regression occurred when a note first contained literal `<`: awk replacement semantics turned `&lt;` into `<lt;`. The renderer lives in [`scripts/render_notes_html.sh`](../../scripts/render_notes_html.sh), which `make_appcast.sh` calls with the sidecar path; `make_appcast.sh` keeps the empty-notes guard, because an empty sidecar becomes an empty `<description>`. `render_notes_html.sh --self-test` renders a fixture containing literal `<`, `&`, `>`, an already-escaped `&lt;` and `]]>`, compares the result byte for byte, and runs in CI's release-notes contract step, so a broken `esc()` in the shipping file fails there. `>` is escaped even though HTML does not need it, because the output is embedded in CDATA, where a raw `]]>` ends the section; whether `generate_appcast` splits it when embedding is unverified, and escaping removes the question.
 
-That gate is not currently runnable: the renderer is inline in `make_appcast.sh` and writes into a `mktemp -d` its own `EXIT` trap deletes, so its output cannot be observed without changing the script, and a test carrying its own copy of the awk would prove nothing about the shipping path. Tracked in [#313](https://github.com/Nanako0129/syrtis/issues/313). Until it is closed, this rule is stated but unenforced — do not read it as satisfied.
+Changes to anything else on the path from `release-notes.txt` to the appcast `<description>` must still render every committed `release-notes/*.txt` before and after and show the output is byte-identical, or explain each difference. Writing the notes themselves does not touch that path.
 
 | After release | Check |
 |---|---|

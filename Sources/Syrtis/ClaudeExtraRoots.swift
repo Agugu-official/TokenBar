@@ -476,7 +476,8 @@ enum ClaudeExtraRoots {
         setScanPaths: @escaping @Sendable (String) -> ExtraScanPathsResult? = {
             try? TBCore.setExtraScanPaths(json: $0)
         },
-        then completion: (@Sendable @MainActor (ExtraScanPathsResult?) -> Void)?
+        then completion: (@Sendable @MainActor (ExtraScanPathsResult?) -> Void)?,
+        quotaSideDone: (@Sendable @MainActor () -> Void)? = nil
     ) {
         applyQueue.async {
             // The quota-card registry, from the configured list. Separate call
@@ -503,6 +504,12 @@ enum ClaudeExtraRoots {
             // installed yet, which is the reason it was placed after the setter
             // in the first place.
             Task { @MainActor in
+                // Test seam only, and on BOTH exits: the gated return below and
+                // the wake. `completion` belongs to the scan-side task, which
+                // nothing orders against this one, so a test that gated on it
+                // and then read `RegistryChange.epoch` raced this task's
+                // resumption after `invalidate()` (#358).
+                defer { quotaSideDone?() }
                 // Gated the same way the scan side is, and for the same
                 // reason: `install` runs at launch and on every Settings save,
                 // not only when the account list changes, so an unconditional
@@ -597,17 +604,22 @@ enum ClaudeExtraRoots {
     /// Test seam. Drives `install` with substituted setters so the order
     /// between installing the quota registry and probing the scan roots is
     /// observable — see `install`'s doc comment.
+    ///
+    /// `quotaSideDone` fires when the quota-registry task has finished, woken
+    /// or not. Gate any assertion about `RegistryChange.epoch` on it rather
+    /// than on `completion`: the two tasks are unordered against each other.
     @MainActor
     static func installForTesting(
         json: String,
         configDirsJSON: String,
         setConfigDirs: @escaping @Sendable (String) -> Void,
         setScanPaths: @escaping @Sendable (String) -> ExtraScanPathsResult?,
-        then completion: (@Sendable @MainActor (ExtraScanPathsResult?) -> Void)?
+        then completion: (@Sendable @MainActor (ExtraScanPathsResult?) -> Void)?,
+        quotaSideDone: (@Sendable @MainActor () -> Void)? = nil
     ) {
         install(
             json: json, configDirsJSON: configDirsJSON,
             setConfigDirs: setConfigDirs, setScanPaths: setScanPaths,
-            then: completion)
+            then: completion, quotaSideDone: quotaSideDone)
     }
 }
