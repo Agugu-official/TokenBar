@@ -12266,6 +12266,10 @@ enum SelfTest {
                 m.quotaWindowSummaries.contains { $0.id == buildKey }
                 && m.quotaHeatmaps[buildKey] != nil
                 && Set(m.qualifyingCycleKeysForTesting) == qualifyingBefore
+            // #355. A held-over window is drawn, so the strip is not missing
+            // anything and must not say its history could not be read.
+            out["#355: a held-over window is not reported unreadable"] =
+                m.quotaUnreadableClients.isEmpty
             src.failCurveReadClients = []
             await republish(10)
 
@@ -12296,6 +12300,12 @@ enum SelfTest {
             // exists to prevent.
             out["the unreadable window is not invented"] =
                 !m.quotaWindowSummaries.contains { $0.id == buildKey }
+            // #355. That absence is a read failure, and the strip is told so:
+            // Grok's tab would otherwise be empty-and-attempted exactly like a
+            // subscription with no recorded windows. Scoped to the client that
+            // failed — Bot answered.
+            out["#355: the window that threw with nothing to hold marks its client unreadable"] =
+                m.quotaUnreadableClients == ["grok"]
             // Proves the throw reached the model rather than the fixture
             // quietly serving a cached curve: both were still asked.
             out["both providers were still asked"] =
@@ -12307,6 +12317,8 @@ enum SelfTest {
             await republish(12)
             out["recovery republishes both without a relaunch"] =
                 Set(m.quotaWindowSummaries.map(\.id)) == [botKey, buildKey]
+            out["#355: recovery clears the unreadable mark"] =
+                m.quotaUnreadableClients.isEmpty
             return out
         }
         expect(stripPartialFailure != nil, "#359 partial-failure fixture completes")

@@ -1488,6 +1488,7 @@ private struct DashboardSnapshot {
         // loading state until discovery settles, then clear an empty selection.
         if windowCardClients.isEmpty, stats != nil {
             quotaWindowSummaries = []
+            quotaUnreadableClients = []
             quotaHeatmaps = [:]
             quotaHeatmapWindows = []
             qualifyingCycles = [:]
@@ -1622,6 +1623,20 @@ private struct DashboardSnapshot {
                 quotaWindowSummaries = fresh + heldOver
                 publishedWindowSummaries =
                     publishedWindowSummaries || !quotaWindowSummaries.isEmpty
+                // A window that threw and had nothing to hold over is absent
+                // from the strip for a reason the strip must not call "nothing
+                // recorded" (#355). Held-over windows are drawn, so they are
+                // not missing from anything.
+                let heldOverIds = Set(heldOver.map(\.id))
+                quotaUnreadableClients = Set(visibleAgents.flatMap { agent in
+                    agent.uniqueCardWindows.compactMap { window -> String? in
+                        let id = WindowCardLoader.curveKey(
+                            clientId: agent.clientId, accountKey: agent.accountKey,
+                            cardId: window.cardId)
+                        return failedWindowIds.contains(id) && !heldOverIds.contains(id)
+                            ? agent.clientId : nil
+                    }
+                })
                 quotaHeatmaps = Self.retainingFailed(
                     fresh: heatmaps, previous: quotaHeatmaps, failed: failedWindowIds)
                 let heldOverHeatmapWindows = quotaHeatmapWindows.filter { old in
@@ -1876,6 +1891,11 @@ private struct DashboardSnapshot {
     private var publishedWindowSummaries = false
 
     private(set) var quotaWindowSummaries: [QuotaWindowSummary] = []
+    /// Clients with a window whose curve read threw and that has no summary
+    /// in `quotaWindowSummaries` to show for it. The strip's counterpart of
+    /// `quotaCurveUnreadable`: without it an empty strip reads the same whether
+    /// the history is empty or could not be opened (#355).
+    private(set) var quotaUnreadableClients: Set<String> = []
     /// One weekday-by-hour grid per window, keyed as `QuotaWindowSummary.id`.
     /// Written in the same guarded block as the summaries, so it cannot be
     /// blanked by a refresh that saw no clients either.

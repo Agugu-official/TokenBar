@@ -35,6 +35,8 @@ struct QuotaView: View {
     /// Nil until the graph payload has been folded.
     /// Recorded-cycle strips for every displayed window.
     var windowSummaries: [QuotaWindowSummary] = []
+    /// Clients with an unread window the strip has nothing to draw for.
+    var stripUnreadableClients: Set<String> = []
     /// Weekday-by-hour consumption per window, keyed as the window's id.
     var heatmaps: [String: QuotaHeatmap] = [:]
     /// Which windows have a grid at all. Not derived from `windowSummaries`.
@@ -66,7 +68,8 @@ struct QuotaView: View {
                     // folds need quota history only, including Bot-only installs.
                     QuotaHistoryStripCard(
                         summaries: windowSummaries.filter { clientIds.contains($0.clientId) },
-                        equivalences: equivalences, attempted: usageAttempted)
+                        equivalences: equivalences, attempted: usageAttempted,
+                        unreadable: !stripUnreadableClients.isDisjoint(with: clientIds))
                     QuotaHeatmapCard(
                         windows: heatmapWindows.filter { clientIds.contains($0.clientId) },
                         heatmaps: heatmaps, equivalences: equivalences,
@@ -95,7 +98,8 @@ struct QuotaView: View {
                 SubscriptionTrendCard(trend: trend)
                 QuotaHistoryStripCard(
                     summaries: windowSummaries, equivalences: equivalences,
-                    attempted: usageAttempted)
+                    attempted: usageAttempted,
+                    unreadable: !stripUnreadableClients.isEmpty)
                 // After the strip, not before: the strip says how much each
                 // window consumed, and this says when. "When" is only a
                 // question once "how much" has an answer.
