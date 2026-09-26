@@ -15861,12 +15861,15 @@ enum SelfTest {
         let m3oNotWoken: Bool? = awaitMainActorValue {
             let before = ClaudeExtraRoots.RegistryChange.epoch
             let done = ThrottleGate()
+            let quotaDone = ThrottleGate()
             ClaudeExtraRoots.installForTesting(
                 json: "{}", configDirsJSON: m3oConfigDirs,
                 setConfigDirs: { _ in },
                 setScanPaths: { _ in nil },
-                then: { _ in Task { await done.open() } })
+                then: { _ in Task { await done.open() } },
+                quotaSideDone: { Task { await quotaDone.open() } })
             await done.wait()
+            await quotaDone.wait()
             ClaudeExtraRoots.resetApplyClaimForTesting()
             return ClaudeExtraRoots.RegistryChange.epoch == before
         }
@@ -15889,6 +15892,14 @@ enum SelfTest {
         // for up to five minutes. Set up exactly that: the persisted marker
         // already agrees with what is about to install, and this process has
         // installed nothing yet.
+        //
+        // Gated on `quotaSideDone`, not only on `then:`. The wake is signalled
+        // by the quota-registry task after an `await` on the throttle actor,
+        // and `then:` is the scan-side task's completion, which nothing orders
+        // after it — gating on `then:` alone read the epoch before the signal
+        // whenever that resumption landed late (#358). M3-o2 and M3-o4 wait on
+        // it too: a "no wake" read taken before the quota task has run passes
+        // whether or not the gate works.
         let m3oRelaunch = ClaudeExtraRoots.configDirsPayloadJSON(["/tmp/tokenbar-m3o-relaunch"])
         let m3oRelaunchWoke: Bool? = awaitMainActorValue {
             ClaudeExtraRoots.resetAppliedConfigDirsForTesting()
@@ -15896,12 +15907,15 @@ enum SelfTest {
             ClaudeExtraRoots.resetInstalledConfigDirsThisProcessForTesting()
             let before = ClaudeExtraRoots.RegistryChange.epoch
             let done = ThrottleGate()
+            let quotaDone = ThrottleGate()
             ClaudeExtraRoots.installForTesting(
                 json: "{}", configDirsJSON: m3oRelaunch,
                 setConfigDirs: { _ in },
                 setScanPaths: { _ in nil },
-                then: { _ in Task { await done.open() } })
+                then: { _ in Task { await done.open() } },
+                quotaSideDone: { Task { await quotaDone.open() } })
             await done.wait()
+            await quotaDone.wait()
             ClaudeExtraRoots.resetApplyClaimForTesting()
             return ClaudeExtraRoots.RegistryChange.epoch != before
         }
@@ -15920,12 +15934,15 @@ enum SelfTest {
             ClaudeExtraRoots.resetInstalledConfigDirsThisProcessForTesting()
             let before = ClaudeExtraRoots.RegistryChange.epoch
             let done = ThrottleGate()
+            let quotaDone = ThrottleGate()
             ClaudeExtraRoots.installForTesting(
                 json: "{}", configDirsJSON: ClaudeExtraRoots.configDirsPayloadJSON([]),
                 setConfigDirs: { _ in },
                 setScanPaths: { _ in nil },
-                then: { _ in Task { await done.open() } })
+                then: { _ in Task { await done.open() } },
+                quotaSideDone: { Task { await quotaDone.open() } })
             await done.wait()
+            await quotaDone.wait()
             ClaudeExtraRoots.resetApplyClaimForTesting()
             let woke = ClaudeExtraRoots.RegistryChange.epoch != before
             ClaudeExtraRoots.resetInstalledConfigDirsThisProcessForTesting()
