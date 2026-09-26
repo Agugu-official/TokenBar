@@ -97,7 +97,7 @@ Rust provider adapter 必須先把每個 emitted window 分類，分類結果是
 
 這份契約原本允許兩種處置：「保留 last good card」或「依既有 provider error contract 顯示錯誤」。實際上出現的是另外的組合：Kiro、Grok Bot 與 OpenCode Go 全部過期時是顯示錯誤，而且 terminal 會**清掉** last-good；OpenCode Go 只有部分 window 過期時是第三種——部分成功，少一列的卡照常寫進 last-good、覆寫前一筆。目前沒有任何 provider 保留 last good card。刻意不讓 adapter 把 reset 清成 `None` 保留整個 window：Kiro 與 OpenCode Go 的 `usable_success` 只看 window 是否非空，這樣的卡會被當成成功寫進 last-good，而且帶著過期週期的百分比蓋掉前一筆好的讀數。
 
-其他 adapter 在建構前沒有檢查過期 reset；它們的過期 reset 只會在上述 pace 層被標成 `invalidEvidence`。決定見 [#318](https://github.com/Nanako0129/syrtis/issues/318)。
+其他 adapter 在建構前沒有檢查過期 reset：卡片照常產生，過期 reset 只會在上述 pace 層被標成 `invalidEvidence`，而卡片依各自的 `usable_success` 判定仍可能寫進 last-good。Antigravity 的 `binding_candidate_is_better`（`agent_antigravity.rs:2028`）雖然會過濾 `reset > now`，但那只是在重複 model 候選之間排序時把過期 reset 當成沒有 reset，選出的候選仍帶著原本的 reset，所以不算卡片層的處置。決定見 [#318](https://github.com/Nanako0129/syrtis/issues/318)。
 
 Claude `extra_usage` 目前只有 monthly cap 與 utilization，沒有 reset timestamp。官方說明確認它是 [monthly spending cap](https://support.claude.com/en/articles/12429409-manage-usage-credits-for-paid-claude-plans)，但沒有承諾 calendar boundary；因此本版本把它鎖定為 `recurringQuotaMissingReset`，不以「Monthly」文字推導 duration。這是唯一允許不顯示 pace 的正常 emitted percentage card，而且原因必須可見、可測，不得被歸類為「其他 provider 尚未支援」。若未來 payload 增加 reset，adapter 依 schema version 升級為 `recurringQuota`。
 
