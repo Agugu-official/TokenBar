@@ -415,7 +415,7 @@ async fn fetch_agy_cli(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFailu
 /// `fetch_agy_cli_from` counts as an attempt.
 #[cfg(target_os = "macos")]
 async fn run_agy_cli_candidates(now: DateTime<Utc>) -> Result<Fetched, AgyRunError> {
-    let candidates = agy_cli_artifact_candidates().await;
+    let candidates = agy_cli_artifact_candidates(true).await;
     let mut last_failure = None;
     for executable in candidates {
         match fetch_agy_cli_from(&executable, now).await {
@@ -2084,7 +2084,7 @@ async fn discover_client_from_app() -> Option<(String, String)> {
     if let Some(client) = discover_client_from_artifacts(client_artifact_candidates()) {
         return Some(client);
     }
-    discover_client_from_artifacts(agy_cli_artifact_candidates().await)
+    discover_client_from_artifacts(agy_cli_artifact_candidates(false).await)
 }
 
 fn discover_client_from_artifacts<I>(paths: I) -> Option<(String, String)>
@@ -2123,9 +2123,17 @@ fn client_artifact_candidates() -> Vec<PathBuf> {
         .collect()
 }
 
+/// `throttle_login_shell` is true only for the quota poll. Without `agy` an
+/// empty result would start a login shell on every quota refresh (#353), so
+/// that caller is rate-limited by `AGY_LOGIN_SHELL_COOLDOWN`. OAuth client
+/// discovery must not be: `resolve_oauth_client` stores its first answer for
+/// the life of the process, so a cooldown-suppressed empty list would become a
+/// permanent `None`.
 #[cfg(target_os = "macos")]
-async fn agy_cli_artifact_candidates() -> Vec<PathBuf> {
+async fn agy_cli_artifact_candidates(throttle_login_shell: bool) -> Vec<PathBuf> {
     static CACHE: tokio::sync::OnceCell<Vec<PathBuf>> = tokio::sync::OnceCell::const_new();
+    static LAST_SHELL_DISCOVERY: std::sync::Mutex<Option<std::time::Instant>> =
+        std::sync::Mutex::new(None);
     if let Some(cached) = CACHE.get() {
         return cached.clone();
     }
@@ -2136,14 +2144,43 @@ async fn agy_cli_artifact_candidates() -> Vec<PathBuf> {
     let candidates =
         if let Some(path) = executable_from_path(std::env::var_os("PATH").as_deref(), "agy") {
             vec![path]
-        } else {
+        } else if !throttle_login_shell
+            || claim_agy_login_shell_discovery(&LAST_SHELL_DISCOVERY, std::time::Instant::now())
+        {
             agy_cli_artifact_candidates_from(None, discover_agy_from_login_shell().await)
+        } else {
+            Vec::new()
         };
     cache_non_empty_agy_candidates(&CACHE, candidates)
 }
 
+/// How long one polled login-shell discovery suppresses the next. It bounds
+/// how late an `agy` installed after launch, and reachable only through the
+/// login shell, is found by the poll. A shell that timed out also holds the
+/// slot: a slow shell is the costly case this limits. The monotonic clock
+/// pauses across sleep, which only lengthens the wait.
+#[cfg(any(target_os = "macos", test))]
+const AGY_LOGIN_SHELL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Whether a polled login-shell discovery may start now. Claims the slot
+/// before the shell runs, so overlapping callers start one shell, not one each.
+#[cfg(any(target_os = "macos", test))]
+fn claim_agy_login_shell_discovery(
+    last: &std::sync::Mutex<Option<std::time::Instant>>,
+    now: std::time::Instant,
+) -> bool {
+    let mut last = last
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if last.is_some_and(|at| now.saturating_duration_since(at) < AGY_LOGIN_SHELL_COOLDOWN) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
 #[cfg(not(target_os = "macos"))]
-async fn agy_cli_artifact_candidates() -> Vec<PathBuf> {
+async fn agy_cli_artifact_candidates(_throttle_login_shell: bool) -> Vec<PathBuf> {
     Vec::new()
 }
 
@@ -2768,6 +2805,23 @@ mod tests {
             cache_non_empty_agy_candidates(&cache, Vec::new()),
             vec![candidate]
         );
+    }
+
+    #[test]
+    fn agy_login_shell_discovery_waits_out_the_cooldown() {
+        let last = std::sync::Mutex::new(None);
+        let start = std::time::Instant::now();
+
+        assert!(claim_agy_login_shell_discovery(&last, start));
+        assert!(!claim_agy_login_shell_discovery(&last, start));
+        assert!(!claim_agy_login_shell_discovery(
+            &last,
+            start + AGY_LOGIN_SHELL_COOLDOWN - std::time::Duration::from_secs(1),
+        ));
+        assert!(claim_agy_login_shell_discovery(
+            &last,
+            start + AGY_LOGIN_SHELL_COOLDOWN,
+        ));
     }
 
     #[test]
