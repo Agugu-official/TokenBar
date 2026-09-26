@@ -4,7 +4,7 @@ id: kb-history-load-performance
 kind: canonical
 scope: repository
 read_when: investigating dashboard load latency, or planning a scan/cache optimization that might repeat one of these experiments
-last_verified: 2026-08-08
+last_verified: 2026-09-27
 sources: ["macOS sample profiles", "public TokenBar PR #187", "public TokenBar PR #192", "public tokscale-core PR #6", "public tokscale-core PR #7", "docs/knowledge/measurement.md"]
 ---
 
@@ -24,7 +24,7 @@ sources: ["macOS sample profiles", "public TokenBar PR #187", "public TokenBar P
 - [被推翻的假設](#被推翻的假設)
 - [剖析結果](#剖析結果)
 - [已出貨的三項改動](#已出貨的三項改動)
-- [引擎批次平行解析（尚未進 app）](#引擎批次平行解析尚未進-app)
+- [引擎批次平行解析（撰寫時尚未進 app）](#引擎批次平行解析撰寫時尚未進-app)
 - [一條沒有被採納的路](#一條沒有被採納的路)
 
 ---
@@ -49,7 +49,7 @@ sources: ["macOS sample profiles", "public TokenBar PR #187", "public TokenBar P
 
 | 假設 | 實測 | 結論 | 依賴的前提 |
 |---|---|---|---|
-| rayon 執行緒上限（2）綁住冷掃描 | 2 條 28,772ms／10 條 28,078ms／6 條 31,213ms；同為 2 條的兩次相差 9.4 秒 | 差 2.4%，在雜訊內。工作根本沒被分派出去 | **實作**（`5546bd5`，批次化之前；批次化把每檔工作真的派出去了，pin 推進後必須重量）、語料、CPU |
+| rayon 執行緒上限（2）綁住冷掃描 | 2 條 28,772ms／10 條 28,078ms／6 條 31,213ms；同為 2 條的兩次相差 9.4 秒 | 差 2.4%，在雜訊內。工作根本沒被分派出去 | **實作**（`5546bd5`，批次化之前；批次化把每檔工作真的派出去了，pin 推進後必須重量；這次重量已在 [#198](https://github.com/Nanako0129/syrtis/issues/198) 以 `5b5f500` 做過：4 條比 2 條冷掃配對中位數 −15.7%，但 idle 側成本未量，維持 2 條）、語料、CPU |
 | I/O 綁住 | 冷剖析 86.2% 落在兩個解析 lane，工作執行緒整段閒置 | 由剖析推翻。旁證：循序讀完 6.10 GB 單執行緒 7.6 秒（約 800 MB/s），但那不是上界——實際掃描另有數千次 open、metadata、取樣 read 與解析 read | **儲存速度**（換慢很多的磁碟可能反轉）、語料檔案大小分布 |
 | 一開始就要全部年份，顆粒度太大 | 全部年份 28,734／29,526ms；只要 2026 年 28,127／34,522ms | 完全不省。沒有日期索引，解析器必須讀完每則訊息才知道日期 | 實作（parser 沒有日期索引這件事） |
 | 語料只多了約 1000 筆 turns，不該慢 13 秒 | turns +669，但新增位元組約 **960 MB**（codex 792 MB、claude 168 MB），佔 8.2 GB 語料的 +12% | turns 是錯的量尺——它算的是對話起點，不是位元組 | 無（是量尺選擇的問題，不是環境問題） |
@@ -133,9 +133,11 @@ sample <pid> 25 1 -file <輸出路徑>
 
 ---
 
-## 引擎批次平行解析（尚未進 app）
+## 引擎批次平行解析（撰寫時尚未進 app）
 
 在 `tokscale-core` 的 main 上（#6）。TokenBar 的 `vendor/tokscale-core` pin 在本文最後驗證時仍指向 `5546bd5`，所以**這個改善不在 app 裡**。要出貨得由另一個 TokenBar 變更推進 reviewed gitlink，並在該 PR 產生驗收證據。
+
+> 2026-09-27 更新：engine PR #6 以 [`d9b1b969`](https://github.com/Nanako0129/tokscale-core/commit/d9b1b969af8536790e0d917e04633ab35be32b7f) 合併，是現行 reviewed pin `bb9a2a9` 的祖先，所以這個改善**已經在 app 裡**。上面那句保留為撰寫當時的事實。本節引用的 `921412b` 是 PR 分支上的 commit，不在 engine `main` 上。
 
 ### 設計
 
