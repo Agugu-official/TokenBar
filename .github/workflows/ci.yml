@@ -57,6 +57,7 @@ jobs:
             git fetch --unshallow --quiet origin
           fi
           git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse --is-shallow-repository)" = "false"
           git merge-base origin/main HEAD >/dev/null
 
       - name: Validate knowledge contracts
