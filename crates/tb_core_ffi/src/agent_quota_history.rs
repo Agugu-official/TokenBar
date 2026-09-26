@@ -442,6 +442,13 @@ struct LegacyV2Store {
 struct LoadedStore {
     store: Store,
     quarantined: bool,
+    /// The loader changed the store it parsed: `drop_unplaceable_samples`
+    /// dropped a sample or `repair_store_at` ran. A transaction saves when this
+    /// is set even if its body changes nothing, so a repair reaches disk once
+    /// instead of re-running on every load and leaving the file readable only
+    /// by a build that repeats it (#207). The v3 → v4 version stamp does not
+    /// set it; that upgrade stays lazy, see `migrate_store_to_current`.
+    repaired: bool,
 }
 
 /// Record a provider-neutral quota observation in the production v3 store.
@@ -2041,8 +2048,13 @@ fn rollover_activity_at(rollover: &ObservedState) -> i64 {
 /// The newest sample wins a key collision, matching `admit`, which replaces
 /// within a bucket rather than appending. Order is preserved otherwise, so a
 /// store that needed no repair comes out byte-identical.
-fn drop_unplaceable_samples(mut store: Store) -> Store {
+///
+/// Also returns whether anything was dropped. Every branch that does not push
+/// a sample drops one, so "fewer kept than offered" is exactly that.
+fn drop_unplaceable_samples(mut store: Store) -> (Store, bool) {
+    let mut dropped = false;
     for series in &mut store.series {
+        let offered = series.samples.len();
         let mut seen: BTreeMap<(i64, usize), usize> = BTreeMap::new();
         let mut per_cycle: BTreeMap<i64, usize> = BTreeMap::new();
         let mut kept: Vec<QuotaSample> = Vec::with_capacity(series.samples.len());
@@ -2067,9 +2079,10 @@ fn drop_unplaceable_samples(mut store: Store) -> Store {
             seen.insert(key, kept.len());
             kept.push(sample);
         }
+        dropped |= kept.len() < offered;
         series.samples = kept;
     }
-    store
+    (store, dropped)
 }
 
 fn repair_store_at(mut store: Store, upper_bound: i64, observation_now: i64) -> Store {
@@ -3528,10 +3541,19 @@ fn with_locked_transaction_with_save_and_mode<T>(
                         && repair_invalid_series(&mut loaded.store, upper_bound).is_none()
                     {
                         Err(HistoryError::Serialize)
-                    } else if loaded.store == before {
+                    } else if loaded.store == before && !loaded.repaired {
                         Ok(value)
                     } else if save(path, &loaded.store).is_err() {
-                        Err(HistoryError::AtomicSave)
+                        // Writing back only the loader's repair is housekeeping:
+                        // the body's result does not depend on it, and the next
+                        // load repeats the repair in memory. Failing here would
+                        // turn a full disk into "history unavailable" for every
+                        // provider on every poll.
+                        if loaded.store == before {
+                            Ok(value)
+                        } else {
+                            Err(HistoryError::AtomicSave)
+                        }
                     } else {
                         Ok(value)
                     }
@@ -3597,9 +3619,10 @@ fn load_store(path: &Path, now: i64) -> Result<LoadedStore, HistoryError> {
 ///
 /// **The upgrade is lazy, and that is the chosen semantics.** The transaction
 /// snapshots `before` from the value this function returns and writes only when
-/// the store actually changed, so a bare version bump does not dirty it and
-/// does not trigger a write; `read_series_at_path_with_mode` never writes at
-/// all. The file therefore stays `"schemaVersion": 3` on disk until the next
+/// the store actually changed or `LoadedStore::repaired` is set, and a bare
+/// version bump sets neither, so it does not trigger a write;
+/// `read_series_at_path_with_mode` never writes at all. The file therefore
+/// stays `"schemaVersion": 3` on disk until the next
 /// transaction that had a reason to write anyway, re-upgrading in memory on
 /// every load until then. Chosen over an eager upgrade because writing is the
 /// only irreversible act here, and because a file still stamped 3 is one an
@@ -3638,6 +3661,7 @@ fn load_store_at_with_mode(
         return Ok(LoadedStore {
             store: Store::default(),
             quarantined: false,
+            repaired: false,
         });
     };
 
@@ -3666,16 +3690,21 @@ fn load_store_at_with_mode(
         // be able to add it retroactively.
         .map(migrate_store_to_current)
         .map(drop_unplaceable_samples)
-        .filter(|store| validate_store(store));
-    if let Some(store) = parsed {
-        let store = if validate_store_at(&store, validation_now) {
-            store
-        } else {
+        .filter(|(store, _)| validate_store(store));
+    if let Some((store, dropped)) = parsed {
+        // `repair_store_at` always changes a store that failed this check: the
+        // failure is some `last_activity_at` above the ceiling, and the repair
+        // either drops that series or lowers the timestamp.
+        let clock_repaired = !validate_store_at(&store, validation_now);
+        let store = if clock_repaired {
             repair_store_at(store, validation_now, quarantine_now)
+        } else {
+            store
         };
         return Ok(LoadedStore {
             store,
             quarantined: false,
+            repaired: dropped || clock_repaired,
         });
     }
 
@@ -3684,6 +3713,7 @@ fn load_store_at_with_mode(
     Ok(LoadedStore {
         store: Store::default(),
         quarantined: true,
+        repaired: false,
     })
 }
 
@@ -8709,6 +8739,233 @@ mod tests {
         let once = repair_store_at(store.clone(), upper_bound, observation_now);
         let twice = repair_store_at(once.clone(), upper_bound, observation_now);
         assert_eq!(once, twice);
+    }
+
+    /// Run a transaction whose body changes nothing, so any save it makes is
+    /// the loader's repair reaching disk and nothing else.
+    fn no_op_transaction(path: &Path, observation_now: i64, lock_time: i64) {
+        with_locked_transaction_with_mode(
+            StorageMode::Generic,
+            path,
+            observation_now,
+            || lock_time,
+            |_store| Ok(()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_load_time_clock_repair_reaches_disk_once() {
+        let (directory, path) = temp_path("persist-clock-repair");
+        let upper_bound = 33_000_000;
+        let observation_now = upper_bound - 100;
+        let trigger = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "session.v1".into(),
+            active_reset_at: None,
+            last_activity_at: upper_bound + 50,
+            rollover: None,
+            samples: Vec::new(),
+        };
+        let sibling = SeriesState {
+            provider_id: "copilot".into(),
+            account_scope: "acct".into(),
+            window_key: "premium_interactions.v1".into(),
+            active_reset_at: None,
+            last_activity_at: upper_bound - 10,
+            rollover: None,
+            samples: Vec::new(),
+        };
+        // A sample stamped past the ceiling makes `repair_store_at` drop the
+        // whole series: the destructive branch, now also written to disk.
+        let reset = upper_bound + DAY;
+        let tainted_sample = QuotaSample {
+            reset_at: reset,
+            duration_seconds: 2 * DAY,
+            duration_source: DurationSource::Provider,
+            used_percent: 40.0,
+            sampled_at: upper_bound + 5,
+            origin: SampleOrigin::LiveV3,
+            plan: None,
+        };
+        let tainted = SeriesState {
+            provider_id: "grok".into(),
+            account_scope: "acct".into(),
+            window_key: "weekly.v1".into(),
+            active_reset_at: Some(reset),
+            last_activity_at: tainted_sample.sampled_at,
+            rollover: None,
+            samples: vec![tainted_sample],
+        };
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![trigger, sibling, tainted],
+        };
+        store.series.sort_by(series_order);
+        // Control: the file on disk leads the ceiling, so the loader repairs it.
+        assert!(validate_store(&store));
+        assert!(!validate_store_at(&store, upper_bound));
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+
+        reset_save_call_count();
+        no_op_transaction(&path, observation_now, upper_bound);
+        assert_eq!(save_call_count(), 1, "the repair must be written once");
+        let on_disk = read_store(&path);
+        assert!(
+            validate_store_at(&on_disk, upper_bound),
+            "the written file must no longer need the repair"
+        );
+        let mut windows = on_disk
+            .series
+            .iter()
+            .map(|series| series.window_key.as_str())
+            .collect::<Vec<_>>();
+        windows.sort_unstable();
+        assert_eq!(
+            windows,
+            ["premium_interactions.v1", "session.v1"],
+            "the clamped trigger and the sibling are written; the tainted series is not"
+        );
+
+        no_op_transaction(&path, observation_now, upper_bound);
+        assert_eq!(save_call_count(), 1, "a repaired file is not rewritten");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_load_time_sample_drop_reaches_disk_once() {
+        let (directory, path) = temp_path("persist-sample-drop");
+        let now = 34_000_000;
+        let reset = now + 3 * HOUR;
+        let duration_seconds = 5 * HOUR;
+        // Phase 0.2 puts both readings an hour before `now`, so the only
+        // repair the loader has to make is the collision, not the clock.
+        let first = quota_sample(reset, duration_seconds, 0.20, 30.0, SampleOrigin::LiveV3);
+        // Same phase bucket as `first`, so the two share a `sample_key`.
+        let second = QuotaSample {
+            sampled_at: first.sampled_at + 10,
+            used_percent: 31.0,
+            ..first.clone()
+        };
+        let series = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "session.v1".into(),
+            active_reset_at: Some(reset),
+            last_activity_at: second.sampled_at,
+            rollover: None,
+            samples: vec![first.clone(), second.clone()],
+        };
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series],
+        };
+        // Control: the two samples collide, so the loader has to drop one.
+        assert_eq!(sample_key(&first), sample_key(&second));
+        assert!(!validate_store(&store));
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+
+        reset_save_call_count();
+        no_op_transaction(&path, now, now);
+        assert_eq!(save_call_count(), 1, "the drop must be written once");
+        let on_disk = read_store(&path);
+        assert!(validate_store_at(&on_disk, now));
+        assert_eq!(
+            on_disk.series[0].samples,
+            vec![second],
+            "the newer reading is kept"
+        );
+
+        no_op_transaction(&path, now, now);
+        assert_eq!(save_call_count(), 1, "a repaired file is not rewritten");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_failed_repair_write_back_does_not_fail_the_transaction() {
+        let (directory, path) = temp_path("persist-save-failure");
+        let upper_bound = 36_000_000;
+        let observation_now = upper_bound - 100;
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![SeriesState {
+                provider_id: "claude".into(),
+                account_scope: "acct".into(),
+                window_key: "session.v1".into(),
+                active_reset_at: None,
+                last_activity_at: upper_bound + 50,
+                rollover: None,
+                samples: Vec::new(),
+            }],
+        };
+        assert!(!validate_store_at(&store, upper_bound));
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+        let failing_save = |_: &Path, _: &Store| Err(io::Error::other("disk full"));
+
+        let repair_only = with_locked_transaction_with_save_and_mode(
+            StorageMode::Generic,
+            &path,
+            observation_now,
+            || upper_bound,
+            failing_save,
+            |_store| Ok(7),
+        );
+        assert_eq!(repair_only, Ok(7), "the body's result survives");
+
+        // Control: a body that changed the store still reports the failure.
+        let body_changed = with_locked_transaction_with_save_and_mode(
+            StorageMode::Generic,
+            &path,
+            observation_now,
+            || upper_bound,
+            failing_save,
+            |store| {
+                store.series.clear();
+                Ok(7)
+            },
+        );
+        assert_eq!(body_changed, Err(HistoryError::AtomicSave));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_v3_stamp_alone_is_not_written_by_a_no_op_transaction() {
+        let (directory, path) = temp_path("persist-v3-lazy");
+        let now = 35_000_000;
+        let reset = now + 3 * HOUR;
+        let sample = quota_sample(reset, 5 * HOUR, 0.40, 30.0, SampleOrigin::LiveV3);
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![SeriesState {
+                provider_id: "claude".into(),
+                account_scope: "acct".into(),
+                window_key: "session.v1".into(),
+                active_reset_at: Some(reset),
+                last_activity_at: sample.sampled_at,
+                rollover: None,
+                samples: vec![sample],
+            }],
+        };
+        assert!(validate_store_at(&store, now));
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+        // Control: the fixture really is a v3 file, not a v4 one.
+        assert_eq!(downgrade_file_to_v3(&path), 1);
+        let v3_bytes = fs::read(&path).unwrap();
+
+        reset_save_call_count();
+        no_op_transaction(&path, now, now);
+        assert_eq!(
+            save_call_count(),
+            0,
+            "the version stamp alone must not write"
+        );
+        assert_eq!(fs::read(&path).unwrap(), v3_bytes);
+
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
