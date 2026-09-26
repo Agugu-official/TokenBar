@@ -79,10 +79,83 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
+      # Most PRs never touch Rust, yet rebuilt the staticlib every run: the
+      # dependency cache hits, but the two workspace crates are path
+      # dependencies it does not keep, and tb_core_ffi's fat LTO alone was 99 s
+      # of the 129 s step (run 36272682120). So the finished library is cached
+      # under a key of everything that goes into it, and a PR whose key matches
+      # links the library main already built.
+      #
+      # Key inputs: the root manifest (it carries [profile.release]), the lock
+      # file, the FFI crate, .cargo/ (MACOSX_DEPLOYMENT_TARGET), this workflow
+      # (how cargo is invoked), the engine submodule's commit, and the exact
+      # rustc, and the runner image version, which carries the clang that
+      # compiles rusqlite's bundled C. Pushes never read this cache and always
+      # build in full, so a stale library cannot survive past the merge.
+      #
+      # Each part is assigned before use: a failure inside `$(...)` in the echo
+      # would not trip `set -e`, and an empty engine term would let a PR that
+      # only moves the submodule link the previous engine.
+      - name: Rust library cache key
+        id: rustlib
+        run: |
+          set -euo pipefail
+          rustc_id=$(rustc -V | shasum | cut -c1-12)
+          engine=$(git rev-parse HEAD:vendor/tokscale-core)
+          image="${ImageOS:?}-${ImageVersion:?}"
+          echo "key=rustlib-v1-${RUNNER_OS}-${RUNNER_ARCH}-${image}-${rustc_id}-${engine}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/**', '.cargo/**', '.github/workflows/ci.yml') }}" >> "$GITHUB_OUTPUT"
 
+      # PR-only. A push must not read it: the push-only steps below invoke
+      # cargo again (make selftest-bundled, scripts/bundle.sh), which would
+      # rebuild every dependency from nothing without rust-cache's state.
+      #
+      # The cache path must be the one main saves under: actions/cache folds
+      # the path into the entry's version, and a different path never matches.
+      - name: Restore Rust library
+        id: rustlib-restore
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/rustlib/libtb_core_ffi.a
+          key: ${{ steps.rustlib.outputs.key }}
+
+      - name: Link the restored Rust library
+        if: steps.rustlib-restore.outputs.cache-hit == 'true'
+        run: |
+          mkdir -p target/release
+          cp "$RUNNER_TEMP/rustlib/libtb_core_ffi.a" target/release/
+
+      # Saves on main only: a PR's own entry is scoped to that PR and would only
+      # evict main's entries from the 10 GB budget.
+      - uses: Swatinem/rust-cache@v2
+        if: steps.rustlib-restore.outputs.cache-hit != 'true'
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # --locked: the key names Cargo.lock, so the build must be held to it. A
+      # manifest change without a regenerated lock fails here instead of being
+      # resolved afresh and cached under a key that claims the old lock.
       - name: Build Rust staticlib
-        run: cargo build --release
+        if: steps.rustlib-restore.outputs.cache-hit != 'true'
+        run: cargo build --release --locked
+
+      # The copy main saves is taken here, from this exact cargo invocation —
+      # the push-only steps below run cargo again through make and bundle.sh,
+      # whose flags this key does not cover.
+      - name: Stage Rust library for the cache
+        if: github.event_name == 'push'
+        run: |
+          mkdir -p "$RUNNER_TEMP/rustlib"
+          cp target/release/libtb_core_ffi.a "$RUNNER_TEMP/rustlib/"
+
+      - name: Check for an existing Rust library entry
+        id: rustlib-exists
+        if: github.event_name == 'push'
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/rustlib/libtb_core_ffi.a
+          key: ${{ steps.rustlib.outputs.key }}
+          lookup-only: true
 
       - name: Build Swift package
         run: swift build
@@ -139,3 +212,13 @@ jobs:
       - name: Selftest from the bundled release binary
         if: github.event_name == 'push'
         run: make selftest-bundled SELFTEST_BUNDLE_ID=
+
+      # Last, so only a main commit that passed every step above — the
+      # release-configuration build and the bundled selftest included — can
+      # publish the library PRs will link.
+      - name: Save Rust library
+        if: github.event_name == 'push' && steps.rustlib-exists.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/rustlib/libtb_core_ffi.a
+          key: ${{ steps.rustlib.outputs.key }}
