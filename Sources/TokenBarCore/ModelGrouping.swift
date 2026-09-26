@@ -11,8 +11,9 @@
 /// Presentation only. Anything that matches a model id — quota scopes,
 /// attribution records, color-table construction from raw rows — keeps the
 /// raw id. `Tests/fixtures/model-grouping-cases.json` is checked against both
-/// this function (SelfTest) and the engine (tb_core_ffi test), so the two
-/// cannot drift silently.
+/// this function (SelfTest) and the engine (tb_core_ffi test). That binds the
+/// two on those inputs only: an engine rule that widens beyond the table, or
+/// a user alias map once the app installs one, would not be caught by it.
 public enum ModelGrouping {
     /// `grok-<version>-build` → `grok-<version>`, where the version is one or
     /// more dot-separated runs of ASCII digits. Every other id is returned

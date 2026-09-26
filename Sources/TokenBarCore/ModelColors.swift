@@ -86,7 +86,8 @@ public struct ModelColorMap: Sendable {
         for e in entries {
             let key = ModelColors.providerColorKey(e.provider, e.model)
             let cost = e.cost.isFinite ? e.cost : 0
-            byProvider[key, default: [:]][e.model, default: 0] += cost
+            // Grouped on both sides so a raw entry and a raw lookup still meet.
+            byProvider[key, default: [:]][ModelGrouping.groupID(e.model), default: 0] += cost
         }
         var map: [String: String] = [:]
         for (providerKey, models) in byProvider {

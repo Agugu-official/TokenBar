@@ -458,8 +458,11 @@ public enum QuotaHistoryFold {
                     split.cacheWrite = split.cacheWrite.saturatingAdding(message.cacheWrite)
                     split.reasoning = split.reasoning.saturatingAdding(message.reasoning)
                     mine.cost += message.cost
+                    // Display breakdown, so group like every other model
+                    // surface (#118); the attribution match above stayed raw.
                     let key = ModelKey(
-                        providerId: message.providerId, modelId: message.modelId)
+                        providerId: message.providerId,
+                        modelId: ModelGrouping.groupID(message.modelId))
                     let current = byModel[key] ?? (0, 0, TokenBreakdown())
                     byModel[key] = (
                         current.tokens.saturatingAdding(message.tokens),

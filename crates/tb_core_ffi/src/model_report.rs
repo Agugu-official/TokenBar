@@ -240,9 +240,9 @@ mod tests {
 
     /// The display-grouping case table is shared with SelfTest's
     /// `ModelGrouping.groupID` check. Asserting it against the engine's own
-    /// grouping function is what ties the Swift helper to the Rust fold: a pin
-    /// advance that changes the engine rule fails here until the table (and so
-    /// the Swift side) follows.
+    /// grouping function ties the Swift helper to the Rust fold on the table's
+    /// inputs: a pin advance that changes the result for any of them fails
+    /// here. A change on inputs the table does not list is not caught.
     #[test]
     fn model_grouping_cases_match_the_engine() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))

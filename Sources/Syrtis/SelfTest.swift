@@ -3569,6 +3569,32 @@ enum SelfTest {
                 && groupingSlices.first?.cost == 3.0,
             "Monthly model slices merge grok-4.6-build into grok-4.6 with exact sums "
                 + "(got \(groupingSlices.map { ($0.model, $0.input, $0.output, $0.cost) }))")
+        let groupingDaily = DailyView(
+            payload: groupingPayload, clientIds: ["grok"], turnClientIds: ["grok"],
+            colors: groupingColors
+        ).models(for: groupingPayload.contributions[0])
+        expect(
+            groupingDaily.map(\.model) == ["grok-4.6", "grok-code-fast-1"]
+                && groupingDaily.first?.input == 130
+                && groupingDaily.first?.cost == 3.0,
+            "Daily model slices merge grok-4.6-build into grok-4.6 with exact sums "
+                + "(got \(groupingDaily.map { ($0.model, $0.input, $0.cost) }))")
+        let groupingPoints = AttributedDailySeries.points(
+            contributions: groupingPayload.contributions, confirmed: [])
+        expect(
+            groupingPoints.map(\.model) == ["grok-4.6", "grok-code-fast-1"]
+                && groupingPoints.first?.tokens == 150
+                && groupingPoints.first?.cost == 3.0,
+            "the attributed daily series buckets grok-4.6-build under grok-4.6 "
+                + "(got \(groupingPoints.map { ($0.model, $0.tokens, $0.cost) }))")
+        let rawColors = ModelColorMap(entries: [
+            ("xai", "grok-code-fast-1", 10.0),
+            ("xai", "grok-4.6-build", 3.0),
+        ])
+        expect(
+            rawColors.color("xai", "grok-4.6-build") == rawColors.color("xai", "grok-4.6")
+                && rawColors.color("xai", "grok-4.6") != rawColors.color("xai", "grok-code-fast-1"),
+            "a color table built from a raw -build entry is found by the grouped lookup too")
 
         // ISODay: civil-date round trip.
         expect(ISODay("1970-01-01")?.number == 0, "epoch day number")
@@ -13950,6 +13976,27 @@ enum SelfTest {
         expect(qhSplitRow?.mineTokens == 3585,
                "QH-SPLIT which is the literal sum of the fixture, so the identity "
                    + "above is not two derived values agreeing with each other")
+
+        // QH-GROUP (#118). The per-model breakdown is display, so a Grok Build
+        // id lands in its bare version's row; attribution matched the raw id.
+        let qhGroupMessages = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":\((qhsReset - 500_000) * 1000),"client":"c","providerId":"p",
+              "modelId":"grok-4.6-build","input":100,"output":0,"cacheRead":0,"cacheWrite":0,
+              "reasoning":0,"cost":0.25,"isTurnStart":true},
+             {"timestamp":\((qhsReset - 3_600) * 1000),"client":"c","providerId":"p",
+              "modelId":"grok-4.6","input":7,"output":0,"cacheRead":0,"cacheWrite":0,
+              "reasoning":0,"cost":1.75,"isTurnStart":true}]
+            """.utf8))
+        let qhGroupModels = QuotaHistoryFold.rows(
+            cycles: qhsCycles, messages: qhGroupMessages, subscription: "c",
+            modelScope: nil, confirmed: qhsRecords).first?.models ?? []
+        expect(
+            qhGroupModels.map(\.modelId) == ["grok-4.6"] && qhGroupModels.first?.tokens == 107
+                && qhGroupModels.first?.cost == 2.0,
+            "QH-GROUP grok-4.6-build and grok-4.6 share one breakdown row with summed tokens "
+                + "(got \(qhGroupModels.map { ($0.modelId, $0.tokens) }))")
         // AL-HIDDEN. Every exit from `baseClients` goes through one filter.
         // The rule was got wrong three times — inside `reorderable`, then above
         // only the restricted return, then above both while the opencode branch
