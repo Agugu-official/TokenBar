@@ -9,6 +9,14 @@ on:
   pull_request:
     paths-ignore: ['landing/**']
 
+# A new push to a PR branch makes its previous run's result moot, so that run is
+# cancelled rather than left holding an xcode-27 runner. Pushes to main key on
+# the run id and are never cancelled: every main commit keeps its own
+# release-configuration gate.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     # Xcode 27 (the macOS 27 SDK): the dashboard's glass panel is built on
