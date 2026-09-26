@@ -12322,28 +12322,33 @@ enum SelfTest {
             out["#355: recovery clears the unreadable mark"] =
                 m.quotaUnreadableClients.isEmpty
 
-            // #355. Hiding the client must take its unreadable mark with it,
-            // even on a pass that skips the publication block entirely. Grok
-            // needs a mark first, which needs an empty strip — after recovery
-            // its row would simply be held over.
+            // #355, the pass that skips publication. Bot is drawn and Grok
+            // never was: Grok is left out of the read (`limitsHidden`, not
+            // `tabHidden` — the two share a tab, and hiding it takes both)
+            // while Bot publishes from an empty strip.
             m.configureQuotaVisibility(tabHidden: ["grok", "grok-bot"], limitsHidden: [], orderRaw: "")
             m.refreshWindowQuotaHalves()
-            m.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
-            src.failCurveReadClients = ["grok"]
-            await republish(13)
-            out["#355 control: Grok is marked again before it is hidden"] =
-                m.quotaUnreadableClients == ["grok"]
-            // Bot throws too, so nothing answers after a set was published and
-            // only the visibility prune can drop Grok. `limitsHidden`, not
-            // `tabHidden`: Grok and Bot share one tab, so hiding the tab takes
-            // both and clears through the no-clients path instead.
-            src.failCurveReadClients = ["grok", "grok-bot"]
             m.configureQuotaVisibility(tabHidden: [], limitsHidden: ["grok"], orderRaw: "")
+            await republish(13)
+            out["#355 control: Bot alone is drawn and nothing is marked"] =
+                m.quotaWindowSummaries.map(\.id) == [botKey]
+                    && m.quotaUnreadableClients.isEmpty
+            // Now both throw. Nothing answers after a set was published, so
+            // publication is skipped — and this is still the first pass to fail
+            // Grok, whose tab would otherwise read "nothing recorded".
+            src.failCurveReadClients = ["grok", "grok-bot"]
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
             await republish(14)
-            out["#355: hiding a client drops its unreadable mark on a skipped publication"] =
-                m.quotaUnreadableClients.isEmpty
+            out["#355: a skipped publication still marks a failed window that was never drawn"] =
+                m.quotaUnreadableClients == ["grok"]
                 // Control: the skip path was really taken — Bot's row is the
                 // held-over one, not a fresh answer.
+                && m.quotaWindowSummaries.map(\.id) == [botKey]
+            // And hiding Grok on the same kind of pass takes the mark with it.
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: ["grok"], orderRaw: "")
+            await republish(15)
+            out["#355: hiding a client drops its unreadable mark on a skipped publication"] =
+                m.quotaUnreadableClients.isEmpty
                 && m.quotaWindowSummaries.map(\.id) == [botKey]
             return out
         }
