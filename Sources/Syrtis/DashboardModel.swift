@@ -448,7 +448,9 @@ private struct DashboardSnapshot {
                 modelPayloadGeneratedAt = snap.modelGeneratedAt
                 modelFetchedAt = snap.modelFetchedAt
                 modelCurrent = snap.modelGeneratedAt == snap.payload.meta.generatedAt
-                    && Self.isFresh(modelFetchedAt: snap.modelFetchedAt)
+                    && Self.isFresh(
+                        modelFetchedAt: snap.modelFetchedAt,
+                        headroom: Self.modelReportRestoreHeadroom)
             }
             agentUsage = snap.agentUsage.map {
                 AgentUsagePublicationCoordinator.resolve($0)
@@ -568,8 +570,19 @@ private struct DashboardSnapshot {
     /// `REMOTE_PRICING_TTL_SECS`, both 3600 in the pinned tokscale-core): a
     /// re-fetch sooner could not observe new prices anyway.
     static let modelReportMaxAge: TimeInterval = 3600
-    private static func isFresh(modelFetchedAt: Date?) -> Bool {
-        modelFetchedAt.map { Date().timeIntervalSince($0) < modelReportMaxAge } ?? false
+    /// How much of `modelReportMaxAge` a restored report must still have left
+    /// to count as current. The restore decides whether to install the LP3
+    /// gate once, in `init`; a report that expired between then and the first
+    /// `ensureModelReport` would be re-fetched with no gate, before `load()`
+    /// confirms the payload. Five minutes is far wider than that gap, which is
+    /// not measured.
+    static let modelReportRestoreHeadroom: TimeInterval = 300
+    /// A negative age means the wall clock moved back past the fetch; that
+    /// counts as expired, so a clock change cannot freeze prices for longer.
+    private static func isFresh(modelFetchedAt: Date?, headroom: TimeInterval = 0) -> Bool {
+        guard let modelFetchedAt else { return false }
+        let age = Date().timeIntervalSince(modelFetchedAt)
+        return age >= 0 && age < modelReportMaxAge - headroom
     }
     /// Moves the fetch time back, so a case can cross `modelReportMaxAge`
     /// without waiting an hour. Re-caches the snapshot so a reopen restores

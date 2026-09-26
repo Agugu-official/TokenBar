@@ -6682,6 +6682,12 @@ enum SelfTest {
             await healModel.retryMissingModelForTest()
             let pricingRefetchResetsAge =
                 await healSource.modelCallCount() == healCallsAfterRefresh + 1
+            // A fetch time in the future means the clock moved back. Counting
+            // that as fresh would freeze prices for the size of the jump.
+            healModel.ageModelReportForTesting(by: -7_200)
+            await healModel.retryMissingModelForTest()
+            let pricingClockBackRefetches =
+                await healSource.modelCallCount() == healCallsAfterRefresh + 2
 
             // #191 on a reopen. A same-process snapshot carrying an expired
             // report must not count as current: that would skip the restore
@@ -6711,6 +6717,40 @@ enum SelfTest {
             let agedFinalCalls = await agedSource.modelCallCount()
             let pricingReopenGatedThenRefetched =
                 agedSeeded && agedRestored && !agedRaced && agedFinalCalls == 2
+
+            // Inside the restore headroom: still fresh, so nothing is
+            // re-fetched, but too close to expiry to skip the gate — it could
+            // expire before the first lens call. Observed as the lens call
+            // not returning until `load()` settles the gate.
+            actor Done { var value = false; func set() { value = true } }
+            let edgeYear = "2043"
+            let edgeSource = ControlledTurnUsageDataSource()
+            let edgeSeed = DashboardModel(
+                cachesSnapshot: true, source: edgeSource, initialYear: edgeYear)
+            await edgeSeed.load()
+            await edgeSeed.ensureModelData(for: .overview)
+            edgeSeed.ageModelReportForTesting(
+                by: DashboardModel.modelReportMaxAge
+                    - DashboardModel.modelReportRestoreHeadroom / 2)
+            await edgeSource.blockGraph(year: edgeYear)
+            let edgeReopened = DashboardModel(
+                cachesSnapshot: true, source: edgeSource, initialYear: edgeYear)
+            let edgeDone = Done()
+            let edgeLens = Task {
+                await edgeReopened.ensureModelData(for: .overview)
+                await edgeDone.set()
+            }
+            let edgeReturnedBeforeLoad = await waitUntil(timeout: .milliseconds(300)) {
+                await edgeDone.value
+            }
+            let edgeLoad = Task { await edgeReopened.load() }
+            _ = await waitUntil { await edgeSource.hasPendingGraph(year: edgeYear) }
+            await edgeSource.releaseGraph(year: edgeYear)
+            await edgeLoad.value
+            await edgeLens.value
+            let edgeCalls = await edgeSource.modelCallCount()
+            let pricingRestoreHeadroomGates =
+                edgeReopened.modelReport != nil && !edgeReturnedBeforeLoad && edgeCalls == 1
 
             // A reload may call the shared seam unconditionally; modelWanted is
             // what keeps a graph-only dashboard from paying for a model scan.
@@ -7245,6 +7285,8 @@ enum SelfTest {
                 "pricingStaleRefetchedOnce": pricingStaleRefetchedOnce,
                 "pricingRefetchResetsAge": pricingRefetchResetsAge,
                 "pricingReopenGatedThenRefetched": pricingReopenGatedThenRefetched,
+                "pricingClockBackRefetches": pricingClockBackRefetches,
+                "pricingRestoreHeadroomGates": pricingRestoreHeadroomGates,
                 "neverWantedGenerationAdvanced": neverWantedGenerationAdvanced,
                 "neverWantedSkippedModel": neverWantedSkippedModel,
                 "phantomIssuedNoScan": phantomIssuedNoScan,
@@ -7403,6 +7445,12 @@ enum SelfTest {
         expect(
             turnTransitionChecks?["pricingReopenGatedThenRefetched"] == true,
             "#191: a reopen restoring an expired report waits for load() before re-fetching it, then re-fetches once")
+        expect(
+            turnTransitionChecks?["pricingClockBackRefetches"] == true,
+            "#191: a fetch time in the future (clock moved back) counts as expired")
+        expect(
+            turnTransitionChecks?["pricingRestoreHeadroomGates"] == true,
+            "#191: a restored report within the headroom of expiry installs the load() gate without re-fetching")
         expect(
             turnTransitionChecks?["neverWantedGenerationAdvanced"] == true
                 && turnTransitionChecks?["neverWantedSkippedModel"] == true,
