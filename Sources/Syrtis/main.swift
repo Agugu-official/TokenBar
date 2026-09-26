@@ -35,6 +35,10 @@ if CommandLine.arguments.contains("--selftest") {
     SelfTest.run()
 }
 
+if CommandLine.arguments.contains("--demo") {
+    DemoData.ignoreLocalVisibility(in: .standard)
+}
+
 // First launch after the Syrtis rename: move TokenBar.app to Syrtis.app and
 // relaunch from there (exits on success). Before NSApplication, so nothing has
 // loaded a resource through the old path yet.

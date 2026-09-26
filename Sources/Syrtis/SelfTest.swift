@@ -7916,6 +7916,87 @@ enum SelfTest {
         expect(!demoSource.allowsQuotaCachePersistence, "demo source disables quota cache persistence")
         expect(liveSource.allowsQuotaCachePersistence, "live source allows quota cache persistence")
 
+        // #228. The demo's quota lens must have something to draw: curves the
+        // lookups resolve, enough completed cycles for the strip and the
+        // equivalence threshold, a weekly rhythm in the heatmap, and a running
+        // cycle that agrees with the card above it.
+        let demoQuota = DemoData.publishedAgentUsage
+        expect(demoQuota.publicationGeneration == DemoData.quotaGeneration,
+               "#228: the demo source's payload carries a publication generation")
+        expect(DemoData.agentUsage.publicationGeneration == nil,
+               "#228: the shared DemoData.agentUsage the selftest doubles serve stays without one")
+        var demoCurveWindows = 0
+        var demoCurveChecks = true
+        for agent in demoQuota.agents {
+            for window in agent.windows {
+                guard let key = window.paceStatus.windowKey,
+                      let curve = try? demoSource.quotaCurveSync(
+                          clientId: agent.clientId, accountKey: nil, windowKey: key,
+                          generation: DemoData.quotaGeneration)
+                else { continue }
+                demoCurveWindows += 1
+                let cycles = QuotaHistoryFold.cycles(points: curve.points)
+                let active = curve.points.filter(\.isActiveGroup)
+                let grid = QuotaHeatmapFold.build(points: curve.points)
+                let weekdayMean = grid.cells[0..<5].joined().reduce(0, +) / 5
+                let weekendMean = grid.cells[5..<7].joined().reduce(0, +) / 2
+                let ok = cycles.count >= WindowEquivalence.minimumCycles
+                    && cycles.allSatisfy { $0.observedFraction >= WindowEquivalence.minimumObservedFraction }
+                    && active.last?.usedPercent == window.usedPercent.rounded()
+                    && grid.hasMovement && weekdayMean > 2 * weekendMean
+                if !ok {
+                    print("  #228 curve check failed: \(agent.clientId) \(key) cycles=\(cycles.count) "
+                          + "active=\(active.last?.usedPercent ?? -1)/\(window.usedPercent) "
+                          + "weekday=\(weekdayMean) weekend=\(weekendMean)")
+                }
+                demoCurveChecks = demoCurveChecks && ok
+            }
+        }
+        // Claude, Codex and Copilot carry a session and a weekly window each,
+        // Grok Bot a weekly one: seven, and no other client.
+        expect(demoCurveWindows == 7,
+               "#228: the demo serves curves for exactly its history subscriptions' windows (\(demoCurveWindows) served)")
+        expect(demoCurveChecks,
+               "#228: every demo curve has enough observed cycles, a weekday-heavy heatmap, and a running cycle matching its card")
+        // Demo mode ignores this Mac's hidden tabs and limits: a scratch suite
+        // with both set reads them back empty once the override is applied,
+        // and an unrelated argument survives it.
+        if let suite = UserDefaults(suiteName: "syrtis.selftest.demo-visibility") {
+            suite.set("codex", forKey: ClientRegistry.tabHiddenKey)
+            suite.set("copilot", forKey: ClientRegistry.limitsHiddenKey)
+            suite.setVolatileDomain(["unrelated": "kept"], forName: UserDefaults.argumentDomain)
+            let hiddenBefore = suite.string(forKey: ClientRegistry.tabHiddenKey) == "codex"
+            DemoData.ignoreLocalVisibility(in: suite)
+            expect(hiddenBefore
+                       && suite.string(forKey: ClientRegistry.tabHiddenKey) == ""
+                       && suite.string(forKey: ClientRegistry.limitsHiddenKey) == ""
+                       && suite.string(forKey: "unrelated") == "kept",
+                   "#228: demo mode reads no hidden tabs or limits, and keeps other arguments")
+            suite.removePersistentDomain(forName: "syrtis.selftest.demo-visibility")
+        }
+        // Through the model, which is what the screenshots render: the lookups
+        // only resolve once the published generation reaches it.
+        let demoLens: (summaries: Int, heatmaps: Int)? = awaitMainActorValue {
+            AgentUsagePublicationCoordinator.resetForTesting()
+            defer { AgentUsagePublicationCoordinator.resetForTesting() }
+            let m = DashboardModel(source: DemoUsageDataSource(), initialYear: nil)
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while m.agentUsage?.publicationGeneration == nil, spins < 2_000 {
+                try? await Task.sleep(for: .milliseconds(1))
+                spins += 1
+            }
+            poll.cancel()
+            ClaudeExtraRoots.RegistryChange.signal()
+            await poll.value
+            m.refreshWindowQuotaHalves()
+            return (m.quotaWindowSummaries.count, m.quotaHeatmapWindows.count)
+        }
+        expect(demoLens?.summaries == 7 && demoLens?.heatmaps == 7,
+               "#228: the demo quota lens publishes strip rows and heatmap windows "
+                   + "(\(demoLens?.summaries ?? -1) rows, \(demoLens?.heatmaps ?? -1) grids)")
+
         let demoPayload = DemoData.payload
         let demoDates = demoPayload.contributions.map(\.date)
         let demoDayNumbers = demoDates.compactMap { ISODay($0)?.number }

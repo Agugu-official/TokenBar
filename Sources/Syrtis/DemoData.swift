@@ -10,6 +10,34 @@ enum DemoData {
     static var hourlyReport: HourlyReport { hourlyReport(for: nil, clients: nil) }
     static var agentsReport: AgentsReport { agentsReport(for: nil, clients: nil) }
     static var agentUsage: AgentUsagePayload { makeAgentUsage() }
+    /// What `DemoUsageDataSource` serves: the same payload with a publication
+    /// generation, which is what lets the quota lens look its curves up.
+    /// `agentUsage` above stays without one, because several selftest doubles
+    /// serve it and pair it with curves of their own.
+    static var publishedAgentUsage: AgentUsagePayload {
+        makeAgentUsage(publicationGeneration: quotaGeneration)
+    }
+    static let quotaGeneration: UInt64 = 1
+
+    /// Demo mode exists for screenshots, so what it shows must not depend on
+    /// which tabs and limits this Mac happens to have hidden. Blanks both
+    /// visibility settings in the argument domain — exactly what passing
+    /// `-tokenbar.tabs.hidden "" -tokenbar.limits.hidden ""` does — so every
+    /// reader, `@AppStorage` included, sees nothing hidden, and nothing is
+    /// written to disk. The trade: hiding a tab in Settings during a demo run
+    /// has no visible effect, since the argument domain outranks the stored
+    /// value.
+    static func ignoreLocalVisibility(in defaults: UserDefaults) {
+        var arguments = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+        arguments[ClientRegistry.tabHiddenKey] = ""
+        arguments[ClientRegistry.limitsHiddenKey] = ""
+        defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+    }
+    /// The subscriptions that have recorded history in the demo. A handful,
+    /// not every client: the lens is read in screenshots, and a real user has
+    /// a few subscriptions rather than one per registered client. Every other
+    /// client keeps its "nothing recorded yet" state.
+    static let quotaHistoryClients: Set<String> = ["claude", "codex", "copilot", "grok-bot"]
     static var trace: [TraceBucket] { trace(windowSecs: 600) }
     static var tokensPerMin: Double {
         trace(windowSecs: 600).reduce(0) { $0 + $1.tokensPerMin }
@@ -372,7 +400,7 @@ enum DemoData {
             maxDayCost: maxDayCost, yearMetadata: yearMetadata)
     }
 
-    private static func makeAgentUsage() -> AgentUsagePayload {
+    private static func makeAgentUsage(publicationGeneration: UInt64? = nil) -> AgentUsagePayload {
         let now = Date()
         let formatter = ISO8601DateFormatter()
         let updated = formatter.string(from: now)
@@ -388,7 +416,7 @@ enum DemoData {
                 "usedPercent": used,
                 "remainingPercent": 100 - used,
                 "resetsAt": formatter.string(
-                    from: now.addingTimeInterval(TimeInterval(duration / 2))),
+                    from: activeReset(now: now, duration: duration)),
                 "resetText": duration == sessionDuration ? "in 2h 30m" : "in 3d 12h",
                 "windowMinutes": duration / 60,
                 "paceStatus": [
@@ -511,7 +539,7 @@ enum DemoData {
                         "usedPercent": 18.0,
                         "remainingPercent": 82.0,
                         "resetsAt": formatter.string(
-                            from: now.addingTimeInterval(TimeInterval(sessionDuration / 2))),
+                            from: activeReset(now: now, duration: sessionDuration)),
                         "resetText": "in 2h 30m",
                         "paceStatus": [
                             "state": "learningDuration",
@@ -532,7 +560,7 @@ enum DemoData {
                         "usedPercent": 72.0,
                         "remainingPercent": 28.0,
                         "resetsAt": formatter.string(
-                            from: now.addingTimeInterval(TimeInterval(sessionDuration / 2))),
+                            from: activeReset(now: now, duration: sessionDuration)),
                         "resetText": "in 2h 30m",
                         "windowMinutes": sessionDuration / 60,
                         "paceStatus": [
@@ -585,13 +613,121 @@ enum DemoData {
                 "windows": windows,
             ] as [String: Any]
         }
+        var payload: [String: Any] = [
+            "generatedAt": updated,
+            "agents": agents,
+            "opencodeSubscriptions": ["Codex", "Claude"],
+        ]
+        payload["publicationGeneration"] = publicationGeneration
+        return decode(payload, as: AgentUsagePayload.self)
+    }
+
+    /// The running window's reset, shared by the payload and the curves so the
+    /// two agree on which cycle is current. Mid-window, as the payload always
+    /// was, and on a whole minute so a payload and a curve built a few
+    /// milliseconds apart name the same reset.
+    static func activeReset(now: Date, duration: Int64) -> Date {
+        let raw = Int64(now.timeIntervalSince1970) + duration / 2
+        return Date(timeIntervalSince1970: TimeInterval(raw - raw % 60))
+    }
+
+    /// Recorded history for the demo's session and weekly windows.
+    ///
+    /// Consumption follows a working week — weekday office hours heavy,
+    /// evenings light, nights and weekends near idle — so the heatmap shows a
+    /// rhythm rather than noise. Each completed weekly cycle ends at 30-90%;
+    /// a session's total follows how busy its hours were, so office-hour
+    /// sessions can run out and idle ones are not recorded at all. The
+    /// running cycle ends at the percentage the payload reports, so the curve
+    /// and the card agree. Readings are whole percents, as providers report
+    /// them. Deterministic per client and window.
+    static func quotaCurve(
+        clientId: String, windowKey: String, generation: UInt64, now: Date = Date()
+    ) -> QuotaCurve? {
+        let duration: Int64, cycles: Int, step: Int64
+        switch windowKey {
+        case "session.v1": (duration, cycles, step) = (18_000, 48, 900)
+        case "weekly.v1": (duration, cycles, step) = (604_800, 10, 7_200)
+        default: return nil
+        }
+        guard quotaHistoryClients.contains(clientId),
+              let agent = makeAgentUsage().agents.first(where: { $0.clientId == clientId }),
+              let current = agent.windows.first(where: { $0.paceStatus.windowKey == windowKey })
+        else { return nil }
+        let seed = clientId.unicodeScalars.reduce(UInt64(windowKey.count)) {
+            $0 &* 31 &+ UInt64($1.value)
+        }
+        func unit(_ k: Int) -> Double {
+            var x = seed &+ UInt64(k) &* 0x9E37_79B9_7F4A_7C15
+            x ^= x >> 33; x &*= 0xFF51_AFD7_ED55_8CCD; x ^= x >> 33
+            return Double(x % 10_000) / 10_000
+        }
+        let calendar = Calendar.current
+        func rate(_ t: Int64) -> Double {
+            let date = Date(timeIntervalSince1970: TimeInterval(t))
+            let weekday = calendar.component(.weekday, from: date)  // 1 = Sunday
+            let hour = calendar.component(.hour, from: date)
+            let day: Double = weekday == 1 ? 0.15 : weekday == 7 ? 0.3 : 1
+            let time: Double = switch hour {
+            case 9..<12: 1
+            case 13..<19: 1.25
+            case 12, 19..<23: 0.45
+            default: 0.04
+            }
+            return day * time
+        }
+        let nowSecs = Int64(now.timeIntervalSince1970)
+        let activeResetAt = Int64(activeReset(now: now, duration: duration).timeIntervalSince1970)
+        var points: [[String: Any]] = []
+        for k in stride(from: cycles, through: 0, by: -1) {
+            let resetAt = activeResetAt - Int64(k) * duration
+            let start = resetAt - duration
+            let end = k == 0 ? nowSecs : resetAt
+            var stamps: [Int64] = []
+            var t = start + step
+            while t <= end { stamps.append(t); t += step }
+            guard !stamps.isEmpty else { continue }
+            // A week always spans the rhythm, so a weekly total can be drawn
+            // freely. A five-hour session cannot: its total has to follow how
+            // busy those hours were, or a Sunday-night session would consume
+            // as much as a Tuesday afternoon.
+            let busy = stamps.reduce(0) { $0 + rate($1) } / Double(stamps.count)
+            let total: Double = k == 0 ? current.usedPercent
+                : duration == 18_000 ? min(100, 105 * busy * (0.6 + 0.6 * unit(k)))
+                : 30 + 60 * unit(k)
+            // An idle session is never opened, so it has no readings at all.
+            if k > 0, total < 3 { continue }
+            var cumulative: [Double] = []
+            var sum = 0.0
+            for stamp in stamps {
+                sum += rate(stamp) * (0.6 + 0.8 * unit(Int(stamp / step)))
+                cumulative.append(sum)
+            }
+            for (stamp, c) in zip(stamps, cumulative) {
+                points.append([
+                    "sampledAt": stamp,
+                    "usedPercent": min(100, (total * c / max(sum, 1e-9)).rounded()),
+                    "resetAt": resetAt,
+                    "durationSeconds": duration,
+                    "durationSource": "contract",
+                    "origin": "liveV3",
+                    "isActiveGroup": k == 0,
+                ])
+            }
+        }
+        let stamps = points.compactMap { $0["sampledAt"] as? Int64 }
+        guard let oldest = stamps.min(), let newest = stamps.max() else { return nil }
         return decode(
             [
-                "generatedAt": updated,
-                "agents": agents,
-                "opencodeSubscriptions": ["Codex", "Claude"],
-            ],
-            as: AgentUsagePayload.self)
+                "points": points,
+                "coverage": [
+                    "oldestSampledAt": oldest, "newestSampledAt": newest,
+                    "sampleCount": points.count,
+                ],
+                "activeResetAt": activeResetAt,
+                "generation": generation,
+            ] as [String: Any],
+            as: QuotaCurve.self)
     }
 
     /// Returns the synthetic contribution dates for an injectable local today.

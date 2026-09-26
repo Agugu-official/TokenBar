@@ -287,7 +287,21 @@ struct DemoUsageDataSource: UsageDataSource {
     }
 
     func agentUsage() async throws -> AgentUsagePayload {
-        DemoData.agentUsage
+        DemoData.publishedAgentUsage
+    }
+
+    func quotaCurve(
+        clientId: String, accountKey: String?, windowKey: String, generation: UInt64
+    ) async throws -> QuotaCurve? {
+        try quotaCurveSync(
+            clientId: clientId, accountKey: accountKey, windowKey: windowKey,
+            generation: generation)
+    }
+
+    func quotaCurveSync(
+        clientId: String, accountKey: String?, windowKey: String, generation: UInt64
+    ) throws -> QuotaCurve? {
+        DemoData.quotaCurve(clientId: clientId, windowKey: windowKey, generation: generation)
     }
 
     func usageTrace(windowSecs: Int64) async throws -> [TraceBucket] {
