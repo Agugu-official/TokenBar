@@ -167,9 +167,9 @@ arm 開頭的 washout 讓每個 arm 從同一個熱狀態**開始**，但暖執�
 
 漏掉第 5 步的重建，`NEW` 會重播 `OLD-b` 寫進去的條目，而不是走它自己的 miss 路徑——**那正是要驗的東西**。結果仍然會相等，只是相等的原因變成「兩邊讀的是同一份快取」。
 
-**第 9 步比對 `NEW-a`，不是 `OLD` 基準。** 要問的是「讀別人的快取」與「從零開始」是否給出同一個結果；改動本來就要改變輸出時，`OLD` 基準本來就不會相等。這個 arm 抓得到的典型錯誤是**該 bump `parser_version` 卻沒 bump**：舊條目被當成命中直接重播，修正對既有使用者完全無效，而每個清快取的 arm 都照樣通過。本專案實際發生過一次，#287 的 1h cache write 計價修正就是用這種暖快取量測驗收的，拿掉 bump 重跑時成本回到舊值、delta 恰為零（見 [`verification.md`](verification.md) 的 cross-port 段落）。
+**第 9 步比對 `NEW-a`，不是 `OLD` 基準。** 要問的是「讀別人的快取」與「從零開始」是否給出同一個結果；改動本來就要改變輸出時，`OLD` 基準本來就不會相等。這個 arm 抓得到的典型錯誤是**該 bump `parser_version` 卻沒 bump**：舊條目被當成命中直接重播，修正對既有使用者完全無效，而每個清快取的 arm 都照樣通過。#287 的 1h cache write 計價修正就是用這種暖快取量測驗收的，驗收時還做了消融：刻意拿掉 bump 重跑暖快取，成本回到舊值、delta 恰為零，證明這個檢驗真的會失敗（見 [`verification.md`](verification.md) 的 cross-port 段落）。出貨的版本有 bump，漏 bump 並沒有真的發生過。
 
-**第 9 步不適用時，要寫明理由，不能默默跳過。** 報告裡「跳過」和「不適用」長得一模一樣。唯一的理由是 `NEW` 會丟棄**每一個** `OLD` 條目，而且要從引擎程式碼確認，不能只看版本號：bump `CACHE_FORMAT_VERSION` 不再自動代表舊條目全部作廢。engine PR #24 起，format bump 可以走遷移，format 4 就會解碼並沿用 format 3 的 Claude shard。
+**第 9 步沒有跳過條件。** 就算預期 `NEW` 會丟棄每一個 `OLD` 條目，也照樣跑：那時它驗的正是「作廢真的發生了」，而這件事不能靠讀程式碼確認，因為讀程式碼會相信版本號生效，漏掉的正是比對或遷移路徑上的 bug。預期全部作廢時，要把預期寫進報告，並附上 `NEW` 在 `OLD` 快取上的表現與全冷執行相當的量測。版本號也不能當成捷徑：bump `CACHE_FORMAT_VERSION` 不再代表舊條目全部作廢。engine PR #24 起，format bump 可以走遷移，format 4 就會解碼並沿用 format 3 的 Claude shard。
 
 **`NEW` 要跑兩次，但它證明的東西比你想的小。** `OLD-a`／`OLD-b` 證明 **oracle** 穩定；`NEW-a`／`NEW-b` 是被測實作的 sanity check。**兩個 arm 必須是同一個 revision**；換一個含後續修正的 commit 不算第二個樣本，那量到的是另一個實作。
 
