@@ -254,9 +254,8 @@ enum GlassPanelStyle {
     /// the text legible. 0.20 read too see-through; 0.35 is the second round.
     /// The glass was .clear until #398: it barely blurs, so a tooltip over a
     /// list showed the rows beneath it sharp through the scrim. The maintainer
-    /// compared both on the live panel and chose .regular. .clear was seen to
-    /// follow the system glass setting (NSGlassTintAmount); .regular was not
-    /// checked against it.
+    /// compared both on the live panel and chose .regular. Both were seen to
+    /// follow the system glass setting (NSGlassTintAmount, no public API).
     static let tooltipScrimDark = Color.black.opacity(0.35)
     static let tooltipScrimLight = Color.white.opacity(0.35)
     /// Gray tooltip text over see-through glass washed out; lifting the text
