@@ -65,6 +65,10 @@ jobs:
             python3 scripts/check_release_notes.py "$(basename "$f" .txt)"
           done
 
+          # The appcast renderer's escaping, run against the shipping file
+          # rather than a copy of it: literal <, &, >, an escaped &lt; and ]]>.
+          scripts/render_notes_html.sh --self-test
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2

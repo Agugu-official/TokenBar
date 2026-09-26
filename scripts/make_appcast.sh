@@ -38,26 +38,12 @@ trap 'rm -rf "$WORK"' EXIT
 
 cp "$ARCHIVE" "$WORK/$ARCHIVE_BASENAME"
 
-# Render the plain-text notes (restricted format: "New:"/"Fixes:" headings,
-# "- " bullets) into simple HTML beside the archive; generate_appcast embeds a
-# same-base-name HTML sidecar as this item's <description>.
+# Render the plain-text notes beside the archive; generate_appcast embeds a
+# same-base-name HTML sidecar as this item's <description>. The renderer and
+# its escaping live in render_notes_html.sh so they can be tested on their own.
+# The guard stays here: an empty sidecar would become an empty <description>.
 if [[ -n "$NOTES_FILE" && -s "$NOTES_FILE" ]]; then
-  awk '
-    function esc(t) { gsub(/&/, "\\&amp;", t); gsub(/</, "\\&lt;", t); return t }
-    /^- / {
-      if (!inlist) { print "<ul>"; inlist = 1 }
-      print "<li>" esc(substr($0, 3)) "</li>"
-      next
-    }
-    {
-      if (inlist) { print "</ul>"; inlist = 0 }
-      if ($0 ~ /^[[:space:]]*$/) next
-      t = esc($0)
-      if (t ~ /:[[:space:]]*$/) print "<b>" t "</b>"
-      else print "<p>" t "</p>"
-    }
-    END { if (inlist) print "</ul>" }
-  ' "$NOTES_FILE" > "$WORK/$NOTES_BASENAME"
+  "$(dirname "$0")/render_notes_html.sh" "$NOTES_FILE" "$WORK/$NOTES_BASENAME"
 fi
 
 # Stable releases stay channel-less (served to everyone, so the latest stable is
