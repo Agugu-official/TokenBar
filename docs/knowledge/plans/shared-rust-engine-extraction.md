@@ -45,7 +45,7 @@ submodule pin 同一個 immutable commit。執行期間的本機路徑、credent
 |---|---|---|
 | [`Nanako0129/tokscale-core`](https://github.com/Nanako0129/tokscale-core) | `b31e39425859393504a2d56cb5af7c93e6461c7d` | Shared source、tests、standalone lock／CI 與 authoritative `UPSTREAM.md` ledger |
 | [`Nanako0129/TokenBar`](https://github.com/Nanako0129/TokenBar) | `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` | Gitlink `vendor/tokscale-core` pins `b31e39425859393504a2d56cb5af7c93e6461c7d` |
-| [`Nanako0129/TokenBar-Windows`](https://github.com/Nanako0129/TokenBar-Windows) | `26492a5b615fed9378034e7bb56bc5aeccf5d368` | Gitlink `vendor/tokscale-core` pins `b31e39425859393504a2d56cb5af7c93e6461c7d` |
+| [`Nanako0129/TokenBar-Windows`](https://github.com/Nanako0129/TokenBar-Windows) | [`26492a5b615fed9378034e7bb56bc5aeccf5d368`](https://github.com/Nanako0129/Syrtis-Windows/commit/26492a5b615fed9378034e7bb56bc5aeccf5d368) | Gitlink `vendor/tokscale-core` pins `b31e39425859393504a2d56cb5af7c93e6461c7d` |
 
 At closeout, the two consumer default branches used the same public submodule
 URL and exact gitlink. Their application-owned FFI、C header、Swift／C# bridge、
@@ -116,12 +116,12 @@ consumer advances its gitlink.
 
 | Phase | Result |
 |---|---|
-| CORE-R0 rebaseline | Issue #107 and Windows cfg hygiene landed; Native source was frozen at `729dc3adf21cc31e16ef0b8b742f0244197d7058`, Windows at `68e2541c5e9adb14a47433f8b25e26b0be84d1fc`, and both shared trees were exact |
+| CORE-R0 rebaseline | Issue #107 and Windows cfg hygiene landed; Native source was frozen at `729dc3adf21cc31e16ef0b8b742f0244197d7058`, Windows at [`68e2541c5e9adb14a47433f8b25e26b0be84d1fc`](https://github.com/Nanako0129/Syrtis-Windows/commit/68e2541c5e9adb14a47433f8b25e26b0be84d1fc), and both shared trees were exact |
 | CORE-T0 tool provenance | `git-filter-repo 2.47.0`, `gitleaks 8.30.1`, supporting scanners and their configurations were fixed before history rewrite |
-| CORE-X0 local extraction | Filtered base `5bc3d4092bfae987df30dd0df20ed575663cc40e` reproduced source tree `3b27354b617649cba2880fbca3ecaddee4326e7c`; standalone lock、macOS／Windows gates、closure scans and fresh security verification passed |
+| CORE-X0 local extraction | Filtered base `5bc3d4092bfae987df30dd0df20ed575663cc40e` reproduced source tree `3b27354b617649cba2880fbca3ecaddee4326e7c` (a git tree object, not a commit); standalone lock、macOS／Windows gates、closure scans and fresh security verification passed |
 | CORE-X1H engine repository | [Engine PR #1](https://github.com/Nanako0129/tokscale-core/pull/1) completed hardening and publication at `b31e39425859393504a2d56cb5af7c93e6461c7d`; Codex review、dual-platform CI、anonymous closure equality and fresh verification passed |
 | CORE-X1N Native consumer | [Native PR #114](https://github.com/Nanako0129/TokenBar/pull/114) rebase-merged the same-path submodule at main `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea`; root lock、runtime gates、review、CI、fresh verification and rollback rehearsal passed |
-| CORE-X1W Windows consumer | [Windows PR #12](https://github.com/Nanako0129/TokenBar-Windows/pull/12) rebase-merged the same pin at main `26492a5b615fed9378034e7bb56bc5aeccf5d368`; root lock、x64／ARM64 CI、Swift cross-check、native ARM64 FFI smoke、review、fresh verification and rollback rehearsal passed |
+| CORE-X1W Windows consumer | [Windows PR #12](https://github.com/Nanako0129/TokenBar-Windows/pull/12) rebase-merged the same pin at main [`26492a5b615fed9378034e7bb56bc5aeccf5d368`](https://github.com/Nanako0129/Syrtis-Windows/commit/26492a5b615fed9378034e7bb56bc5aeccf5d368); root lock、x64／ARM64 CI、Swift cross-check、native ARM64 FFI smoke、review、fresh verification and rollback rehearsal passed |
 | CORE-X1D closeout | Default-branch pins、ledger ownership、retired manual-copy paths and canonical knowledge were audited and recorded |
 
 ## Acceptance evidence
@@ -150,8 +150,8 @@ recovery path without changing a default branch.
 
 | Consumer | Rehearsal result |
 |---|---|
-| Native | Reverting `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` then `d114da442f94c6f3b56e408e97f9d2e49daaafae` restored superproject tree `4fdcb184c9417541d549bd6dd4e366bf9e9ecbbc`, shared tree `3b27354b617649cba2880fbca3ecaddee4326e7c`, and root-lock SHA-256 `b43f13855caa0eef9dd964282703b2af2aa130f23a0e53dbbfe2e2149f76baa2` |
-| Windows | Deinitializing the submodule, then reverting `26492a5b615fed9378034e7bb56bc5aeccf5d368` and `5a1ae9a5c4994198face5bbbcf7f0e463adb6ab5`, restored tree `2ea2ad5af4b1d1ef6ddda88db03b753d1720f3f8` and root-lock SHA-256 `11cc213417e3dc5e4f440eb317dbd9764f87f4277a909a3de14a0d5ea9a3ad94` |
+| Native | Reverting `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` then `d114da442f94c6f3b56e408e97f9d2e49daaafae` restored superproject tree `4fdcb184c9417541d549bd6dd4e366bf9e9ecbbc`, shared tree `3b27354b617649cba2880fbca3ecaddee4326e7c` (both git tree objects in this repository), and root-lock SHA-256 `b43f13855caa0eef9dd964282703b2af2aa130f23a0e53dbbfe2e2149f76baa2` |
+| Windows | Deinitializing the submodule, then reverting Windows commits [`26492a5b615fed9378034e7bb56bc5aeccf5d368`](https://github.com/Nanako0129/Syrtis-Windows/commit/26492a5b615fed9378034e7bb56bc5aeccf5d368) and [`5a1ae9a5c4994198face5bbbcf7f0e463adb6ab5`](https://github.com/Nanako0129/Syrtis-Windows/commit/5a1ae9a5c4994198face5bbbcf7f0e463adb6ab5), restored tree `2ea2ad5af4b1d1ef6ddda88db03b753d1720f3f8` (a git tree object in the Windows repository) and root-lock SHA-256 `11cc213417e3dc5e4f440eb317dbd9764f87f4277a909a3de14a0d5ea9a3ad94` |
 
 The Native rehearsal used a fresh non-recursive clone. The Windows rehearsal
 proved that an initialized checkout must first deinitialize the exact

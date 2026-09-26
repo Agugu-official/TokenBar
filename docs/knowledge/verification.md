@@ -323,6 +323,8 @@ git diff --check origin/main...HEAD
 
 These checks cover frontmatter, relative links, canonical reachability, migration-ledger counts and enums, privacy scans, and repository whitespace. Do not claim runtime PASS for a docs-only change.
 
+SHA existence is checked only where the repository is known: `check_engine_pin` resolves every 40-hex SHA inside a `tokscale-core/{blob,commit,tree}` URL against the submodule. It needs a complete engine checkout and skips the question ("cannot ask", not a failure) when the submodule is absent or shallow. `ci.yml` unshallows the submodule before its knowledge step, so the check runs there; the Pages job checks out without submodules, so there it is skipped and `ci.yml` is the enforcing gate. A bare 40-hex string in prose is not resolved, because the tree cites commits and tree objects from several repositories (Syrtis, `tokscale-core`, Syrtis-Windows, upstream `tokscale`, CodexBar) and the text alone does not say which. [#295](https://github.com/Nanako0129/syrtis/issues/295) found nine such strings that looked unresolvable and all turned out to be real, just unlabelled. So write a SHA that does not belong to this repository as a link to its repository, or name the repository and, for a tree object, say so next to it.
+
 ## Failure interpretation
 
 A failed smoke run caused by missing local credentials, an empty private session tree, or a provider network response is not evidence that the parser or docs are wrong. Record the environmental limitation separately, then rely on hermetic tests and the relevant source-level gate. Conversely, a green live smoke run without a fixture does not close a data-dependent correctness issue.
