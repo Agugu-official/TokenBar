@@ -105,9 +105,12 @@ public struct ModelColorMap: Sendable {
         self.init(entries: (report?.entries ?? []).map { ($0.provider, $0.model, $0.cost) })
     }
 
+    /// The table is built from model-report rows, which the engine has already
+    /// grouped, while graph and window callers pass raw ids; looking up the
+    /// grouped id lets a raw `grok-4.6-build` find the `grok-4.6` shade.
     public func color(_ providerId: String?, _ modelId: String) -> String {
         let key = ModelColors.providerColorKey(providerId, modelId)
-        if let hit = colorByKeyModel["\(key) \(modelId)"] { return hit }
+        if let hit = colorByKeyModel["\(key) \(ModelGrouping.groupID(modelId))"] { return hit }
         let base = ModelColors.providerBase[key] ?? ModelColors.providerBase["unknown"]!
         return ModelColors.shadeFromBase(base, rank: 0)
     }

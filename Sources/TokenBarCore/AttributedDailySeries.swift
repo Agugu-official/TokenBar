@@ -66,10 +66,12 @@ public enum AttributedDailySeries {
                         model: client.modelId,
                         records: confirmed)
                 }
+                // Attribution matched the raw id above; the bucket groups by
+                // display identity so it agrees with the Models view.
                 let key = Key(
                     date: contribution.date,
                     state: state,
-                    model: client.modelId)
+                    model: ModelGrouping.groupID(client.modelId))
                 rows.append(Row(key: key, tokens: tokens, cost: client.cost))
             }
         }
