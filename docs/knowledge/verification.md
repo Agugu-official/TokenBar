@@ -4,7 +4,7 @@ id: kb-verification
 kind: canonical
 scope: repository
 read_when: changing runtime code, running a local build or UX acceptance, parser output, cache behavior, FFI contracts, or this knowledge tree
-last_verified: 2026-09-14
+last_verified: 2026-09-27
 sources: [".github/workflows/ci.yml", "Makefile", "Package.swift", "scripts/bundle.sh", "Sources/Syrtis/ClientTray.swift", "Sources/Syrtis/StatusItemController.swift", "Sources/Syrtis/MenuBarTextColor.swift", "Sources/Syrtis/Views/AgentIconView.swift", "Sources/Syrtis/Views/SettingsPanel.swift", "Sources/Syrtis/SelfTest.swift", "Sources/Syrtis/ClaudeExtraRoots.swift", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_storage_windows.rs", "crates/tb_core_ffi/src/agent_kiro.rs", "crates/tb_core_ffi/src/kiro_integrations.rs", "crates/tb_core_ffi/src/extra_scan_paths.rs", "docs/knowledge/plans/provider-quota-pace.md", "docs/knowledge/plans/codex-historical-pace-v2.md", "public TokenBar-Windows PR #7", "public Syrtis PR #114", "public TokenBar-Windows PR #12", "AGENTS.md", "memory-derived hermetic verification practice", "memory-derived local build indexing incident"]
 ---
 
@@ -319,6 +319,8 @@ git diff --check origin/main...HEAD
 ```
 
 These checks cover frontmatter, relative links, canonical reachability, migration-ledger counts and enums, privacy scans, and repository whitespace. Do not claim runtime PASS for a docs-only change.
+
+SHA existence is checked only where the repository is known: `check_engine_pin` resolves every 40-hex SHA inside a `tokscale-core/{blob,commit,tree}` URL against the submodule, and CI unshallows the submodule first so this runs there too, not only on a full local clone. A bare 40-hex string in prose is not resolved, because the tree cites commits and tree objects from several repositories (Syrtis, `tokscale-core`, Syrtis-Windows, upstream `tokscale`, CodexBar) and the text alone does not say which. [#295](https://github.com/Nanako0129/syrtis/issues/295) found nine such strings that looked unresolvable and all turned out to be real, just unlabelled. So write a SHA that does not belong to this repository as a link to its repository, or name the repository and, for a tree object, say so next to it.
 
 ## Failure interpretation
 

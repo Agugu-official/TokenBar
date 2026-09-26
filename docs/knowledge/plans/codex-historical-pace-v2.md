@@ -73,7 +73,7 @@ TokenBar 的本機 token 與 cost history 不代表 OpenAI subscription quota un
 | Sampling cadence | reset 先 round 到 5 分鐘，再套 30 分鐘／1 percentage-point write threshold | 對齊 CodexBar 的 bounded live-history cadence，避免 reset jitter 繞過 throttle |
 | Complete week | Dedupe 後至少 6 筆，window 開始後 24 小時與 reset 前 24 小時都有 coverage | 避免單筆、局部或滑動 reset fragment 被當成完整週 |
 | Historical threshold | 3 個完整週才產生 historical pace；5 個完整週才公開 run-out probability | 對齊 CodexBar 的 confidence boundary |
-| Evaluator baseline | Store cadence 對齊 CodexBar `4abfbb6c`；evaluator 以 `f986661480c7862bc42b09ad37e5dc781a7353d3` 為基準，但 historical expectation 允許高於 linear baseline | 個人歷史曲線負責描述實際節奏；quota safety 由獨立 risk／ETA evaluator 判斷，避免前期集中但整週安全的使用模式被誤標為超前 |
+| Evaluator baseline | Store cadence 對齊 CodexBar `4abfbb6c`；evaluator 以 CodexBar [`f986661480c7862bc42b09ad37e5dc781a7353d3`](https://github.com/steipete/CodexBar/commit/f986661480c7862bc42b09ad37e5dc781a7353d3)（#1581）為基準，但 historical expectation 允許高於 linear baseline | 個人歷史曲線負責描述實際節奏；quota safety 由獨立 risk／ETA evaluator 判斷，避免前期集中但整週安全的使用模式被誤標為超前 |
 | Retention | 保留 56 天 v2 samples | 容納最多約 8 週，同時限制檔案成長 |
 | Backfill | 第一版不實作 dashboard backfill | TokenBar 沒有相應 dashboard auth、daily breakdown 與 account-authority contract |
 | Cache schema | 不變更 vendored message cache schema | 這是獨立 quota-history store 與 FFI presentation payload，不改 parser serialized output |
