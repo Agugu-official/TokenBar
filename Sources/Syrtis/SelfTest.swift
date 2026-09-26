@@ -337,6 +337,24 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
 /// The deadline is generous because the cost of raising it is only paid when a
 /// test is genuinely about to fail, while the cost of setting it too low is a
 /// flake that looks like a product defect.
+/// The window a NEGATIVE probe gives the event it asserts never happens.
+///
+/// `waitUntil`'s deadline is generous because a positive wait only pays it on
+/// the way to a failure. A probe for something that must not happen pays it on
+/// every pass: eight such probes held each suite run for 8 × 5 s, and the push
+/// pipeline runs the suite twice.
+///
+/// 500 ms, chosen by the maintainer (2026-09-27). Measured on the xcode-27
+/// runner (run 36277549879) with each probe's defect restored, five suite runs
+/// each: the race showed within 2.62 ms at the slowest probe, far under half
+/// this window, and every probe failed. A race slower than the window would
+/// pass here; that is the trade.
+///
+/// `modelRaced` keeps the default: restoring its defect in that run did not
+/// make the race appear, so nothing shows how fast it would, and a short window
+/// there would be unmeasured.
+private let negativeProbeWindow: Duration = .milliseconds(500)
+
 private func waitUntil(
     timeout: Duration = .seconds(5),
     _ predicate: @escaping @Sendable () async -> Bool
@@ -6319,7 +6337,7 @@ enum SelfTest {
             let reopenLoad = Task { await reopened.load() }
             _ = await waitUntil { await reopenSource.hasPendingGraph(year: reopenYear) }
             let reopenLens = Task { await reopened.ensureModelData(for: .overview) }
-            let reopenRaced = await waitUntil { await reopenSource.modelCallCount() > 0 }
+            let reopenRaced = await waitUntil(timeout: negativeProbeWindow) { await reopenSource.modelCallCount() > 0 }
             // Folds in the fixture's own health: without confirming the snapshot
             // really restored payload-without-model, "did not race" would also
             // hold on a reopen that never reached the gate at all.
@@ -6358,7 +6376,7 @@ enum SelfTest {
             let refreshGateLens = Task {
                 await refreshGateModel.ensureModelData(for: .overview)
             }
-            let refreshGateRaced = await waitUntil {
+            let refreshGateRaced = await waitUntil(timeout: negativeProbeWindow) {
                 await refreshGateSource.modelCallCount() > 0
             }
             // Folds in the fixture's own health: without confirming the refresh
@@ -6555,7 +6573,7 @@ enum SelfTest {
             }
             // The older fetch completes and commits nothing.
             await chainSource.releaseGraph(year: chainYear, index: 0, day: 3)
-            let chainRaced = await waitUntil { await chainSource.modelCallCount() > 0 }
+            let chainRaced = await waitUntil(timeout: negativeProbeWindow) { await chainSource.modelCallCount() > 0 }
             // Folds in the fixture's own health: without confirming a payload was
             // restored and both fetches actually overlapped, "did not race" would
             // also hold on a request that never reached the gate.
@@ -6591,7 +6609,7 @@ enum SelfTest {
             await lazySource.blockHourly(year: lazyYear)
             // The refresh is now the older, overtaken fetch.
             await lazySource.releaseGraph(year: lazyYear, index: 0, day: 3)
-            let lazyRefetched = await waitUntil {
+            let lazyRefetched = await waitUntil(timeout: negativeProbeWindow) {
                 await lazySource.hasPendingHourly(year: lazyYear)
             }
             // Folds in the fixture's own health: without confirming the lens was
@@ -6830,7 +6848,7 @@ enum SelfTest {
             let monthlyDrive = Task {
                 await noHourlyModel.ensureData(for: .monthly, clients: clients)
             }
-            let hourlyReappeared = await waitUntil {
+            let hourlyReappeared = await waitUntil(timeout: negativeProbeWindow) {
                 await noHourlySource.hasPendingHourly(year: yearA)
             }
             let emptyDidNotFetch = !hourlyReappeared
@@ -7098,7 +7116,7 @@ enum SelfTest {
             // Wait for the outcome instead of sampling immediately: the third
             // task had not been scheduled yet when this read the counter, so
             // the assertion passed even with the defect restored.
-            let abaThirdStarted = await waitUntil { await abaSource.modelCallCount() >= 3 }
+            let abaThirdStarted = await waitUntil(timeout: negativeProbeWindow) { await abaSource.modelCallCount() >= 3 }
             let abaNoThirdScan = !abaThirdStarted
             await abaSource.releaseModel()
             await abaSecond.value
@@ -11388,7 +11406,7 @@ enum SelfTest {
             // called `gatedGraph` yet), so the old code fell straight through
             // every guard and scanned immediately.
             let gateLens = Task { await gateModel.ensureModelData(for: .overview) }
-            let gateRaced = await waitUntil { await gateSource.modelCallCount() > 0 }
+            let gateRaced = await waitUntil(timeout: negativeProbeWindow) { await gateSource.modelCallCount() > 0 }
             results["gateModelTaskFirstDidNotRace"] = !gateRaced
             // A DIFFERENT caller (not the one awaiting the gate) is what
             // finally calls load() — proving the gate is fulfilled by ANY
