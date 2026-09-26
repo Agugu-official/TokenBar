@@ -6667,6 +6667,91 @@ enum SelfTest {
             let healCurrentAfterRefresh =
                 await healSource.modelCallCount() == healCallsAfterRefresh
 
+            // #191 — prices refresh independently of the logs, so a report
+            // current for an unchanged graph generation still expires. Same
+            // model and generation as the idempotent retry just above; only
+            // the report's age moves.
+            healModel.ageModelReportForTesting(by: DashboardModel.modelReportMaxAge - 60)
+            await healModel.retryMissingModelForTest()
+            let pricingFreshNotRefetched =
+                await healSource.modelCallCount() == healCallsAfterRefresh
+            healModel.ageModelReportForTesting(by: 120)
+            await healModel.retryMissingModelForTest()
+            let pricingStaleRefetchedOnce =
+                await healSource.modelCallCount() == healCallsAfterRefresh + 1
+            await healModel.retryMissingModelForTest()
+            let pricingRefetchResetsAge =
+                await healSource.modelCallCount() == healCallsAfterRefresh + 1
+            // A fetch time in the future means the clock moved back. Counting
+            // that as fresh would freeze prices for the size of the jump.
+            healModel.ageModelReportForTesting(by: -7_200)
+            await healModel.retryMissingModelForTest()
+            let pricingClockBackRefetches =
+                await healSource.modelCallCount() == healCallsAfterRefresh + 2
+
+            // #191 on a reopen. A same-process snapshot carrying an expired
+            // report must not count as current: that would skip the restore
+            // gate, and the expired report would be re-fetched against a
+            // restored payload before `load()` confirms it — the scan beside
+            // the graph that LP3 exists to prevent.
+            let agedYear = "2042"
+            let agedSource = ControlledTurnUsageDataSource()
+            let agedSeed = DashboardModel(
+                cachesSnapshot: true, source: agedSource, initialYear: agedYear)
+            await agedSeed.load()
+            await agedSeed.ensureModelData(for: .overview)
+            let agedSeedCalls = await agedSource.modelCallCount()
+            let agedSeeded = agedSeed.modelReport != nil && agedSeedCalls == 1
+            agedSeed.ageModelReportForTesting(by: DashboardModel.modelReportMaxAge + 60)
+            await agedSource.blockGraph(year: agedYear)
+            let agedReopened = DashboardModel(
+                cachesSnapshot: true, source: agedSource, initialYear: agedYear)
+            let agedRestored = agedReopened.modelReport != nil
+            let agedLens = Task { await agedReopened.ensureModelData(for: .overview) }
+            let agedRaced = await waitUntil { await agedSource.modelCallCount() > 1 }
+            let agedLoad = Task { await agedReopened.load() }
+            _ = await waitUntil { await agedSource.hasPendingGraph(year: agedYear) }
+            await agedSource.releaseGraph(year: agedYear)
+            await agedLoad.value
+            await agedLens.value
+            let agedFinalCalls = await agedSource.modelCallCount()
+            let pricingReopenGatedThenRefetched =
+                agedSeeded && agedRestored && !agedRaced && agedFinalCalls == 2
+
+            // Inside the restore headroom: still fresh, so nothing is
+            // re-fetched, but too close to expiry to skip the gate — it could
+            // expire before the first lens call. Observed as the lens call
+            // not returning until `load()` settles the gate.
+            actor Done { var value = false; func set() { value = true } }
+            let edgeYear = "2043"
+            let edgeSource = ControlledTurnUsageDataSource()
+            let edgeSeed = DashboardModel(
+                cachesSnapshot: true, source: edgeSource, initialYear: edgeYear)
+            await edgeSeed.load()
+            await edgeSeed.ensureModelData(for: .overview)
+            edgeSeed.ageModelReportForTesting(
+                by: DashboardModel.modelReportMaxAge
+                    - DashboardModel.modelReportRestoreHeadroom / 2)
+            await edgeSource.blockGraph(year: edgeYear)
+            let edgeReopened = DashboardModel(
+                cachesSnapshot: true, source: edgeSource, initialYear: edgeYear)
+            let edgeDone = Done()
+            let edgeLens = Task {
+                await edgeReopened.ensureModelData(for: .overview)
+                await edgeDone.set()
+            }
+            let edgeReturnedBeforeLoad = await waitUntil(timeout: .milliseconds(300)) {
+                await edgeDone.value
+            }
+            let edgeLoad = Task { await edgeReopened.load() }
+            _ = await waitUntil { await edgeSource.hasPendingGraph(year: edgeYear) }
+            await edgeSource.releaseGraph(year: edgeYear)
+            await edgeLoad.value
+            await edgeLens.value
+            let edgeCalls = await edgeSource.modelCallCount()
+            let pricingRestoreHeadroomGates =
+                edgeReopened.modelReport != nil && !edgeReturnedBeforeLoad && edgeCalls == 1
+
             // A reload may call the shared seam unconditionally; modelWanted is
             // what keeps a graph-only dashboard from paying for a model scan.
             let neverWantedSource = ControlledTurnUsageDataSource()
@@ -7196,6 +7281,12 @@ enum SelfTest {
                 "healRefreshPriority": healRefreshPriority,
                 "healedAfterRefresh": healedAfterRefresh,
                 "healCurrentAfterRefresh": healCurrentAfterRefresh,
+                "pricingFreshNotRefetched": pricingFreshNotRefetched,
+                "pricingStaleRefetchedOnce": pricingStaleRefetchedOnce,
+                "pricingRefetchResetsAge": pricingRefetchResetsAge,
+                "pricingReopenGatedThenRefetched": pricingReopenGatedThenRefetched,
+                "pricingClockBackRefetches": pricingClockBackRefetches,
+                "pricingRestoreHeadroomGates": pricingRestoreHeadroomGates,
                 "neverWantedGenerationAdvanced": neverWantedGenerationAdvanced,
                 "neverWantedSkippedModel": neverWantedSkippedModel,
                 "phantomIssuedNoScan": phantomIssuedNoScan,
@@ -7344,6 +7435,22 @@ enum SelfTest {
             turnTransitionChecks?["healedAfterRefresh"] == true
                 && turnTransitionChecks?["healCurrentAfterRefresh"] == true,
             "manual Refresh returns with the model report healed for the committed generation")
+        expect(
+            turnTransitionChecks?["pricingFreshNotRefetched"] == true,
+            "#191: a report younger than modelReportMaxAge is not re-fetched for an unchanged generation")
+        expect(
+            turnTransitionChecks?["pricingStaleRefetchedOnce"] == true
+                && turnTransitionChecks?["pricingRefetchResetsAge"] == true,
+            "#191: an expired report is re-fetched once for an unchanged generation, and the re-fetch restarts its age")
+        expect(
+            turnTransitionChecks?["pricingReopenGatedThenRefetched"] == true,
+            "#191: a reopen restoring an expired report waits for load() before re-fetching it, then re-fetches once")
+        expect(
+            turnTransitionChecks?["pricingClockBackRefetches"] == true,
+            "#191: a fetch time in the future (clock moved back) counts as expired")
+        expect(
+            turnTransitionChecks?["pricingRestoreHeadroomGates"] == true,
+            "#191: a restored report within the headroom of expiry installs the load() gate without re-fetching")
         expect(
             turnTransitionChecks?["neverWantedGenerationAdvanced"] == true
                 && turnTransitionChecks?["neverWantedSkippedModel"] == true,
