@@ -1,3 +1,13 @@
+---
+status: active
+id: vendor-readme
+kind: reference
+scope: repository
+read_when: advancing or auditing the vendor/tokscale-core consumer pin
+last_verified: 2026-09-27
+sources: [".gitmodules", "vendor/tokscale-core", "docs/knowledge/vendor-tokscale.md"]
+---
+
 # Shared Rust core pin
 
 TokenBar consumes the public

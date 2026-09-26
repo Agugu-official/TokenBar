@@ -45,6 +45,20 @@ jobs:
           fi
           test "$(git -C vendor/tokscale-core rev-parse --is-shallow-repository)" = "false"
 
+      # Two knowledge checks read this repository's own history: whether the
+      # last engine pin advance touched crates/tb_core_ffi or ctb.h, and
+      # whether a document's body changed since the merge base with main
+      # without moving last_verified. A depth-1 checkout holds neither, and
+      # both checks then answer "cannot ask" and pass.
+      - name: Fetch history for the knowledge checks
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --unshallow --quiet origin
+          fi
+          git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base origin/main HEAD >/dev/null
+
       - name: Validate knowledge contracts
         run: |
           python3 scripts/check_knowledge.py --self-test
