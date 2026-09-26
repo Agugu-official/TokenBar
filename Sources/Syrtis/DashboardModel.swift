@@ -1369,6 +1369,10 @@ private struct DashboardSnapshot {
             // no windows, so their previous curve is no longer eligible.
             windowCurves = windowCurves.filter { keys.contains($0.key) }
             quotaWindowSummaries = quotaWindowSummaries.filter { keys.contains($0.id) }
+            // Pruned with the summaries it describes. The recompute below only
+            // runs once a client list is known; until then the summaries are
+            // retained and pruned here, and so is this.
+            quotaUnreadableClients.formIntersection(visibleAgents.map(\.clientId))
             quotaHeatmaps = quotaHeatmaps.filter { keys.contains($0.key) }
             quotaHeatmapWindows = quotaHeatmapWindows.filter { keys.contains($0.id) }
             qualifyingCycles = qualifyingCycles.filter { keys.contains($0.key) }
@@ -1488,6 +1492,7 @@ private struct DashboardSnapshot {
         // loading state until discovery settles, then clear an empty selection.
         if windowCardClients.isEmpty, stats != nil {
             quotaWindowSummaries = []
+            quotaUnreadableClients = []
             quotaHeatmaps = [:]
             quotaHeatmapWindows = []
             qualifyingCycles = [:]
@@ -1668,6 +1673,23 @@ private struct DashboardSnapshot {
                 qualifyingCycles = Self.retainingFailed(
                     fresh: freshQualifying, previous: qualifyingCycles, failed: failedWindowIds)
             }
+            // A window that threw and has nothing drawn is absent from the
+            // strip for a reason the strip must not call "nothing recorded"
+            // (#355). Outside the guard above on purpose: a pass that skips
+            // publication can still be the first to fail a window that was
+            // never drawn, and it must say so. "Drawn" is read from the
+            // summaries as they now stand, which is the held-over set on a
+            // publishing pass and the unchanged set on a skipped one.
+            let drawnIds = Set(quotaWindowSummaries.map(\.id))
+            quotaUnreadableClients = Set(visibleAgents.flatMap { agent in
+                agent.uniqueCardWindows.compactMap { window -> String? in
+                    let id = WindowCardLoader.curveKey(
+                        clientId: agent.clientId, accountKey: agent.accountKey,
+                        cardId: window.cardId)
+                    return failedWindowIds.contains(id) && !drawnIds.contains(id)
+                        ? agent.clientId : nil
+                }
+            })
         }
 
         // Cycles follow the scan's client, not every displayed one: the history
@@ -1876,6 +1898,11 @@ private struct DashboardSnapshot {
     private var publishedWindowSummaries = false
 
     private(set) var quotaWindowSummaries: [QuotaWindowSummary] = []
+    /// Clients with a window whose curve read threw and that has no summary
+    /// in `quotaWindowSummaries` to show for it. The strip's counterpart of
+    /// `quotaCurveUnreadable`: without it an empty strip reads the same whether
+    /// the history is empty or could not be opened (#355).
+    private(set) var quotaUnreadableClients: Set<String> = []
     /// One weekday-by-hour grid per window, keyed as `QuotaWindowSummary.id`.
     /// Written in the same guarded block as the summaries, so it cannot be
     /// blanked by a refresh that saw no clients either.

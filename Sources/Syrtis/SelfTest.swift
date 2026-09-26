@@ -12266,6 +12266,10 @@ enum SelfTest {
                 m.quotaWindowSummaries.contains { $0.id == buildKey }
                 && m.quotaHeatmaps[buildKey] != nil
                 && Set(m.qualifyingCycleKeysForTesting) == qualifyingBefore
+            // #355. A held-over window is drawn, so the strip is not missing
+            // anything and must not say its history could not be read.
+            out["#355: a held-over window is not reported unreadable"] =
+                m.quotaUnreadableClients.isEmpty
             src.failCurveReadClients = []
             await republish(10)
 
@@ -12296,6 +12300,12 @@ enum SelfTest {
             // exists to prevent.
             out["the unreadable window is not invented"] =
                 !m.quotaWindowSummaries.contains { $0.id == buildKey }
+            // #355. That absence is a read failure, and the strip is told so:
+            // Grok's tab would otherwise be empty-and-attempted exactly like a
+            // subscription with no recorded windows. Scoped to the client that
+            // failed — Bot answered.
+            out["#355: the window that threw with nothing to hold marks its client unreadable"] =
+                m.quotaUnreadableClients == ["grok"]
             // Proves the throw reached the model rather than the fixture
             // quietly serving a cached curve: both were still asked.
             out["both providers were still asked"] =
@@ -12307,6 +12317,39 @@ enum SelfTest {
             await republish(12)
             out["recovery republishes both without a relaunch"] =
                 Set(m.quotaWindowSummaries.map(\.id)) == [botKey, buildKey]
+            // Taken straight from the marked state above, so it fails if the
+            // mark only ever accumulates.
+            out["#355: recovery clears the unreadable mark"] =
+                m.quotaUnreadableClients.isEmpty
+
+            // #355, the pass that skips publication. Bot is drawn and Grok
+            // never was: Grok is left out of the read (`limitsHidden`, not
+            // `tabHidden` — the two share a tab, and hiding it takes both)
+            // while Bot publishes from an empty strip.
+            m.configureQuotaVisibility(tabHidden: ["grok", "grok-bot"], limitsHidden: [], orderRaw: "")
+            m.refreshWindowQuotaHalves()
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: ["grok"], orderRaw: "")
+            await republish(13)
+            out["#355 control: Bot alone is drawn and nothing is marked"] =
+                m.quotaWindowSummaries.map(\.id) == [botKey]
+                    && m.quotaUnreadableClients.isEmpty
+            // Now both throw. Nothing answers after a set was published, so
+            // publication is skipped — and this is still the first pass to fail
+            // Grok, whose tab would otherwise read "nothing recorded".
+            src.failCurveReadClients = ["grok", "grok-bot"]
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+            await republish(14)
+            out["#355: a skipped publication still marks a failed window that was never drawn"] =
+                m.quotaUnreadableClients == ["grok"]
+                // Control: the skip path was really taken — Bot's row is the
+                // held-over one, not a fresh answer.
+                && m.quotaWindowSummaries.map(\.id) == [botKey]
+            // And hiding Grok on the same kind of pass takes the mark with it.
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: ["grok"], orderRaw: "")
+            await republish(15)
+            out["#355: hiding a client drops its unreadable mark on a skipped publication"] =
+                m.quotaUnreadableClients.isEmpty
+                && m.quotaWindowSummaries.map(\.id) == [botKey]
             return out
         }
         expect(stripPartialFailure != nil, "#359 partial-failure fixture completes")
