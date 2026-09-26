@@ -12311,10 +12311,27 @@ enum SelfTest {
             out["both providers were still asked"] =
                 Set(src.curveReads.map(\.client)) == ["grok", "grok-bot"]
 
+            // #355. Hiding the client must take its unreadable mark with it,
+            // even on a pass that skips the publication block entirely: Bot
+            // throws too, so nothing answers after a set was published and
+            // only the visibility prune can drop Grok.
+            src.failCurveReadClients = ["grok", "grok-bot"]
+            // `limitsHidden`, not `tabHidden`: Grok and Bot share one tab, so
+            // hiding the tab takes both and clears through the no-clients
+            // path instead of the prune this is about.
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: ["grok"], orderRaw: "")
+            await republish(12)
+            out["#355: hiding a client drops its unreadable mark on a skipped publication"] =
+                m.quotaUnreadableClients.isEmpty
+                // Control: the skip path was really taken — Bot's row is the
+                // held-over one, not a fresh answer.
+                && m.quotaWindowSummaries.map(\.id) == [botKey]
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+
             // Not a latch: the moment the binding answers again the strip
             // follows, without a relaunch.
             src.failCurveReadClients = []
-            await republish(12)
+            await republish(13)
             out["recovery republishes both without a relaunch"] =
                 Set(m.quotaWindowSummaries.map(\.id)) == [botKey, buildKey]
             out["#355: recovery clears the unreadable mark"] =

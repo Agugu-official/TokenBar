@@ -73,7 +73,8 @@ struct QuotaView: View {
                     QuotaHeatmapCard(
                         windows: heatmapWindows.filter { clientIds.contains($0.clientId) },
                         heatmaps: heatmaps, equivalences: equivalences,
-                        attempted: usageAttempted)
+                        attempted: usageAttempted,
+                        unreadable: !stripUnreadableClients.isDisjoint(with: clientIds))
                 } else {
                     QuotaHistoryCard(
                         clientId: singleClient, cycles: quotaCycles,
@@ -105,7 +106,8 @@ struct QuotaView: View {
                 // question once "how much" has an answer.
                 QuotaHeatmapCard(
                     windows: heatmapWindows, heatmaps: heatmaps,
-                    equivalences: equivalences, attempted: usageAttempted)
+                    equivalences: equivalences, attempted: usageAttempted,
+                    unreadable: !stripUnreadableClients.isEmpty)
                 if limitsEnabled {
                     AgentLimitsCard(
                     clients: clientIds, trace: trace, agentUsage: agentUsage,

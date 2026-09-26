@@ -1369,6 +1369,10 @@ private struct DashboardSnapshot {
             // no windows, so their previous curve is no longer eligible.
             windowCurves = windowCurves.filter { keys.contains($0.key) }
             quotaWindowSummaries = quotaWindowSummaries.filter { keys.contains($0.id) }
+            // Pruned with the summaries it describes: the block that rewrites
+            // it can be skipped, and a hidden client's failure must not
+            // outlive the client on the all-agent strip.
+            quotaUnreadableClients.formIntersection(visibleAgents.map(\.clientId))
             quotaHeatmaps = quotaHeatmaps.filter { keys.contains($0.key) }
             quotaHeatmapWindows = quotaHeatmapWindows.filter { keys.contains($0.id) }
             qualifyingCycles = qualifyingCycles.filter { keys.contains($0.key) }
