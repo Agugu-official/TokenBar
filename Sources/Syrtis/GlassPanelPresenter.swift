@@ -250,9 +250,13 @@ enum GlassPanelStyle {
     static let lightSecondaryText = Color.black.opacity(0.70)
     static let lightTertiaryText = Color.black.opacity(0.50)
     static let lightCardScrim = Color.black.opacity(0.04)
-    /// Hover tooltips under the panel: .clear glass, more see-through than the
-    /// popover's .regularMaterial, over a scrim that keeps the text legible.
-    /// 0.20 read too see-through; 0.35 is the second round.
+    /// Hover tooltips under the panel: .regular glass over a scrim that keeps
+    /// the text legible. 0.20 read too see-through; 0.35 is the second round.
+    /// The glass was .clear until #398: it barely blurs, so a tooltip over a
+    /// list showed the rows beneath it sharp through the scrim. The maintainer
+    /// compared both on the live panel and chose .regular. .clear was seen to
+    /// follow the system glass setting (NSGlassTintAmount); .regular was not
+    /// checked against it.
     static let tooltipScrimDark = Color.black.opacity(0.35)
     static let tooltipScrimLight = Color.white.opacity(0.35)
     /// Gray tooltip text over see-through glass washed out; lifting the text
@@ -475,7 +479,7 @@ private struct TooltipSurface: ViewModifier {
                     dark ? GlassPanelStyle.tooltipScrimDark
                                          : GlassPanelStyle.tooltipScrimLight,
                     in: shape)
-                .glassEffect(.clear, in: .rect(cornerRadius: 8))
+                .glassEffect(.regular, in: .rect(cornerRadius: 8))
         } else {
             content
                 .background(.regularMaterial, in: shape)
