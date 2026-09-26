@@ -1089,7 +1089,9 @@ enum ClaudeLoginResolution {
     Absent,
     ExplicitLogout,
     Ready(ClaudeCredentials),
-    Terminal,
+    /// Fail closed with this card text. Built only from static literals and a
+    /// `security` exit code, never from credential bytes or error Display.
+    Terminal(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -2055,9 +2057,7 @@ fn load_claude_config_dir_credentials_with<L>(
 where
     L: FnOnce(Option<&str>) -> Result<Option<String>, String>,
 {
-    let raw = load(Some(config_dir))
-        .map_err(|_| CLAUDE_CREDENTIALS_LOAD_ERROR.to_string())?
-        .ok_or_else(|| CLAUDE_EXTRA_UNCONFIGURED_ERROR.to_string())?;
+    let raw = load(Some(config_dir))?.ok_or_else(|| CLAUDE_EXTRA_UNCONFIGURED_ERROR.to_string())?;
     match resolve_stored_claude_login(&raw, ClaudeCredentialSource::Keychain) {
         ClaudeLoginResolution::Ready(mut credentials) => {
             // `claude_login_scope_slot` names the primary directory's fixed
@@ -2074,7 +2074,7 @@ where
         ClaudeLoginResolution::Absent | ClaudeLoginResolution::ExplicitLogout => {
             Err(CLAUDE_EXTRA_UNCONFIGURED_ERROR.to_string())
         }
-        ClaudeLoginResolution::Terminal => Err(CLAUDE_CREDENTIALS_LOAD_ERROR.to_string()),
+        ClaudeLoginResolution::Terminal(display) => Err(display),
     }
 }
 
@@ -2543,11 +2543,9 @@ where
 {
     match login {
         ClaudeLoginResolution::Ready(credentials) => request_login(credentials).await,
-        ClaudeLoginResolution::Terminal => (
+        ClaudeLoginResolution::Terminal(display) => (
             "oauth",
-            ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
-                CLAUDE_CREDENTIALS_LOAD_ERROR,
-            )),
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(display)),
         ),
         ClaudeLoginResolution::Absent | ClaudeLoginResolution::ExplicitLogout => {
             match load_setup() {
@@ -2558,11 +2556,9 @@ where
                         CLAUDE_UNCONFIGURED_ERROR,
                     )),
                 ),
-                Err(_) => (
+                Err(display) => (
                     "setup-token",
-                    ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
-                        CLAUDE_CREDENTIALS_LOAD_ERROR,
-                    )),
+                    ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(display)),
                 ),
             }
         }
@@ -3233,6 +3229,31 @@ const CODEX_UNCONFIGURED_ERROR: &str = "Codex auth.json not found. Run `codex` t
 /// shows the failure instead of claiming the user never logged in.
 const CODEX_CREDENTIALS_UNREADABLE_ERROR: &str = "Codex auth.json could not be read.";
 const CLAUDE_CREDENTIALS_LOAD_ERROR: &str = "Claude credentials could not be loaded.";
+const CLAUDE_CREDENTIALS_LOAD_PREFIX: &str = "Claude credentials could not be loaded: ";
+// Terminal reasons (#225). Each keeps the sentence above as its prefix so
+// existing reports still match; none may carry credential bytes.
+const CLAUDE_KEYCHAIN_SPAWN_ERROR: &str =
+    "Claude credentials could not be loaded: the Keychain could not be queried.";
+/// `security` killed by a signal: `ExitStatus::code()` has no number to show.
+const CLAUDE_KEYCHAIN_SIGNAL_ERROR: &str =
+    "Claude credentials could not be loaded: Keychain read failed (security was stopped by a signal).";
+const CLAUDE_KEYCHAIN_NOT_TEXT_ERROR: &str =
+    "Claude credentials could not be loaded: the Keychain item is not text.";
+const CLAUDE_KEYCHAIN_EMPTY_ERROR: &str =
+    "Claude credentials could not be loaded: the Keychain item is empty.";
+const CLAUDE_CREDENTIALS_FILE_UNREADABLE_ERROR: &str =
+    "Claude credentials could not be loaded: ~/.claude/.credentials.json could not be read.";
+const CLAUDE_STORED_LOGIN_MALFORMED_ERROR: &str =
+    "Claude credentials could not be loaded: the stored login is malformed.";
+const CLAUDE_STORED_LOGIN_NO_ACCESS_TOKEN_ERROR: &str =
+    "Claude credentials could not be loaded: the stored login has no access token.";
+const CLAUDE_SETUP_KEYCHAIN_SPAWN_ERROR: &str =
+    "The Syrtis setup-token Keychain item could not be read: the Keychain could not be queried.";
+const CLAUDE_SETUP_KEYCHAIN_SIGNAL_ERROR: &str =
+    "The Syrtis setup-token Keychain item could not be read (security was stopped by a signal).";
+const CLAUDE_SETUP_KEYCHAIN_NOT_TEXT_ERROR: &str =
+    "The Syrtis setup-token Keychain item is not text.";
+const CLAUDE_SETUP_KEYCHAIN_EMPTY_ERROR: &str = "The Syrtis setup-token Keychain item is empty.";
 /// An extra config directory is configured but its Keychain item holds no
 /// usable login. Distinct from the primary's unconfigured message: there is no
 /// setup-token fallback for an isolated account, and naming one would send the
@@ -3250,14 +3271,16 @@ fn load_claude_login_credentials() -> ClaudeLoginResolution {
     match load_claude_credentials_from_environment() {
         Ok(Some(credentials)) => return ClaudeLoginResolution::Ready(credentials),
         Ok(None) => {}
-        Err(_) => return ClaudeLoginResolution::Terminal,
+        Err(_) => {
+            return ClaudeLoginResolution::Terminal(CLAUDE_CREDENTIALS_LOAD_ERROR.to_string())
+        }
     }
     load_stored_claude_login_with(
         load_claude_credentials_from_keychain,
         || match fs::read_to_string(claude_credentials_path()) {
             Ok(raw) => Ok(Some(raw)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(_) => Err("Claude credentials file could not be read.".to_string()),
+            Err(_) => Err(CLAUDE_CREDENTIALS_FILE_UNREADABLE_ERROR.to_string()),
         },
     )
 }
@@ -3275,19 +3298,21 @@ where
             return resolve_stored_claude_login(&raw, ClaudeCredentialSource::Keychain);
         }
         Ok(None) => {}
-        Err(_) => return ClaudeLoginResolution::Terminal,
+        Err(display) => return ClaudeLoginResolution::Terminal(display),
     }
     match load_file() {
         Ok(Some(raw)) => resolve_stored_claude_login(&raw, ClaudeCredentialSource::File),
         Ok(None) => ClaudeLoginResolution::Absent,
-        Err(_) => ClaudeLoginResolution::Terminal,
+        Err(display) => ClaudeLoginResolution::Terminal(display),
     }
 }
 
 fn resolve_stored_claude_login(raw: &str, source: ClaudeCredentialSource) -> ClaudeLoginResolution {
     let raw_root: Value = match serde_json::from_str(raw) {
         Ok(root) => root,
-        Err(_) => return ClaudeLoginResolution::Terminal,
+        Err(_) => {
+            return ClaudeLoginResolution::Terminal(CLAUDE_STORED_LOGIN_MALFORMED_ERROR.to_string())
+        }
     };
     // A store with no `claudeAiOauth` at all carries no Claude login (e.g. an
     // mcpOAuth-only Keychain item, issue #219). That is absence, not a malformed
@@ -3306,7 +3331,7 @@ fn resolve_stored_claude_login(raw: &str, source: ClaudeCredentialSource) -> Cla
     }
     match parse_claude_credentials_data(raw, source) {
         Ok(credentials) => ClaudeLoginResolution::Ready(credentials),
-        Err(_) => ClaudeLoginResolution::Terminal,
+        Err(display) => ClaudeLoginResolution::Terminal(display),
     }
 }
 
@@ -3397,10 +3422,12 @@ fn parse_claude_credentials_data(
     raw: &str,
     source: ClaudeCredentialSource,
 ) -> Result<ClaudeCredentials, String> {
+    // Never the serde error's Display: invalid-type errors quote the offending
+    // value, which here is credential content, and this string reaches the card.
     let raw_root: Value =
-        serde_json::from_str(raw).map_err(|e| format!("decode Claude OAuth credentials: {}", e))?;
+        serde_json::from_str(raw).map_err(|_| CLAUDE_STORED_LOGIN_MALFORMED_ERROR.to_string())?;
     let root: ClaudeCredentialsRoot =
-        serde_json::from_str(raw).map_err(|e| format!("decode Claude OAuth credentials: {}", e))?;
+        serde_json::from_str(raw).map_err(|_| CLAUDE_STORED_LOGIN_MALFORMED_ERROR.to_string())?;
     let oauth = root
         .claude_ai_oauth
         .ok_or_else(|| "Claude OAuth credentials are missing claudeAiOauth.".to_string())?;
@@ -3408,7 +3435,7 @@ fn parse_claude_credentials_data(
         .access_token
         .map(|token| token.trim().to_string())
         .filter(|token| !token.is_empty())
-        .ok_or_else(|| "Claude OAuth credentials have no access token.".to_string())?;
+        .ok_or_else(|| CLAUDE_STORED_LOGIN_NO_ACCESS_TOKEN_ERROR.to_string())?;
     let expires_at = oauth
         .expires_at
         .and_then(|millis| Utc.timestamp_millis_opt(millis as i64).single());
@@ -3441,7 +3468,10 @@ fn claude_login_scope_slot(source: ClaudeCredentialSource) -> Result<CredentialS
                 &claude_credentials_path(),
                 Some("claudeAiOauth"),
             )
-            .map_err(|_| "Claude credential location cannot be scoped safely.".to_string())?,
+            .map_err(|_| {
+                "Claude credentials could not be loaded: the credential location cannot be scoped safely."
+                    .to_string()
+            })?,
         }),
         ClaudeCredentialSource::Environment => {
             Err("environment credentials require an explicit account-scope slot".to_string())
@@ -3449,9 +3479,73 @@ fn claude_login_scope_slot(source: ClaudeCredentialSource) -> Result<CredentialS
     }
 }
 
-#[cfg(target_os = "macos")]
-fn keychain_item_not_found(status: &std::process::ExitStatus) -> bool {
-    status.code() == Some(44)
+/// `security find-generic-password -w` prints the whole value as lowercase hex
+/// (issue #226, e.g. an item holding "café") when any byte is outside printable
+/// ASCII 0x20..=0x7E. Accept only a rendering that rule could have produced:
+/// even length, all [0-9a-f], decoding to UTF-8 with a non-printable byte.
+/// Anything else is text already and is left alone (None).
+fn decode_security_hex_output(text: &str) -> Option<String> {
+    if !text.len().is_multiple_of(2)
+        || !text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return None;
+    }
+    let bytes = (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    if bytes.iter().all(|b| (0x20..=0x7E).contains(b)) {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Post-spawn half of `load_claude_credentials_from_keychain_item`. `exit` is
+/// `ExitStatus::code()` (None = killed by a signal); 44 is item-not-found.
+fn claude_keychain_item_output(
+    exit: Option<i32>,
+    stdout: Vec<u8>,
+) -> Result<Option<String>, String> {
+    match exit {
+        Some(0) => {}
+        Some(44) => return Ok(None),
+        Some(code) => {
+            let reason = format!("Keychain read failed (security exit {code}).");
+            return Err(format!("{CLAUDE_CREDENTIALS_LOAD_PREFIX}{reason}"));
+        }
+        None => return Err(CLAUDE_KEYCHAIN_SIGNAL_ERROR.to_string()),
+    }
+    let raw = String::from_utf8(stdout).map_err(|_| CLAUDE_KEYCHAIN_NOT_TEXT_ERROR.to_string())?;
+    let raw = raw.trim_matches(['\r', '\n']);
+    let raw = decode_security_hex_output(raw).unwrap_or_else(|| raw.to_string());
+    if raw.trim().is_empty() {
+        return Err(CLAUDE_KEYCHAIN_EMPTY_ERROR.to_string());
+    }
+    Ok(Some(raw))
+}
+
+/// Post-spawn half of `load_claude_raw_token_from_keychain`.
+fn claude_raw_token_output(exit: Option<i32>, stdout: Vec<u8>) -> Result<Option<String>, String> {
+    match exit {
+        Some(0) => {}
+        Some(44) => return Ok(None),
+        Some(code) => {
+            return Err(format!(
+                "The Syrtis setup-token Keychain item could not be read (security exit {code})."
+            ))
+        }
+        None => return Err(CLAUDE_SETUP_KEYCHAIN_SIGNAL_ERROR.to_string()),
+    }
+    let raw =
+        String::from_utf8(stdout).map_err(|_| CLAUDE_SETUP_KEYCHAIN_NOT_TEXT_ERROR.to_string())?;
+    let raw = raw.trim();
+    // A hex rendering hides the stored whitespace from the first trim.
+    let raw = decode_security_hex_output(raw)
+        .map_or_else(|| raw.to_string(), |decoded| decoded.trim().to_string());
+    if raw.is_empty() {
+        return Err(CLAUDE_SETUP_KEYCHAIN_EMPTY_ERROR.to_string());
+    }
+    Ok(Some(raw))
 }
 
 /// Keychain service holding the credentials for one `CLAUDE_CONFIG_DIR`.
@@ -3499,21 +3593,8 @@ fn load_claude_credentials_from_keychain_item(
     let output = command
         .arg("-w")
         .output()
-        .map_err(|e| format!("read Claude Keychain credentials: {}", e))?;
-    if !output.status.success() {
-        return if keychain_item_not_found(&output.status) {
-            Ok(None)
-        } else {
-            Err("Claude Keychain credentials could not be read.".to_string())
-        };
-    }
-    let raw = String::from_utf8(output.stdout)
-        .map_err(|_| "Claude Keychain credentials are not UTF-8 JSON.".to_string())?;
-    let raw = raw.trim_matches(['\r', '\n']).to_string();
-    if raw.trim().is_empty() {
-        return Err("Claude Keychain credentials are empty.".to_string());
-    }
-    Ok(Some(raw))
+        .map_err(|_| CLAUDE_KEYCHAIN_SPAWN_ERROR.to_string())?;
+    claude_keychain_item_output(output.status.code(), output.stdout)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -3695,21 +3776,8 @@ fn load_claude_raw_token_from_keychain() -> Result<Option<String>, String> {
             "-w",
         ])
         .output()
-        .map_err(|e| format!("read Syrtis Claude token from Keychain: {}", e))?;
-    if !output.status.success() {
-        return if keychain_item_not_found(&output.status) {
-            Ok(None)
-        } else {
-            Err("Syrtis Claude Keychain token could not be read.".to_string())
-        };
-    }
-    let raw = String::from_utf8(output.stdout)
-        .map_err(|_| "Syrtis Claude Keychain token is not UTF-8.".to_string())?;
-    let raw = raw.trim().to_string();
-    if raw.is_empty() {
-        return Err("Syrtis Claude Keychain token is empty.".to_string());
-    }
-    Ok(Some(raw))
+        .map_err(|_| CLAUDE_SETUP_KEYCHAIN_SPAWN_ERROR.to_string())?;
+    claude_raw_token_output(output.status.code(), output.stdout)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -6592,7 +6660,7 @@ mod tests {
         ] {
             assert!(matches!(
                 resolve_stored_claude_login(malformed, ClaudeCredentialSource::Keychain),
-                ClaudeLoginResolution::Terminal
+                ClaudeLoginResolution::Terminal(_)
             ));
         }
 
@@ -6691,7 +6759,7 @@ mod tests {
                 ClaudeLoginResolution::Absent => "absent",
                 ClaudeLoginResolution::ExplicitLogout => "explicit-logout",
                 ClaudeLoginResolution::Ready(_) => "ready",
-                ClaudeLoginResolution::Terminal => "terminal",
+                ClaudeLoginResolution::Terminal(_) => "terminal",
             };
             assert_eq!(actual, expected, "unexpected resolution for {raw}");
         }
@@ -6755,6 +6823,297 @@ mod tests {
         assert_eq!(primary_calls.get(), 0);
         assert_eq!(setup_loads.get(), 1);
         assert_eq!(setup_calls.get(), 1);
+    }
+
+    /// What `security -w` prints for a value with a non-printable byte.
+    fn security_hex(value: &str) -> String {
+        value.bytes().map(|b| format!("{b:02x}")).collect()
+    }
+
+    const SENTINEL_LOGIN: &str = r#"{"claudeAiOauth":"SENTINEL"}"#;
+    const KEYCHAIN_EXIT_51: &str =
+        "Claude credentials could not be loaded: Keychain read failed (security exit 51).";
+
+    /// Issue #226: a login item holding "café" comes back from `security` as hex.
+    #[test]
+    fn issue_226_keychain_hex_output_decodes_to_the_stored_login() {
+        const CAFE_LOGIN: &str = r#"{"claudeAiOauth":{"accessToken":"fake-access","refreshToken":"fake-refresh","subscriptionType":"café"}}"#;
+        let stdout = format!("{}\n", security_hex(CAFE_LOGIN)).into_bytes();
+        let raw = claude_keychain_item_output(Some(0), stdout)
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw, CAFE_LOGIN);
+        assert!(matches!(
+            resolve_stored_claude_login(&raw, ClaudeCredentialSource::Keychain),
+            ClaudeLoginResolution::Ready(ref c) if c.subscription_type.as_deref() == Some("café")
+        ));
+
+        let ascii = r#"{"claudeAiOauth":{"accessToken":"fake-access"}}"#;
+        let stdout = format!("{ascii}\n").into_bytes();
+        assert_eq!(
+            claude_keychain_item_output(Some(0), stdout),
+            Ok(Some(ascii.to_string()))
+        );
+    }
+
+    #[test]
+    fn security_hex_decode_leaves_text_that_is_not_a_hex_rendering() {
+        // Control: the accepted shape does decode.
+        assert_eq!(
+            decode_security_hex_output("636166c3a9").as_deref(),
+            Some("café")
+        );
+        // Odd length, uppercase, not UTF-8, printable-only, plain text.
+        for text in ["636166c3a", "636166C3A9", "ff", "6162", "fake-token"] {
+            assert_eq!(decode_security_hex_output(text), None, "{text}");
+            let bytes = text.as_bytes().to_vec();
+            assert_eq!(
+                claude_keychain_item_output(Some(0), bytes.clone()),
+                Ok(Some(text.to_string()))
+            );
+            assert_eq!(
+                claude_raw_token_output(Some(0), bytes),
+                Ok(Some(text.to_string()))
+            );
+        }
+        // A JSON-number item ("1234") is also a valid hex rendering, so it now
+        // fails closed as malformed instead of reading as absent. Accepted in
+        // the C1 plan: no login item holds a bare number.
+        let raw = claude_keychain_item_output(Some(0), b"1234\n".to_vec())
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw, "\u{12}\u{34}");
+        assert!(matches!(
+            resolve_stored_claude_login(&raw, ClaudeCredentialSource::Keychain),
+            ClaudeLoginResolution::Terminal(ref d) if d == CLAUDE_STORED_LOGIN_MALFORMED_ERROR
+        ));
+    }
+
+    #[test]
+    fn claude_setup_token_hex_output_decodes_and_trims_again() {
+        let stdout = format!("{}\n", security_hex("fake-setup-token\n")).into_bytes();
+        assert_eq!(
+            claude_raw_token_output(Some(0), stdout),
+            Ok(Some("fake-setup-token".to_string()))
+        );
+        // Only whitespace once decoded: empty, not a token.
+        assert_eq!(
+            claude_raw_token_output(Some(0), b"0a0a\n".to_vec()),
+            Err(CLAUDE_SETUP_KEYCHAIN_EMPTY_ERROR.to_string())
+        );
+    }
+
+    /// Issue #225: every read failure names its class; the setup-token item's
+    /// messages never read as the login item's.
+    #[test]
+    fn claude_keychain_read_failures_carry_distinct_class_messages() {
+        let cases = [
+            (
+                Some(51),
+                vec![],
+                KEYCHAIN_EXIT_51,
+                "The Syrtis setup-token Keychain item could not be read (security exit 51).",
+            ),
+            (
+                None,
+                vec![],
+                CLAUDE_KEYCHAIN_SIGNAL_ERROR,
+                CLAUDE_SETUP_KEYCHAIN_SIGNAL_ERROR,
+            ),
+            (
+                Some(0),
+                vec![0xff],
+                CLAUDE_KEYCHAIN_NOT_TEXT_ERROR,
+                CLAUDE_SETUP_KEYCHAIN_NOT_TEXT_ERROR,
+            ),
+            (
+                Some(0),
+                b"\n".to_vec(),
+                CLAUDE_KEYCHAIN_EMPTY_ERROR,
+                CLAUDE_SETUP_KEYCHAIN_EMPTY_ERROR,
+            ),
+        ];
+        for (exit, stdout, login, setup) in cases {
+            assert_eq!(
+                claude_keychain_item_output(exit, stdout.clone()),
+                Err(login.to_string())
+            );
+            assert_eq!(
+                claude_raw_token_output(exit, stdout),
+                Err(setup.to_string())
+            );
+            assert_ne!(login, setup);
+        }
+        assert_ne!(
+            CLAUDE_KEYCHAIN_SPAWN_ERROR,
+            CLAUDE_SETUP_KEYCHAIN_SPAWN_ERROR
+        );
+        assert_eq!(
+            claude_keychain_item_output(Some(44), b"x".to_vec()),
+            Ok(None)
+        );
+        assert_eq!(claude_raw_token_output(Some(44), b"x".to_vec()), Ok(None));
+    }
+
+    /// Display test (c): each Terminal class survives resolution unchanged.
+    #[test]
+    fn claude_stored_login_terminal_carries_each_class_message() {
+        for class in [
+            CLAUDE_KEYCHAIN_SPAWN_ERROR,
+            KEYCHAIN_EXIT_51,
+            CLAUDE_KEYCHAIN_NOT_TEXT_ERROR,
+            CLAUDE_KEYCHAIN_EMPTY_ERROR,
+        ] {
+            let file_loads = std::cell::Cell::new(0);
+            let login = load_stored_claude_login_with(
+                || Err(class.to_string()),
+                || {
+                    file_loads.set(file_loads.get() + 1);
+                    Ok(None)
+                },
+            );
+            assert!(
+                matches!(login, ClaudeLoginResolution::Terminal(ref d) if d == class),
+                "{class}"
+            );
+            assert_eq!(file_loads.get(), 0);
+        }
+        let login = load_stored_claude_login_with(
+            || Ok(None),
+            || Err(CLAUDE_CREDENTIALS_FILE_UNREADABLE_ERROR.to_string()),
+        );
+        assert!(matches!(
+            login,
+            ClaudeLoginResolution::Terminal(ref d) if d == CLAUDE_CREDENTIALS_FILE_UNREADABLE_ERROR
+        ));
+        for (raw, expected) in [
+            ("{", CLAUDE_STORED_LOGIN_MALFORMED_ERROR),
+            (
+                r#"{"claudeAiOauth":{}}"#,
+                CLAUDE_STORED_LOGIN_NO_ACCESS_TOKEN_ERROR,
+            ),
+            (SENTINEL_LOGIN, CLAUDE_STORED_LOGIN_MALFORMED_ERROR),
+        ] {
+            assert!(
+                matches!(
+                    resolve_stored_claude_login(raw, ClaudeCredentialSource::Keychain),
+                    ClaudeLoginResolution::Terminal(ref d) if d == expected
+                ),
+                "{raw}"
+            );
+        }
+    }
+
+    /// Display tests (a) and (d): the Terminal text reaches the card verbatim,
+    /// and neither request runs.
+    #[tokio::test]
+    async fn claude_terminal_display_reaches_the_card_verbatim() {
+        let requests = std::cell::Cell::new(0);
+        let setup_loads = std::cell::Cell::new(0);
+        let (source, outcome) = fetch_claude_login_or_setup_with(
+            ClaudeLoginResolution::Terminal(CLAUDE_STORED_LOGIN_MALFORMED_ERROR.to_string()),
+            |_| async {
+                requests.set(requests.get() + 1);
+                ("oauth", claude_test_success_outcome())
+            },
+            || {
+                setup_loads.set(setup_loads.get() + 1);
+                Ok(Some(claude_test_setup_token()))
+            },
+            |_| async {
+                requests.set(requests.get() + 1);
+                ("setup-token", claude_test_success_outcome())
+            },
+        )
+        .await;
+        assert_eq!(source, "oauth");
+        assert!(matches!(
+            outcome,
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::Terminal { ref display })
+                if display == CLAUDE_STORED_LOGIN_MALFORMED_ERROR
+        ));
+        assert_eq!((requests.get(), setup_loads.get()), (0, 0));
+
+        let (source, outcome) = fetch_claude_login_or_setup_with(
+            ClaudeLoginResolution::Absent,
+            |_| async {
+                requests.set(requests.get() + 1);
+                ("oauth", claude_test_success_outcome())
+            },
+            || Err(CLAUDE_SETUP_KEYCHAIN_EMPTY_ERROR.to_string()),
+            |_| async {
+                requests.set(requests.get() + 1);
+                ("setup-token", claude_test_success_outcome())
+            },
+        )
+        .await;
+        assert_eq!(source, "setup-token");
+        assert!(matches!(
+            outcome,
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::Terminal { ref display })
+                if display == CLAUDE_SETUP_KEYCHAIN_EMPTY_ERROR
+        ));
+        assert_eq!(requests.get(), 0);
+    }
+
+    /// Display test (b) and config-dir class pass-through.
+    #[test]
+    fn claude_config_dir_account_shows_the_read_class_message() {
+        for class in [
+            CLAUDE_KEYCHAIN_SPAWN_ERROR,
+            KEYCHAIN_EXIT_51,
+            CLAUDE_KEYCHAIN_NOT_TEXT_ERROR,
+            CLAUDE_KEYCHAIN_EMPTY_ERROR,
+        ] {
+            let error = load_claude_config_dir_credentials_with(G_TEST_CONFIG_DIR, |_| {
+                Err(class.to_string())
+            })
+            .unwrap_err();
+            assert_eq!(error, class);
+        }
+        let error = load_claude_config_dir_credentials_with(G_TEST_CONFIG_DIR, |_| {
+            Ok(Some(SENTINEL_LOGIN.to_string()))
+        })
+        .unwrap_err();
+        assert_eq!(error, CLAUDE_STORED_LOGIN_MALFORMED_ERROR);
+    }
+
+    /// serde's invalid-type error quotes the value, i.e. credential bytes; no
+    /// card text may carry it, on the resolve path or the refresh reload path.
+    #[tokio::test]
+    async fn claude_malformed_login_error_never_quotes_the_stored_value() {
+        // Control: the fixture does trigger a quoting serde error.
+        let serde_error =
+            serde_json::from_str::<ClaudeCredentialsRoot>(SENTINEL_LOGIN).unwrap_err();
+        assert!(serde_error.to_string().contains("SENTINEL"));
+
+        assert_eq!(
+            parse_claude_credentials_data(SENTINEL_LOGIN, ClaudeCredentialSource::Keychain)
+                .unwrap_err(),
+            CLAUDE_STORED_LOGIN_MALFORMED_ERROR
+        );
+        assert!(matches!(
+            resolve_stored_claude_login(SENTINEL_LOGIN, ClaudeCredentialSource::Keychain),
+            ClaudeLoginResolution::Terminal(ref d) if !d.contains("SENTINEL")
+        ));
+
+        let scope = TestRefreshScope::new("claude", "sentinel-reload");
+        let failure = refresh_claude_credentials_with(
+            &claude_test_login_credentials(),
+            &scope,
+            |_| parse_claude_credentials_data(SENTINEL_LOGIN, ClaudeCredentialSource::Keychain),
+            |_, _| async { Err(ProviderFetchFailure::terminal("request must not run")) },
+            |_| Ok(()),
+            |_| Ok(()),
+            checkpoint_at(None),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            failure,
+            ProviderFetchFailure::Terminal { ref display } if display == CLAUDE_STORED_LOGIN_MALFORMED_ERROR
+        ));
+        scope.cleanup();
     }
 
     fn timeout_diagnostic() -> SafeTransportDiagnostic {
