@@ -4,8 +4,8 @@ id: kb-plan-provider-quota-pace
 kind: plan
 scope: repository
 read_when: implementing or reviewing pace duration and historical pace for provider quota cards
-last_verified: 2026-09-08
-sources: ["crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_usage.rs", "crates/tb_core_ffi/src/agent_antigravity.rs", "crates/tb_core_ffi/src/agent_copilot.rs", "crates/tb_core_ffi/src/agent_grok.rs", "crates/tb_core_ffi/src/agent_opencode_go.rs", "crates/tb_core_ffi/src/opencode_integrations.rs", "Sources/Syrtis/Views/AgentLimitsCard.swift", "Sources/TokenBarCore/UsageAttributionSettings.swift", "Sources/TokenBarCore/AgentUsage.swift", "Sources/TokenBarCore/UsagePace.swift", "Sources/Syrtis/TrayAnimator.swift", "Sources/Syrtis/DashboardModel.swift", "docs/knowledge/plans/codex-historical-pace-v2.md", "docs/knowledge/architecture.md", "docs/knowledge/verification.md", "public TokenBar-Windows PR #7", "public TokenBar PR #114", "public TokenBar-Windows PR #12", "official GitHub Copilot billing documentation", "official Claude usage credits documentation"]
+last_verified: 2026-09-27
+sources: ["crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_usage.rs", "crates/tb_core_ffi/src/agent_antigravity.rs", "crates/tb_core_ffi/src/agent_copilot.rs", "crates/tb_core_ffi/src/agent_grok.rs", "crates/tb_core_ffi/src/agent_opencode_go.rs", "crates/tb_core_ffi/src/agent_kiro.rs", "crates/tb_core_ffi/src/agent_grokbot.rs", "crates/tb_core_ffi/src/opencode_integrations.rs", "Sources/Syrtis/Views/AgentLimitsCard.swift", "Sources/TokenBarCore/UsageAttributionSettings.swift", "Sources/TokenBarCore/AgentUsage.swift", "Sources/TokenBarCore/UsagePace.swift", "Sources/Syrtis/TrayAnimator.swift", "Sources/Syrtis/DashboardModel.swift", "docs/knowledge/plans/codex-historical-pace-v2.md", "docs/knowledge/architecture.md", "docs/knowledge/verification.md", "public TokenBar-Windows PR #7", "public TokenBar PR #114", "public TokenBar-Windows PR #12", "official GitHub Copilot billing documentation", "official Claude usage credits documentation"]
 ---
 
 # Provider-wide quota pace plan
@@ -81,7 +81,23 @@ Rust provider adapter 必須先把每個 emitted window 分類，分類結果是
 | `recurringQuota` | 有 bounded `0...100` utilization、下一次 reset，且 reset 後 quota 重新開始 | 必須進入 duration、sampling 與 Historical lifecycle |
 | `recurringQuotaMissingReset` | 百分比看似 recurring，但 provider payload 沒有 reset | 顯示 `unavailable(missingReset)`；不能假設月初 |
 | `nonRecurringCap` | Spend／credit cap 沒有可證明的 recurring reset | 不計算 pace，顯示 cap 語意；不得偽裝成 quota pace |
-| `invalid` | 非 finite、越界、expired reset 或 contradictory bounds | 不 record；保留 last good card，或依既有 provider error contract 顯示錯誤 |
+| `invalid` | 非 finite、越界、expired reset 或 contradictory bounds | 不 record；卡片層的處置見下方 [Expired reset 的實際處置](#expired-reset-的實際處置) |
+
+### Expired reset 的實際處置
+
+「不 record」對所有 provider 都成立：共用的 pace enrichment [`enrich_snapshot_with`](../../../crates/tb_core_ffi/src/agent_usage.rs) 在 `agent_usage.rs:4683` 遇到 `reset_at <= now` 就把 window 標成 `unavailable(invalidEvidence)`，不產生 observation，也不寫 history。
+
+卡片層沒有共用的 enforcement point。共用建構點 `UsageWindow::try_from_provider_used_percent`（`agent_usage.rs:746`）只檢查百分比，不看 `resets_at`，所以卡片怎麼處置由各 adapter 自己決定。目前明確處理過期 reset 的是這三個：
+
+| Provider | 位置 | 處置 | 對卡片與 last-good 的效果 |
+|---|---|---|---|
+| Kiro | [`agent_kiro.rs`](../../../crates/tb_core_ffi/src/agent_kiro.rs):16（契約說明）、:192（`ResetEvidence::Expired` 分支）、:235（分類） | 整個 response 回 `ProviderFetchFailure::terminal` | 走 `apply_provider_outcome_with` 的 Terminal 分支（`agent_usage.rs:1443`）：**清掉** last-good，顯示錯誤卡 |
+| Grok Bot | [`agent_grokbot.rs`](../../../crates/tb_core_ffi/src/agent_grokbot.rs):321-335 | `map_response` 回錯誤，`:188` 包成 terminal | 同 Kiro：清掉 last-good，顯示錯誤卡 |
+| OpenCode Go | [`agent_opencode_go.rs`](../../../crates/tb_core_ffi/src/agent_opencode_go.rs):228 | 只丟掉過期的那個 window | 其餘 window 照常是 Success，依 `usable_success` 進 last-good，過期的那列從卡上消失；三個 window 全部丟光時，`:188-194` 回 terminal，效果同上 |
+
+這份契約原本允許兩種處置：「保留 last good card」或「依既有 provider error contract 顯示錯誤」。實際上出現的是另外的組合：Kiro、Grok Bot 與 OpenCode Go 全部過期時是顯示錯誤，而且 terminal 會**清掉** last-good；OpenCode Go 只有部分 window 過期時是第三種——部分成功，少一列的卡照常寫進 last-good、覆寫前一筆。目前沒有任何 provider 保留 last good card。刻意不讓 adapter 把 reset 清成 `None` 保留整個 window：Kiro 與 OpenCode Go 的 `usable_success` 只看 window 是否非空，這樣的卡會被當成成功寫進 last-good，而且帶著過期週期的百分比蓋掉前一筆好的讀數。
+
+其他 adapter 在建構前沒有檢查過期 reset：卡片照常產生，過期 reset 只會在上述 pace 層被標成 `invalidEvidence`，而卡片依各自的 `usable_success` 判定仍可能寫進 last-good。Antigravity 的 `binding_candidate_is_better`（`agent_antigravity.rs:2028`）雖然會過濾 `reset > now`，但那只是在重複 model 候選之間排序時把過期 reset 當成沒有 reset，選出的候選仍帶著原本的 reset，所以不算卡片層的處置。決定見 [#318](https://github.com/Nanako0129/syrtis/issues/318)。
 
 Claude `extra_usage` 目前只有 monthly cap 與 utilization，沒有 reset timestamp。官方說明確認它是 [monthly spending cap](https://support.claude.com/en/articles/12429409-manage-usage-credits-for-paid-claude-plans)，但沒有承諾 calendar boundary；因此本版本把它鎖定為 `recurringQuotaMissingReset`，不以「Monthly」文字推導 duration。這是唯一允許不顯示 pace 的正常 emitted percentage card，而且原因必須可見、可測，不得被歸類為「其他 provider 尚未支援」。若未來 payload 增加 reset，adapter 依 schema version 升級為 `recurringQuota`。
 
