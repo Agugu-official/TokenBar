@@ -95,7 +95,7 @@ Rust provider adapter 必須先把每個 emitted window 分類，分類結果是
 | Grok Bot | [`agent_grokbot.rs`](../../../crates/tb_core_ffi/src/agent_grokbot.rs):321-335 | `map_response` 回錯誤，`:188` 包成 terminal | 同 Kiro：清掉 last-good，顯示錯誤卡 |
 | OpenCode Go | [`agent_opencode_go.rs`](../../../crates/tb_core_ffi/src/agent_opencode_go.rs):228 | 只丟掉過期的那個 window | 其餘 window 照常是 Success，依 `usable_success` 進 last-good，過期的那列從卡上消失；三個 window 全部丟光時，`:188-194` 回 terminal，效果同上 |
 
-所以上表的兩種處置中，實際採用的是「依 provider error contract 顯示錯誤」，而且 terminal 會清掉 last-good；目前沒有任何 provider 採用「保留 last good card」。刻意不讓 adapter 把 reset 清成 `None` 保留卡片：Kiro 與 OpenCode Go 的 `usable_success` 只看 window 是否非空，這樣的卡會被當成成功寫進 last-good，蓋掉前一筆好的讀數。
+這份契約原本允許兩種處置：「保留 last good card」或「依既有 provider error contract 顯示錯誤」。實際上出現的是另外的組合：Kiro、Grok Bot 與 OpenCode Go 全部過期時是顯示錯誤，而且 terminal 會**清掉** last-good；OpenCode Go 只有部分 window 過期時是第三種——部分成功，少一列的卡照常寫進 last-good、覆寫前一筆。目前沒有任何 provider 保留 last good card。刻意不讓 adapter 把 reset 清成 `None` 保留整個 window：Kiro 與 OpenCode Go 的 `usable_success` 只看 window 是否非空，這樣的卡會被當成成功寫進 last-good，而且帶著過期週期的百分比蓋掉前一筆好的讀數。
 
 其他 adapter 在建構前沒有檢查過期 reset；它們的過期 reset 只會在上述 pace 層被標成 `invalidEvidence`。決定見 [#318](https://github.com/Nanako0129/syrtis/issues/318)。
 
