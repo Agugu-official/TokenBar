@@ -3,6 +3,21 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>2.0.1</title>
+            <pubDate>Sat, 26 Sep 2026 20:16:43 +0000</pubDate>
+            <link>https://github.com/Nanako0129/syrtis/releases/tag/v2.0.1</link>
+            <sparkle:version>1248</sparkle:version>
+            <sparkle:shortVersionString>2.0.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>Fixes:</b>
+<ul>
+<li>Hover tooltips in the glass panel were hard to read over a list. On macOS 27 the tooltips used clear glass, which barely blurs what is behind it, so over the window history the rows beneath showed through the tooltip's own figures. The tooltips now use the same frosted glass as the panel.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/syrtis/releases/download/v2.0.1/Syrtis.app.tar.gz" length="11057571" type="application/octet-stream" sparkle:edSignature="7xDdl8fZXkMbjtX+7pH4vj1IYkG6IfrgEOaAaBZR95nVA3yvjgowZVXpHpuqSoAfqZXtDgg7c0j3ynlZCeJqCA=="/>
+        </item>
+        <item>
             <title>2.0.0</title>
             <pubDate>Sat, 26 Sep 2026 03:39:03 +0000</pubDate>
             <link>https://github.com/Nanako0129/syrtis/releases/tag/v2.0.0</link>
@@ -89,21 +104,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.20.0/TokenBar.app.tar.gz" length="10610821" type="application/octet-stream" sparkle:edSignature="P9kS8vrH7N/19zH+ByASROcXK2O7I8WPBBOIrzBN6yZncYxF9Ekhlodn89OpBefVvvi998lWnGkJoADh+r8kAw=="/>
-        </item>
-        <item>
-            <title>1.19.1</title>
-            <pubDate>Sat, 19 Sep 2026 02:29:09 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.19.1</link>
-            <sparkle:version>1134</sparkle:version>
-            <sparkle:shortVersionString>1.19.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>Fixes:</b>
-<ul>
-<li>The Quota lens could report that no history had ever been recorded, about history that was still on disk. Past windows and When the allowance goes fill on launch and could go empty after the app had been running a while. Nothing was lost - relaunching brought the cards back. A refresh that cannot read any history no longer replaces what is already on screen: quota history accumulates, so a refresh returning nothing after those cards have been filled is that pass failing to answer rather than the history ceasing to exist, and the cards now keep what they have. Why those reads come back empty is still under investigation; this does not claim to have fixed that, it stops it from erasing what was already recorded.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.19.1/TokenBar.app.tar.gz" length="10547020" type="application/octet-stream" sparkle:edSignature="57sgKn/upAmLiTqXC9VrD6+moOcZg2bqE+J2XZZmvxXsYK7Wc2m9IRyo59G5igWS57exAxUD8mWH4HNIB3C/Dw=="/>
         </item>
         <item>
             <title>1.1.1</title>
