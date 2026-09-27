@@ -412,7 +412,11 @@ def advance_touched(root):
     current=gitlink_pin(root) or committed.stdout.strip()
     mb=_merge_base(root)
     at_base=_git(root,'rev-parse',f'{mb}:vendor/tokscale-core') if mb else None
-    if mb and _ok(at_base) and at_base.stdout.strip()!=current:
+    # Either the committed gitlink or the checkout moving counts: a branch that
+    # committed an advance while the submodule still sits at the old pin must
+    # not fall through to the HEAD range and miss the committed FFI edits.
+    base_link=at_base.stdout.strip() if _ok(at_base) else None
+    if base_link and (base_link!=current or base_link!=committed.stdout.strip()):
         rng=[mb]
     elif current!=committed.stdout.strip():
         rng=['HEAD']
@@ -768,6 +772,21 @@ def self_test():
             git('update-ref','refs/remotes/origin/main','HEAD')
             (r/'crates/tb_core_ffi/lib.rs').write_text('b'); git('add','crates'); git('commit','-q','-m','ffi first')
             git('update-index','--cacheinfo',f'160000,{FIXTURE_PIN},vendor/tokscale-core'); git('commit','-q','-m','then the advance')
+            self.assertEqual(advance_touched(r),{'crates/tb_core_ffi'})
+        def test_committed_branch_advance_with_stale_checkout_is_not_missed(self):
+            import subprocess
+            r=self.root(); git=self.git_repo(r)
+            engine=r/'vendor/tokscale-core'; engine.mkdir(parents=True,exist_ok=True)
+            subprocess.run(['git','init','-q'],cwd=engine,check=True,capture_output=True)
+            subprocess.run(['git','-c','user.email=t@t','-c','user.name=t','commit','-q','--allow-empty','-m','e'],cwd=engine,check=True,capture_output=True)
+            old_pin=subprocess.run(['git','rev-parse','HEAD'],cwd=engine,capture_output=True,text=True).stdout.strip()
+            (r/'crates/tb_core_ffi').mkdir(parents=True); (r/'crates/tb_core_ffi/lib.rs').write_text('a')
+            git('add','crates','docs','README.md','AGENTS.md','CLAUDE.md','landing','vendor/README.md','vendor/AGENTS.md')
+            git('update-index','--add','--cacheinfo',f'160000,{old_pin},vendor/tokscale-core'); git('commit','-q','-m','base')
+            git('update-ref','refs/remotes/origin/main','HEAD')
+            (r/'crates/tb_core_ffi/lib.rs').write_text('b'); git('add','crates')
+            git('update-index','--cacheinfo',f'160000,{FIXTURE_PIN},vendor/tokscale-core'); git('commit','-q','-m','advance, checkout left behind')
+            self.assertEqual(gitlink_pin(r),old_pin,'fixture: checkout still at the old pin')
             self.assertEqual(advance_touched(r),{'crates/tb_core_ffi'})
         def test_uncommitted_advance_is_measured_against_head(self):
             import subprocess
