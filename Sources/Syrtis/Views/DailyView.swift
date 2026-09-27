@@ -102,7 +102,7 @@ struct DailyView: View {
             if !allow.contains(cc.client) { continue }
             let tokens = Self.tokenTotal(cc.tokens)
             if tokens <= 0 && cc.cost <= 0 && cc.messages <= 0 { continue }
-            let model = cc.modelId.isEmpty ? "unknown" : cc.modelId
+            let model = cc.modelId.isEmpty ? "unknown" : ModelGrouping.groupID(cc.modelId)
             let key = "\(model)|\(cc.providerId)"
             var slot = grouped[key] ?? ModelSlice(
                 key: key, model: model, provider: cc.providerId,

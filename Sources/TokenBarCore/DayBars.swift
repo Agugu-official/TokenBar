@@ -77,7 +77,7 @@ public enum DayBars {
             guard allowed.contains(client.client) else { continue }
             let tokens = client.tokens.total
             if tokens <= 0 && client.cost <= 0 { continue }
-            let model = client.modelId.isEmpty ? "unknown" : client.modelId
+            let model = client.modelId.isEmpty ? "unknown" : ModelGrouping.groupID(client.modelId)
             let key = stackBy == .model ? model : client.client
             var slot = grouped[key] ?? {
                 switch stackBy {

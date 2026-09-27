@@ -238,6 +238,32 @@ mod tests {
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    /// The display-grouping case table is shared with SelfTest's
+    /// `ModelGrouping.groupID` check. Asserting it against the engine's own
+    /// grouping function ties the Swift helper to the Rust fold on the table's
+    /// inputs: a pin advance that changes the result for any of them fails
+    /// here. A change on inputs the table does not list is not caught.
+    #[test]
+    fn model_grouping_cases_match_the_engine() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../Tests/fixtures/model-grouping-cases.json");
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("case table missing at {}: {e}", path.display()));
+        let table: serde_json::Value = serde_json::from_str(&text).expect("case table parses");
+        let cases = table["cases"].as_array().expect("`cases` is an array");
+        // Control: an empty or truncated table must not pass vacuously.
+        assert!(cases.len() >= 17, "case table has {} rows, expected >= 17", cases.len());
+        for case in cases {
+            let input = case[0].as_str().expect("input is a string");
+            let expected = case[1].as_str().expect("expected is a string");
+            assert_eq!(
+                tokscale_core::normalize_model_for_grouping(input),
+                expected,
+                "engine grouping for {input}"
+            );
+        }
+    }
+
     struct FixtureHome(PathBuf);
 
     impl FixtureHome {
