@@ -508,6 +508,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func applyMenuBarState() {
         let mode = TrayMode.current
         let quotaRemaining = trayAnimator?.quotaRemaining
+        // Before the title, so a gauge drawn fresh minutes ago turns grey on
+        // the same pass as the title beside it (#420).
+        trayAnimator?.syncStaleGauge()
         let rate = trayAnimator?.tokensPerMinRate ?? lastRate
         statusController?.updateTitle(
             mode.title(graph: lastGraph, tokensPerMin: rate, quotaRemaining: quotaRemaining),

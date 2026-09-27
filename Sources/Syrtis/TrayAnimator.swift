@@ -160,6 +160,9 @@ final class TrayAnimator {
         iconSettingsSignature = Self.currentIconSignature()
         controller?.setAppearanceChangeHandler { [weak self] in
             self?.refreshIcon()
+            // The stale title grey depends on the appearance too (#420); the
+            // title is redrawn by the menu-bar pass, not by `refreshIcon`.
+            self?.onQuotaUpdated?()
         }
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main
@@ -201,6 +204,21 @@ final class TrayAnimator {
     }
 
     /// Draws the current gauge style immediately (no-op for cat/parrot).
+    /// The stale state the gauge was last drawn with. The title is recomputed
+    /// every ~30 s, the gauge only on quota polls (~5 min), so without this the
+    /// title could turn grey minutes before the gauge (#420).
+    private var drawnStale: Bool?
+
+    /// Redraws the gauge when its stale state no longer matches `readingIsStaleNow`.
+    /// Called from the menu-bar pass that recomputes the title, so the two
+    /// cross the 30-minute threshold on the same tick.
+    func syncStaleGauge() {
+        guard QuotaIconStyle(rawValue: currentStyle) != nil,
+              drawnStale != nil, drawnStale != readingIsStaleNow
+        else { return }
+        refreshIcon()
+    }
+
     /// Whether the reading the menu bar shows is stale now: the gauge fill
     /// and, since #420, the quota title use the same answer.
     var readingIsStaleNow: Bool {
@@ -221,6 +239,7 @@ final class TrayAnimator {
         ) ?? .warningOnly
         presentedAnimationKey = nil
         let stale = readingIsStaleNow
+        drawnStale = stale
         controller?.setStaticIcon(
             TrayIcons.image(
                 style: gaugeStyle, remaining: quotaRemaining,
