@@ -34,12 +34,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Restores the dependency cache ci.yml's build job keeps (shared-key
-      # replaces the per-job part of the key) but never writes it: that job is
-      # the one writer, and two jobs saving one key at once only race.
+      # Restores the dependency cache ci.yml's build job keeps (the same
+      # shared-key) but never writes it: that job is the one writer, and two
+      # jobs saving one key at once only race.
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: build
+          shared-key: build-with-tests
           save-if: false
 
       - name: Build Rust staticlib
