@@ -2568,10 +2568,38 @@ enum SelfTest {
             expect(
                 onboardingDismissDefaults.object(forKey: AttributionOnboardingCard.dismissedKey) == nil,
                 "onboarding dismissal flag starts unset")
+            // `mayShow` decides whether the Quota lens fetches the model report
+            // for the card, so a wrong answer either starts a scan nobody needs
+            // or leaves the card unable to appear there.
+            let userArguments = ["Syrtis"]
+            expect(
+                AttributionOnboardingCard.mayShow(
+                    defaults: onboardingDismissDefaults, arguments: userArguments),
+                "onboarding mayShow with nothing confirmed and no dismissal")
+            expect(
+                !AttributionOnboardingCard.mayShow(
+                    defaults: onboardingDismissDefaults, arguments: ["Syrtis", "--selftest"]),
+                "onboarding mayShow is false under a non-user runtime")
             AttributionOnboardingCard.markDismissed(defaults: onboardingDismissDefaults)
             expect(
                 onboardingDismissDefaults.bool(forKey: AttributionOnboardingCard.dismissedKey) == true,
                 "\"Not now\" writes the dismissal flag")
+            expect(
+                !AttributionOnboardingCard.mayShow(
+                    defaults: onboardingDismissDefaults, arguments: userArguments),
+                "onboarding mayShow is false once dismissed")
+            onboardingDismissDefaults.removeObject(forKey: AttributionOnboardingCard.dismissedKey)
+            if let confirmedRaw = UsageAttribution.confirmedRaw(
+                updating: nil,
+                records: [UsageAttribution.Record(
+                    client: "claude", provider: "anthropic", model: nil, state: .assigned("claude"))])
+            {
+                onboardingDismissDefaults.set(confirmedRaw, forKey: UsageAttribution.confirmedKey)
+            }
+            expect(
+                !AttributionOnboardingCard.mayShow(
+                    defaults: onboardingDismissDefaults, arguments: userArguments),
+                "onboarding mayShow is false once anything is confirmed")
         } else {
             expect(false, "isolated onboarding dismissal defaults suite is available")
         }
