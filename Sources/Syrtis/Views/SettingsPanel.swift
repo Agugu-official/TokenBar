@@ -484,7 +484,7 @@ struct SettingsPanel: View {
                                         limitsHiddenRaw = hidden.sorted().joined(separator: ",")
                                     }
                                 ))
-                                .disabled(tabHidden)
+                                .disabled(tabHidden || DemoData.ignoresLocalVisibility)
                                 .toggleStyle(.switch)
                                 .controlSize(.mini)
                                 .labelsHidden()
@@ -612,6 +612,7 @@ struct SettingsPanel: View {
                                             tabsHiddenRaw = hidden.sorted().joined(separator: ",")
                                         }
                                     ))
+                                    .disabled(DemoData.ignoresLocalVisibility)
                                     .toggleStyle(.switch)
                                     .controlSize(.mini)
                                     .labelsHidden()

@@ -137,7 +137,7 @@ sample <pid> 25 1 -file <輸出路徑>
 
 在 `tokscale-core` 的 main 上（#6）。TokenBar 的 `vendor/tokscale-core` pin 在本段最初撰寫時仍指向 `5546bd5`，所以**這個改善不在 app 裡**。要出貨得由另一個 TokenBar 變更推進 reviewed gitlink，並在該 PR 產生驗收證據。
 
-> 2026-09-27 更新：engine PR #6 以 [`d9b1b969`](https://github.com/Nanako0129/tokscale-core/commit/d9b1b969af8536790e0d917e04633ab35be32b7f) 合併，是現行 reviewed pin `bb9a2a9` 的祖先，所以這個改善**已經在 app 裡**。上面那句保留為撰寫當時的事實。本節引用的 `921412b` 是 PR 分支上的 commit，不在 engine `main` 上。
+> 2026-09-27 更新：engine PR #6 以 [`d9b1b969`](https://github.com/Nanako0129/tokscale-core/commit/d9b1b969af8536790e0d917e04633ab35be32b7f) 合併，是 reviewed pin `bb9a2a9`（及其後的 `319ffa8`）的祖先，所以這個改善**已經在 app 裡**。上面那句保留為撰寫當時的事實。本節引用的 `921412b` 是 PR 分支上的 commit，不在 engine `main` 上。
 
 ### 設計
 

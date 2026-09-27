@@ -449,8 +449,16 @@ private struct MenuBarMock: View {
     private func icon(remaining: Double?) -> some View {
         if let gauge = QuotaIconStyle(rawValue: animationStyle) {
             let coloring = IconColoring(rawValue: iconColoringRaw) ?? .warningOnly
+            // Same stale rule as the menu bar (#8), evaluated at render time.
+            let stale = TrayAnimator.readingIsStale(
+                payload: agentUsage,
+                persistedSelection: quotaSource,
+                excluding: ClientRegistry.quotaExcludedClients(),
+                defaults: UsageDataSources.current.allowsQuotaCachePersistence ? .standard : nil,
+                now: Date())
             Image(nsImage: TrayIcons.image(
-                style: gauge, remaining: remaining, dark: dark, coloring: coloring))
+                style: gauge, remaining: remaining, dark: dark, coloring: coloring,
+                stale: stale))
         } else {
             let frames = PreviewFrames.frames(style: animationStyle, dark: dark)
             if frames.isEmpty {

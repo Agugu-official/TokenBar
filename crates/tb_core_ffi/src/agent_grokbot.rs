@@ -96,11 +96,7 @@ impl GrokBotCredentials {
                 access_token,
                 team_id,
             } => {
-                let payload = access_token.split('.').nth(1)?;
-                let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                    .decode(payload.trim_end_matches('='))
-                    .ok()?;
-                let claims: Value = serde_json::from_slice(&bytes).ok()?;
+                let claims = crate::agent_usage::jwt_payload(access_token)?;
                 let subject = claims.get("sub")?.as_str()?.trim();
                 if subject.is_empty() {
                     return None;
@@ -1420,6 +1416,57 @@ mod tests {
             access_token: format!("header.{payload}.{signature}"),
             team_id,
         }
+    }
+
+    fn raw_desktop_token(access_token: String) -> GrokBotCredentials {
+        GrokBotCredentials::Desktop {
+            access_token,
+            team_id: None,
+        }
+    }
+
+    #[test]
+    fn history_owner_requires_a_compact_three_segment_jwt() {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::json!({"sub": "user-a"}).to_string());
+        assert_eq!(
+            raw_desktop_token(format!("header.{payload}.signature")).history_owner(),
+            Some(r#"["user-a",null]"#.to_string()),
+            "control: the same claims in a three-segment token must yield an owner"
+        );
+        for malformed in [
+            format!("header.{payload}"),
+            format!("header.{payload}.signature.extra"),
+            format!("header.{payload}."),
+            format!(".{payload}.signature"),
+        ] {
+            assert!(
+                raw_desktop_token(malformed.clone())
+                    .history_owner()
+                    .is_none(),
+                "{malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn history_owner_is_the_literal_subject_and_team_tuple() {
+        assert_eq!(
+            desktop_token("user-a", "credential-a", None).history_owner(),
+            Some(r#"["user-a",null]"#.to_string())
+        );
+    }
+
+    #[test]
+    fn history_owner_decodes_url_safe_payload_alphabet() {
+        let subject = "~~~???>>>";
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::json!({"sub": subject}).to_string());
+        assert!(payload.contains('-') && payload.contains('_'), "{payload}");
+        assert_eq!(
+            desktop_token(subject, "credential-a", None).history_owner(),
+            Some(serde_json::json!([subject, null]).to_string())
+        );
     }
 
     #[test]
