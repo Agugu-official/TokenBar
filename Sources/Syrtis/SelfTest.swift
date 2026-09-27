@@ -5461,6 +5461,20 @@ enum SelfTest {
                 }
             }
             expect(glyphOK, "#419: the no-reading glyph differs from 100% and from 0% in every style")
+            // #420: a stale quota title takes the gauge's stale grey, over the
+            // automatic verdict colour and over a custom colour alike; a live
+            // title, and a title that is not a quota reading, keep theirs.
+            let customRed = NSColor(red: 1, green: 0, blue: 0, alpha: 1)
+            expect(
+                MenuBarTextColor.applyingStale(customRed, stale: true, quotaRemaining: 5, dark: true)
+                    == TrayIcons.staleInk(dark: true)
+                    && MenuBarTextColor.applyingStale(nil, stale: true, quotaRemaining: 5, dark: false)
+                        == TrayIcons.staleInk(dark: false)
+                    && MenuBarTextColor.applyingStale(customRed, stale: false, quotaRemaining: 5, dark: true)
+                        == customRed
+                    && MenuBarTextColor.applyingStale(customRed, stale: true, quotaRemaining: nil, dark: true)
+                        == customRed,
+                "#420: a stale quota title is drawn in the gauge's stale grey")
 
             defaults.set(80, forKey: TrayAnimator.lastRemainingKey)
             let settingsTerminal = SettingsWindowView.applyQuotaRemaining(

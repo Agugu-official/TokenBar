@@ -315,13 +315,18 @@ struct SettingsWindowView: View {
                 .foregroundStyle(.tertiary)
 
             section("Menu bar") {
-                VStack(spacing: 6) {
-                    MenuBarMock(
-                        dark: true, graph: model.payload,
-                        tokensPerMin: tokensPerMin, agentUsage: model.agentUsage)
-                    MenuBarMock(
-                        dark: false, graph: model.payload,
-                        tokensPerMin: tokensPerMin, agentUsage: model.agentUsage)
+                // The stale rule reads the clock, so with polls failing and
+                // the payload unchanged nothing else would redraw the preview
+                // when a reading crosses the 30-minute threshold (#420).
+                TimelineView(.periodic(from: .now, by: 60)) { _ in
+                    VStack(spacing: 6) {
+                        MenuBarMock(
+                            dark: true, graph: model.payload,
+                            tokensPerMin: tokensPerMin, agentUsage: model.agentUsage)
+                        MenuBarMock(
+                            dark: false, graph: model.payload,
+                            tokensPerMin: tokensPerMin, agentUsage: model.agentUsage)
+                    }
                 }
             }
 
@@ -406,9 +411,21 @@ private struct MenuBarMock: View {
                     Text(title)
                         .font(.system(size: 12).monospacedDigit())
                         .foregroundStyle(
-                            MenuBarTextColor.resolve(
-                                automatic: mode.titleColor(quotaRemaining: remaining),
-                                modeRaw: textColorMode, hex: customHex)
+                            MenuBarTextColor.applyingStale(
+                                MenuBarTextColor.resolve(
+                                    automatic: mode.titleColor(quotaRemaining: remaining),
+                                    modeRaw: textColorMode, hex: customHex),
+                                // Same stale rule as the menu bar and the icon
+                                // beside this title (#420).
+                                stale: mode == .quotaLeft && TrayAnimator.readingIsStale(
+                                    payload: agentUsage,
+                                    persistedSelection: quotaSource,
+                                    excluding: ClientRegistry.quotaExcludedClients(),
+                                    defaults: UsageDataSources.current.allowsQuotaCachePersistence
+                                        ? .standard : nil,
+                                    now: Date()),
+                                quotaRemaining: mode == .quotaLeft ? remaining : nil,
+                                dark: dark)
                                 .map(Color.init(nsColor:)) ?? ink)
                 }
             }

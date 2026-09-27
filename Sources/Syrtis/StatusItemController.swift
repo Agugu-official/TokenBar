@@ -183,9 +183,13 @@ final class StatusItemController: NSObject {
     /// Sets the text shown next to the menu-bar icon ("" = icon only). A
     /// color renders as an attributed title, with the user's text override
     /// taking precedence over the automatic quota color.
-    func updateTitle(_ title: String, color: NSColor? = nil, quotaRemaining: Double? = nil) {
+    func updateTitle(
+        _ title: String, color: NSColor? = nil, quotaRemaining: Double? = nil, stale: Bool = false
+    ) {
         guard let button = statusItem.button else { return }
-        let color = MenuBarTextColor.resolve(automatic: color, quotaRemaining: quotaRemaining)
+        let color = MenuBarTextColor.applyingStale(
+            MenuBarTextColor.resolve(automatic: color, quotaRemaining: quotaRemaining),
+            stale: stale, quotaRemaining: quotaRemaining, dark: isDarkAppearance)
         // Leading space keeps a gap between the template icon and the text.
         let value = title.isEmpty ? "" : " \(title)"
         let key = "\(value)|\(color?.description ?? "")"

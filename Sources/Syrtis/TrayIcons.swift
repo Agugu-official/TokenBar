@@ -58,6 +58,12 @@ enum TrayIcons {
     }
 
     /// The fill ink for a gauge icon under the chosen coloring policy.
+    /// The grey a stale reading is drawn in: the gauge fill, and since #420
+    /// the quota title beside it, so the two read as one state.
+    static func staleInk(dark: Bool) -> NSColor {
+        NSColor(white: dark ? staleFillWhiteDark : staleFillWhiteLight, alpha: 1)
+    }
+
     static func ink(remaining: Double?, dark: Bool, coloring: IconColoring) -> NSColor {
         let mono: NSColor = dark ? .white : .black
         guard let remaining else { return mono }
@@ -87,7 +93,7 @@ enum TrayIcons {
         // nothing to be stale, so the no-reading glyph (`drawNoReading`) is
         // kept whatever the stamp says.
         let fill = stale && remaining != nil
-            ? NSColor(white: dark ? staleFillWhiteDark : staleFillWhiteLight, alpha: 1)
+            ? staleInk(dark: dark)
             : ink(remaining: remaining, dark: dark, coloring: coloring)
         let level = remaining ?? 100
         let image = NSImage(size: NSSize(width: 16, height: 16), flipped: false) { _ in

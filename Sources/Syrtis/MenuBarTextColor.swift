@@ -44,6 +44,18 @@ enum MenuBarTextColor: String, CaseIterable {
         return color(hex: hex) ?? automatic
     }
 
+    /// #420: a stale quota title takes the gauge's stale grey, whatever the
+    /// automatic or custom colour resolved to. Both of those are a verdict on
+    /// the remaining allowance (normal, warning, critical), and an hour-old
+    /// verdict in red beside a grey gauge reads as live. Only a quota title
+    /// (`quotaRemaining` present) is affected; other titles keep their colour.
+    static func applyingStale(
+        _ resolved: NSColor?, stale: Bool, quotaRemaining: Double?, dark: Bool
+    ) -> NSColor? {
+        guard stale, quotaRemaining != nil else { return resolved }
+        return TrayIcons.staleInk(dark: dark)
+    }
+
     static func color(hex: String) -> NSColor? {
         guard let normalized = normalizedHex(hex) else { return nil }
         return NSColor(Color(hex: normalized))
