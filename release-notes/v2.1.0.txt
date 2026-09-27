@@ -1,0 +1,14 @@
+Features:
+- A card offers to attribute your usage to subscriptions. Until usage is attributed, a subscription's window history lists 0 tokens and $0.00 for every window. When nothing is attributed yet, a card at the top of Overview and of the Quota view on every client tab lists the suggested assignments and applies them in one click; "Set up manually…" opens Settings → Usage attribution, and "Not now" hides the card for good.
+- Grok Build models are listed under one name. grok-4.6-build and grok-4.6 were two rows for one model; Models, Monthly, Daily and the Grok quota card now list grok-4.6 and grok-4.7 once each. Totals are unchanged.
+- The menu bar gauge turns grey once the reading it shows is more than 30 minutes old, and takes its color back with the next fresh reading.
+
+Fixes:
+- Setting the clock back could erase quota history. Loading dropped a whole series when it held readings stamped later than the current time, and a poll that recorded anything then saved the loss. With the clock set back 10 minutes on a copy of a real history file, the previous version dropped 10,163 readings to 3,780 in memory; this version drops only the 4 readings stamped in the future. Repairs made while loading are now written back once.
+- The window history said "Quota history could not be read. It will be retried." for good for sources that record no history, such as Antigravity read through agy. It now shows that no earlier windows are recorded.
+- Model prices stopped updating while you were idle. While the dashboard is open, the model report is now fetched again once it is an hour old.
+- A signed-in agy that Syrtis could not find started a login shell on every refresh. It now runs at most once every 15 minutes.
+- Claude credential errors now name their cause, and none includes credential content. A Keychain credential with a character outside printable ASCII is now read.
+- A malformed Codex token could skip the refresh check; its expiry is no longer trusted. Thanks @snowman12320.
+- Quota history that failed to load was described as never recorded; Past windows and the heatmap now say it could not be read and will be retried.
+- On macOS 27 in light mode, the separators in the glass panel are lighter.
