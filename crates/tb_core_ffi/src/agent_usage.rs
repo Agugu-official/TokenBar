@@ -1593,12 +1593,14 @@ type ProviderFetch = Pin<Box<dyn Future<Output = Vec<AgentUsageSnapshot>>>>;
 pub(crate) struct QuotaProvider {
     /// The `client_id` this provider's snapshots carry. `run` passes it to
     /// `fetch`, which is expected to pass it on to `apply_provider_outcome`.
-    /// Invariant: a card is published under the id of the provider whose data
-    /// it carries. It rests on three links. `fetch_table` handing each fetch
-    /// its own entry's id is tested (`each_fetch_is_handed_its_own_entry_id`).
-    /// Unchecked, each compiling and passing every test: this line pairing the
-    /// id with the right provider's fetch, and the fetch publishing only
-    /// through `apply_provider_outcome` with the id it was handed.
+    /// A card should be published under the id of the provider whose data it
+    /// carries. What checks that: `fetch_table` handing each fetch its own
+    /// entry's id (`each_fetch_is_handed_its_own_entry_id`) and the Success
+    /// branch stamping the caller's id (`the_caller_id_is_stamped_on_a_successful_snapshot`).
+    /// Nothing checks that this line pairs the id with the right provider's
+    /// fetch, that the fetch passes on the id it was handed, or any other place
+    /// where a card's id could change (error cards, the last-good fallback,
+    /// `enrich`).
     pub(crate) id: ProviderId,
     /// Receives its own entry's `id` and must pass it to
     /// `apply_provider_outcome`, which stamps it on every snapshot.
