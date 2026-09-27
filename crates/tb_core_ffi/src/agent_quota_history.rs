@@ -2090,15 +2090,18 @@ fn repair_store_at(mut store: Store, upper_bound: i64, observation_now: i64) -> 
         observation_now <= upper_bound,
         "repair_store_at requires observation_now <= upper_bound"
     );
-    // A series whose own sample evidence leads the ceiling cannot be
-    // verified against any clock the reader trusts; drop it wholesale so a
-    // sibling's history is not held hostage by it.
-    store.series.retain(|series| {
-        !series
+    // A sample stamped past the ceiling cannot be verified against any clock
+    // the reader trusts, so it goes. Only the sample: the ceiling comes from
+    // the wall clock, and a clock that stepped back produces exactly this
+    // shape, so dropping the whole series (as #206 did) erased a history that
+    // nothing was wrong with, and any later save made that permanent. The
+    // clamp below then brings `last_activity_at` down to the samples that
+    // remain, all of which sit at or below the ceiling.
+    for series in &mut store.series {
+        series
             .samples
-            .iter()
-            .any(|sample| sample.sampled_at > upper_bound)
-    });
+            .retain(|sample| sample.sampled_at <= upper_bound);
+    }
 
     for series in &mut store.series {
         if series.last_activity_at <= upper_bound {
@@ -3694,25 +3697,17 @@ fn load_store_at_with_mode(
     if let Some((store, dropped)) = parsed {
         // `repair_store_at` always changes a store that failed this check: the
         // failure is some `last_activity_at` above the ceiling, and the repair
-        // either drops that series or lowers the timestamp.
+        // drops the samples stamped past the ceiling and lowers the timestamp.
         let clock_repaired = !validate_store_at(&store, validation_now);
-        let series_before = store.series.len();
         let store = if clock_repaired {
             repair_store_at(store, validation_now, quarantine_now)
         } else {
             store
         };
-        // Dropping a whole series is the one repair that cannot be undone, and
-        // it can be caused by a clock that is behind rather than by the file:
-        // a sample stamped past a ceiling that has stepped back. Kept in memory
-        // only, it comes back once the clock catches up. So nothing from this
-        // load is persisted on the repair's account; a transaction whose body
-        // changes the store still saves it, as it did before `repaired` existed.
-        let erased_series = store.series.len() < series_before;
         return Ok(LoadedStore {
             store,
             quarantined: false,
-            repaired: (dropped || clock_repaired) && !erased_series,
+            repaired: dropped || clock_repaired,
         });
     }
 
@@ -8149,7 +8144,7 @@ mod tests {
     }
 
     #[test]
-    fn future_sample_evidence_drops_only_that_series() {
+    fn future_sample_evidence_drops_only_that_sample() {
         let (directory, path) = temp_path("clock-future-sample");
         let upper_bound = 21_000_000;
         let observation_now = upper_bound;
@@ -8175,7 +8170,9 @@ mod tests {
         // This sample's own sampled_at leads the ceiling, which forces
         // last_activity_at (>= every sample) to lead it too, per
         // activity_valid — this series is structurally valid but
-        // unverifiable, not merely metadata-ahead.
+        // unverifiable, not merely metadata-ahead. The earlier reading beside
+        // it is verifiable and must survive.
+        let past_sample = quota_sample(reset, 2 * DAY, 0.20, 20.0, SampleOrigin::LiveV3);
         let tainted_sample = QuotaSample {
             reset_at: reset,
             duration_seconds: 2 * DAY,
@@ -8185,6 +8182,7 @@ mod tests {
             origin: SampleOrigin::LiveV3,
             plan: None,
         };
+        assert!(past_sample.sampled_at <= upper_bound);
         let tainted = SeriesState {
             provider_id: "claude".into(),
             account_scope: "acct".into(),
@@ -8192,7 +8190,7 @@ mod tests {
             active_reset_at: Some(reset),
             last_activity_at: tainted_sample.sampled_at,
             rollover: None,
-            samples: vec![tainted_sample],
+            samples: vec![past_sample.clone(), tainted_sample],
         };
 
         let mut store = Store {
@@ -8208,8 +8206,25 @@ mod tests {
                 .unwrap();
         assert!(!loaded.quarantined);
         assert!(validate_store_at(&loaded.store, upper_bound));
-        assert_eq!(loaded.store.series.len(), 1);
-        assert_eq!(loaded.store.series[0], healthy, "sibling is untouched");
+        assert_eq!(loaded.store.series.len(), 2, "no series is dropped");
+        let sibling = loaded
+            .store
+            .series
+            .iter()
+            .find(|s| s.window_key == "session.v1")
+            .unwrap();
+        assert_eq!(*sibling, healthy, "sibling is untouched");
+        let repaired = loaded
+            .store
+            .series
+            .iter()
+            .find(|s| s.window_key == "weekly.v1")
+            .unwrap();
+        assert_eq!(
+            repaired.samples,
+            vec![past_sample],
+            "only the sample past the ceiling goes"
+        );
 
         fs::remove_dir_all(directory).unwrap();
     }
@@ -8872,14 +8887,15 @@ mod tests {
     }
 
     #[test]
-    fn a_series_erased_by_the_clock_is_not_written_by_a_no_op_transaction() {
-        let (directory, path) = temp_path("persist-no-erase");
+    fn a_future_sample_drop_reaches_disk_once_and_keeps_the_series() {
+        let (directory, path) = temp_path("persist-future-sample");
         let upper_bound = 37_000_000;
         let observation_now = upper_bound - 100;
         let reset = upper_bound + DAY;
-        // A sample stamped past the ceiling: a clock that stepped back makes
-        // `repair_store_at` drop this whole series.
-        let tainted_sample = QuotaSample {
+        let past_sample = quota_sample(reset, 2 * DAY, 0.20, 20.0, SampleOrigin::LiveV3);
+        // A clock that stepped back leaves this reading stamped past the
+        // ceiling; it is the only thing the repair may remove.
+        let future_sample = QuotaSample {
             reset_at: reset,
             duration_seconds: 2 * DAY,
             duration_source: DurationSource::Provider,
@@ -8888,43 +8904,37 @@ mod tests {
             origin: SampleOrigin::LiveV3,
             plan: None,
         };
-        let tainted = SeriesState {
-            provider_id: "grok".into(),
-            account_scope: "acct".into(),
-            window_key: "weekly.v1".into(),
-            active_reset_at: Some(reset),
-            last_activity_at: tainted_sample.sampled_at,
-            rollover: None,
-            samples: vec![tainted_sample],
-        };
-        // A sibling that also needs the clamp, so the save would happen if the
-        // erasure did not hold it back.
-        let clamped = SeriesState {
-            provider_id: "claude".into(),
-            account_scope: "acct".into(),
-            window_key: "session.v1".into(),
-            active_reset_at: None,
-            last_activity_at: upper_bound + 50,
-            rollover: None,
-            samples: Vec::new(),
-        };
-        let mut store = Store {
+        let store = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
-            series: vec![tainted, clamped],
+            series: vec![SeriesState {
+                provider_id: "grok".into(),
+                account_scope: "acct".into(),
+                window_key: "weekly.v1".into(),
+                active_reset_at: Some(reset),
+                last_activity_at: future_sample.sampled_at,
+                rollover: None,
+                samples: vec![past_sample.clone(), future_sample],
+            }],
         };
-        store.series.sort_by(series_order);
+        // Control: the file needs the clock repair.
+        assert!(validate_store(&store));
+        assert!(!validate_store_at(&store, upper_bound));
         fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
-        let bytes = fs::read(&path).unwrap();
-        // Control: the loader really does erase the series in memory.
-        let loaded =
-            load_store_at_with_mode(StorageMode::Generic, &path, upper_bound, observation_now)
-                .unwrap();
-        assert_eq!(loaded.store.series.len(), 1);
 
         reset_save_call_count();
         no_op_transaction(&path, observation_now, upper_bound);
-        assert_eq!(save_call_count(), 0, "an erasure must not be written");
-        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(save_call_count(), 1, "the repair must be written once");
+        let on_disk = read_store(&path);
+        assert!(validate_store_at(&on_disk, upper_bound));
+        assert_eq!(on_disk.series.len(), 1, "the series survives on disk");
+        assert_eq!(
+            on_disk.series[0].samples,
+            vec![past_sample],
+            "the verifiable reading survives on disk"
+        );
+
+        no_op_transaction(&path, observation_now, upper_bound);
+        assert_eq!(save_call_count(), 1, "a repaired file is not rewritten");
 
         fs::remove_dir_all(directory).unwrap();
     }

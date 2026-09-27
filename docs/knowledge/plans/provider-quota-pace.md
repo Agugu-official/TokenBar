@@ -454,7 +454,7 @@ Migration fixtures 必須包含 empty／existing／corrupt v3、valid／corrupt 
 | Failure class | Disposition |
 |---|---|
 | Deserialize 或結構失敗 | 隔離、重建空 store（不變） |
-| 某 series 自己的 `sample.sampled_at` 超前 ceiling | **只**丟該 series，兄弟不受影響 |
+| 某 series 自己的 `sample.sampled_at` 超前 ceiling | **只**丟那些超前的樣本，series 與其餘樣本保留、兄弟不受影響（2026-09-27 #415：原本丟整條 series，但 ceiling 來自牆鐘，時鐘倒退會產生同樣形狀，任何後續存檔都會讓整段歷史永久消失） |
 | Rollover 的**活動**時間戳超前 | rollover 設為 `None`，樣本全留 |
 | `lastActivityAt` 超前 ceiling | 夾取 |
 
