@@ -11,8 +11,9 @@ on:
 
 # A new push to a PR branch makes its previous run's result moot, so that run is
 # cancelled rather than left holding an xcode-27 runner. Pushes to main key on
-# the run id and are never cancelled: every main commit keeps its own
-# release-configuration gate.
+# the run id and are never cancelled, so every main commit gets its own run of
+# this workflow. That is half of main's gate: the release-configuration half is
+# ci-release.yml, and a tag needs both green.
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -149,9 +150,9 @@ jobs:
           image="${ImageOS:?}-${ImageVersion:?}"
           echo "key=rustlib-v1-${RUNNER_OS}-${RUNNER_ARCH}-${image}-${rustc_id}-${engine}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/**', '.cargo/**', '.github/workflows/ci.yml') }}" >> "$GITHUB_OUTPUT"
 
-      # PR-only. A push must not read it: the push-only steps below invoke
-      # cargo again (make selftest-bundled, scripts/bundle.sh), which would
-      # rebuild every dependency from nothing without rust-cache's state.
+      # PR-only. Main always builds from source: it is the only writer of this
+      # cache, so reading it there would carry an entry forward instead of
+      # proving the library still builds.
       #
       # The cache path must be the one main saves under: actions/cache folds
       # the path into the entry's version, and a different path never matches.
@@ -183,9 +184,7 @@ jobs:
         if: steps.scope.outputs.docs_only != 'true' && (steps.rustlib-restore.outputs.cache-hit != 'true')
         run: cargo build --release --locked
 
-      # The copy main saves is taken here, from this exact cargo invocation —
-      # the push-only steps below run cargo again through make and bundle.sh,
-      # whose flags this key does not cover.
+      # The copy main saves is taken here, from this exact cargo invocation.
       - name: Stage Rust library for the cache
         if: steps.scope.outputs.docs_only != 'true' && (github.event_name == 'push')
         run: |
@@ -216,53 +215,10 @@ jobs:
         if: steps.scope.outputs.docs_only != 'true'
         run: swift run Syrtis --smoke
 
-      # Every step above compiles the debug configuration, so nothing here can
-      # see a `#if DEBUG` boundary break. The release configuration was first
-      # compiled by scripts/bundle.sh, which only runs from release.yml on a
-      # `v*` tag — so a call to a DEBUG-only symbol stayed green through local
-      # gates, PR CI and merge, and failed only after the tag was already
-      # pushed. PR #137 hit exactly that.
-      #
-      # Push-only, not on pull_request: this class of break needs someone to
-      # touch a conditional-compilation boundary, which is rare, and a release
-      # build is slow enough that paying for it on every PR iteration is a bad
-      # trade. Running it on main still guarantees the tag is never the first
-      # time this configuration is compiled.
-      - name: Build Swift package (release configuration)
-        if: steps.scope.outputs.docs_only != 'true' && (github.event_name == 'push')
-        run: swift build -c release
-
-      # Every step above runs the bare executable, where
-      # `Bundle.main.bundleIdentifier` is nil. A value keyed on that is literal
-      # where the suite looks and something else where it ships — #146 wrote
-      # three source scans against exactly that and all three were escaped,
-      # because the gap is not in the source text. Running the suite from the
-      # bundled binary is what observes it.
-      #
-      # Same push-only trade as the step above, and it reuses that release
-      # build, so the marginal cost here is the bundling and one suite run.
-      #
-      # `SELFTEST_BUNDLE_ID=` — empty, on purpose. The Makefile defaults to a
-      # throwaway identifier so a local run cannot write into the installed
-      # app's preference domain, and empty here means "whatever
-      # scripts/bundle.sh defaults to", which is the shipping identifier.
-      #
-      # That difference is the gate. A value keyed on the identifier merely
-      # being non-nil is caught either way, but one keyed on the production
-      # string takes the safe branch under any other identity — so the run that
-      # blocks a release has to carry the real one. This runner is ephemeral and
-      # has no Syrtis installed, which is what makes that safe here and not on
-      # a developer's Mac.
-      #
-      # Empty rather than the literal: a second copy of the identifier is a
-      # second place for a rename to silently weaken this into a no-op.
-      - name: Selftest from the bundled release binary
-        if: steps.scope.outputs.docs_only != 'true' && (github.event_name == 'push')
-        run: make selftest-bundled SELFTEST_BUNDLE_ID=
-
-      # Last, so only a main commit that passed every step above — the
-      # release-configuration build and the bundled selftest included — can
-      # publish the library PRs will link.
+      # Last, so only a main commit that passed every step above — build,
+      # selftest and smoke test — can publish the library PRs will link. The
+      # release-configuration gate runs beside this job, in ci-release.yml; the
+      # library bytes do not depend on its outcome.
       - name: Save Rust library
         if: steps.scope.outputs.docs_only != 'true' && (github.event_name == 'push' && steps.rustlib-exists.outputs.cache-hit != 'true')
         uses: actions/cache/save@v6

@@ -5,7 +5,7 @@ kind: canonical
 scope: repository
 read_when: changing release scripts, code signing, appcast, Sparkle, Homebrew, Pages, packaged Info.plist, or post-release notes
 last_verified: 2026-09-27
-sources: [".github/workflows/release.yml", ".github/workflows/ci.yml", ".github/workflows/pages.yml", ".github/workflows/update-install-count.yml", "scripts/bundle.sh", "scripts/build-sparkle.sh", "scripts/make_appcast.sh", "scripts/render_notes_html.sh", "appcast.xml", "Makefile", "docs/knowledge/plans/provider-quota-pace.md", "Sources/Syrtis/SelfTest.swift", "public release history"]
+sources: [".github/workflows/release.yml", ".github/workflows/ci.yml", ".github/workflows/ci-release.yml", ".github/workflows/pages.yml", ".github/workflows/update-install-count.yml", "scripts/bundle.sh", "scripts/build-sparkle.sh", "scripts/make_appcast.sh", "scripts/render_notes_html.sh", "appcast.xml", "Makefile", "docs/knowledge/plans/provider-quota-pace.md", "Sources/Syrtis/SelfTest.swift", "public release history"]
 ---
 
 # Release and delivery
@@ -101,7 +101,7 @@ Source comes from SwiftPM's own checkout under `.build/checkouts/Sparkle`, which
 
 > **Updater rule：** this is the highest-consequence single point in the release chain. A defective framework breaks updating for the entire installed base at once, and the cask is `auto_updates true`, so `brew upgrade` is not a rescue channel. `scripts/bundle.sh` therefore asserts on the binary it just copied — the bundled `Autoupdate` must reference `SUNormalizedInstallationPath` — and fails the build otherwise. The assertion is on the shipping artifact rather than on source text, and it discriminates: the official prebuilt scores zero under the same check. Do not weaken it into a source scan, and do not make embedding the framework conditional; an app assembled without an updater looks fine and silently never updates again.
 
-CI runs `scripts/bundle.sh` on pushes to `main` through `make selftest-bundled`, so a broken Sparkle build fails there rather than after a tag is pushed. Upgrading Sparkle now means rebuilding it here; the prebuilt artifact cannot simply be consumed again.
+CI runs `scripts/bundle.sh` on pushes to `main` through `make selftest-bundled` (in `.github/workflows/ci-release.yml`, which runs beside `ci.yml`; both runs must be green before a tag), so a broken Sparkle build fails there rather than after a tag is pushed. Upgrading Sparkle now means rebuilding it here; the prebuilt artifact cannot simply be consumed again.
 
 ## Migration principle
 
