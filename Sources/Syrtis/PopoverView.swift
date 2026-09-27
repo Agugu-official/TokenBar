@@ -209,7 +209,7 @@ struct PopoverView: View {
             ViewSwitch(active: activeView, views: visibleViews)
                 .padding(.horizontal, 12)
                 .padding(.bottom, 10)
-            Divider()
+            PanelDivider()
             GeometryReader { viewport in
                 ScrollView {
                     content
@@ -228,7 +228,7 @@ struct PopoverView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
             }
-            Divider()
+            PanelDivider()
             footer
         }
         // AppKit owns the live drag size. Filling the hosting view avoids
