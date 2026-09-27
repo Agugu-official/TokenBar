@@ -11,8 +11,9 @@ on:
 
 # A new push to a PR branch makes its previous run's result moot, so that run is
 # cancelled rather than left holding an xcode-27 runner. Pushes to main key on
-# the run id and are never cancelled: every main commit keeps its own
-# release-configuration gate.
+# the run id and are never cancelled, so every main commit gets its own run of
+# this workflow. That is half of main's gate: the release-configuration half is
+# ci-release.yml, and release.yml refuses a tag unless both are green.
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -92,6 +93,11 @@ jobs:
           # rather than a copy of it: literal <, &, >, an escaped &lt; and ]]>.
           scripts/render_notes_html.sh --self-test
 
+          # The tag gate release.yml runs before its release job, against a
+          # fake `gh`: a regression here would otherwise surface only when a
+          # real tag is refused or, worse, let through.
+          scripts/check_ci_gate_test.sh
+
       # A PR that only changes prose needs the knowledge and release-notes
       # checks above, not a 5-minute app build. Everything below is skipped for
       # it, so the `build` check still ends green or red rather than disappearing
@@ -136,6 +142,12 @@ jobs:
       # compiles rusqlite's bundled C. Pushes never read this cache and always
       # build in full, so a stale library cannot survive past the merge.
       #
+      # A hit also skips the Rust unit tests below, so the key covers what they
+      # read as well: Fixtures/ and Tests/fixtures/ (agent_usage.rs and
+      # model_report.rs load a fixture from each). Those do not change the
+      # library's bytes; they are here so a fixture-only change still runs the
+      # tests.
+      #
       # Each part is assigned before use: a failure inside `$(...)` in the echo
       # would not trip `set -e`, and an empty engine term would let a PR that
       # only moves the submodule link the previous engine.
@@ -147,11 +159,11 @@ jobs:
           rustc_id=$(rustc -V | shasum | cut -c1-12)
           engine=$(git rev-parse HEAD:vendor/tokscale-core)
           image="${ImageOS:?}-${ImageVersion:?}"
-          echo "key=rustlib-v1-${RUNNER_OS}-${RUNNER_ARCH}-${image}-${rustc_id}-${engine}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/**', '.cargo/**', '.github/workflows/ci.yml') }}" >> "$GITHUB_OUTPUT"
+          echo "key=rustlib-v1-${RUNNER_OS}-${RUNNER_ARCH}-${image}-${rustc_id}-${engine}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/**', '.cargo/**', '.github/workflows/ci.yml', 'Fixtures/**', 'Tests/fixtures/**') }}" >> "$GITHUB_OUTPUT"
 
-      # PR-only. A push must not read it: the push-only steps below invoke
-      # cargo again (make selftest-bundled, scripts/bundle.sh), which would
-      # rebuild every dependency from nothing without rust-cache's state.
+      # PR-only. Main always builds from source: it is the only writer of this
+      # cache, so reading it there would carry an entry forward instead of
+      # proving the library still builds.
       #
       # The cache path must be the one main saves under: actions/cache folds
       # the path into the entry's version, and a different path never matches.
@@ -171,9 +183,17 @@ jobs:
 
       # Saves on main only: a PR's own entry is scoped to that PR and would only
       # evict main's entries from the 10 GB budget.
+      #
+      # shared-key names the entry explicitly (it replaces rust-cache's
+      # key-plus-job-id part); ci-release.yml restores the same one. It was
+      # renamed from the implicit `build` when the unit tests and Clippy were
+      # added: rust-cache never re-saves a key that already exists, so under
+      # the old name the dev/test-profile dependencies would never have been
+      # stored and both steps would have compiled them cold on every run.
       - uses: Swatinem/rust-cache@v2
         if: steps.scope.outputs.docs_only != 'true' && (steps.rustlib-restore.outputs.cache-hit != 'true')
         with:
+          shared-key: build-with-tests
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # --locked: the key names Cargo.lock, so the build must be held to it. A
@@ -183,9 +203,41 @@ jobs:
         if: steps.scope.outputs.docs_only != 'true' && (steps.rustlib-restore.outputs.cache-hit != 'true')
         run: cargo build --release --locked
 
-      # The copy main saves is taken here, from this exact cargo invocation —
-      # the push-only steps below run cargo again through make and bundle.sh,
-      # whose flags this key does not cover.
+      # The Rust unit tests and Clippy, on every run that builds Rust: a PR
+      # whose Rust inputs or the fixtures its tests read changed (a cache hit
+      # means neither did, so both are skipped with the build; see the key
+      # above) and every push to main. Until now they
+      # ran only as local gates (docs/knowledge/verification.md). Measured on
+      # runs 36313333899 and 36317158008: test 94-103 s and clippy 52-54 s
+      # with a cold dev/test profile, 33 s and 8 s once rust-cache holds it.
+      #
+      # Clippy reports warnings without failing on them: tb_core_ffi had 12 lib
+      # and 19 lib-test warnings on run 36320004486, so `-D warnings` would
+      # turn CI red before any change. What fails here is an error-level lint,
+      # which includes Clippy's deny-by-default correctness group.
+      #
+      # tb_core_ffi only: vendor/tokscale-core declares `#![deny(clippy::all)]`
+      # and the toolchain is the floating stable, so a new Rust release adding
+      # a lint the engine trips would turn every PR and main red at once, and
+      # the tag gate would then hold releases on code nobody here changed. The
+      # engine's lints stay with the local gate (`cargo clippy --workspace
+      # --all-targets`) and with the upstream sync.
+      #
+      # `-p` alone does not do that: the engine is a path dependency and a
+      # workspace member, so cargo does not cap its lints, and Clippy still
+      # lints its lib target. `--no-deps` does. Measured with clippy 1.97.1: a
+      # needless `return` injected into the engine failed `-p tb_core_ffi`
+      # (exit 101) and passed with `--no-deps`; an `x == x` (eq_op, deny by
+      # default) injected into tb_core_ffi still failed with `--no-deps`.
+      - name: Rust unit tests
+        if: steps.scope.outputs.docs_only != 'true' && (steps.rustlib-restore.outputs.cache-hit != 'true')
+        run: cargo test -p tb_core_ffi --locked
+
+      - name: Clippy
+        if: steps.scope.outputs.docs_only != 'true' && (steps.rustlib-restore.outputs.cache-hit != 'true')
+        run: cargo clippy -p tb_core_ffi --all-targets --locked --no-deps
+
+      # The copy main saves is taken here, from this exact cargo invocation.
       - name: Stage Rust library for the cache
         if: steps.scope.outputs.docs_only != 'true' && (github.event_name == 'push')
         run: |
@@ -216,53 +268,10 @@ jobs:
         if: steps.scope.outputs.docs_only != 'true'
         run: swift run Syrtis --smoke
 
-      # Every step above compiles the debug configuration, so nothing here can
-      # see a `#if DEBUG` boundary break. The release configuration was first
-      # compiled by scripts/bundle.sh, which only runs from release.yml on a
-      # `v*` tag — so a call to a DEBUG-only symbol stayed green through local
-      # gates, PR CI and merge, and failed only after the tag was already
-      # pushed. PR #137 hit exactly that.
-      #
-      # Push-only, not on pull_request: this class of break needs someone to
-      # touch a conditional-compilation boundary, which is rare, and a release
-      # build is slow enough that paying for it on every PR iteration is a bad
-      # trade. Running it on main still guarantees the tag is never the first
-      # time this configuration is compiled.
-      - name: Build Swift package (release configuration)
-        if: steps.scope.outputs.docs_only != 'true' && (github.event_name == 'push')
-        run: swift build -c release
-
-      # Every step above runs the bare executable, where
-      # `Bundle.main.bundleIdentifier` is nil. A value keyed on that is literal
-      # where the suite looks and something else where it ships — #146 wrote
-      # three source scans against exactly that and all three were escaped,
-      # because the gap is not in the source text. Running the suite from the
-      # bundled binary is what observes it.
-      #
-      # Same push-only trade as the step above, and it reuses that release
-      # build, so the marginal cost here is the bundling and one suite run.
-      #
-      # `SELFTEST_BUNDLE_ID=` — empty, on purpose. The Makefile defaults to a
-      # throwaway identifier so a local run cannot write into the installed
-      # app's preference domain, and empty here means "whatever
-      # scripts/bundle.sh defaults to", which is the shipping identifier.
-      #
-      # That difference is the gate. A value keyed on the identifier merely
-      # being non-nil is caught either way, but one keyed on the production
-      # string takes the safe branch under any other identity — so the run that
-      # blocks a release has to carry the real one. This runner is ephemeral and
-      # has no Syrtis installed, which is what makes that safe here and not on
-      # a developer's Mac.
-      #
-      # Empty rather than the literal: a second copy of the identifier is a
-      # second place for a rename to silently weaken this into a no-op.
-      - name: Selftest from the bundled release binary
-        if: steps.scope.outputs.docs_only != 'true' && (github.event_name == 'push')
-        run: make selftest-bundled SELFTEST_BUNDLE_ID=
-
-      # Last, so only a main commit that passed every step above — the
-      # release-configuration build and the bundled selftest included — can
-      # publish the library PRs will link.
+      # Last, so only a main commit that passed every step above — build,
+      # selftest and smoke test — can publish the library PRs will link. The
+      # release-configuration gate runs beside this job, in ci-release.yml; the
+      # library bytes do not depend on its outcome.
       - name: Save Rust library
         if: steps.scope.outputs.docs_only != 'true' && (github.event_name == 'push' && steps.rustlib-exists.outputs.cache-hit != 'true')
         uses: actions/cache/save@v6

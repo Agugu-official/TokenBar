@@ -5649,7 +5649,8 @@ fn string_key(
         .map(str::to_string)
 }
 
-fn jwt_payload(token: &str) -> Option<Value> {
+/// Returns unverified claims; use them for identity only after the server has accepted the request.
+pub(crate) fn jwt_payload(token: &str) -> Option<Value> {
     let mut parts = token.split('.');
     let header = parts.next()?;
     let payload = parts.next()?;
