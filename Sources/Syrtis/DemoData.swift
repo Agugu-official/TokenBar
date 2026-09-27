@@ -701,7 +701,10 @@ enum DemoData {
             let end = k == 0 ? nowSecs : resetAt
             var stamps: [Int64] = []
             var t = start + step
-            while t <= end { stamps.append(t); t += step }
+            // A completed cycle stops short of its reset: the next cycle starts
+            // at that instant, and a reading there would open the running
+            // cycle's sparkline on the previous cycle's final value.
+            while k == 0 ? t <= end : t < end { stamps.append(t); t += step }
             guard !stamps.isEmpty else { continue }
             // A week always spans the rhythm, so a weekly total can be drawn
             // freely. A five-hour session cannot: its total has to follow how

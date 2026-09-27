@@ -7940,12 +7940,19 @@ enum SelfTest {
                 let grid = QuotaHeatmapFold.build(points: curve.points)
                 let weekdayMean = grid.cells[0..<5].joined().reduce(0, +) / 5
                 let weekendMean = grid.cells[5..<7].joined().reduce(0, +) / 2
-                let ok = cycles.count >= WindowEquivalence.minimumCycles
+                // No completed cycle may read at or after the running cycle's
+                // start, or the running sparkline opens on its final value.
+                let runningStart = (curve.activeResetAt ?? .max)
+                    - (active.first?.durationSeconds ?? 0)
+                let noSpill = curve.points.allSatisfy {
+                    $0.isActiveGroup || $0.sampledAt < runningStart
+                }
+                let ok = noSpill && cycles.count >= WindowEquivalence.minimumCycles
                     && cycles.allSatisfy { $0.observedFraction >= WindowEquivalence.minimumObservedFraction }
                     && active.last?.usedPercent == window.usedPercent.rounded()
                     && grid.hasMovement && weekdayMean > 2 * weekendMean
                 if !ok {
-                    print("  #228 curve check failed: \(agent.clientId) \(key) cycles=\(cycles.count) "
+                    print("  #228 curve check failed: \(agent.clientId) \(key) noSpill=\(noSpill) cycles=\(cycles.count) "
                           + "active=\(active.last?.usedPercent ?? -1)/\(window.usedPercent) "
                           + "weekday=\(weekdayMean) weekend=\(weekendMean)")
                 }
@@ -7957,7 +7964,7 @@ enum SelfTest {
         expect(demoCurveWindows == 7,
                "#228: the demo serves curves for exactly its history subscriptions' windows (\(demoCurveWindows) served)")
         expect(demoCurveChecks,
-               "#228: every demo curve has enough observed cycles, a weekday-heavy heatmap, and a running cycle matching its card")
+               "#228: every demo curve has enough observed cycles, a weekday-heavy heatmap, a running cycle matching its card, and no completed-cycle reading at the running cycle's start")
         // Demo mode ignores this Mac's hidden tabs and limits. Tested on the
         // pure transform: the argument domain is process-wide, and setting it
         // here would strip this run's own `-AppleLanguages`.
