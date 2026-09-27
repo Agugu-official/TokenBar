@@ -109,7 +109,7 @@ make selftest          # = swift run Syrtis --selftest -AppleLanguages "(en)"
 swift run Syrtis --smoke
 ```
 
-`cargo test` and `cargo clippy --workspace --all-targets` are local full code-change gates; this document does not claim that the current CI workflow runs them. The `--all-targets` flag is required because `vendor/tokscale-core/src/lib.rs` declares `#![deny(clippy::all)]`, so a test-only lint can fail the gate even when the library target itself is clean.
+`cargo test` and `cargo clippy --workspace --all-targets` are local full code-change gates. CI runs a subset on every run that builds Rust (a PR whose Rust inputs or the fixtures its tests read under `Fixtures/` and `Tests/fixtures/` changed, and every push to `main`; a PR that links main's cached library skips them with the build): `cargo test -p tb_core_ffi` — the FFI crate's tests, not the whole workspace's — and `cargo clippy -p tb_core_ffi --all-targets --no-deps`, which fails on error-level lints only (`tb_core_ffi` currently has warnings). CI does not lint `vendor/tokscale-core`: its `#![deny(clippy::all)]` under the floating stable toolchain would let a new Rust release turn every run red, so the workspace-wide Clippy remains a local gate. `--no-deps` is what excludes it; `-p` alone still lints the engine, because a path dependency that is a workspace member gets no lint cap. The `--all-targets` flag is required because `vendor/tokscale-core/src/lib.rs` declares `#![deny(clippy::all)]`, so a test-only lint can fail the gate even when the library target itself is clean.
 
 Live account-scope smoke必須在hermetic security suite通過後才執行，且每次重新執行都需要當次明確授權。若出現任何Keychain或credential授權視窗，立即停止process並把smoke判為失敗；不得要求輸入登入密碼、讀取secret或用真實credential診斷。
 
