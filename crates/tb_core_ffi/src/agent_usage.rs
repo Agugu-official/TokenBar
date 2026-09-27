@@ -1593,9 +1593,11 @@ type ProviderFetch = Pin<Box<dyn Future<Output = Vec<AgentUsageSnapshot>>>>;
 pub(crate) struct QuotaProvider {
     /// The `client_id` this provider's snapshots carry. `run` passes it to
     /// `fetch`, which is expected to pass it on to `apply_provider_outcome`.
-    /// Unchecked: this line pairing an id with another provider's fetch, and a
-    /// fetch passing some other variant to `apply_provider_outcome`; either
-    /// compiles and passes every test here.
+    /// Unchecked: anything that makes a fetch publish under an id other than
+    /// the one it was handed. Known forms: this line pairing an id with another
+    /// provider's fetch, a fetch passing another variant to
+    /// `apply_provider_outcome`, and a fetch building a snapshot without going
+    /// through it. Each compiles and passes every test here.
     pub(crate) id: ProviderId,
     /// Receives its own entry's `id` and must pass it to
     /// `apply_provider_outcome`, which stamps it on every snapshot.
