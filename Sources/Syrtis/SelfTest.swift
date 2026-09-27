@@ -325,6 +325,24 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
     func tokensPerMin() async throws -> Double { DemoData.tokensPerMin }
 }
 
+/// The window a NEGATIVE probe gives the event it asserts never happens.
+///
+/// `waitUntil`'s deadline is generous because a positive wait only pays it on
+/// the way to a failure. A probe for something that must not happen pays it on
+/// every pass: nine such probes held each suite run for 9 × 5 s, and the push
+/// pipeline runs the suite twice.
+///
+/// 500 ms, chosen by the maintainer (2026-09-27). Measured on the xcode-27
+/// runner (run 36277549879) with each probe's defect restored, five suite runs
+/// each: at the eight probes that use this window the race showed within
+/// 2.62 ms at the slowest, far under half of it, and each of their assertions
+/// failed. A race slower than the window would pass here; that is the trade.
+///
+/// `modelRaced` keeps the default: restoring its defect in that run did not
+/// make the race appear, so nothing shows how fast it would, and a short window
+/// there would be unmeasured.
+private let negativeProbeWindow: Duration = .milliseconds(500)
+
 /// Wait for a condition another task has to establish.
 ///
 /// Bounded by a deadline rather than by an iteration count. A fixed number of
@@ -337,24 +355,6 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
 /// The deadline is generous because the cost of raising it is only paid when a
 /// test is genuinely about to fail, while the cost of setting it too low is a
 /// flake that looks like a product defect.
-/// The window a NEGATIVE probe gives the event it asserts never happens.
-///
-/// `waitUntil`'s deadline is generous because a positive wait only pays it on
-/// the way to a failure. A probe for something that must not happen pays it on
-/// every pass: eight such probes held each suite run for 8 × 5 s, and the push
-/// pipeline runs the suite twice.
-///
-/// 500 ms, chosen by the maintainer (2026-09-27). Measured on the xcode-27
-/// runner (run 36277549879) with each probe's defect restored, five suite runs
-/// each: the race showed within 2.62 ms at the slowest probe, far under half
-/// this window, and every probe failed. A race slower than the window would
-/// pass here; that is the trade.
-///
-/// `modelRaced` keeps the default: restoring its defect in that run did not
-/// make the race appear, so nothing shows how fast it would, and a short window
-/// there would be unmeasured.
-private let negativeProbeWindow: Duration = .milliseconds(500)
-
 private func waitUntil(
     timeout: Duration = .seconds(5),
     _ predicate: @escaping @Sendable () async -> Bool
@@ -6726,7 +6726,7 @@ enum SelfTest {
                 cachesSnapshot: true, source: agedSource, initialYear: agedYear)
             let agedRestored = agedReopened.modelReport != nil
             let agedLens = Task { await agedReopened.ensureModelData(for: .overview) }
-            let agedRaced = await waitUntil { await agedSource.modelCallCount() > 1 }
+            let agedRaced = await waitUntil(timeout: negativeProbeWindow) { await agedSource.modelCallCount() > 1 }
             let agedLoad = Task { await agedReopened.load() }
             _ = await waitUntil { await agedSource.hasPendingGraph(year: agedYear) }
             await agedSource.releaseGraph(year: agedYear)
