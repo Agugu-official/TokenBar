@@ -84,13 +84,17 @@ enum TrayIcons {
         let mono: NSColor = dark ? .white : .black
         // A stale reading drops the coloring policy: a green or red that is an
         // hour old would still read as a live verdict. With no reading there is
-        // nothing to be stale, so the no-reading glyph is kept (an orphaned
-        // stamp must not paint a grey 100%).
+        // nothing to be stale, so the no-reading glyph (`drawNoReading`) is
+        // kept whatever the stamp says.
         let fill = stale && remaining != nil
             ? NSColor(white: dark ? staleFillWhiteDark : staleFillWhiteLight, alpha: 1)
             : ink(remaining: remaining, dark: dark, coloring: coloring)
         let level = remaining ?? 100
         let image = NSImage(size: NSSize(width: 16, height: 16), flipped: false) { _ in
+            guard remaining != nil else {
+                drawNoReading(style: style, mono: mono)
+                return true
+            }
             switch style {
             case .bars: drawBars(remaining: level, mono: mono, fill: fill)
             case .ring: drawRing(remaining: level, mono: mono, fill: fill)
@@ -100,6 +104,49 @@ enum TrayIcons {
         }
         image.isTemplate = false
         return image
+    }
+
+    // MARK: - No reading (#419)
+
+    /// With no reading the gauge used to be drawn at 100% in mono, which is
+    /// what a full allowance looks like. It is now the full shape, faded, with
+    /// a "no signal" slash, so it reads as neither full nor empty (0% keeps
+    /// its bright empty track). Chosen by the maintainer from renders of every
+    /// style in dark and light.
+    ///
+    /// The shape is drawn opaque inside a transparency layer and faded as a
+    /// whole, so the popsicle's overlapping stick and body do not show through
+    /// each other.
+    static let noReadingAlpha: CGFloat = 0.3
+    /// Slash stroke, and the wider gap cut out of the faded shape around it.
+    static let noReadingSlashWidth: CGFloat = 1.5
+    static let noReadingSlashGap: CGFloat = 3.4
+
+    private static func drawNoReading(style: QuotaIconStyle, mono: NSColor) {
+        guard let cg = NSGraphicsContext.current?.cgContext else { return }
+        cg.saveGState()
+        cg.setAlpha(noReadingAlpha)
+        cg.beginTransparencyLayer(auxiliaryInfo: nil)
+        switch style {
+        case .bars: drawBars(remaining: 100, mono: mono, fill: mono)
+        case .ring: drawRing(remaining: 100, mono: mono, fill: mono)
+        case .popsicle: drawPopsicle(remaining: 100, mono: mono, fill: mono)
+        }
+        cg.endTransparencyLayer()
+        cg.restoreGState()
+
+        let slash = NSBezierPath()
+        slash.move(to: point(2.5, 13.5))
+        slash.line(to: point(13.5, 2.5))
+        slash.lineCapStyle = .round
+        NSGraphicsContext.current?.compositingOperation = .destinationOut
+        slash.lineWidth = noReadingSlashGap
+        NSColor.black.setStroke()
+        slash.stroke()
+        NSGraphicsContext.current?.compositingOperation = .sourceOver
+        slash.lineWidth = noReadingSlashWidth
+        mono.withAlphaComponent(0.9).setStroke()
+        slash.stroke()
     }
 
     // MARK: - Shared 16-grid helpers

@@ -5444,6 +5444,23 @@ enum SelfTest {
                         style: .ring, remaining: nil, dark: true, coloring: .always, stale: false
                     ).tiffRepresentation,
                 "no reading keeps the no-reading glyph even when the stamp is stale")
+            // #419: no reading used to draw the 100% gauge. It must read as
+            // neither full nor empty, in every style and appearance.
+            let glyphOK = [QuotaIconStyle.bars, .ring, .popsicle].allSatisfy { style in
+                [true, false].allSatisfy { dark in
+                    let none = TrayIcons.image(
+                        style: style, remaining: nil, dark: dark, coloring: .never
+                    ).tiffRepresentation
+                    return none != nil
+                        && none != TrayIcons.image(
+                            style: style, remaining: 100, dark: dark, coloring: .never
+                        ).tiffRepresentation
+                        && none != TrayIcons.image(
+                            style: style, remaining: 0, dark: dark, coloring: .never
+                        ).tiffRepresentation
+                }
+            }
+            expect(glyphOK, "#419: the no-reading glyph differs from 100% and from 0% in every style")
 
             defaults.set(80, forKey: TrayAnimator.lastRemainingKey)
             let settingsTerminal = SettingsWindowView.applyQuotaRemaining(
