@@ -1593,11 +1593,12 @@ type ProviderFetch = Pin<Box<dyn Future<Output = Vec<AgentUsageSnapshot>>>>;
 pub(crate) struct QuotaProvider {
     /// The `client_id` this provider's snapshots carry. `run` passes it to
     /// `fetch`, which is expected to pass it on to `apply_provider_outcome`.
-    /// Unchecked: anything that makes a fetch publish under an id other than
-    /// the one it was handed. Known forms: this line pairing an id with another
-    /// provider's fetch, a fetch passing another variant to
-    /// `apply_provider_outcome`, and a fetch building a snapshot without going
-    /// through it. Each compiles and passes every test here.
+    /// Invariant: a card is published under the id of the provider whose data
+    /// it carries. It rests on three links. `fetch_table` handing each fetch
+    /// its own entry's id is tested (`each_fetch_is_handed_its_own_entry_id`).
+    /// Unchecked, each compiling and passing every test: this line pairing the
+    /// id with the right provider's fetch, and the fetch publishing only
+    /// through `apply_provider_outcome` with the id it was handed.
     pub(crate) id: ProviderId,
     /// Receives its own entry's `id` and must pass it to
     /// `apply_provider_outcome`, which stamps it on every snapshot.
@@ -1669,9 +1670,14 @@ async fn fetch_in_order(fetches: Vec<ProviderFetch>) -> Vec<AgentUsageSnapshot> 
         .collect()
 }
 
+/// Fetch every entry of `providers`, handing each fetch its own entry's id.
+async fn fetch_table(providers: &[QuotaProvider]) -> Vec<AgentUsageSnapshot> {
+    fetch_in_order(providers.iter().map(|p| (p.fetch)(p.id)).collect()).await
+}
+
 pub async fn run(publication_generation: u64) -> AgentUsagePayload {
     let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-    let agents = fetch_in_order(QUOTA_PROVIDERS.iter().map(|p| (p.fetch)(p.id)).collect()).await;
+    let agents = fetch_table(QUOTA_PROVIDERS).await;
     AgentUsagePayload {
         generated_at,
         publication_generation,
@@ -8109,6 +8115,22 @@ mod tests {
         .await
         .expect("fetches must be polled concurrently");
         assert_eq!(ids(&out), ["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn each_fetch_is_handed_its_own_entry_id() {
+        // Each stub publishes whatever id it is handed, so the output ids are
+        // exactly the ids `fetch_table` passed in.
+        fn echo(id: ProviderId) -> ProviderFetch {
+            provider_fetch(async move {
+                vec![empty_error_snapshot(id, None, "fixture", Utc::now(), String::new(), None)]
+            })
+        }
+        let table = [
+            QuotaProvider { id: ProviderId::Test("first"), fetch: echo },
+            QuotaProvider { id: ProviderId::Test("second"), fetch: echo },
+        ];
+        assert_eq!(ids(&fetch_table(&table).await), ["first", "second"]);
     }
 
     #[test]
