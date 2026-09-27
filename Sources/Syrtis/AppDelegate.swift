@@ -512,7 +512,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusController?.updateTitle(
             mode.title(graph: lastGraph, tokensPerMin: rate, quotaRemaining: quotaRemaining),
             color: mode.titleColor(quotaRemaining: quotaRemaining),
-            quotaRemaining: mode == .quotaLeft ? quotaRemaining : nil)
+            quotaRemaining: mode == .quotaLeft ? quotaRemaining : nil,
+            stale: mode == .quotaLeft && (trayAnimator?.readingIsStaleNow ?? false))
 
         statusController?.reconcileClientItems(ClientTray.runtimePresentations(
             graph: lastGraph,

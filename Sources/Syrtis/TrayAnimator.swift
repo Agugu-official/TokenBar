@@ -201,6 +201,18 @@ final class TrayAnimator {
     }
 
     /// Draws the current gauge style immediately (no-op for cat/parrot).
+    /// Whether the reading the menu bar shows is stale now: the gauge fill
+    /// and, since #420, the quota title use the same answer.
+    var readingIsStaleNow: Bool {
+        Self.readingIsStale(
+            payload: quota,
+            persistedSelection: UserDefaults.standard.string(forKey: Self.quotaSourceKey)
+                ?? QuotaResolver.auto,
+            excluding: ClientRegistry.quotaExcludedClients(),
+            defaults: source.allowsQuotaCachePersistence ? .standard : nil,
+            now: Date())
+    }
+
     private func renderGaugeIcon() {
         let style = currentStyle
         guard let gaugeStyle = QuotaIconStyle(rawValue: style) else { return }
@@ -208,13 +220,7 @@ final class TrayAnimator {
             rawValue: UserDefaults.standard.string(forKey: IconColoring.storageKey) ?? ""
         ) ?? .warningOnly
         presentedAnimationKey = nil
-        let stale = Self.readingIsStale(
-            payload: quota,
-            persistedSelection: UserDefaults.standard.string(forKey: Self.quotaSourceKey)
-                ?? QuotaResolver.auto,
-            excluding: ClientRegistry.quotaExcludedClients(),
-            defaults: source.allowsQuotaCachePersistence ? .standard : nil,
-            now: Date())
+        let stale = readingIsStaleNow
         controller?.setStaticIcon(
             TrayIcons.image(
                 style: gaugeStyle, remaining: quotaRemaining,

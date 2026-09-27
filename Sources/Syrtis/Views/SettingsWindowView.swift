@@ -406,9 +406,21 @@ private struct MenuBarMock: View {
                     Text(title)
                         .font(.system(size: 12).monospacedDigit())
                         .foregroundStyle(
-                            MenuBarTextColor.resolve(
-                                automatic: mode.titleColor(quotaRemaining: remaining),
-                                modeRaw: textColorMode, hex: customHex)
+                            MenuBarTextColor.applyingStale(
+                                MenuBarTextColor.resolve(
+                                    automatic: mode.titleColor(quotaRemaining: remaining),
+                                    modeRaw: textColorMode, hex: customHex),
+                                // Same stale rule as the menu bar and the icon
+                                // beside this title (#420).
+                                stale: mode == .quotaLeft && TrayAnimator.readingIsStale(
+                                    payload: agentUsage,
+                                    persistedSelection: quotaSource,
+                                    excluding: ClientRegistry.quotaExcludedClients(),
+                                    defaults: UsageDataSources.current.allowsQuotaCachePersistence
+                                        ? .standard : nil,
+                                    now: Date()),
+                                quotaRemaining: mode == .quotaLeft ? remaining : nil,
+                                dark: dark)
                                 .map(Color.init(nsColor:)) ?? ink)
                 }
             }
