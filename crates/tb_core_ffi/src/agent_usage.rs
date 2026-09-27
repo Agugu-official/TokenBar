@@ -109,7 +109,7 @@ impl AgentUsagePayload {
                         (
                             snapshot.account_key.clone(),
                             SeriesKey::new(
-                                snapshot.client_id.clone(),
+                                snapshot.client_id.as_str(),
                                 &history_scope,
                                 window_key.clone(),
                             ),
@@ -121,10 +121,57 @@ impl AgentUsagePayload {
     }
 }
 
+/// A quota provider's client id (#324). In a non-test build the only values
+/// are the eight provider variants (`Test` exists under `cfg(test)` only), and
+/// `usable_success` must match each one. `run` hands each fetch its table
+/// entry's id to pass to `apply_provider_outcome`, which stamps it on a
+/// successful snapshot. Serialized as the plain string; the wire is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderId {
+    Codex,
+    Claude,
+    Antigravity,
+    Copilot,
+    Grok,
+    GrokBot,
+    Kiro,
+    OpenCode,
+    /// Fixture ids for tests that need a client outside the table.
+    #[cfg(test)]
+    Test(&'static str),
+}
+
+impl ProviderId {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Antigravity => "antigravity",
+            Self::Copilot => "copilot",
+            Self::Grok => "grok",
+            Self::GrokBot => "grok-bot",
+            Self::Kiro => "kiro",
+            Self::OpenCode => "opencode",
+            #[cfg(test)]
+            Self::Test(id) => id,
+        }
+    }
+}
+
+impl Serialize for ProviderId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentUsageSnapshot {
-    client_id: String,
+    /// Whatever a fetch writes here is replaced by the id the caller passed to
+    /// `apply_provider_outcome` on success; error cards are built with that id,
+    /// and a transient fallback replays a cached snapshot that was stamped when
+    /// it was stored.
+    client_id: ProviderId,
     /// Which account of `client_id` this card is. `None` is the primary, and
     /// is omitted from the wire entirely, so a payload with no extra account
     /// configured is byte-identical to one from before this field existed.
@@ -505,9 +552,9 @@ struct LastGoodEntry {
 /// stored under another's name, which nothing downstream can detect.
 type AccountSlot = (String, Option<String>);
 
-fn account_slot(client_id: &str, account: Option<&str>) -> AccountSlot {
+fn account_slot(client_id: ProviderId, account: Option<&str>) -> AccountSlot {
     (
-        client_id.to_string(),
+        client_id.as_str().to_string(),
         account_key_component(account).map(str::to_string),
     )
 }
@@ -1322,7 +1369,7 @@ struct ClaudeRefreshResponse {
 }
 
 fn empty_error_snapshot(
-    client_id: &str,
+    client_id: ProviderId,
     account: Option<&str>,
     source: &str,
     now: DateTime<Utc>,
@@ -1334,7 +1381,7 @@ fn empty_error_snapshot(
         // accounts of one client are only distinguishable downstream by this
         // field, so an error attributed to the primary would replace its card.
         account_key: account.map(str::to_string),
-        client_id: client_id.to_string(),
+        client_id,
         source: source.to_string(),
         updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
         identity: None,
@@ -1348,8 +1395,8 @@ fn empty_error_snapshot(
 }
 
 fn usable_success(snapshot: &AgentUsageSnapshot) -> bool {
-    match snapshot.client_id.as_str() {
-        "codex" => {
+    match snapshot.client_id {
+        ProviderId::Codex => {
             !snapshot.windows.is_empty()
                 || snapshot
                     .credits
@@ -1357,23 +1404,28 @@ fn usable_success(snapshot: &AgentUsageSnapshot) -> bool {
                     .and_then(|credits| credits.remaining)
                     .is_some_and(f64::is_finite)
         }
-        "grok" => snapshot
+        ProviderId::Grok => snapshot
             .windows
             .iter()
             .any(|window| window.card_id == "billing.weekly.v1"),
         // Grok Bot is stricter than the rest: a response can carry windows
         // while omitting the weekly meter, and only that meter is the card.
-        "grok-bot" => snapshot
+        ProviderId::GrokBot => snapshot
             .windows
             .iter()
             .any(|window| window.card_id == agent_grokbot::WEEKLY_WINDOW_KEY),
         // "kiro" and "opencode" carry the Kiro and OpenCode Go subscription
         // quotas; like the others their success is a non-empty window set, so a
         // later transient failure keeps the last-good card instead of a bare error.
-        "claude" | "copilot" | "antigravity" | "kiro" | "opencode" => {
+        ProviderId::Claude
+        | ProviderId::Copilot
+        | ProviderId::Antigravity
+        | ProviderId::Kiro
+        | ProviderId::OpenCode => {
             !snapshot.windows.is_empty()
         }
-        _ => false,
+        #[cfg(test)]
+        ProviderId::Test(_) => false,
     }
 }
 
@@ -1387,7 +1439,7 @@ fn lock_last_good(
 
 fn apply_provider_outcome_with<F>(
     cache: &Mutex<ProviderLastGoodCache>,
-    client_id: &str,
+    client_id: ProviderId,
     account: Option<&str>,
     failure_source: &str,
     now: DateTime<Utc>,
@@ -1411,6 +1463,10 @@ where
             mut snapshot,
             cache_binding,
         } => {
+            // The id the caller was handed by its table entry wins over
+            // whatever the fetch wrote while building the snapshot, so a card
+            // cannot leave here under another provider's name.
+            snapshot.client_id = client_id;
             match snapshot.account_scope.as_ref() {
                 Ok(_) | Err(AccountScopeError::NoTrustedEvidence) => {}
                 Err(_) => {
@@ -1423,7 +1479,7 @@ where
                         now,
                         format!(
                             "{} account identity could not be verified.",
-                            clean_plan(client_id)
+                            clean_plan(client_id.as_str())
                         ),
                         None,
                     ));
@@ -1506,7 +1562,7 @@ where
 /// `apply_provider_outcome_with` still takes one, because a test needs to
 /// state the instant it is asserting about.
 fn apply_provider_outcome(
-    client_id: &str,
+    client_id: ProviderId,
     account: Option<&str>,
     failure_source: &str,
     outcome: ProviderFetchOutcome,
@@ -1535,13 +1591,15 @@ fn apply_provider_outcome(
 type ProviderFetch = Pin<Box<dyn Future<Output = Vec<AgentUsageSnapshot>>>>;
 
 pub(crate) struct QuotaProvider {
-    /// The `client_id` this provider's snapshots carry. Not enforced: each
-    /// `fetch_*` still writes its own literal, and nothing checks the two
-    /// agree. A mismatch would leave that provider without a `usable_success`
-    /// rule at runtime and log its transport diagnostics as "unknown", while
-    /// every test here passes, because they all walk this id.
-    pub(crate) id: &'static str,
-    fetch: fn() -> ProviderFetch,
+    /// The `client_id` this provider's snapshots carry. `run` passes it to
+    /// `fetch`, which is expected to pass it on to `apply_provider_outcome`.
+    /// Unchecked: this line pairing an id with another provider's fetch, and a
+    /// fetch passing some other variant to `apply_provider_outcome`; either
+    /// compiles and passes every test here.
+    pub(crate) id: ProviderId,
+    /// Receives its own entry's `id` and must pass it to
+    /// `apply_provider_outcome`, which stamps it on every snapshot.
+    fetch: fn(ProviderId) -> ProviderFetch,
 }
 
 fn provider_fetch<F>(future: F) -> ProviderFetch
@@ -1558,43 +1616,43 @@ where
 /// missed elsewhere fails a named test instead of shipping a silent gap (#324).
 pub(crate) const QUOTA_PROVIDERS: &[QuotaProvider] = &[
     QuotaProvider {
-        id: "codex",
-        fetch: || provider_fetch(async { vec![fetch_codex().await] }),
+        id: ProviderId::Codex,
+        fetch: |id| provider_fetch(async move { vec![fetch_codex(id).await] }),
     },
     // The primary first, then any extra config directories. With none
     // configured this is the single Claude card it has always been.
     QuotaProvider {
-        id: "claude",
-        fetch: || provider_fetch(fetch_claude_accounts()),
+        id: ProviderId::Claude,
+        fetch: |id| provider_fetch(fetch_claude_accounts(id)),
     },
     QuotaProvider {
-        id: "antigravity",
-        fetch: || provider_fetch(async { vec![fetch_antigravity().await] }),
+        id: ProviderId::Antigravity,
+        fetch: |id| provider_fetch(async move { vec![fetch_antigravity(id).await] }),
     },
     // Copilot only appears when signed in (via opencode).
     QuotaProvider {
-        id: "copilot",
-        fetch: || provider_fetch(async { fetch_copilot().await.into_iter().collect() }),
+        id: ProviderId::Copilot,
+        fetch: |id| provider_fetch(async move { fetch_copilot(id).await.into_iter().collect() }),
     },
     // Grok only appears when ~/.grok/auth.json has credentials.
     QuotaProvider {
-        id: "grok",
-        fetch: || provider_fetch(async { fetch_grok().await.into_iter().collect() }),
+        id: ProviderId::Grok,
+        fetch: |id| provider_fetch(async move { fetch_grok(id).await.into_iter().collect() }),
     },
     // Grok Bot only appears when a desktop or Cursor login exists.
     QuotaProvider {
-        id: "grok-bot",
-        fetch: || provider_fetch(async { fetch_grokbot().await.into_iter().collect() }),
+        id: ProviderId::GrokBot,
+        fetch: |id| provider_fetch(async move { fetch_grokbot(id).await.into_iter().collect() }),
     },
     // Kiro only appears when signed in (kiro-cli store or Kiro IDE token file).
     QuotaProvider {
-        id: "kiro",
-        fetch: || provider_fetch(async { fetch_kiro().await.into_iter().collect() }),
+        id: ProviderId::Kiro,
+        fetch: |id| provider_fetch(async move { fetch_kiro(id).await.into_iter().collect() }),
     },
     // OpenCode Go only appears when opencode auth.json holds an "opencode-go" api key.
     QuotaProvider {
-        id: "opencode",
-        fetch: || provider_fetch(async { fetch_opencode_go().await.into_iter().collect() }),
+        id: ProviderId::OpenCode,
+        fetch: |id| provider_fetch(async move { fetch_opencode_go(id).await.into_iter().collect() }),
     },
 ];
 
@@ -1611,7 +1669,7 @@ async fn fetch_in_order(fetches: Vec<ProviderFetch>) -> Vec<AgentUsageSnapshot> 
 
 pub async fn run(publication_generation: u64) -> AgentUsagePayload {
     let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-    let agents = fetch_in_order(QUOTA_PROVIDERS.iter().map(|p| (p.fetch)()).collect()).await;
+    let agents = fetch_in_order(QUOTA_PROVIDERS.iter().map(|p| (p.fetch)(p.id)).collect()).await;
     AgentUsagePayload {
         generated_at,
         publication_generation,
@@ -1620,7 +1678,7 @@ pub async fn run(publication_generation: u64) -> AgentUsagePayload {
     }
 }
 
-async fn fetch_grokbot() -> Option<AgentUsageSnapshot> {
+async fn fetch_grokbot(id: ProviderId) -> Option<AgentUsageSnapshot> {
     // After the fetch, not before it: `agent_grokbot::fetch` can sit behind a
     // Keychain authorization prompt for up to 25s, and this instant becomes the
     // snapshot's `updated_at`. The adapter takes its own instant for the reset
@@ -1628,7 +1686,7 @@ async fn fetch_grokbot() -> Option<AgentUsageSnapshot> {
     let result = agent_grokbot::fetch().await;
     let outcome = grokbot_outcome(result, Utc::now());
     let failure_source = grokbot_failure_source(&outcome);
-    apply_provider_outcome("grok-bot", None, failure_source, outcome)
+    apply_provider_outcome(id, None, failure_source, outcome)
 }
 
 /// Which `source` a failed Grok Bot fetch publishes under. Everything is
@@ -1666,7 +1724,7 @@ fn grokbot_outcome(
             cache_binding: data.cache_binding,
             snapshot: AgentUsageSnapshot {
                 account_key: None,
-                client_id: "grok-bot".to_string(),
+                client_id: ProviderId::GrokBot, // replaced by apply_provider_outcome
                 source: "oauth".to_string(),
                 updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
                 identity: data.identity,
@@ -1683,14 +1741,14 @@ fn grokbot_outcome(
     }
 }
 
-async fn fetch_grok() -> Option<AgentUsageSnapshot> {
+async fn fetch_grok(id: ProviderId) -> Option<AgentUsageSnapshot> {
     let now = Utc::now();
     let outcome = match agent_grok::fetch(now).await {
         Ok(Some(data)) => ProviderFetchOutcome::Success {
             cache_binding: data.cache_binding,
             snapshot: AgentUsageSnapshot {
                 account_key: None,
-                client_id: "grok".to_string(),
+                client_id: id,
                 source: "oauth".to_string(),
                 updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
                 identity: data.identity,
@@ -1706,10 +1764,10 @@ async fn fetch_grok() -> Option<AgentUsageSnapshot> {
         Ok(None) => ProviderFetchOutcome::Absent,
         Err(failure) => ProviderFetchOutcome::Failure(failure),
     };
-    apply_provider_outcome("grok", None, "oauth", outcome)
+    apply_provider_outcome(id, None, "oauth", outcome)
 }
 
-async fn fetch_kiro() -> Option<AgentUsageSnapshot> {
+async fn fetch_kiro(id: ProviderId) -> Option<AgentUsageSnapshot> {
     let now = Utc::now();
     let outcome = match crate::kiro_integrations::kiro_credential(now).await {
         crate::kiro_integrations::KiroCredentialLoad::Absent => ProviderFetchOutcome::Absent,
@@ -1722,7 +1780,7 @@ async fn fetch_kiro() -> Option<AgentUsageSnapshot> {
                     cache_binding: Some(data.cache_binding),
                     snapshot: AgentUsageSnapshot {
                         account_key: None,
-                        client_id: "kiro".to_string(),
+                        client_id: id,
                         source: "oauth".to_string(),
                         updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
                         identity: data.identity,
@@ -1739,10 +1797,10 @@ async fn fetch_kiro() -> Option<AgentUsageSnapshot> {
             }
         }
     };
-    apply_provider_outcome("kiro", None, "oauth", outcome)
+    apply_provider_outcome(id, None, "oauth", outcome)
 }
 
-async fn fetch_copilot() -> Option<AgentUsageSnapshot> {
+async fn fetch_copilot(id: ProviderId) -> Option<AgentUsageSnapshot> {
     let now = Utc::now();
     let outcome = match crate::opencode_integrations::github_copilot_credential() {
         crate::opencode_integrations::GitHubCopilotCredentialLoad::Absent => {
@@ -1757,7 +1815,7 @@ async fn fetch_copilot() -> Option<AgentUsageSnapshot> {
                     cache_binding: Some(data.cache_binding),
                     snapshot: AgentUsageSnapshot {
                         account_key: None,
-                        client_id: "copilot".to_string(),
+                        client_id: id,
                         source: "oauth".to_string(),
                         updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
                         identity: data.identity,
@@ -1774,10 +1832,10 @@ async fn fetch_copilot() -> Option<AgentUsageSnapshot> {
             }
         }
     };
-    apply_provider_outcome("copilot", None, "oauth", outcome)
+    apply_provider_outcome(id, None, "oauth", outcome)
 }
 
-async fn fetch_opencode_go() -> Option<AgentUsageSnapshot> {
+async fn fetch_opencode_go(id: ProviderId) -> Option<AgentUsageSnapshot> {
     let now = Utc::now();
     let outcome = match crate::opencode_integrations::opencode_go_credential() {
         crate::opencode_integrations::OpenCodeGoCredentialLoad::Absent => {
@@ -1796,7 +1854,7 @@ async fn fetch_opencode_go() -> Option<AgentUsageSnapshot> {
                         // `opencode` client tab, mirroring how the Copilot quota
                         // (also fetched via opencode auth) feeds the `copilot`
                         // tab rather than a separate one.
-                        client_id: "opencode".to_string(),
+                        client_id: id,
                         source: "api".to_string(),
                         updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
                         identity: data.identity,
@@ -1813,17 +1871,17 @@ async fn fetch_opencode_go() -> Option<AgentUsageSnapshot> {
             }
         }
     };
-    apply_provider_outcome("opencode", None, "api", outcome)
+    apply_provider_outcome(id, None, "api", outcome)
 }
 
-async fn fetch_antigravity() -> AgentUsageSnapshot {
+async fn fetch_antigravity(id: ProviderId) -> AgentUsageSnapshot {
     let now = Utc::now();
     let outcome = match agent_antigravity::fetch(now).await {
         Ok(fetched) => ProviderFetchOutcome::Success {
             cache_binding: fetched.cache_binding,
             snapshot: AgentUsageSnapshot {
                 account_key: None,
-                client_id: "antigravity".to_string(),
+                client_id: id,
                 source: fetched.source,
                 updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
                 identity: fetched.identity,
@@ -1838,14 +1896,14 @@ async fn fetch_antigravity() -> AgentUsageSnapshot {
         Err(failure) => ProviderFetchOutcome::Failure(failure),
     };
     let source = required_card_source(&outcome, agent_antigravity::ANTIGRAVITY_UNCONFIGURED_ERROR);
-    apply_provider_outcome("antigravity", None, source, outcome)
+    apply_provider_outcome(id, None, source, outcome)
         .expect("Antigravity is a required provider card")
 }
 
-async fn fetch_codex() -> AgentUsageSnapshot {
+async fn fetch_codex(id: ProviderId) -> AgentUsageSnapshot {
     let outcome = fetch_codex_inner().await;
     let source = required_card_source(&outcome, CODEX_UNCONFIGURED_ERROR);
-    apply_provider_outcome("codex", None, source, outcome)
+    apply_provider_outcome(id, None, source, outcome)
         .expect("Codex is a required provider card")
 }
 
@@ -1977,9 +2035,9 @@ fn parse_retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option<Dat
         .map(|t| t.with_timezone(&Utc))
 }
 
-async fn fetch_claude() -> AgentUsageSnapshot {
+async fn fetch_claude(id: ProviderId) -> AgentUsageSnapshot {
     let (failure_source, outcome) = fetch_claude_inner().await;
-    apply_provider_outcome("claude", None, failure_source, outcome)
+    apply_provider_outcome(id, None, failure_source, outcome)
         .expect("Claude is a required provider card")
 }
 
@@ -1988,10 +2046,10 @@ async fn fetch_claude() -> AgentUsageSnapshot {
 ///
 /// With no extra directory configured the registry is empty, the loop body
 /// never runs, and this is the single `fetch_claude()` call it was before.
-async fn fetch_claude_accounts() -> Vec<AgentUsageSnapshot> {
+async fn fetch_claude_accounts(id: ProviderId) -> Vec<AgentUsageSnapshot> {
     let config_dirs = crate::claude_config_dirs::snapshot();
     if config_dirs.is_empty() {
-        return vec![fetch_claude().await];
+        return vec![fetch_claude(id).await];
     }
     // Concurrent, not sequential. An earlier version ran these in a loop and
     // justified it as "one extra account costs one more round trip on a 60s
@@ -2007,10 +2065,10 @@ async fn fetch_claude_accounts() -> Vec<AgentUsageSnapshot> {
     // a rate-limit. Four is above any realistic account count, so the bound
     // costs nothing in practice and exists for the case that is not realistic.
     let mut work: Vec<Pin<Box<dyn Future<Output = AgentUsageSnapshot>>>> =
-        vec![Box::pin(fetch_claude())];
+        vec![Box::pin(fetch_claude(id))];
     for config_dir in config_dirs {
         work.push(Box::pin(async move {
-            fetch_claude_extra_account(&config_dir).await
+            fetch_claude_extra_account(id, &config_dir).await
         }));
     }
     join_local_ordered(work).await
@@ -2062,9 +2120,9 @@ async fn join_local_ordered<T: 'static>(
         .await
 }
 
-async fn fetch_claude_extra_account(config_dir: &str) -> AgentUsageSnapshot {
+async fn fetch_claude_extra_account(id: ProviderId, config_dir: &str) -> AgentUsageSnapshot {
     let (failure_source, outcome) = fetch_claude_extra_inner(config_dir).await;
-    apply_provider_outcome("claude", Some(config_dir), failure_source, outcome)
+    apply_provider_outcome(id, Some(config_dir), failure_source, outcome)
         .expect("an extra Claude account always produces a card")
 }
 
@@ -2270,7 +2328,7 @@ async fn fetch_codex_inner() -> ProviderFetchOutcome {
     ProviderFetchOutcome::Success {
         snapshot: AgentUsageSnapshot {
             account_key: None,
-            client_id: "codex".to_string(),
+            client_id: ProviderId::Codex, // replaced by apply_provider_outcome
             source: "oauth".to_string(),
             updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
             identity,
@@ -2895,7 +2953,7 @@ async fn fetch_claude_oauth_usage_request(
         ProviderFetchOutcome::Success {
             snapshot: AgentUsageSnapshot {
                 account_key: identity.account_key.clone(),
-                client_id: "claude".to_string(),
+                client_id: ProviderId::Claude, // replaced by apply_provider_outcome
                 source: "oauth".to_string(),
                 updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
                 identity: Some(AgentIdentity {
@@ -3180,7 +3238,7 @@ async fn claude_header_snapshot(
     ProviderFetchOutcome::Success {
         snapshot: AgentUsageSnapshot {
             account_key: identity.account_key.clone(),
-            client_id: "claude".to_string(),
+            client_id: ProviderId::Claude, // replaced by apply_provider_outcome
             source: "setup-token".to_string(),
             updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
             identity: Some(AgentIdentity {
@@ -4784,7 +4842,7 @@ where
             // The provider already classified this card as windowIdentity.
             continue;
         };
-        let key = SeriesKey::new(snapshot.client_id.clone(), history_scope, window_key);
+        let key = SeriesKey::new(snapshot.client_id.as_str(), history_scope, window_key);
         active_keys.push(key.clone());
         if matches!(window.pace_status.state, PaceState::Unavailable) {
             // Emission protects existing history from capacity eviction, but
@@ -6403,13 +6461,13 @@ mod tests {
     }
 
     fn cache_test_snapshot(
-        client_id: &str,
+        client_id: ProviderId,
         account_scope: Result<AccountScope, AccountScopeError>,
         now: DateTime<Utc>,
     ) -> AgentUsageSnapshot {
         AgentUsageSnapshot {
             account_key: None,
-            client_id: client_id.to_string(),
+            client_id,
             source: "oauth".to_string(),
             updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
             identity: Some(AgentIdentity {
@@ -6453,19 +6511,19 @@ mod tests {
             generated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
             publication_generation: 1,
             agents: vec![
-                cache_test_snapshot("codex", Ok(trusted.clone()), now),
-                cache_test_snapshot("claude", Err(AccountScopeError::NoTrustedEvidence), now),
+                cache_test_snapshot(ProviderId::Codex, Ok(trusted.clone()), now),
+                cache_test_snapshot(ProviderId::Claude, Err(AccountScopeError::NoTrustedEvidence), now),
                 // Trusted scope, but the provider failed and these windows are
                 // its last-good replay — the identity was not confirmed by this
                 // run, so it must not become a binding.
                 {
-                    let mut stale = cache_test_snapshot("copilot", Ok(trusted.clone()), now);
+                    let mut stale = cache_test_snapshot(ProviderId::Copilot, Ok(trusted.clone()), now);
                     stale.error = Some("Copilot is unavailable.".to_string());
                     stale
                 },
                 // Trusted scope, degraded transport — same reasoning.
                 {
-                    let mut degraded = cache_test_snapshot("grok", Ok(trusted.clone()), now);
+                    let mut degraded = cache_test_snapshot(ProviderId::Grok, Ok(trusted.clone()), now);
                     degraded.transport_diagnostic =
                         Some(SafeTransportDiagnostic::server_error(503));
                     degraded
@@ -6529,7 +6587,7 @@ mod tests {
             agents: vec![AgentUsageSnapshot {
                 account_key: None,
                 windows,
-                ..cache_test_snapshot("claude", Ok(trusted.clone()), now)
+                ..cache_test_snapshot(ProviderId::Claude, Ok(trusted.clone()), now)
             }],
             opencode_subscriptions: Vec::new(),
         };
@@ -6581,7 +6639,7 @@ mod tests {
     fn claude_test_success_outcome() -> ProviderFetchOutcome {
         let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
         ProviderFetchOutcome::Success {
-            snapshot: cache_test_snapshot("claude", Err(AccountScopeError::NoTrustedEvidence), now),
+            snapshot: cache_test_snapshot(ProviderId::Claude, Err(AccountScopeError::NoTrustedEvidence), now),
             cache_binding: None,
         }
     }
@@ -7190,12 +7248,12 @@ mod tests {
 
         apply_provider_outcome_with(
             &cache,
-            "copilot",
+            ProviderId::Copilot,
             None,
             "oauth",
             fresh_at,
             ProviderFetchOutcome::Success {
-                snapshot: cache_test_snapshot("copilot", Ok(account_scope.clone()), fresh_at),
+                snapshot: cache_test_snapshot(ProviderId::Copilot, Ok(account_scope.clone()), fresh_at),
                 cache_binding: Some(binding.clone()),
             },
             |_| {},
@@ -7220,7 +7278,7 @@ mod tests {
             Ok((plan, windows)) => ProviderFetchOutcome::Success {
                 snapshot: AgentUsageSnapshot {
                     account_key: None,
-                    client_id: "copilot".to_string(),
+                    client_id: ProviderId::Copilot,
                     source: "oauth".to_string(),
                     updated_at: response_at.to_rfc3339_opts(SecondsFormat::Millis, true),
                     identity: Some(AgentIdentity { email: None, plan }),
@@ -7236,14 +7294,14 @@ mod tests {
             Err(failure) => ProviderFetchOutcome::Failure(failure),
         };
         let snapshot =
-            apply_provider_outcome_with(&cache, "copilot", None, "oauth", response_at, outcome, |_| {})
+            apply_provider_outcome_with(&cache, ProviderId::Copilot, None, "oauth", response_at, outcome, |_| {})
                 .unwrap();
 
         assert!(snapshot.error.is_none());
         assert_eq!(snapshot.windows.len(), 1);
         assert!((snapshot.windows[0].remaining_percent - 60.0).abs() < 0.01);
         assert!(snapshot.windows[0].resets_at.is_none());
-        let cached = lock_last_good(&cache).entries[&account_slot("copilot", None)].snapshot.clone();
+        let cached = lock_last_good(&cache).entries[&account_slot(ProviderId::Copilot, None)].snapshot.clone();
         assert_eq!(cached.updated_at, snapshot.updated_at);
         assert_eq!(cached.windows.len(), 1);
         assert!(cached.error.is_none());
@@ -7326,7 +7384,7 @@ mod tests {
             data.cache_binding = Some(binding.clone());
             let fresh = apply_provider_outcome_with(
                 &cache,
-                "grok-bot",
+                ProviderId::GrokBot,
                 None,
                 "oauth",
                 now,
@@ -7340,7 +7398,7 @@ mod tests {
             let later = now + chrono::Duration::minutes(1);
             let result = apply_provider_outcome_with(
                 &cache,
-                "grok-bot",
+                ProviderId::GrokBot,
                 None,
                 "oauth",
                 later,
@@ -7415,7 +7473,7 @@ mod tests {
         let cache = Mutex::new(ProviderLastGoodCache::default());
         let snapshot = apply_provider_outcome_with(
             &cache,
-            "grok-bot",
+            ProviderId::GrokBot,
             None,
             grokbot_failure_source(&consent),
             now,
@@ -7445,12 +7503,12 @@ mod tests {
 
         let fresh = apply_provider_outcome_with(
             &cache,
-            "codex",
+            ProviderId::Codex,
             None,
             "oauth",
             fresh_at,
             ProviderFetchOutcome::Success {
-                snapshot: cache_test_snapshot("codex", Ok(account_scope), fresh_at),
+                snapshot: cache_test_snapshot(ProviderId::Codex, Ok(account_scope), fresh_at),
                 cache_binding: Some(binding.clone()),
             },
             |snapshot| {
@@ -7476,7 +7534,7 @@ mod tests {
 
         let fallback = apply_provider_outcome_with(
             &cache,
-            "codex",
+            ProviderId::Codex,
             None,
             "oauth",
             failure_at,
@@ -7525,7 +7583,7 @@ mod tests {
 
         let cached = lock_last_good(&cache)
             .entries
-            .get(&account_slot("codex", None))
+            .get(&account_slot(ProviderId::Codex, None))
             .unwrap()
             .snapshot
             .clone();
@@ -7535,7 +7593,7 @@ mod tests {
 
         let fallback_again = apply_provider_outcome_with(
             &cache,
-            "codex",
+            ProviderId::Codex,
             None,
             "oauth",
             failure_at + chrono::Duration::minutes(1),
@@ -7553,7 +7611,7 @@ mod tests {
 
         let dns_fallback = apply_provider_outcome_with(
             &cache,
-            "codex",
+            ProviderId::Codex,
             None,
             "oauth",
             failure_at + chrono::Duration::minutes(2),
@@ -7602,12 +7660,12 @@ mod tests {
 
         let fresh = apply_provider_outcome_with(
             &cache,
-            "opencode",
+            ProviderId::OpenCode,
             None,
             "api",
             fresh_at,
             ProviderFetchOutcome::Success {
-                snapshot: cache_test_snapshot("opencode", Ok(account_scope), fresh_at),
+                snapshot: cache_test_snapshot(ProviderId::OpenCode, Ok(account_scope), fresh_at),
                 cache_binding: Some(binding.clone()),
             },
             |_| {},
@@ -7618,11 +7676,11 @@ mod tests {
         // The success reached the cache under the opencode slot.
         assert!(lock_last_good(&cache)
             .entries
-            .contains_key(&account_slot("opencode", None)));
+            .contains_key(&account_slot(ProviderId::OpenCode, None)));
 
         let fallback = apply_provider_outcome_with(
             &cache,
-            "opencode",
+            ProviderId::OpenCode,
             None,
             "api",
             failure_at,
@@ -7663,19 +7721,19 @@ mod tests {
             let cache = Mutex::new(ProviderLastGoodCache::default());
             apply_provider_outcome_with(
                 &cache,
-                "codex",
+                ProviderId::Codex,
                 None,
                 "oauth",
                 now,
                 ProviderFetchOutcome::Success {
-                    snapshot: cache_test_snapshot("codex", Ok(scope_a.clone()), now),
+                    snapshot: cache_test_snapshot(ProviderId::Codex, Ok(scope_a.clone()), now),
                     cache_binding: Some(binding_a.clone()),
                 },
                 |_| {},
             );
             let result = apply_provider_outcome_with(
                 &cache,
-                "codex",
+                ProviderId::Codex,
                 None,
                 "oauth",
                 now + chrono::Duration::seconds(1),
@@ -7684,25 +7742,25 @@ mod tests {
             )
             .unwrap();
             assert!(result.windows.is_empty());
-            assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("codex", None)));
+            assert!(!lock_last_good(&cache).entries.contains_key(&account_slot(ProviderId::Codex, None)));
         }
 
         let cache = Mutex::new(ProviderLastGoodCache::default());
         apply_provider_outcome_with(
             &cache,
-            "codex",
+            ProviderId::Codex,
             None,
             "oauth",
             now,
             ProviderFetchOutcome::Success {
-                snapshot: cache_test_snapshot("codex", Ok(scope_a), now),
+                snapshot: cache_test_snapshot(ProviderId::Codex, Ok(scope_a), now),
                 cache_binding: Some(binding_a),
             },
             |_| {},
         );
         assert!(apply_provider_outcome_with(
             &cache,
-            "codex",
+            ProviderId::Codex,
             None,
             "oauth",
             now,
@@ -7710,7 +7768,7 @@ mod tests {
             |_| panic!("absent must not enrich"),
         )
         .is_none());
-        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("codex", None)));
+        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot(ProviderId::Codex, None)));
         scope.cleanup();
     }
 
@@ -7726,25 +7784,25 @@ mod tests {
         let cache = Mutex::new(ProviderLastGoodCache::default());
         apply_provider_outcome_with(
             &cache,
-            "antigravity",
+            ProviderId::Antigravity,
             None,
             "oauth",
             now,
             ProviderFetchOutcome::Success {
-                snapshot: cache_test_snapshot("antigravity", Ok(account_scope.clone()), now),
+                snapshot: cache_test_snapshot(ProviderId::Antigravity, Ok(account_scope.clone()), now),
                 cache_binding: Some(binding.clone()),
             },
             |_| {},
         );
         let anonymous = apply_provider_outcome_with(
             &cache,
-            "antigravity",
+            ProviderId::Antigravity,
             None,
             "local",
             now,
             ProviderFetchOutcome::Success {
                 snapshot: cache_test_snapshot(
-                    "antigravity",
+                    ProviderId::Antigravity,
                     Err(AccountScopeError::NoTrustedEvidence),
                     now,
                 ),
@@ -7754,25 +7812,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(anonymous.windows.len(), 1);
-        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("antigravity", None)));
+        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot(ProviderId::Antigravity, None)));
 
         apply_provider_outcome_with(
             &cache,
-            "antigravity",
+            ProviderId::Antigravity,
             None,
             "oauth",
             now,
             ProviderFetchOutcome::Success {
-                snapshot: cache_test_snapshot("antigravity", Ok(account_scope.clone()), now),
+                snapshot: cache_test_snapshot(ProviderId::Antigravity, Ok(account_scope.clone()), now),
                 cache_binding: Some(binding.clone()),
             },
             |_| {},
         );
-        let mut empty = cache_test_snapshot("antigravity", Ok(account_scope.clone()), now);
+        let mut empty = cache_test_snapshot(ProviderId::Antigravity, Ok(account_scope.clone()), now);
         empty.windows.clear();
         let live_empty = apply_provider_outcome_with(
             &cache,
-            "antigravity",
+            ProviderId::Antigravity,
             None,
             "oauth",
             now,
@@ -7784,16 +7842,16 @@ mod tests {
         )
         .unwrap();
         assert!(live_empty.windows.is_empty());
-        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("antigravity", None)));
+        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot(ProviderId::Antigravity, None)));
 
         apply_provider_outcome_with(
             &cache,
-            "antigravity",
+            ProviderId::Antigravity,
             None,
             "oauth",
             now,
             ProviderFetchOutcome::Success {
-                snapshot: cache_test_snapshot("antigravity", Ok(account_scope), now),
+                snapshot: cache_test_snapshot(ProviderId::Antigravity, Ok(account_scope), now),
                 cache_binding: Some(binding),
             },
             |_| {},
@@ -7801,13 +7859,13 @@ mod tests {
         let enrich_calls = std::cell::Cell::new(0);
         let invalid = apply_provider_outcome_with(
             &cache,
-            "antigravity",
+            ProviderId::Antigravity,
             None,
             "oauth",
             now,
             ProviderFetchOutcome::Success {
                 snapshot: cache_test_snapshot(
-                    "antigravity",
+                    ProviderId::Antigravity,
                     Err(AccountScopeError::MetadataRead),
                     now,
                 ),
@@ -7818,7 +7876,7 @@ mod tests {
         .unwrap();
         assert!(invalid.windows.is_empty());
         assert_eq!(enrich_calls.get(), 0);
-        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("antigravity", None)));
+        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot(ProviderId::Antigravity, None)));
         scope.cleanup();
     }
 
@@ -7918,12 +7976,12 @@ mod tests {
 
         apply_provider_outcome_with(
             &cache,
-            "kiro",
+            ProviderId::Kiro,
             None,
             "oauth",
             fresh_at,
             ProviderFetchOutcome::Success {
-                snapshot: cache_test_snapshot("kiro", Ok(account_scope), fresh_at),
+                snapshot: cache_test_snapshot(ProviderId::Kiro, Ok(account_scope), fresh_at),
                 cache_binding: Some(binding.clone()),
             },
             |_| {},
@@ -7932,7 +7990,7 @@ mod tests {
 
         let fallback = apply_provider_outcome_with(
             &cache,
-            "kiro",
+            ProviderId::Kiro,
             None,
             "oauth",
             failure_at,
@@ -7961,7 +8019,7 @@ mod tests {
         // The ids label one generic call rather than dispatching per provider;
         // walking the table keeps the label list from drifting (it had lost
         // grok-bot) without claiming more coverage than the call gives.
-        for provider in QUOTA_PROVIDERS.iter().map(|provider| provider.id) {
+        for provider in QUOTA_PROVIDERS.iter().map(|provider| provider.id.as_str()) {
             let sends = std::cell::Cell::new(0);
             let result: Result<(), &str> =
                 request_after_verified_binding(Err::<(), _>("scope unavailable"), |()| async {
@@ -7976,7 +8034,7 @@ mod tests {
 
     // ---- #324: the provider table is the single registration point ----
 
-    fn table_test_snapshot(client_id: &str) -> AgentUsageSnapshot {
+    fn table_test_snapshot(client_id: ProviderId) -> AgentUsageSnapshot {
         cache_test_snapshot(
             client_id,
             Err(AccountScopeError::NoTrustedEvidence),
@@ -7998,7 +8056,7 @@ mod tests {
         // stop checking a provider that is REMOVED from it; this is the check
         // that covers every provider for that case (a few older selftests
         // happen to name codex, kiro and opencode directly).
-        let ids: Vec<&str> = QUOTA_PROVIDERS.iter().map(|p| p.id).collect();
+        let ids: Vec<&str> = QUOTA_PROVIDERS.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(
             ids,
             ["codex", "claude", "antigravity", "copilot", "grok", "grok-bot", "kiro", "opencode"]
@@ -8009,18 +8067,18 @@ mod tests {
     async fn fetches_land_in_table_order_whatever_order_they_finish_in() {
         let slow_first = provider_fetch(async {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            vec![table_test_snapshot("a")]
+            vec![table_test_snapshot(ProviderId::Test("a"))]
         });
-        let out = fetch_in_order(vec![slow_first, stub(vec![table_test_snapshot("b")])]).await;
+        let out = fetch_in_order(vec![slow_first, stub(vec![table_test_snapshot(ProviderId::Test("b"))])]).await;
         assert_eq!(ids(&out), ["a", "b"]);
     }
 
     #[tokio::test]
     async fn an_empty_fetch_contributes_no_card_and_a_multi_account_fetch_keeps_its_order() {
         let out = fetch_in_order(vec![
-            stub(vec![table_test_snapshot("a")]),
+            stub(vec![table_test_snapshot(ProviderId::Test("a"))]),
             stub(Vec::new()),
-            stub(vec![table_test_snapshot("c1"), table_test_snapshot("c2")]),
+            stub(vec![table_test_snapshot(ProviderId::Test("c1")), table_test_snapshot(ProviderId::Test("c2"))]),
         ])
         .await;
         assert_eq!(ids(&out), ["a", "c1", "c2"]);
@@ -8035,12 +8093,12 @@ mod tests {
         let a = provider_fetch(async move {
             a_started.send(()).unwrap();
             b_seen.await.unwrap();
-            vec![table_test_snapshot("a")]
+            vec![table_test_snapshot(ProviderId::Test("a"))]
         });
         let b = provider_fetch(async move {
             b_started.send(()).unwrap();
             a_seen.await.unwrap();
-            vec![table_test_snapshot("b")]
+            vec![table_test_snapshot(ProviderId::Test("b"))]
         });
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -8052,10 +8110,45 @@ mod tests {
     }
 
     #[test]
+    fn the_caller_id_is_stamped_on_a_successful_snapshot() {
+        // A snapshot built under another id is published under the caller's
+        // id. The slot is computed from the caller's id either way; what the
+        // stamp changes is the published id and the `usable_success` verdict
+        // that decides whether the snapshot is cached in that slot.
+        let scope = TestRefreshScope::new("kiro", "kiro-stamp");
+        let account_scope = scope
+            .resolve_current("fixture", "account-a", b"marker-a")
+            .unwrap();
+        let binding = ProviderCacheBinding::primary(account_scope.clone());
+        let cache = Mutex::new(ProviderLastGoodCache::default());
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let built_under = ProviderId::Test("written-by-the-fetch");
+        let fixture = cache_test_snapshot(built_under, Ok(account_scope), now);
+        // Control: the fixture really carries the other id going in.
+        assert_eq!(fixture.client_id, built_under);
+        let snapshot = apply_provider_outcome_with(
+            &cache,
+            ProviderId::Kiro,
+            None,
+            "oauth",
+            now,
+            ProviderFetchOutcome::Success {
+                snapshot: fixture,
+                cache_binding: Some(binding),
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(snapshot.client_id, ProviderId::Kiro);
+        let cache = lock_last_good(&cache);
+        assert!(cache.entries.contains_key(&account_slot(ProviderId::Kiro, None)));
+    }
+
+    #[test]
     fn every_provider_in_the_table_has_a_usable_success_rule() {
-        // Checks the table id against the arms. It does NOT check that a
-        // provider's fetch emits that id; see `QuotaProvider::id`.
-        let base = table_test_snapshot("any").windows[0].clone();
+        // A missing arm no longer compiles (the match is exhaustive); this
+        // checks that each arm accepts its provider's success shape.
+        let base = table_test_snapshot(ProviderId::Test("any")).windows[0].clone();
         let card = |id: &str| base.clone().with_identity(id, Some(id.to_string()), None, None);
         for provider in QUOTA_PROVIDERS {
             let mut snapshot = table_test_snapshot(provider.id);
@@ -8067,12 +8160,12 @@ mod tests {
             assert!(
                 usable_success(&snapshot),
                 "{} has no usable_success rule; a transient failure would drop its last-good card",
-                provider.id
+                provider.id.as_str()
             );
         }
-        // Control: the same success shape under an id outside the table is
-        // refused, so the loop above is not passing on a catch-all.
-        let mut stranger = table_test_snapshot("not-a-provider");
+        // Control: the same success shape under the test-only fixture id is
+        // refused, so a success shape alone does not make an arm pass.
+        let mut stranger = table_test_snapshot(ProviderId::Test("not-a-provider"));
         stranger.windows = vec![card("session.v1")];
         assert!(!usable_success(&stranger));
     }
@@ -8752,7 +8845,7 @@ mod tests {
             .unwrap();
         let mut snapshot = AgentUsageSnapshot {
             account_key: None,
-            client_id: "codex".to_string(),
+            client_id: ProviderId::Codex,
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
@@ -9860,7 +9953,7 @@ mod tests {
         let expected_scope = account_scope.as_str().to_string();
         let mut snapshot = AgentUsageSnapshot {
             account_key: None,
-            client_id: "claude".to_string(),
+            client_id: ProviderId::Claude,
             source: "oauth".to_string(),
             updated_at: String::new(),
             identity: None,
@@ -9981,7 +10074,7 @@ mod tests {
         );
         let mut snapshot = AgentUsageSnapshot {
             account_key: None,
-            client_id: "claude".to_string(),
+            client_id: ProviderId::Claude,
             source: "oauth".to_string(),
             updated_at: String::new(),
             identity: None,
@@ -12048,7 +12141,7 @@ mod tests {
         };
         let mut snapshot = AgentUsageSnapshot {
             account_key: None,
-            client_id: "fixture".to_string(),
+            client_id: ProviderId::Test("fixture"),
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
@@ -12106,7 +12199,7 @@ mod tests {
         };
         let mut snapshot = AgentUsageSnapshot {
             account_key: None,
-            client_id: "fixture".to_string(),
+            client_id: ProviderId::Test("fixture"),
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
@@ -12180,7 +12273,7 @@ mod tests {
         let reset = Utc.timestamp_opt(now + 86_400, 0).single().unwrap();
         let mut snapshot = AgentUsageSnapshot {
             account_key: None,
-            client_id: "fixture".to_string(),
+            client_id: ProviderId::Test("fixture"),
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
@@ -12268,7 +12361,7 @@ mod tests {
         let reset = Utc.timestamp_opt(now + 86_400, 0).single().unwrap();
         let mut snapshot = AgentUsageSnapshot {
             account_key: None,
-            client_id: "fixture".to_string(),
+            client_id: ProviderId::Test("fixture"),
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
@@ -12323,7 +12416,7 @@ mod tests {
         let reset = Utc.timestamp_opt(now + 86_400, 0).single().unwrap();
         let mut snapshot = AgentUsageSnapshot {
             account_key: None,
-            client_id: "fixture".to_string(),
+            client_id: ProviderId::Test("fixture"),
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
@@ -12446,7 +12539,7 @@ mod tests {
         let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
         let mut snapshot = AgentUsageSnapshot {
             account_key: None,
-            client_id: "fixture".to_string(),
+            client_id: ProviderId::Test("fixture"),
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
@@ -12547,7 +12640,7 @@ mod tests {
             let sampled_at = start + index as i64 * 900;
             let mut snapshot = AgentUsageSnapshot {
                 account_key: None,
-                client_id: "claude".to_string(),
+                client_id: ProviderId::Claude,
                 source: "oauth".to_string(),
                 updated_at: String::new(),
                 identity: None,
@@ -12659,7 +12752,7 @@ mod tests {
         let start = 1_800_000_000_i64;
         let mut snapshot = AgentUsageSnapshot {
             account_key: None,
-            client_id: "antigravity".to_string(),
+            client_id: ProviderId::Antigravity,
             source: "cli".to_string(),
             updated_at: String::new(),
             identity: None,
@@ -12841,8 +12934,8 @@ mod tests {
         // overwrites the other's fallback — one account's state stored under
         // another's name, which nothing downstream can detect.
         assert_ne!(
-            account_slot("claude", Some(spaced)),
-            account_slot("claude", Some(trimmed)),
+            account_slot(ProviderId::Claude, Some(spaced)),
+            account_slot(ProviderId::Claude, Some(trimmed)),
             "the last-good cache slot was derived from the trimmed path"
         );
 
@@ -12883,20 +12976,20 @@ mod tests {
             .unwrap();
         let binding = ProviderCacheBinding::primary(scope_primary.clone());
 
-        let primary = account_slot("claude", None);
-        let second = account_slot("claude", Some("/Users/someone/.claude-work"));
+        let primary = account_slot(ProviderId::Claude, None);
+        let second = account_slot(ProviderId::Claude, Some("/Users/someone/.claude-work"));
         assert_ne!(primary, second, "the account dimension collapsed");
 
         let cache = Mutex::new(ProviderLastGoodCache::default());
         lock_last_good(&cache).replace(
             &primary,
             binding.clone(),
-            cache_test_snapshot("claude", Ok(scope_primary.clone()), now),
+            cache_test_snapshot(ProviderId::Claude, Ok(scope_primary.clone()), now),
         );
         lock_last_good(&cache).replace(
             &second,
             binding.clone(),
-            cache_test_snapshot("claude", Ok(scope_second.clone()), now),
+            cache_test_snapshot(ProviderId::Claude, Ok(scope_second.clone()), now),
         );
 
         let recovered = lock_last_good(&cache)
@@ -13027,7 +13120,7 @@ mod tests {
         );
         AgentUsageSnapshot {
             account_key: identity.account_key.clone(),
-            client_id: "claude".to_string(),
+            client_id: ProviderId::Claude,
             source: "oauth".to_string(),
             updated_at: now_date.to_rfc3339_opts(SecondsFormat::Millis, true),
             identity: None,
@@ -13372,7 +13465,7 @@ mod tests {
         let account_scope = scope
             .resolve_current("fixture", "g5-account", b"g5-marker")
             .unwrap();
-        let primary = cache_test_snapshot("claude", Ok(account_scope.clone()), now);
+        let primary = cache_test_snapshot(ProviderId::Claude, Ok(account_scope.clone()), now);
         let json = serde_json::to_string(&primary).unwrap();
         assert!(
             !json.contains("accountKey"),
@@ -13386,7 +13479,7 @@ mod tests {
         // The field is not dead: an extra account does carry it.
         let extra = AgentUsageSnapshot {
             account_key: Some(G_TEST_CONFIG_DIR.to_string()),
-            ..cache_test_snapshot("claude", Ok(account_scope), now)
+            ..cache_test_snapshot(ProviderId::Claude, Ok(account_scope), now)
         };
         let extra_json = serde_json::to_string(&extra).unwrap();
         assert!(
@@ -13420,11 +13513,11 @@ mod tests {
         let round_three = round_two + chrono::Duration::seconds(60);
         let cache = Mutex::new(ProviderLastGoodCache::default());
 
-        let primary_snapshot = cache_test_snapshot("claude", Ok(primary_scope.clone()), round_one);
+        let primary_snapshot = cache_test_snapshot(ProviderId::Claude, Ok(primary_scope.clone()), round_one);
         let primary_updated_at = primary_snapshot.updated_at.clone();
         apply_provider_outcome_with(
             &cache,
-            "claude",
+            ProviderId::Claude,
             None,
             "oauth",
             round_one,
@@ -13438,14 +13531,14 @@ mod tests {
 
         apply_provider_outcome_with(
             &cache,
-            "claude",
+            ProviderId::Claude,
             Some(G_TEST_CONFIG_DIR),
             "oauth",
             round_two,
             ProviderFetchOutcome::Success {
                 snapshot: AgentUsageSnapshot {
                     account_key: Some(G_TEST_CONFIG_DIR.to_string()),
-                    ..cache_test_snapshot("claude", Ok(extra_scope.clone()), round_two)
+                    ..cache_test_snapshot(ProviderId::Claude, Ok(extra_scope.clone()), round_two)
                 },
                 cache_binding: Some(extra_binding.clone()),
             },
@@ -13455,7 +13548,7 @@ mod tests {
 
         let recovered = apply_provider_outcome_with(
             &cache,
-            "claude",
+            ProviderId::Claude,
             None,
             "oauth",
             round_three,
@@ -13485,7 +13578,7 @@ mod tests {
         // The extra account kept its own entry through all three rounds.
         assert!(
             lock_last_good(&cache)
-                .clean_for(&account_slot("claude", Some(G_TEST_CONFIG_DIR)), &extra_binding)
+                .clean_for(&account_slot(ProviderId::Claude, Some(G_TEST_CONFIG_DIR)), &extra_binding)
                 .is_some()
         );
         scope.cleanup();
@@ -13634,7 +13727,7 @@ mod tests {
             publication_generation: 1,
             agents: vec![AgentUsageSnapshot {
                 account_key: None,
-                client_id: "provider-fixture.invalid".to_string(),
+                client_id: ProviderId::Test("provider-fixture.invalid"),
                 source: "fixture.invalid".to_string(),
                 updated_at: "2026-07-10T12:00:00.000Z".to_string(),
                 identity: None,

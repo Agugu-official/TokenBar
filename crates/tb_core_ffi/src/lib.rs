@@ -1054,7 +1054,7 @@ pub extern "C" fn tb_quota_provider_ids() -> *mut c_char {
     guarded("tb_quota_provider_ids", || {
         let ids: Vec<&str> = agent_usage::QUOTA_PROVIDERS
             .iter()
-            .map(|provider| provider.id)
+            .map(|provider| provider.id.as_str())
             .collect();
         envelope(Ok(serde_json::json!({ "ids": ids })))
     })
