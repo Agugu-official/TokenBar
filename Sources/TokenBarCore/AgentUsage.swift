@@ -138,12 +138,13 @@ public struct PaceStatus: Decodable, Sendable, Equatable {
     public let reason: UsagePaceUnavailableReason?
 
     /// The key to read this window's quota curve with, or nil when the engine
-    /// recorded no history for it. `accountScope` is the engine's mark for an
-    /// identity it could not verify (`agent_usage.rs`, the history recorder),
-    /// and such a window is neither recorded nor bound, so its curve read
-    /// throws "binding is unavailable" on every publication. Reading it anyway
-    /// reported a permanent absence as a failed read that "will be retried":
-    /// Antigravity through the `agy` CLI, which carries no account identity.
+    /// records no history for it. `accountScope` is the engine's mark for an
+    /// account with no trusted history identity (`enrich_snapshot_with`): the
+    /// `agy` CLI route of Antigravity, or a Grok Bot token with no subject.
+    /// Such a window is neither recorded nor bound, so its curve read throws
+    /// "binding is unavailable" on every publication, and reading it anyway
+    /// reported a permanent absence as a failed read that "will be retried".
+    /// A storage failure is reported as `history` instead and is still read.
     public var historyKey: String? {
         state == .unavailable && reason == .accountScope ? nil : windowKey
     }
