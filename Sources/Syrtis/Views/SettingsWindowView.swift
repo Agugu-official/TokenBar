@@ -371,6 +371,7 @@ private struct MenuBarMock: View {
     let agentUsage: AgentUsagePayload?
 
     @AppStorage(TrayMode.storageKey) private var trayModeRaw = TrayMode.todayTokens.rawValue
+    @AppStorage(AnimationPace.storageKey) private var paceRaw = AnimationPace.default.rawValue
     @AppStorage(MenuBarTextColor.storageKey) private var textColorMode = MenuBarTextColor.automatic.rawValue
     @AppStorage(MenuBarTextColor.customColorKey) private var textColorHex = MenuBarTextColor.defaultHex
     @AppStorage(MenuBarTextColor.warningColorKey) private var warningTextColorHex = QuotaColorLevel.warning.defaultHex
@@ -464,7 +465,11 @@ private struct MenuBarMock: View {
                 style: gauge, remaining: remaining, dark: dark, coloring: coloring,
                 stale: stale))
         } else {
-            let frames = PreviewFrames.frames(style: animationStyle, dark: dark)
+            let frames = PreviewFrames.frames(
+                style: animationStyle, dark: dark,
+                level: TrayAnimator.sandLevel(
+                    tokensPerMinute: AnimationPace(rawValue: paceRaw).map { $0.scaled(tokensPerMin ?? 0) }
+                        ?? AnimationPace.default.scaled(tokensPerMin ?? 0)))
             if frames.isEmpty {
                 Image(systemName: "chart.bar.fill")
                     .font(.system(size: 12))
@@ -482,11 +487,13 @@ private struct MenuBarMock: View {
         }
     }
 
-    /// animation.rs pacing, same as TrayAnimator: idle 2 fps, 1M tok/min
-    /// tops out at 40 fps.
+    /// Same pacing as TrayAnimator: idle 2 fps up to 50k tok/min, a log ramp
+    /// to 40 fps at 3M.
     private var frameInterval: TimeInterval {
-        let load = min((tokensPerMin ?? 0) / 10_000.0, 100.0)
-        return 0.5 / max(1.0, load / 5.0)
+        if animationStyle == TrayAnimator.sandStyle { return 1 / TrayAnimator.sandFPS }
+        let pace = AnimationPace(rawValue: paceRaw) ?? .default
+        return Double(TrayAnimator.animationIntervalMilliseconds(
+            load: TrayAnimator.animationLoad(tokensPerMinute: pace.scaled(tokensPerMin ?? 0)))) / 1000
     }
 
     private static let clock = Date.now.formatted(date: .omitted, time: .shortened)
@@ -498,9 +505,14 @@ private struct MenuBarMock: View {
 private enum PreviewFrames {
     private static var cache: [String: [NSImage]] = [:]
 
-    static func frames(style: String, dark: Bool) -> [NSImage] {
-        let directory =
-            (style == "parrot" ? "anim-parrot" : "anim-cat2") + (dark ? "" : "-light")
+    static func frames(style: String, dark: Bool, level: Int = 0) -> [NSImage] {
+        let base: String
+        switch style {
+        case "parrot": base = "anim-parrot"
+        case TrayAnimator.sandStyle: base = "anim-sand\(level)"
+        default: base = "anim-cat2"
+        }
+        let directory = base + (dark ? "" : "-light")
         if let hit = cache[directory] { return hit }
         let loaded = TrayAnimator.loadFrames(directory: directory)
         cache[directory] = loaded

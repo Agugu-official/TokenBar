@@ -143,14 +143,7 @@ struct AttributionOnboardingCardView: View {
             DashCard(AttributionOnboardingCard.Copy.title) {
                 content(summary)
             }
-            .background(
-                Color.accentColor.opacity(AttributionOnboardingCard.accentFill),
-                in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(
-                        Color.accentColor.opacity(AttributionOnboardingCard.accentStroke),
-                        lineWidth: 1))
+            .onboardingCardStyle()
         }
     }
 
@@ -230,4 +223,24 @@ struct AttributionSetupLink: View {
         .buttonStyle(.link)
         .font(.caption)
     }
+}
+
+/// The accent wash and border every onboarding card wears, so the attribution
+/// card and the animation-pace card read as the same kind of prompt.
+struct OnboardingCardStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .background(
+                Color.accentColor.opacity(AttributionOnboardingCard.accentFill),
+                in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(
+                        Color.accentColor.opacity(AttributionOnboardingCard.accentStroke),
+                        lineWidth: 1))
+    }
+}
+
+extension View {
+    func onboardingCardStyle() -> some View { modifier(OnboardingCardStyle()) }
 }

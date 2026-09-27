@@ -68,6 +68,7 @@ struct SettingsPanel: View {
     @State private var editingTextColor: QuotaColorLevel?
     @AppStorage(TrayAnimator.animateKey) private var animateTray = true
     @AppStorage(TrayAnimator.styleKey) private var animationStyle = "cat"
+    @AppStorage(AnimationPace.storageKey) private var animationPaceRaw = AnimationPace.default.rawValue
     @AppStorage(IconColoring.storageKey) private var iconColoringRaw = IconColoring.warningOnly.rawValue
     @AppStorage(TrayAnimator.quotaSourceKey) private var quotaSource = QuotaResolver.auto
     @AppStorage(ClientTray.enabledKey) private var individualEnabledRaw = ""
@@ -296,11 +297,17 @@ struct SettingsPanel: View {
         section("Menubar icon") {
             radioGroup(
                 selection: $animationStyle,
-                options: [("cat", "Spinning cat"), ("parrot", "Party parrot")]
+                options: [("cat", "Spinning cat"), ("parrot", "Party parrot"), ("sand", "Sand shoal")]
                     + QuotaIconStyle.allCases.map { ($0.rawValue, $0.label) })
             if isAnimatedStyle {
                 toggleRow("Animate based on token usage", isOn: $animateTray)
-                hint("Spins faster as the live token rate climbs (idle 2 fps, 1M tokens/min tops out at 40 fps).")
+                if animateTray {
+                    radioGroup(
+                        selection: $animationPaceRaw,
+                        options: AnimationPace.allCases.map { ($0.rawValue, $0.label) })
+                    hint((AnimationPace(rawValue: animationPaceRaw) ?? .default).detail)
+                }
+                hint("The cat and parrot speed up and the sand gets busier as the live token rate climbs. The pace sets how much traffic reaches the top: Light at 600K tokens/min, Moderate at 3M, Heavy at 10M.")
             } else {
                 radioGroup(
                     selection: $iconColoringRaw,
@@ -1108,6 +1115,7 @@ struct SettingsPanel: View {
 
     private var isAnimatedStyle: Bool {
         animationStyle == "cat" || animationStyle == "parrot"
+            || animationStyle == TrayAnimator.sandStyle
     }
 
     /// Shows the resolved auto height while 0 (auto), the chosen value once set.
