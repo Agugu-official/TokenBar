@@ -1,3 +1,4 @@
+import Foundation
 import TokenBarCore
 
 /// Shared quota-selection policy for the tray and Settings preview. Both live
@@ -52,5 +53,26 @@ enum QuotaSelectionPolicy {
             remaining.isFinite
         else { return nil }
         return remaining
+    }
+
+    /// When the selected reading was fetched (#8): the `updatedAt` of the
+    /// snapshot `resolve` picked. Rust's same-binding `last_good` fallback
+    /// keeps the original fetch's `updated_at`, so an explicit selection served
+    /// from it reports its real age. This is only as accurate as the
+    /// snapshot's own `updatedAt`; a provider that serves cached data under a
+    /// fresh stamp is reported younger than it is.
+    static func resolvedAt(
+        payload: AgentUsagePayload,
+        persistedSelection: String,
+        excluding: Set<String>
+    ) -> Date? {
+        guard let resolved = resolve(
+            payload: payload, persistedSelection: persistedSelection, excluding: excluding),
+            let agent = payload.agents.first(where: {
+                $0.clientId == resolved.clientId && $0.accountKey == resolved.accountKey
+            }),
+            let ms = WindowCardLoader.parseISO8601Ms(agent.updatedAt)
+        else { return nil }
+        return Date(timeIntervalSince1970: Double(ms) / 1000)
     }
 }

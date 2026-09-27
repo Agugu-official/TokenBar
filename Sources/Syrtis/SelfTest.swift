@@ -4995,6 +4995,72 @@ enum SelfTest {
                     && restarted?.object(forKey: TrayAnimator.lastRemainingKey) == nil,
                 "terminal empty provider payload clears scalar across restart")
 
+            // #8: an explicit selection served from Rust's same-binding
+            // last_good keeps the original fetch's `updatedAt`, so its age is
+            // real; the gauge turns stale only past 30 minutes.
+            let snapshotTime = Date(timeIntervalSince1970: 1_767_225_600)  // 2026-01-01T00:00:00Z
+            let lastGoodPayload = try! JSONDecoder().decode(
+                AgentUsagePayload.self,
+                from: Data(#"{"generatedAt":"now","agents":[{"clientId":"codex","source":"oauth","updatedAt":"2026-01-01T00:00:00.000Z","windows":[{"cardId":"session.v1","label":"Session","usedPercent":60,"remainingPercent":40}],"error":"timed out","transportDiagnostic":{"category":"timeout"}}]}"#.utf8))
+            let staleSuite = "\(suiteName).stale"
+            let staleDefaults = UserDefaults(suiteName: staleSuite)!
+            defer { staleDefaults.removePersistentDomain(forName: staleSuite) }
+            let explicitLastGood = TrayAnimator.applyQuotaRemaining(
+                payload: lastGoodPayload, persistedSelection: "codex|session.v1", excluding: [],
+                cachedRemaining: nil, defaults: staleDefaults)
+            func stale(_ payload: AgentUsagePayload?, _ selection: String, after: TimeInterval,
+                       defaults: UserDefaults? = staleDefaults) -> Bool {
+                TrayAnimator.readingIsStale(
+                    payload: payload, persistedSelection: selection, excluding: [],
+                    defaults: defaults, now: snapshotTime.addingTimeInterval(after))
+            }
+            let limit = TrayAnimator.quotaStaleAfter
+            expect(
+                explicitLastGood == 40
+                    && staleDefaults.double(forKey: TrayAnimator.lastResolvedAtKey)
+                        == snapshotTime.timeIntervalSince1970
+                    && !stale(lastGoodPayload, "codex|session.v1", after: limit)
+                    && stale(lastGoodPayload, "codex|session.v1", after: limit + 1)
+                    && !stale(lastGoodPayload, "codex|session.v1", after: limit + 1, defaults: nil),
+                "an explicit last_good reading is aged by its snapshot time, stale only past 30 min, never in demo mode")
+
+            // Without a payload the cached scalar is drawn, aged by the stamp
+            // persisted beside it. Auto still excludes the errored provider
+            // (#94), so it resolves nothing, clears both keys, and is not stale.
+            let coldLaunchStale = stale(nil, QuotaResolver.auto, after: limit + 1)
+            // With a payload, its own snapshot time wins over the old stamp.
+            let freshPayload = try! JSONDecoder().decode(
+                AgentUsagePayload.self,
+                from: Data(#"{"generatedAt":"now","agents":[{"clientId":"codex","source":"oauth","updatedAt":"2026-01-01T00:30:00.000Z","windows":[{"cardId":"session.v1","label":"Session","usedPercent":60,"remainingPercent":40}]}]}"#.utf8))
+            let payloadAgeWins = !stale(freshPayload, "codex|session.v1", after: limit + 1)
+            let autoLastGood = TrayAnimator.applyQuotaRemaining(
+                payload: lastGoodPayload, persistedSelection: QuotaResolver.auto, excluding: [],
+                cachedRemaining: 40, defaults: staleDefaults)
+            expect(
+                coldLaunchStale && payloadAgeWins && autoLastGood == nil
+                    && staleDefaults.object(forKey: TrayAnimator.lastResolvedAtKey) == nil
+                    && !stale(lastGoodPayload, QuotaResolver.auto, after: limit + 1)
+                    && !stale(nil, QuotaResolver.auto, after: limit + 1),
+                "a missing payload ages the persisted stamp, a present one its own snapshot; Auto on an errored provider clears it")
+
+            // The flag has to reach the pixels, or the feature silently does nothing.
+            let liveIcon = TrayIcons.image(
+                style: .ring, remaining: 62, dark: true, coloring: .always, stale: false)
+            let staleIcon = TrayIcons.image(
+                style: .ring, remaining: 62, dark: true, coloring: .always, stale: true)
+            expect(
+                liveIcon.tiffRepresentation != nil
+                    && liveIcon.tiffRepresentation != staleIcon.tiffRepresentation,
+                "a stale gauge is drawn differently from a live one")
+            expect(
+                TrayIcons.image(
+                    style: .ring, remaining: nil, dark: true, coloring: .always, stale: true
+                ).tiffRepresentation
+                    == TrayIcons.image(
+                        style: .ring, remaining: nil, dark: true, coloring: .always, stale: false
+                    ).tiffRepresentation,
+                "no reading keeps the no-reading glyph even when the stamp is stale")
+
             defaults.set(80, forKey: TrayAnimator.lastRemainingKey)
             let settingsTerminal = SettingsWindowView.applyQuotaRemaining(
                 payload: terminalPayload,
