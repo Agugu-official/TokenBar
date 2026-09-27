@@ -6,10 +6,63 @@ on:
 
 permissions:
   contents: write
-  actions: write   # the badge step dispatches update-install-count.yml
+  actions: write   # the badge step dispatches update-install-count.yml; the gate job reads CI runs
 
 jobs:
+  # Two cheap checks on Linux before the macOS job that holds the signing key
+  # and publishes: notes, then gate. The release job needs both.
+  #
+  # The notes are checked here as well as in CI. `release_notes.sh` refuses a
+  # missing or empty source on its own, but a nonempty pair whose figures
+  # disagree would otherwise ship to the release page and the appcast with
+  # nothing in between. It runs first, so a tag with bad notes fails in
+  # seconds.
+  notes:
+    runs-on: ubuntu-latest
+    # Job-level permissions replace the workflow's for this job only.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts
+            release-notes
+      - name: Check the release notes for this tag
+        run: python3 scripts/check_release_notes.py "$GITHUB_REF_NAME"
+
+  # CI does not run on tags: ci.yml and ci-release.yml trigger on pushes to
+  # main (ci.yml also on pull requests). So the tagged commit's own main runs
+  # are checked here: both must have concluded success, and runs still going
+  # are waited for (up to 30 min, on a Linux runner rather than an xcode-27
+  # one). A tag on the wrong commit, or one pushed before main's runs finish,
+  # stops here. It is a mistake guard, not a security boundary: the tagged
+  # commit carries this file and the script. See scripts/check_ci_gate.sh for
+  # the wait limits and the recovery.
+  gate:
+    # After notes: a tag whose notes fail cannot release anyway, so the run
+    # ends in seconds instead of polling CI for up to half an hour first.
+    needs: notes
+    runs-on: ubuntu-latest
+    # Backstop above the script's own limits (5 min grace, 30 min wait,
+    # 3 unreadable passes), so no path can hold a runner for the 6 h default.
+    timeout-minutes: 40
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+      - name: Require green CI for the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/check_ci_gate.sh "$GITHUB_SHA"
+
   release:
+    needs: [notes, gate]
     # Xcode 27 (the macOS 27 SDK): the dashboard's glass panel is built on
     # NSStatusItem.expandedInterfaceDelegate, which older SDKs do not have.
     # macos-26 carries Xcode 26.6 and fails to compile it; compiling the panel
@@ -22,20 +75,6 @@ jobs:
         with:
           fetch-depth: 0
           submodules: recursive
-
-      # The notes are checked here, not only in CI, because CI does not run on
-      # tags: ci.yml triggers on pushes to main and on pull requests, so a tag
-      # cut from an unreviewed commit — or pushed before its main run finishes —
-      # would reach publication unchecked. `release_notes.sh` refuses a missing
-      # or empty source on its own, but a nonempty pair whose figures disagree
-      # would otherwise ship to the release page and the appcast with nothing
-      # in between. (The legacy Tauri latest.json is frozen and carries no
-      # notes from this release.)
-      #
-      # First step, before the toolchain: a tag with bad notes should fail in
-      # seconds rather than after a twenty-minute build.
-      - name: Check the release notes for this tag
-        run: python3 scripts/check_release_notes.py "$GITHUB_REF_NAME"
 
       - uses: dtolnay/rust-toolchain@stable
 
