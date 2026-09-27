@@ -256,6 +256,14 @@ enum GlassPanelStyle {
     /// list showed the rows beneath it sharp through the scrim. The maintainer
     /// compared both on the live panel and chose .regular. Both were seen to
     /// follow the system glass setting (NSGlassTintAmount, no public API).
+    /// The popover separators (under the lens row, above the footer). The
+    /// system `Divider` is a solid hairline that reads as a hard edge across
+    /// the glass; a user found it abrupt ("很突兀"), and the maintainer's
+    /// target is a quieter line. Light mode only: round 2 (0.08) was too faint
+    /// to see, round 3 (0.14) sits between that and the system divider. Dark
+    /// mode keeps the system divider, as v2.0.1 drew it, at the maintainer's
+    /// call after comparing the rounds on the live panel.
+    static let lightDivider = Color.black.opacity(0.14)
     static let tooltipScrimDark = Color.black.opacity(0.35)
     static let tooltipScrimLight = Color.white.opacity(0.35)
     /// Gray tooltip text over see-through glass washed out; lifting the text
@@ -529,4 +537,24 @@ final class GlassPanel: NSPanel {
     /// Esc), which a borderless panel ignores for lack of a close button.
     var onPerformClose: (() -> Void)?
     override func performClose(_ sender: Any?) { onPerformClose?() }
+}
+
+/// The popover's horizontal separators: a quieter hairline than the system
+/// `Divider` under the glass panel in light mode (see
+/// `GlassPanelStyle.lightDivider`); the system divider, unchanged, in dark mode
+/// and in the NSPopover.
+struct PanelDivider: View {
+    @Environment(\.inGlassPanel) private var inGlassPanel
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.displayScale) private var displayScale
+
+    var body: some View {
+        if inGlassPanel, colorScheme == .light {
+            Rectangle()
+                .fill(GlassPanelStyle.lightDivider)
+                .frame(height: 1 / max(displayScale, 1))
+        } else {
+            Divider()
+        }
+    }
 }
