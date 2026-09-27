@@ -7934,6 +7934,92 @@ enum SelfTest {
         expect(!demoSource.allowsQuotaCachePersistence, "demo source disables quota cache persistence")
         expect(liveSource.allowsQuotaCachePersistence, "live source allows quota cache persistence")
 
+        // #228. The demo's quota lens must have something to draw: curves the
+        // lookups resolve, enough completed cycles for the strip and the
+        // equivalence threshold, a weekly rhythm in the heatmap, and a running
+        // cycle that agrees with the card above it.
+        let demoQuota = DemoData.publishedAgentUsage
+        expect(demoQuota.publicationGeneration == DemoData.quotaGeneration,
+               "#228: the demo source's payload carries a publication generation")
+        expect(DemoData.agentUsage.publicationGeneration == nil,
+               "#228: the shared DemoData.agentUsage the selftest doubles serve stays without one")
+        var demoCurveWindows = 0
+        var demoCurveChecks = true
+        for agent in demoQuota.agents {
+            for window in agent.windows {
+                guard let key = window.paceStatus.windowKey,
+                      let curve = try? demoSource.quotaCurveSync(
+                          clientId: agent.clientId, accountKey: nil, windowKey: key,
+                          generation: DemoData.quotaGeneration)
+                else { continue }
+                demoCurveWindows += 1
+                let cycles = QuotaHistoryFold.cycles(points: curve.points)
+                let active = curve.points.filter(\.isActiveGroup)
+                let grid = QuotaHeatmapFold.build(points: curve.points)
+                let weekdayMean = grid.cells[0..<5].joined().reduce(0, +) / 5
+                let weekendMean = grid.cells[5..<7].joined().reduce(0, +) / 2
+                // No completed cycle may read at or after the running cycle's
+                // start, or the running sparkline opens on its final value.
+                let runningStart = (curve.activeResetAt ?? .max)
+                    - (active.first?.durationSeconds ?? 0)
+                let noSpill = curve.points.allSatisfy {
+                    $0.isActiveGroup || $0.sampledAt < runningStart
+                }
+                let ok = noSpill && cycles.count >= WindowEquivalence.minimumCycles
+                    && cycles.allSatisfy { $0.observedFraction >= WindowEquivalence.minimumObservedFraction }
+                    && active.last?.usedPercent == window.usedPercent.rounded()
+                    && grid.hasMovement && weekdayMean > 2 * weekendMean
+                if !ok {
+                    print("  #228 curve check failed: \(agent.clientId) \(key) noSpill=\(noSpill) cycles=\(cycles.count) "
+                          + "active=\(active.last?.usedPercent ?? -1)/\(window.usedPercent) "
+                          + "weekday=\(weekdayMean) weekend=\(weekendMean)")
+                }
+                demoCurveChecks = demoCurveChecks && ok
+            }
+        }
+        // Claude, Codex and Copilot carry a session and a weekly window each,
+        // Grok Bot a weekly one: seven, and no other client.
+        expect(demoCurveWindows == 7,
+               "#228: the demo serves curves for exactly its history subscriptions' windows (\(demoCurveWindows) served)")
+        expect(demoCurveChecks,
+               "#228: every demo curve has enough observed cycles, a weekday-heavy heatmap, a running cycle matching its card, and no completed-cycle reading at the running cycle's start")
+        // Demo mode ignores this Mac's hidden tabs and limits. Tested on the
+        // pure transform: the argument domain is process-wide, and setting it
+        // here would strip this run's own `-AppleLanguages`.
+        let demoArgs = DemoData.visibilityArguments([
+            ClientRegistry.tabHiddenKey: "codex",
+            ClientRegistry.limitsHiddenKey: "copilot",
+            "AppleLanguages": ["en"],
+        ])
+        expect(demoArgs[ClientRegistry.tabHiddenKey] as? String == ""
+                   && demoArgs[ClientRegistry.limitsHiddenKey] as? String == ""
+                   && demoArgs["AppleLanguages"] as? [String] == ["en"],
+               "#228: demo mode blanks hidden tabs and limits and keeps other arguments")
+        expect(!DemoData.ignoresLocalVisibility,
+               "#228: the selftest process never applies the demo visibility override")
+        // Through the model, which is what the screenshots render: the lookups
+        // only resolve once the published generation reaches it.
+        let demoLens: (summaries: Int, heatmaps: Int)? = awaitMainActorValue {
+            AgentUsagePublicationCoordinator.resetForTesting()
+            defer { AgentUsagePublicationCoordinator.resetForTesting() }
+            let m = DashboardModel(source: DemoUsageDataSource(), initialYear: nil)
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while m.agentUsage?.publicationGeneration == nil, spins < 2_000 {
+                try? await Task.sleep(for: .milliseconds(1))
+                spins += 1
+            }
+            poll.cancel()
+            ClaudeExtraRoots.RegistryChange.signal()
+            await poll.value
+            m.refreshWindowQuotaHalves()
+            return (m.quotaWindowSummaries.count, m.quotaHeatmapWindows.count)
+        }
+        expect(demoLens?.summaries == 7 && demoLens?.heatmaps == 7,
+               "#228: the demo quota lens publishes strip rows and heatmap windows "
+                   + "(\(demoLens?.summaries ?? -1) rows, \(demoLens?.heatmaps ?? -1) grids)")
+
         let demoPayload = DemoData.payload
         let demoDates = demoPayload.contributions.map(\.date)
         let demoDayNumbers = demoDates.compactMap { ISODay($0)?.number }
