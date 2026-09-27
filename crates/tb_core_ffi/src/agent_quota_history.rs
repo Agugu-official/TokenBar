@@ -2090,23 +2090,21 @@ fn repair_store_at(mut store: Store, upper_bound: i64, observation_now: i64) -> 
         observation_now <= upper_bound,
         "repair_store_at requires observation_now <= upper_bound"
     );
-    // A sample stamped past the ceiling cannot be verified against any clock
-    // the reader trusts, so it goes. Only the sample: the ceiling comes from
-    // the wall clock, and a clock that stepped back produces exactly this
-    // shape, so dropping the whole series (as #206 did) erased a history that
-    // nothing was wrong with, and any later save made that permanent. The
-    // clamp below then brings `last_activity_at` down to the samples that
-    // remain, all of which sit at or below the ceiling.
-    for series in &mut store.series {
-        series
-            .samples
-            .retain(|sample| sample.sampled_at <= upper_bound);
-    }
-
     for series in &mut store.series {
         if series.last_activity_at <= upper_bound {
             continue; // gated: a series at or below the ceiling is untouched
         }
+        // A sample stamped past the ceiling cannot be verified against any
+        // clock the reader trusts, so it goes. Only the sample: the ceiling
+        // comes from the wall clock, and a clock that stepped back produces
+        // exactly this shape, so dropping the whole series (as #206 did)
+        // erased a history nothing was wrong with, and any later save made
+        // that permanent. The gate above is enough to find every such sample:
+        // `validate_store` has already passed, and its `activity_valid` puts
+        // `last_activity_at` at or above every `sampled_at`.
+        series
+            .samples
+            .retain(|sample| sample.sampled_at <= upper_bound);
         if series
             .rollover
             .as_ref()
@@ -2122,6 +2120,8 @@ fn repair_store_at(mut store: Store, upper_bound: i64, observation_now: i64) -> 
             .into_iter()
             .chain(series.rollover.as_ref().map(rollover_activity_at))
             .max();
+        // `observation_now`, unless a surviving sample or rollover activity
+        // sits between it and the ceiling, in which case that one.
         let clamped = series.last_activity_at.min(observation_now);
         series.last_activity_at = floor.map_or(clamped, |floor| floor.max(clamped));
     }
@@ -8746,13 +8746,22 @@ mod tests {
             active_reset_at: Some(reset),
             last_activity_at: lead,
             rollover: Some(watching_rollover(reset, lead - 100, lead)),
-            samples: vec![quota_sample(
-                reset,
-                2 * DAY,
-                0.10,
-                20.0,
-                SampleOrigin::LiveV3,
-            )],
+            samples: vec![
+                quota_sample(reset, 2 * DAY, 0.10, 20.0, SampleOrigin::LiveV3),
+                // Between `observation_now` and the ceiling: kept, and it
+                // becomes the clamp's floor.
+                QuotaSample {
+                    sampled_at: upper_bound - 500,
+                    used_percent: 30.0,
+                    ..quota_sample(reset, 2 * DAY, 0.10, 20.0, SampleOrigin::LiveV3)
+                },
+                // Past the ceiling: dropped by the first pass.
+                QuotaSample {
+                    sampled_at: lead,
+                    used_percent: 40.0,
+                    ..quota_sample(reset, 2 * DAY, 0.10, 20.0, SampleOrigin::LiveV3)
+                },
+            ],
         };
         let store = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
@@ -8760,6 +8769,9 @@ mod tests {
         };
 
         let once = repair_store_at(store.clone(), upper_bound, observation_now);
+        // Control: the first pass really did remove the future sample.
+        assert_eq!(once.series[0].samples.len(), 2);
+        assert_eq!(once.series[0].last_activity_at, upper_bound - 500);
         let twice = repair_store_at(once.clone(), upper_bound, observation_now);
         assert_eq!(once, twice);
     }
@@ -8890,7 +8902,7 @@ mod tests {
     fn a_future_sample_drop_reaches_disk_once_and_keeps_the_series() {
         let (directory, path) = temp_path("persist-future-sample");
         let upper_bound = 37_000_000;
-        let observation_now = upper_bound - 100;
+        let observation_now = upper_bound - 1_000;
         let reset = upper_bound + DAY;
         let past_sample = quota_sample(reset, 2 * DAY, 0.20, 20.0, SampleOrigin::LiveV3);
         // A clock that stepped back leaves this reading stamped past the
@@ -8900,10 +8912,31 @@ mod tests {
             duration_seconds: 2 * DAY,
             duration_source: DurationSource::Provider,
             used_percent: 40.0,
-            sampled_at: upper_bound + 5,
+            // Two hours past, so its phase bucket differs from the reading at
+            // the ceiling and the loader's duplicate pass cannot touch either.
+            sampled_at: upper_bound + 2 * HOUR,
             origin: SampleOrigin::LiveV3,
             plan: None,
         };
+        // Both at or below the ceiling, one of them above `observation_now`:
+        // the boundary is `<= upper_bound`, and neither may be lost.
+        let at_ceiling = QuotaSample {
+            sampled_at: upper_bound,
+            used_percent: 35.0,
+            ..past_sample.clone()
+        };
+        let before_ceiling = QuotaSample {
+            sampled_at: upper_bound - 500,
+            used_percent: 34.0,
+            ..past_sample.clone()
+        };
+        assert!(before_ceiling.sampled_at > observation_now);
+        let keys = [&past_sample, &before_ceiling, &at_ceiling, &future_sample]
+            .map(sample_key)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(keys.len(), 4, "every reading sits in its own bucket");
+        let kept = vec![past_sample.clone(), before_ceiling, at_ceiling];
         let store = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
             series: vec![SeriesState {
@@ -8913,7 +8946,7 @@ mod tests {
                 active_reset_at: Some(reset),
                 last_activity_at: future_sample.sampled_at,
                 rollover: None,
-                samples: vec![past_sample.clone(), future_sample],
+                samples: kept.iter().cloned().chain([future_sample]).collect(),
             }],
         };
         // Control: the file needs the clock repair.
@@ -8929,8 +8962,8 @@ mod tests {
         assert_eq!(on_disk.series.len(), 1, "the series survives on disk");
         assert_eq!(
             on_disk.series[0].samples,
-            vec![past_sample],
-            "the verifiable reading survives on disk"
+            kept,
+            "every reading at or below the ceiling survives on disk"
         );
 
         no_op_transaction(&path, observation_now, upper_bound);
