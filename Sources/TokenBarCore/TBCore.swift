@@ -356,6 +356,13 @@ public enum TBCore {
         try unwrap(tb_usage_trace(windowSecs))
     }
 
+    /// The quota provider ids, in card order, from the engine's single
+    /// registration table. Offline and cheap.
+    public static func quotaProviderIds() throws -> [String] {
+        let payload: QuotaProviderIds = try unwrap(tb_quota_provider_ids())
+        return payload.ids
+    }
+
     /// Live tokens/min estimate (10-minute-window average).
     public static func tokensPerMin() throws -> Double {
         let payload: TokensPerMin = try unwrap(tb_tokens_per_min())
