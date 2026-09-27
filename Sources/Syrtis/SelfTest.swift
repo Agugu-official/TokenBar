@@ -3605,6 +3605,21 @@ enum SelfTest {
                 && groupingPoints.first?.cost == 3.0,
             "the attributed daily series buckets grok-4.6-build under grok-4.6 "
                 + "(got \(groupingPoints.map { ($0.model, $0.tokens, $0.cost) }))")
+        // Attribution still matches the raw id before bucketing: a record for
+        // grok-4.6-build alone must not claim the bare grok-4.6 row, even though
+        // both display as grok-4.6.
+        let groupingAttributed = AttributedDailySeries.points(
+            contributions: groupingPayload.contributions,
+            confirmed: [UsageAttribution.Record(
+                client: "grok", provider: "xai", model: "grok-4.6-build",
+                state: .assigned("grok"))]
+        ).filter { $0.model == "grok-4.6" }
+        expect(
+            groupingAttributed.count == 2
+                && groupingAttributed.contains { $0.state == .assigned("grok") && $0.tokens == 100 }
+                && groupingAttributed.contains { $0.state == .unassigned && $0.tokens == 50 },
+            "a record for the raw grok-4.6-build id attributes only that row; both still "
+                + "display as grok-4.6 (got \(groupingAttributed.map { ($0.state, $0.tokens) }))")
         let rawColors = ModelColorMap(entries: [
             ("xai", "grok-code-fast-1", 10.0),
             ("xai", "grok-4.6-build", 3.0),
@@ -14122,6 +14137,21 @@ enum SelfTest {
                 && qhGroupModels.first?.cost == 2.0,
             "QH-GROUP grok-4.6-build and grok-4.6 share one breakdown row with summed tokens "
                 + "(got \(qhGroupModels.map { ($0.modelId, $0.tokens) }))")
+        // QH-GROUP raw match: a model-level record excluding the bare grok-4.6 id
+        // keeps only the -build usage in the subscription's row, so attribution
+        // resolved on the raw id before the breakdown grouped it.
+        let qhGroupRawRow = QuotaHistoryFold.rows(
+            cycles: qhsCycles, messages: qhGroupMessages, subscription: "c",
+            modelScope: nil,
+            confirmed: qhsRecords + [UsageAttribution.Record(
+                client: "c", provider: "p", model: "grok-4.6", state: .excluded)]
+        ).first
+        expect(
+            qhGroupRawRow?.mineTokens == 100
+                && qhGroupRawRow?.models.map(\.modelId) == ["grok-4.6"]
+                && qhGroupRawRow?.models.first?.tokens == 100,
+            "QH-GROUP excluding raw grok-4.6 leaves the grok-4.6-build usage, shown as grok-4.6 "
+                + "(got \(qhGroupRawRow.map { ($0.mineTokens, $0.models.map { ($0.modelId, $0.tokens) }) } as Any))")
         // AL-HIDDEN. Every exit from `baseClients` goes through one filter.
         // The rule was got wrong three times — inside `reorderable`, then above
         // only the restricted return, then above both while the opencode branch
