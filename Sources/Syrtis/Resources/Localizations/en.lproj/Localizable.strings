@@ -162,7 +162,6 @@
 "Quota history shows no tokens or API-equivalent value until usage is attributed." = "Quota history shows no tokens or API-equivalent value until usage is attributed.";
 "%@ · %@ → %@" = "%@ · %@ → %@";
 "and %lld more" = "and %lld more";
-"%lld sources have no suggestion — set them in Settings." = "%lld sources have no suggestion — set them in Settings.";
 "Set up manually…" = "Set up manually…";
 "Apply suggestions" = "Apply suggestions";
 "%@ of %@ windows recorded — the estimate needs that many" = "%@ of %@ windows recorded — the estimate needs that many";
@@ -183,3 +182,5 @@
 "No local usage records in this range." = "No local usage records in this range.";
 "The tokens and amounts below stay at 0 until usage is attributed to this subscription." = "The tokens and amounts below stay at 0 until usage is attributed to this subscription.";
 "Set up usage attribution…" = "Set up usage attribution…";
+
+"Without a suggestion: %lld — set them in Settings." = "Without a suggestion: %lld — set them in Settings.";

@@ -2485,78 +2485,58 @@ enum SelfTest {
             return try! JSONDecoder().decode(ModelReport.self, from: Data(json.utf8))
         }
 
-        // Visibility rule: every gate is independently necessary. Flipping
-        // exactly one input at a time from the "shown" baseline pins that no
-        // gate is redundant with another.
+        // Visibility rule, split where the code splits it: `mayShow` holds the
+        // gates that need no dashboard data (and also decide the Quota lens'
+        // report fetch), `isVisible` adds "the data offers something". Each
+        // gate is flipped alone from the "shown" baseline.
+        let emptyConfirmed = UsageAttribution.parseRaw(nil)
+        let userArgs = ["Syrtis"]
+        let offering = UsageAttributionSettings.OnboardingSummary(records: [
+            UsageAttribution.Record(
+                client: "claude", provider: "anthropic", model: nil, state: .assigned("claude")),
+        ], unsuggestedCount: 0)
         expect(
             AttributionOnboardingCard.isVisible(
-                confirmedIsEmpty: true, dismissed: false, hasReport: true, hasAgentUsage: true,
-                attributableRowCount: 1, isNonUserRuntime: false),
+                mayShow: AttributionOnboardingCard.mayShow(
+                    confirmed: emptyConfirmed, dismissed: false, arguments: userArgs),
+                summary: offering),
             "onboarding card shows with nothing confirmed, not dismissed, data loaded, and a row to attribute")
         expect(
-            !AttributionOnboardingCard.isVisible(
-                confirmedIsEmpty: false, dismissed: false, hasReport: true, hasAgentUsage: true,
-                attributableRowCount: 1, isNonUserRuntime: false),
+            !AttributionOnboardingCard.mayShow(
+                confirmed: UsageAttribution.parseRaw(
+                    UsageAttribution.confirmedRaw(updating: nil, records: offering.records)),
+                dismissed: false, arguments: userArgs),
             "onboarding card hides once any usage is confirmed")
+        // A table the codec cannot read is someone's configuration, not an
+        // empty one; inviting that user ends in a write the codec refuses.
         expect(
-            !AttributionOnboardingCard.isVisible(
-                confirmedIsEmpty: true, dismissed: true, hasReport: true, hasAgentUsage: true,
-                attributableRowCount: 1, isNonUserRuntime: false),
+            !AttributionOnboardingCard.mayShow(
+                confirmed: UsageAttribution.parseRaw("not json"), dismissed: false, arguments: userArgs),
+            "onboarding card hides when the confirmed table cannot be read")
+        expect(
+            !AttributionOnboardingCard.mayShow(
+                confirmed: emptyConfirmed, dismissed: true, arguments: userArgs),
             "onboarding card hides after being dismissed")
         expect(
-            !AttributionOnboardingCard.isVisible(
-                confirmedIsEmpty: true, dismissed: false, hasReport: false, hasAgentUsage: true,
-                attributableRowCount: 1, isNonUserRuntime: false),
-            "onboarding card hides before the model report has loaded")
+            !AttributionOnboardingCard.mayShow(
+                confirmed: emptyConfirmed, dismissed: false, arguments: ["Syrtis", "--selftest"]),
+            "onboarding card hides under a non-user runtime (selftest/demo/smoke)")
+        expect(
+            !AttributionOnboardingCard.isVisible(mayShow: true, summary: nil),
+            "onboarding card hides before the model report and agent usage have loaded")
         expect(
             !AttributionOnboardingCard.isVisible(
-                confirmedIsEmpty: true, dismissed: false, hasReport: true, hasAgentUsage: false,
-                attributableRowCount: 1, isNonUserRuntime: false),
-            "onboarding card hides before agent usage has loaded")
-        expect(
-            !AttributionOnboardingCard.isVisible(
-                confirmedIsEmpty: true, dismissed: false, hasReport: true, hasAgentUsage: true,
-                attributableRowCount: 0, isNonUserRuntime: false),
+                mayShow: true,
+                summary: UsageAttributionSettings.OnboardingSummary(records: [], unsuggestedCount: 0)),
             "onboarding card hides when there is nothing attributable")
         expect(
-            !AttributionOnboardingCard.isVisible(
-                confirmedIsEmpty: true, dismissed: false, hasReport: true, hasAgentUsage: true,
-                attributableRowCount: 1, isNonUserRuntime: true),
-            "onboarding card hides under a non-user runtime (selftest/demo/smoke)")
-
-        // The view has to actually wire `CommandLine.arguments` into that last
-        // gate, not just expose a pure function nobody calls: `--selftest` is
-        // on the argument list right now, so a fully-loaded, fully-eligible
-        // card must still hide itself here — not because of demo data, but
-        // because this run is not a user session.
-        let liveOnboardingConfirmedBackup =
-            UserDefaults.standard.object(forKey: UsageAttribution.confirmedKey)
-        let liveOnboardingDismissedBackup =
-            UserDefaults.standard.object(forKey: AttributionOnboardingCard.dismissedKey)
-        UserDefaults.standard.removeObject(forKey: UsageAttribution.confirmedKey)
-        UserDefaults.standard.removeObject(forKey: AttributionOnboardingCard.dismissedKey)
-        let liveOnboardingVisible = awaitMainActorValue { () -> Bool in
-            AttributionOnboardingCardView(
-                modelReport: onboardingReport(
-                    [("openclaw", "xai", "grok-x", 100, 1.0)]),
-                agentUsage: DemoData.agentUsage
-            ).isVisible
-        }
-        if let liveOnboardingConfirmedBackup {
-            UserDefaults.standard.set(liveOnboardingConfirmedBackup, forKey: UsageAttribution.confirmedKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: UsageAttribution.confirmedKey)
-        }
-        if let liveOnboardingDismissedBackup {
-            UserDefaults.standard.set(
-                liveOnboardingDismissedBackup, forKey: AttributionOnboardingCard.dismissedKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: AttributionOnboardingCard.dismissedKey)
-        }
+            AttributionOnboardingCard.isVisible(
+                mayShow: true,
+                summary: UsageAttributionSettings.OnboardingSummary(records: [], unsuggestedCount: 2)),
+            "onboarding card shows when every source still needs a manual choice")
         expect(
-            BuildIdentity.isNonUserRuntime(CommandLine.arguments) && liveOnboardingVisible == false,
-            "the onboarding card view hides itself under --selftest's non-user runtime flag even with "
-                + "an empty confirmed table, no dismissal, and a real report/agent-usage payload")
+            !AttributionOnboardingCard.isVisible(mayShow: false, summary: offering),
+            "onboarding card hides whenever mayShow is false, whatever the data offers")
 
         // "Not now" records an ANSWER, never the fact of being shown — the
         // contrast `GrokBotKeychainConsent` documents against `DiscordIntro`.
@@ -2589,13 +2569,12 @@ enum SelfTest {
                     defaults: onboardingDismissDefaults, arguments: userArguments),
                 "onboarding mayShow is false once dismissed")
             onboardingDismissDefaults.removeObject(forKey: AttributionOnboardingCard.dismissedKey)
-            if let confirmedRaw = UsageAttribution.confirmedRaw(
+            let confirmedFixture = UsageAttribution.confirmedRaw(
                 updating: nil,
                 records: [UsageAttribution.Record(
                     client: "claude", provider: "anthropic", model: nil, state: .assigned("claude"))])
-            {
-                onboardingDismissDefaults.set(confirmedRaw, forKey: UsageAttribution.confirmedKey)
-            }
+            expect(confirmedFixture != nil, "onboarding mayShow fixture: a confirmed record encodes")
+            onboardingDismissDefaults.set(confirmedFixture, forKey: UsageAttribution.confirmedKey)
             expect(
                 !AttributionOnboardingCard.mayShow(
                     defaults: onboardingDismissDefaults, arguments: userArguments),

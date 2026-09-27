@@ -503,6 +503,11 @@ public enum UsageAttributionSettings {
     public struct OnboardingSummary: Equatable, Sendable {
         public let records: [UsageAttribution.Record]
         public let unsuggestedCount: Int
+
+        public init(records: [UsageAttribution.Record], unsuggestedCount: Int) {
+            self.records = records
+            self.unsuggestedCount = unsuggestedCount
+        }
     }
 
     public static func onboardingSummary(

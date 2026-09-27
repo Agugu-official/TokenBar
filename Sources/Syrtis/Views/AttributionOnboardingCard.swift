@@ -31,7 +31,7 @@ enum AttributionOnboardingCard {
         /// source client · provider → target
         static let suggestionLine = "%@ · %@ → %@"
         static let moreCount = "and %lld more"
-        static let unsuggestedHint = "%lld sources have no suggestion — set them in Settings."
+        static let unsuggestedHint = "Without a suggestion: %lld — set them in Settings."
         static let notNow = "Not now"
         static let setUpManually = "Set up manually…"
         static let applySuggestions = "Apply suggestions"
@@ -49,36 +49,45 @@ enum AttributionOnboardingCard {
         }
     }
 
-    /// All five gates the card must clear before it draws anything. Split out
-    /// so the rule is assertable on its own — a SwiftUI `body` cannot be
-    /// evaluated from a UI-free test, but this can.
-    static func isVisible(
-        confirmedIsEmpty: Bool,
-        dismissed: Bool,
-        hasReport: Bool,
-        hasAgentUsage: Bool,
-        attributableRowCount: Int,
-        isNonUserRuntime: Bool
+    /// The gates that do not need the dashboard's data, stated once. They
+    /// decide both whether the card can appear and whether the Quota lens
+    /// fetches the model report for it, so the two cannot disagree.
+    ///
+    /// A confirmed table this codec cannot read (a newer build's format, a
+    /// foreign value) is not "nothing confirmed": it is treated as configured,
+    /// because inviting that user would end in a write the codec refuses.
+    static func mayShow(
+        confirmed: UsageAttribution.Table, dismissed: Bool, arguments: [String]
     ) -> Bool {
-        confirmedIsEmpty && !dismissed && hasReport && hasAgentUsage
-            && attributableRowCount > 0 && !isNonUserRuntime
+        confirmed.isWritable && confirmed.records.isEmpty && !dismissed
+            && !BuildIdentity.isNonUserRuntime(arguments)
+    }
+
+    /// Reads `object(forKey:)`, not a String default: an absent key is
+    /// "nothing confirmed", but an empty string does not parse and would read
+    /// as a foreign value.
+    static func mayShow(
+        defaults: UserDefaults = .standard, arguments: [String] = CommandLine.arguments
+    ) -> Bool {
+        mayShow(
+            confirmed: UsageAttribution.confirmed(defaults: defaults),
+            dismissed: defaults.object(forKey: dismissedKey) as? Bool == true,
+            arguments: arguments)
+    }
+
+    /// With the data in hand: something to offer. With nothing confirmed,
+    /// every attributable row is either a proposal or counted as unsuggested.
+    static func isVisible(
+        mayShow: Bool, summary: UsageAttributionSettings.OnboardingSummary?
+    ) -> Bool {
+        guard mayShow, let summary else { return false }
+        return !summary.records.isEmpty || summary.unsuggestedCount > 0
     }
 
     /// Deliberately NOT `DiscordIntro`'s "write the flag when PRESENTED" rule
     /// — see `GrokBotKeychainConsent`'s note on the same contrast. This flag
     /// records an ANSWER ("not now"), so a user who has not yet decided keeps
     /// seeing the card on every open; only tapping "Not now" suppresses it.
-    /// The gates that do not need the dashboard's data: whether the card could
-    /// still appear once the report arrives. Decides whether a lens that does
-    /// not otherwise need the model report fetches it for the card.
-    static func mayShow(
-        defaults: UserDefaults = .standard, arguments: [String] = CommandLine.arguments
-    ) -> Bool {
-        UsageAttribution.confirmed(defaults: defaults).records.isEmpty
-            && defaults.object(forKey: dismissedKey) as? Bool != true
-            && !BuildIdentity.isNonUserRuntime(arguments)
-    }
-
     static func markDismissed(defaults: UserDefaults = .standard) {
         defaults.set(true, forKey: dismissedKey)
     }
@@ -108,46 +117,29 @@ struct AttributionOnboardingCardView: View {
     var modelReport: ModelReport?
     var agentUsage: AgentUsagePayload?
 
+    /// Observed so an Apply here or in Settings redraws the card; the value
+    /// itself is read through `defaults.object`, see `mayShow(defaults:)`.
     @AppStorage(UsageAttribution.confirmedKey) private var confirmedRaw = ""
     @AppStorage(AttributionOnboardingCard.dismissedKey) private var dismissed = false
     @State private var applyFailure: String?
 
-    private var confirmed: [UsageAttribution.Record] {
-        UsageAttribution.parseRaw(confirmedRaw).records
-    }
-
-    /// Computed from THIS surface's own inputs — the model report and the
-    /// agent-usage payload the popover already polls — never from the stored
-    /// suggestions table, which Settings alone fills. Reading that table here
-    /// would show suggestions that only exist because Settings happened to be
-    /// opened once, rather than what this data actually supports right now.
+    /// Computed once per body from THIS surface's own inputs — the model
+    /// report and the agent-usage payload the popover already polls — never
+    /// from the stored suggestions table, which Settings alone fills.
     private var summary: UsageAttributionSettings.OnboardingSummary? {
         guard let modelReport, let agentUsage else { return nil }
         return UsageAttributionSettings.onboardingSummary(
             entries: modelReport.entries,
-            confirmed: confirmed,
+            confirmed: [],
             subscriptionClients: UsageAttributionSettings.subscriptionClients(from: agentUsage),
             routedSubscriptions: UsageAttributionSettings.routedSubscriptions(from: agentUsage))
     }
 
-    private var attributableRowCount: Int {
-        UsageAttributionSettings.rows(
-            entries: modelReport?.entries ?? [], confirmed: confirmed, suggestions: []
-        ).count
-    }
-
-    var isVisible: Bool {
-        AttributionOnboardingCard.isVisible(
-            confirmedIsEmpty: confirmed.isEmpty,
-            dismissed: dismissed,
-            hasReport: modelReport != nil,
-            hasAgentUsage: agentUsage != nil,
-            attributableRowCount: attributableRowCount,
-            isNonUserRuntime: BuildIdentity.isNonUserRuntime(CommandLine.arguments))
-    }
-
     var body: some View {
-        if isVisible, let summary {
+        let _ = (confirmedRaw, dismissed)
+        let mayShow = AttributionOnboardingCard.mayShow()
+        let summary = mayShow ? summary : nil
+        if AttributionOnboardingCard.isVisible(mayShow: mayShow, summary: summary), let summary {
             DashCard(AttributionOnboardingCard.Copy.title) {
                 content(summary)
             }

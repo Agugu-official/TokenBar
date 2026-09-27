@@ -56,6 +56,10 @@ struct SettingsPanel: View {
     /// being fetched.
     var reportLoading = false
 
+    /// The popover's onboarding card also writes confirmed attribution. The
+    /// page reads its tables through `attributionRevision`, which only this
+    /// view bumps, so an outside write is observed here and bumps it too.
+    @AppStorage(UsageAttribution.confirmedKey) private var observedConfirmedRaw = ""
     @AppStorage(TrayMode.storageKey) private var trayModeRaw = TrayMode.todayTokens.rawValue
     @AppStorage(MenuBarTextColor.storageKey) private var textColorMode = MenuBarTextColor.automatic.rawValue
     @AppStorage(MenuBarTextColor.customColorKey) private var textColorHex = MenuBarTextColor.defaultHex
@@ -227,6 +231,7 @@ struct SettingsPanel: View {
         .task(id: attributionInputSignature) {
             refreshAttributionSuggestions()
         }
+        .onChange(of: observedConfirmedRaw) { attributionRevision += 1 }
     }
 
     private var attributionTables: (

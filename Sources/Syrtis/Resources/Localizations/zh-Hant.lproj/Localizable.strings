@@ -509,7 +509,6 @@
 "Quota history shows no tokens or API-equivalent value until usage is attributed." = "用量還沒歸屬前，額度歷史不會顯示 token 數或 API 等值金額。";
 "%@ · %@ → %@" = "%1$@ · %2$@ → %3$@";
 "and %lld more" = "以及另外 %lld 筆";
-"%lld sources have no suggestion — set them in Settings." = "有 %lld 個來源沒有建議，請到「設定」手動指定。";
 "Set up manually…" = "手動設定…";
 "Apply suggestions" = "套用建議";
 "%@ of %@ windows recorded — the estimate needs that many" = "已記錄 %@ 個時間窗，要 %@ 個才能給出估計";
@@ -584,3 +583,5 @@
 "No local usage records in this range." = "此期間沒有本機用量紀錄。";
 "The tokens and amounts below stay at 0 until usage is attributed to this subscription." = "用量歸屬到這個訂閱之前，下面每一列的 token 與金額都會是 0。";
 "Set up usage attribution…" = "設定用量歸屬…";
+
+"Without a suggestion: %lld — set them in Settings." = "沒有建議的來源：%lld 個，請到「設定」手動指定。";
