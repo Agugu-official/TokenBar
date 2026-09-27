@@ -4,7 +4,7 @@ id: kb-plan-codex-historical-pace-v2
 kind: plan
 scope: repository
 read_when: reading the retired Codex weekly v2 design or schema-2 migration history
-last_verified: 2026-07-31
+last_verified: 2026-09-27
 sources: ["crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_usage.rs", "Sources/TokenBarCore/AgentUsage.swift", "Sources/TokenBarCore/UsagePace.swift", "Sources/CrossCheckHarness/main.swift", "docs/knowledge/architecture.md", "docs/knowledge/verification.md", "docs/knowledge/plans/provider-quota-pace.md", "public CodexBar PR #901", "public CodexBar PR #1581"]
 superseded_by: provider-quota-pace.md
 superseded_on: 2026-07-17
@@ -149,7 +149,7 @@ Swift 可以用 `actual - expected` 計算現有 pace stage 與顯示文字，�
 | 1. Introduce v2 store | `crates/tb_core_ffi/src/agent_history.rs`、`crates/tb_core_ffi/src/agent_usage.rs` | 新 filename/schema、account fail-closed、normalized write key、dedupe、coverage、56-day retention、corrupt quarantine、atomic write 與 serialization guard | v1 sentinel bytes／mtime 不變；unknown owner 不碰 store；v2 可 record、reload、recover、prune |
 | 2. Port evaluator | `crates/tb_core_ffi/src/agent_history.rs` | 169-point monotonic curves、recency weighting、Linear baseline blend、capped-curve extension、current-actual shift、weighted risk／ETA | Rust fixtures 對齊 public CodexBar worked cases |
 | 3. Replace payload seam | `crates/tb_core_ffi/src/agent_usage.rs`、`Sources/CTB/include/ctb.h`、`Sources/TokenBarCore/AgentUsage.swift` | 用 nested `historicalPace` 取代 top-level historical scalars，並更新 payload contract comment；C function 與 envelope 不變 | Rust JSON fixture 能由 Swift decode；缺欄位仍走 Linear |
-| 4. Make presentation coherent | `Sources/TokenBarCore/UsagePace.swift`、`Sources/TokenBar/Views/AgentLimitsCard.swift`、selftest fixtures | Historical mode 接受 Rust ETA／will-last／risk，Linear mode 維持現況 | 不再出現 evaluator 判定會耗盡但 UI 顯示 `Lasts until reset` |
+| 4. Make presentation coherent | `Sources/TokenBarCore/UsagePace.swift`、`Sources/Syrtis/Views/AgentLimitsCard.swift`、selftest fixtures | Historical mode 接受 Rust ETA／will-last／risk，Linear mode 維持現況 | 不再出現 evaluator 判定會耗盡但 UI 顯示 `Lasts until reset` |
 | 5. Complete handoff | Relevant canonical docs、release notes、`Sources/CrossCheckHarness/main.swift` if required | 更新 durable behavior、驗證證據與 rollout caveat；跑完整 116-case baseline，區分 intended historical mismatch 與 unrelated regression，並交付 nested fixture／Windows port delta | Docs gate、full code gate、非 historical cross-check 與 diff review 完成；未取得跨 repo 授權前不修改 Windows 或宣稱新 historical parity，停在 integration authorization 前 |
 
 每個 Stage 完成後都應保留單一 concern 的 checkpoint。若 Stage 1 無法證明 v1 完全未被碰觸，或 Stage 3 仍讓 Rust 與 Swift 各自判斷 historical run-out，應停止而不是繼續疊加 UI workaround。
