@@ -4835,10 +4835,17 @@ where
         }
         return;
     };
+    // The account is verified by this point, so a history scope that did not
+    // resolve is a storage failure (the installation key could not be read or
+    // created), not an unverified identity. It is reported as `history`, as a
+    // failed record is, because the series may already hold cycles: Swift reads
+    // `accountScope` as "nothing was ever recorded" and stops asking for the
+    // curve (`PaceStatus.historyKey`), which would clear a drawn history over
+    // a transient failure.
     let Ok(history_scope) = snapshot.history_scope.as_ref() else {
         for window in &mut snapshot.windows {
             if window.window_key.is_some() {
-                window.unavailable("accountScope");
+                window.unavailable("history");
             }
         }
         return;
@@ -12688,6 +12695,41 @@ mod tests {
             snapshot.windows[0].pace_status.state,
             PaceState::Unavailable
         );
+        scope.cleanup();
+    }
+
+    /// A verified account whose history scope failed to resolve is a storage
+    /// failure, reported as `history` rather than `accountScope`: Swift stops
+    /// reading the curve of an `accountScope` window, and this one may already
+    /// have recorded cycles.
+    #[test]
+    fn verified_account_with_unresolved_history_scope_reports_history() {
+        let scope = TestRefreshScope::new("antigravity", "histid-history-scope-failed");
+        let account_scope = scope
+            .resolve_authoritative("antigravity", AuthoritativeIdKind::Email, "a@example.com")
+            .unwrap();
+        let start = 1_800_000_000_i64;
+        let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
+            client_id: ProviderId::Antigravity,
+            source: "local".to_string(),
+            updated_at: String::new(),
+            identity: None,
+            account_scope: Ok(account_scope),
+            history_scope: Err(AccountScopeError::StorageUnavailable),
+            windows: vec![histid_window(20.0, start + 5 * 3_600, start)],
+            credits: None,
+            error: None,
+            transport_diagnostic: None,
+        };
+        let calls = std::cell::Cell::new(0);
+        enrich_snapshot_with(&mut snapshot, start, |_, _, _| {
+            calls.set(calls.get() + 1);
+            Ok(Vec::new())
+        });
+        assert_eq!(calls.get(), 0);
+        assert_eq!(snapshot.windows[0].pace_status.reason.as_deref(), Some("history"));
+        assert_eq!(snapshot.windows[0].pace_status.state, PaceState::Unavailable);
         scope.cleanup();
     }
 

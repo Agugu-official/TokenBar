@@ -1568,7 +1568,7 @@ private struct DashboardSnapshot {
             var windowsToRead = 0
             for agent in visibleAgents {
                 for window in agent.uniqueCardWindows {
-                    guard let key = window.paceStatus.windowKey,
+                    guard let key = window.paceStatus.historyKey,
                           let generation = payload.publicationGeneration
                     else { continue }
                     windowsToRead += 1

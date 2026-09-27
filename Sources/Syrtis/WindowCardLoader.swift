@@ -361,7 +361,7 @@ enum WindowCardLoader {
         guard let selected = pickForHistory(
                   payload: payload, clientId: clientId,
                   chosen: UserDefaults.standard.string(forKey: selectionKey)),
-              let key = selected.window.paceStatus.windowKey,
+              let key = selected.window.paceStatus.historyKey,
               let generation = payload.publicationGeneration
         else { return [] }
         let attempt: QuotaCurve?
@@ -446,7 +446,7 @@ enum WindowCardLoader {
     ) -> [QuotaSample]? {
         // A window the payload cannot key, or a payload with no generation, is
         // a settled "nothing to read" rather than a failed read.
-        guard let key = window.paceStatus.windowKey,
+        guard let key = window.paceStatus.historyKey,
               let generation = payload.publicationGeneration
         else { return [] }
         // The read itself is the part that can fail transiently. `try?` would
