@@ -3,6 +3,35 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>2.1.0</title>
+            <pubDate>Sun, 27 Sep 2026 19:43:56 +0000</pubDate>
+            <link>https://github.com/Nanako0129/syrtis/releases/tag/v2.1.0</link>
+            <sparkle:version>1366</sparkle:version>
+            <sparkle:shortVersionString>2.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>Features:</b>
+<ul>
+<li>A card offers to attribute your usage to subscriptions. Until usage is attributed, a subscription's window history lists 0 tokens and $0.00 for every window. When nothing is attributed yet, a card at the top of Overview and of the Quota view on every client tab lists the suggested assignments and applies them in one click; "Set up manually…" opens Settings → Usage attribution, and "Not now" hides the card for good.</li>
+<li>Grok Build models are listed under one name. grok-4.6-build and grok-4.6 were two rows for one model; Models, Monthly, Daily and the Grok quota card now list grok-4.6 and grok-4.7 once each. Totals are unchanged.</li>
+<li>The menu bar gauge turns grey once the reading it shows is more than 30 minutes old, and takes its color back with the next fresh reading.</li>
+</ul>
+<b>Fixes:</b>
+<ul>
+<li>Setting the clock back could erase quota history. Loading dropped a whole series when it held readings stamped later than the current time, and a poll that recorded anything then saved the loss. With the clock set back 10 minutes on a copy of a real history file, the previous version dropped 10,163 readings to 3,780 in memory; this version drops only the 4 readings stamped in the future. Repairs made while loading are now written back once.</li>
+<li>The window history said "Quota history could not be read. It will be retried." for good for sources that record no history, such as Antigravity read through agy. It now shows that no earlier windows are recorded.</li>
+<li>Model prices stopped updating while you were idle. While the dashboard is open, the model report is now fetched again once it is an hour old.</li>
+<li>A signed-in agy that Syrtis could not find started a login shell on every refresh. It now runs at most once every 15 minutes.</li>
+<li>Claude credential errors now name their cause, and none includes credential content. A Keychain credential with a character outside printable ASCII is now read.</li>
+<li>A malformed Codex token could skip the refresh check; its expiry is no longer trusted. Thanks @snowman12320.</li>
+<li>Quota history that failed to load was described as never recorded; Past windows and the heatmap now say it could not be read and will be retried.</li>
+<li>On macOS 27 in light mode, the separators in the glass panel are lighter.</li>
+</ul>
+<p>Thanks: @snowman12320</p>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/syrtis/releases/download/v2.1.0/Syrtis.app.tar.gz" length="11370210" type="application/octet-stream" sparkle:edSignature="loZMq4/PHlAPjeawqyE1j0A78qHzJz8CpdeQtxwrobcTBmxk/tTjgMt+0JHVIaYsxGhkj9UEsvQyZMptTK9gCQ=="/>
+        </item>
+        <item>
             <title>2.0.1</title>
             <pubDate>Sat, 26 Sep 2026 20:16:43 +0000</pubDate>
             <link>https://github.com/Nanako0129/syrtis/releases/tag/v2.0.1</link>
@@ -77,33 +106,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.20.1/TokenBar.app.tar.gz" length="10610511" type="application/octet-stream" sparkle:edSignature="BuCPLAh0fYZ1CCUzRX7PnCqBq7Qp6srk1cgJ8G2iSMmAZ4MEZFAGVWcnbT2zOp0f9ax1L33mvCvnf6FFOH5wAQ=="/>
-        </item>
-        <item>
-            <title>1.20.0</title>
-            <pubDate>Mon, 21 Sep 2026 06:30:01 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.20.0</link>
-            <sparkle:version>1159</sparkle:version>
-            <sparkle:shortVersionString>1.20.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>Before you update:</b>
-<ul>
-<li>Repairing an unwritable history file drops a few stored samples, once. A history file the engine could no longer write is now repaired on the first poll rather than refused, and the repair drops the samples that were making it fail validation. Measured on one real store: 39 samples of 5815 in one series, 0.67%. The polls after it needed no repair.</li>
-</ul>
-<b>Features:</b>
-<ul>
-<li>Hovering a row in a window's history shows what its tokens were. Input, output, cache read and cache write, each with its share as a percentage, under a heading naming the window's date and time span. The whole row is the hover target rather than the token count alone, and each model line carries its own breakdown.</li>
-</ul>
-<b>Fixes:</b>
-<ul>
-<li>Pace and history read "unavailable" for every provider, and stayed that way. A write the engine refused wrote nothing and quarantined nothing, so the next poll met the same file and refused it identically. The refusal was permanent rather than transient, and it takes every window in the batch with it: one series stopped the whole lens reporting pace. The write is now repaired inside a bounded allowance instead of refused. The cost was worse than a blank field - while writes were refused the window in progress stopped gaining readings, and a window that ends with no readings near its end was deleted outright, so a refused write destroyed the window it had been unable to extend. This does not close #370: a separate defect still deletes a window whose reset the provider later revises.</li>
-<li>One provider's unreadable credential erased every other provider's history. A read that fails now costs only its own window. A card whose read failed keeps what it already had, instead of the failure emptying the lens.</li>
-<li>A few seconds of drift in a provider's reset time split one window into two. The second of the pair read 0% against the full span's tokens. Readings a few seconds apart are grouped as one window again, and the group reports the reset time most of its readings agree on.</li>
-<li>The quota cards were recomputed from scratch every time the popover opened. The history strip, the heatmap and the equivalences are drawn from the reopen cache, so they are present when the popover appears rather than arriving a moment after it.</li>
-<li>The daily chart flashed empty for a frame when the popover opened. A series' rows are folded when the view is constructed, not on its first task tick.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.20.0/TokenBar.app.tar.gz" length="10610821" type="application/octet-stream" sparkle:edSignature="P9kS8vrH7N/19zH+ByASROcXK2O7I8WPBBOIrzBN6yZncYxF9Ekhlodn89OpBefVvvi998lWnGkJoADh+r8kAw=="/>
         </item>
         <item>
             <title>1.1.1</title>
