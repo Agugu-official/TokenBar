@@ -212,7 +212,6 @@ impl Backend for SystemBackend {
             .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
             .unwrap_or(0)
     }
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3156,5 +3155,4 @@ mod tests {
             backend.cleanup();
         }
     }
-
 }
