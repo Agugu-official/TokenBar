@@ -13,7 +13,7 @@ on:
 # cancelled rather than left holding an xcode-27 runner. Pushes to main key on
 # the run id and are never cancelled, so every main commit gets its own run of
 # this workflow. That is half of main's gate: the release-configuration half is
-# ci-release.yml, and a tag needs both green.
+# ci-release.yml, and release.yml refuses a tag unless both are green.
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -92,6 +92,11 @@ jobs:
           # The appcast renderer's escaping, run against the shipping file
           # rather than a copy of it: literal <, &, >, an escaped &lt; and ]]>.
           scripts/render_notes_html.sh --self-test
+
+          # The tag gate release.yml runs before its release job, against a
+          # fake `gh`: a regression here would otherwise surface only when a
+          # real tag is refused or, worse, let through.
+          scripts/check_ci_gate_test.sh
 
       # A PR that only changes prose needs the knowledge and release-notes
       # checks above, not a 5-minute app build. Everything below is skipped for
