@@ -470,8 +470,8 @@ Migration fixtures 必須包含 empty／existing／corrupt v3、valid／corrupt 
 | Failure class | Disposition |
 |---|---|
 | Deserialize 或結構失敗 | 隔離、重建空 store（不變） |
-| 某 series 自己的 `sample.sampled_at` 超前 ceiling | **只**丟該 series，兄弟不受影響 |
-| Rollover 的**活動**時間戳超前 | rollover 設為 `None`，樣本全留 |
+| 某 series 自己的 `sample.sampled_at` 超前 ceiling | **只**丟那些超前的樣本，series 與其餘樣本保留、兄弟不受影響（2026-09-27 #415：原本丟整條 series，但 ceiling 來自牆鐘，時鐘倒退會產生同樣形狀，任何後續存檔都會讓整段歷史永久消失） |
+| Rollover 的**活動**時間戳超前 | rollover 設為 `None`；這一列本身不丟樣本（同一條 series 若也有超前樣本，上一列照樣適用） |
 | `lastActivityAt` 超前 ceiling | 夾取 |
 
 四條規則各自都曾寫錯過一次，錯法相同——**把本模組四種語意不同的時間量拿兩種來比**：
@@ -483,7 +483,7 @@ Migration fixtures 必須包含 empty／existing／corrupt v3、valid／corrupt 
 | Floor 包含存活的 rollover，不只樣本 | 落在 `(observationNow, upperBound]` 的 rollover 活動時間戳會存活，只算樣本的 floor 會夾到它底下、違反 `activity_valid`，最後讓**整筆交易**對所有 provider 失敗 |
 | 夾取以 `lastActivityAt > upperBound` 為閘 | 無閘會改低較新寫入者已提交的時間戳。多 series 時（實際回報的形狀）A 超前觸發修復、兄弟 B 落在健康帶被改低＝lost update |
 
-修復是記憶體內的，**不隔離、不改名、不寫第二個檔**，由既有的 save-if-changed 路徑持久化。它對任何今日可正常載入的 store 必為 no-op：`activity_valid` 已強制 `sampled_at <= lastActivityAt <= upperBound`，所以丟棄條件不可滿足、per-series 閘也全數跳過。**刻意不設有界門檻常數**——夾取在任何幅度下都合理，門檻只會在兩個等價修復之間做無法論證的選擇；真正需要看幅度的只有「樣本證據在未來」，那由分類處理。
+修復是記憶體內的，**不隔離、不改名、不寫第二個檔**。持久化原本只靠既有的 save-if-changed 路徑（body 有變更才寫）；自 #415（#207）起載入修復會設 `LoadedStore.repaired`，下一個交易即使 body 沒變更也寫回一次。它對任何今日可正常載入的 store 必為 no-op：`activity_valid` 已強制 `sampled_at <= lastActivityAt <= upperBound`，所以丟棄條件不可滿足、per-series 閘也全數跳過。**刻意不設有界門檻常數**——夾取在任何幅度下都合理，門檻只會在兩個等價修復之間做無法論證的選擇；真正需要看幅度的只有「樣本證據在未來」，那由分類處理。
 
 ## Provider adapter matrix
 
