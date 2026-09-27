@@ -502,6 +502,15 @@
 "Sun" = "日";
 "Classify your usage in Settings to see what this window is worth" = "在设置中为用量分类，才能估算此窗口的金额";
 "Nothing is classified yet. Settings › Usage attribution splits this by subscription." = "尚未为任何用量分类。“设置”›“用量归属”可以按订阅拆分此图。";
+
+/* Usage-attribution onboarding card（概览页面） */
+"Attribute usage to subscriptions" = "将用量归属到订阅";
+"Quota history shows no tokens or API-equivalent value until usage is attributed." = "用量归属之前，额度历史不会显示 token 数或 API 等值金额。";
+"%@ · %@ → %@" = "%1$@ · %2$@ → %3$@";
+"and %lld more" = "以及另外 %lld 项";
+"%lld sources have no suggestion — set them in Settings." = "有 %lld 个来源没有建议——请在“设置”中手动指定。";
+"Set up manually…" = "手动设置…";
+"Apply suggestions" = "应用建议";
 "%@ of %@ windows recorded — the estimate needs that many" = "已记录 %@ 个窗口；至少需要 %@ 个才能估算";
 "runs out at this rate" = "按当前速度将会用完";
 "Peaked at %@%% · never ran out" = "峰值 %@%% · 从未用完";

@@ -503,6 +503,15 @@
 "Sun" = "日";
 "Classify your usage in Settings to see what this window is worth" = "到設定裡分類用量，才能知道這個窗值多少";
 "Nothing is classified yet. Settings › Usage attribution splits this by subscription." = "還沒有分類過任何用量。設定 › 用量歸屬可以把這張圖拆成各個訂閱。";
+
+/* Usage-attribution onboarding card（Overview 頁面） */
+"Attribute usage to subscriptions" = "把用量歸屬到訂閱";
+"Quota history shows no tokens or API-equivalent value until usage is attributed." = "用量還沒歸屬前，額度歷史不會顯示 token 數或 API 等值金額。";
+"%@ · %@ → %@" = "%1$@ · %2$@ → %3$@";
+"and %lld more" = "以及另外 %lld 筆";
+"%lld sources have no suggestion — set them in Settings." = "有 %lld 個來源沒有建議，請到「設定」手動指定。";
+"Set up manually…" = "手動設定…";
+"Apply suggestions" = "套用建議";
 "%@ of %@ windows recorded — the estimate needs that many" = "已記錄 %@ 個時間窗，要 %@ 個才能給出估計";
 "runs out at this rate" = "照現速會用完";
 "Peaked at %@%% · never ran out" = "最高讀數 %@%%・從未用完";

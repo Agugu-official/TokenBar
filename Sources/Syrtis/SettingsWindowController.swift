@@ -20,10 +20,25 @@ final class SettingsWindowController {
     /// instead of the top of the first page.
     enum Destination {
         case discord
+        case usageAttribution
 
-        var page: SettingsPanel.Page { .general }
-        /// Matched by a `.id(...)` on the section itself.
-        var anchor: String { "settings.section.discord" }
+        var page: SettingsPanel.Page {
+            switch self {
+            case .discord: return .general
+            case .usageAttribution: return .usageAttribution
+            }
+        }
+
+        /// Matched by a `.id(...)` on the section itself, or nil when
+        /// selecting the page already puts the destination at the top —
+        /// the usage-attribution page has exactly one section, so there is
+        /// nothing further to scroll to.
+        var anchor: String? {
+            switch self {
+            case .discord: return "settings.section.discord"
+            case .usageAttribution: return nil
+            }
+        }
     }
 
     func show(scrollingTo destination: Destination? = nil) {
@@ -41,7 +56,9 @@ final class SettingsWindowController {
             // fires the scroll — and is exactly what an ordinary reopen must
             // NOT do, since it would discard the page the user was last on.
             host?.rootView = destination.map {
-                AnyView(SettingsWindowView(destination: $0).id($0.anchor + UUID().uuidString))
+                AnyView(
+                    SettingsWindowView(destination: $0)
+                        .id(($0.anchor ?? $0.page.rawValue) + UUID().uuidString))
             } ?? AnyView(SettingsWindowView())
         }
         let firstShow = !window.isVisible

@@ -702,45 +702,54 @@ struct PopoverView: View {
             let turnClientIds = Self.supportedTurnClients(clientIds)
             switch effectiveView {
             case .overview:
-                OverviewView(
-                    payload: payload, clientIds: clientIds, stats: activeStats,
-                    modelReport: model.modelReport, modelLoading: model.modelLoading,
-                    colors: model.colors,
-                    trace: model.trace,
-                    singleClient: singleClient,
-                    hasLocalUsage: clientIds.contains { model.stats?.presentClients.contains($0) == true },
-                    year: model.year,
-                    hidden: ClientRegistry.hiddenTabClients(ClientRegistry.parseIdSet(hiddenRaw)),
-                    // The user's own pace mode, not the fold's default. Leaving
-                    // it out meant the summary always projected Historically
-                    // while the card beside it obeyed the setting — and with
-                    // pace off, the card hid its marker while the summary kept
-                    // naming a fastest burner. `compute` returns nil for `.off`,
-                    // so passing the real mode suppresses the line too.
-                    // The same union `ClientRegistry.quotaExcludedClients()`
-                    // forms for the tray, built from observed values here. `QuotaSummaryFold` documents
-                    // that it reuses `QuotaResolver` so this sentence and the
-                    // menu bar can never name different subscriptions — but the
-                    // shared function was being handed different arguments, so
-                    // a client hidden only from Agent limits was excluded by
-                    // the tray and named by this line. Since the limits card
-                    // stopped drawing that client's row, the sentence pointed
-                    // at something no longer below it.
-                    quotaSummary: QuotaSummaryFold.build(
-                        payload: model.agentUsage,
-                        excluding: ClientRegistry.quotaExcludedClients(
-                            tabHidden: ClientRegistry.parseIdSet(hiddenRaw),
-                            limitsHidden: ClientRegistry.parseIdSet(limitsHiddenRaw)),
-                        paceMode: PaceMode(rawValue: paceModeRaw) ?? .historical),
-                    usageAttempted: model.agentUsageAttempted,
-                    // The FOURTH statement of this gate, and the one that made
-                    // the previous fix inert: the Overview lens is fed here, so
-                    // removing the gate at the Quota lens' call site below and
-                    // inside `OverviewView` left this one still handing a client
-                    // tab an empty map. The rule was written in four places and
-                    // reconciled in three.
-                    windowCurves: model.windowCurves,
-                    agentUsage: model.agentUsage)
+                VStack(spacing: 12) {
+                    // Only on the global tab: a single client's usage is
+                    // already known whose subscription it belongs to, so
+                    // there is nothing here for that tab to onboard.
+                    if activeTab == ClientTray.overviewTab {
+                        AttributionOnboardingCardView(
+                            modelReport: model.modelReport, agentUsage: model.agentUsage)
+                    }
+                    OverviewView(
+                        payload: payload, clientIds: clientIds, stats: activeStats,
+                        modelReport: model.modelReport, modelLoading: model.modelLoading,
+                        colors: model.colors,
+                        trace: model.trace,
+                        singleClient: singleClient,
+                        hasLocalUsage: clientIds.contains { model.stats?.presentClients.contains($0) == true },
+                        year: model.year,
+                        hidden: ClientRegistry.hiddenTabClients(ClientRegistry.parseIdSet(hiddenRaw)),
+                        // The user's own pace mode, not the fold's default. Leaving
+                        // it out meant the summary always projected Historically
+                        // while the card beside it obeyed the setting — and with
+                        // pace off, the card hid its marker while the summary kept
+                        // naming a fastest burner. `compute` returns nil for `.off`,
+                        // so passing the real mode suppresses the line too.
+                        // The same union `ClientRegistry.quotaExcludedClients()`
+                        // forms for the tray, built from observed values here. `QuotaSummaryFold` documents
+                        // that it reuses `QuotaResolver` so this sentence and the
+                        // menu bar can never name different subscriptions — but the
+                        // shared function was being handed different arguments, so
+                        // a client hidden only from Agent limits was excluded by
+                        // the tray and named by this line. Since the limits card
+                        // stopped drawing that client's row, the sentence pointed
+                        // at something no longer below it.
+                        quotaSummary: QuotaSummaryFold.build(
+                            payload: model.agentUsage,
+                            excluding: ClientRegistry.quotaExcludedClients(
+                                tabHidden: ClientRegistry.parseIdSet(hiddenRaw),
+                                limitsHidden: ClientRegistry.parseIdSet(limitsHiddenRaw)),
+                            paceMode: PaceMode(rawValue: paceModeRaw) ?? .historical),
+                        usageAttempted: model.agentUsageAttempted,
+                        // The FOURTH statement of this gate, and the one that made
+                        // the previous fix inert: the Overview lens is fed here, so
+                        // removing the gate at the Quota lens' call site below and
+                        // inside `OverviewView` left this one still handing a client
+                        // tab an empty map. The rule was written in four places and
+                        // reconciled in three.
+                        windowCurves: model.windowCurves,
+                        agentUsage: model.agentUsage)
+                }
             case .quota:
                 QuotaView(
                     singleClient: singleClient, clientIds: clientIds,

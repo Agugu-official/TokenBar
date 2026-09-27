@@ -886,31 +886,10 @@ struct SettingsPanel: View {
         let records = UsageAttributionSettings.acceptanceRecords(rows: rows)
         guard !records.isEmpty else { return }
 
-        let defaults = UserDefaults.standard
-        let confirmedRaw = UsageAttribution.confirmedRaw(
-            updating: defaults.object(forKey: UsageAttribution.confirmedKey), records: records)
-        guard let confirmedRaw else {
-            attributionNotice = UsageAttributionSettings.writeFailure(
-                table: tables.confirmed, records: records, result: confirmedRaw)?.message
-            attributionRevision += 1
-            return
-        }
-        let removals = records.map {
-            UsageAttribution.Record(
-                client: $0.client, provider: $0.provider, model: $0.model, state: .unassigned)
-        }
-        let suggestionsRaw = UsageAttribution.suggestionsRaw(
-            updating: defaults.object(forKey: UsageAttribution.suggestionsKey), records: removals)
-        guard let suggestionsRaw else {
-            attributionNotice = UsageAttributionSettings.writeFailure(
-                table: tables.suggestions, records: removals, result: suggestionsRaw)?.message
-            attributionRevision += 1
-            return
-        }
-
-        defaults.set(confirmedRaw, forKey: UsageAttribution.confirmedKey)
-        defaults.set(suggestionsRaw, forKey: UsageAttribution.suggestionsKey)
-        attributionNotice = nil
+        // Shared with the onboarding card's "Apply suggestions" button — one
+        // write path decides what accepting a suggestion means, so the two
+        // surfaces cannot confirm records by different rules.
+        attributionNotice = UsageAttributionSettings.accept(records, defaults: .standard)
         attributionRevision += 1
     }
 
