@@ -342,11 +342,18 @@ struct SubscriptionTrendCard: View {
     @ViewBuilder
     private func undeclaredHint(_ trend: SubscriptionTrend) -> some View {
         if trend.targets == [SubscriptionTrendFold.unassignedTarget] {
-            Text("Nothing is classified yet. Settings › Usage attribution splits this by subscription.")
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                SettingsWindowController.shared.showFromPopover(scrollingTo: .usageAttribution)
+            } label: {
+                Text("Nothing is classified yet. Settings › Usage attribution splits this by subscription.")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .underline()
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
         }
     }
 

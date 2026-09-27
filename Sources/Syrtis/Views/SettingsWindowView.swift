@@ -138,12 +138,16 @@ struct SettingsWindowView: View {
                 .onAppear {
                     guard let destination else { return }
                     selectedPage = destination.page
+                    // A nil anchor means the page itself is the destination
+                    // (usage attribution has one section, at the top) — there
+                    // is nothing further to scroll to.
+                    guard let anchor = destination.anchor else { return }
                     // Next runloop turn: the page's own sections have to exist
                     // before the anchor can be resolved, and selecting the page
                     // above is what creates them.
                     DispatchQueue.main.async {
                         withAnimation(.easeOut(duration: 0.25)) {
-                            proxy.scrollTo(destination.anchor, anchor: .top)
+                            proxy.scrollTo(anchor, anchor: .top)
                         }
                     }
                 }

@@ -2464,6 +2464,252 @@ enum SelfTest {
             expect(false, "fresh attribution defaults suite is available")
         }
 
+        // Usage-attribution onboarding card: the popover-side surface that
+        // proposes acceptance without ever reading or writing the stored
+        // suggestions table (Settings-only).
+        func onboardingReport(
+            _ rows: [(client: String, provider: String, model: String, total: Int64, cost: Double)]
+        ) -> ModelReport {
+            let entries = rows.map { row in
+                """
+                {"client":"\(row.client)","model":"\(row.model)","provider":"\(row.provider)",
+                 "input":1,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+                 "total":\(row.total),"messageCount":1,"cost":\(row.cost),"msPer1kTokens":null}
+                """
+            }.joined(separator: ",")
+            let json = """
+            {"entries":[\(entries)],
+             "totalInput":1,"totalOutput":0,"totalCacheRead":0,"totalCacheWrite":0,
+             "totalMessages":\(rows.count),"totalCost":0.0}
+            """
+            return try! JSONDecoder().decode(ModelReport.self, from: Data(json.utf8))
+        }
+
+        // Visibility rule, split where the code splits it: `mayShow` holds the
+        // gates that need no dashboard data (and also decide the Quota lens'
+        // report fetch), `isVisible` adds "the data offers something". Each
+        // gate is flipped alone from the "shown" baseline.
+        let emptyConfirmed = UsageAttribution.parseRaw(nil)
+        let userArgs = ["Syrtis"]
+        let offering = UsageAttributionSettings.OnboardingSummary(records: [
+            UsageAttribution.Record(
+                client: "claude", provider: "anthropic", model: nil, state: .assigned("claude")),
+        ], unsuggestedCount: 0)
+        expect(
+            AttributionOnboardingCard.isVisible(
+                mayShow: AttributionOnboardingCard.mayShow(
+                    confirmed: emptyConfirmed, dismissed: false, arguments: userArgs),
+                summary: offering),
+            "onboarding card shows with nothing confirmed, not dismissed, data loaded, and a row to attribute")
+        expect(
+            !AttributionOnboardingCard.mayShow(
+                confirmed: UsageAttribution.parseRaw(
+                    UsageAttribution.confirmedRaw(updating: nil, records: offering.records)),
+                dismissed: false, arguments: userArgs),
+            "onboarding card hides once any usage is confirmed")
+        // A table the codec cannot read is someone's configuration, not an
+        // empty one; inviting that user ends in a write the codec refuses.
+        expect(
+            !AttributionOnboardingCard.mayShow(
+                confirmed: UsageAttribution.parseRaw("not json"), dismissed: false, arguments: userArgs),
+            "onboarding card hides when the confirmed table cannot be read")
+        expect(
+            !AttributionOnboardingCard.mayShow(
+                confirmed: emptyConfirmed, dismissed: true, arguments: userArgs),
+            "onboarding card hides after being dismissed")
+        expect(
+            !AttributionOnboardingCard.mayShow(
+                confirmed: emptyConfirmed, dismissed: false, arguments: ["Syrtis", "--selftest"]),
+            "onboarding card hides under a non-user runtime (selftest/demo/smoke)")
+        expect(
+            !AttributionOnboardingCard.isVisible(mayShow: true, summary: nil),
+            "onboarding card hides before the model report and agent usage have loaded")
+        expect(
+            !AttributionOnboardingCard.isVisible(
+                mayShow: true,
+                summary: UsageAttributionSettings.OnboardingSummary(records: [], unsuggestedCount: 0)),
+            "onboarding card hides when there is nothing attributable")
+        expect(
+            AttributionOnboardingCard.isVisible(
+                mayShow: true,
+                summary: UsageAttributionSettings.OnboardingSummary(records: [], unsuggestedCount: 2)),
+            "onboarding card shows when every source still needs a manual choice")
+        expect(
+            !AttributionOnboardingCard.isVisible(mayShow: false, summary: offering),
+            "onboarding card hides whenever mayShow is false, whatever the data offers")
+
+        // "Not now" records an ANSWER, never the fact of being shown — the
+        // contrast `GrokBotKeychainConsent` documents against `DiscordIntro`.
+        // A user who has not yet decided keeps seeing the card on every open.
+        let onboardingDismissDefaultsName =
+            "Syrtis.SelfTest.AttributionOnboarding.Dismiss.\(UUID().uuidString)"
+        if let onboardingDismissDefaults = UserDefaults(suiteName: onboardingDismissDefaultsName) {
+            defer { onboardingDismissDefaults.removePersistentDomain(forName: onboardingDismissDefaultsName) }
+            expect(
+                onboardingDismissDefaults.object(forKey: AttributionOnboardingCard.dismissedKey) == nil,
+                "onboarding dismissal flag starts unset")
+            // `mayShow` decides whether the Quota lens fetches the model report
+            // for the card, so a wrong answer either starts a scan nobody needs
+            // or leaves the card unable to appear there.
+            let userArguments = ["Syrtis"]
+            expect(
+                AttributionOnboardingCard.mayShow(
+                    defaults: onboardingDismissDefaults, arguments: userArguments),
+                "onboarding mayShow with nothing confirmed and no dismissal")
+            expect(
+                !AttributionOnboardingCard.mayShow(
+                    defaults: onboardingDismissDefaults, arguments: ["Syrtis", "--selftest"]),
+                "onboarding mayShow is false under a non-user runtime")
+            AttributionOnboardingCard.markDismissed(defaults: onboardingDismissDefaults)
+            expect(
+                onboardingDismissDefaults.bool(forKey: AttributionOnboardingCard.dismissedKey) == true,
+                "\"Not now\" writes the dismissal flag")
+            expect(
+                !AttributionOnboardingCard.mayShow(
+                    defaults: onboardingDismissDefaults, arguments: userArguments),
+                "onboarding mayShow is false once dismissed")
+            onboardingDismissDefaults.removeObject(forKey: AttributionOnboardingCard.dismissedKey)
+            let confirmedFixture = UsageAttribution.confirmedRaw(
+                updating: nil,
+                records: [UsageAttribution.Record(
+                    client: "claude", provider: "anthropic", model: nil, state: .assigned("claude"))])
+            expect(confirmedFixture != nil, "onboarding mayShow fixture: a confirmed record encodes")
+            onboardingDismissDefaults.set(confirmedFixture, forKey: UsageAttribution.confirmedKey)
+            expect(
+                !AttributionOnboardingCard.mayShow(
+                    defaults: onboardingDismissDefaults, arguments: userArguments),
+                "onboarding mayShow is false once anything is confirmed")
+        } else {
+            expect(false, "isolated onboarding dismissal defaults suite is available")
+        }
+
+        // The card's suggestion list is `suggestionRecords` → `rows` →
+        // `acceptanceRecords` composed once, not a second policy — this pins
+        // the composition, not the policy those three already cover.
+        let mixedOnboardingEntries = [
+            attributionEntry(
+                client: "claude", provider: "openai", model: "gpt-mix", total: 40, cost: 2.0),
+            attributionEntry(
+                client: "openclaw", provider: "unknown-vendor", model: "m", total: 10, cost: 0.1),
+        ]
+        let mixedOnboardingSummary = UsageAttributionSettings.onboardingSummary(
+            entries: mixedOnboardingEntries, confirmed: [], subscriptionClients: ["codex"])
+        expect(
+            mixedOnboardingSummary.records == [
+                UsageAttribution.Record(client: "claude", provider: "openai", state: .assigned("codex")),
+            ] && mixedOnboardingSummary.unsuggestedCount == 1,
+            "onboarding summary proposes an acceptance record only for a source with a suggestion, "
+                + "and counts the rest as unsuggested")
+
+        let confirmedOnboardingEntries = [
+            attributionEntry(
+                client: "claude", provider: "openai", model: "gpt-mix", total: 40, cost: 2.0),
+        ]
+        let confirmedOnboardingSummary = UsageAttributionSettings.onboardingSummary(
+            entries: confirmedOnboardingEntries,
+            confirmed: [
+                UsageAttribution.Record(client: "claude", provider: "openai", state: .excluded),
+            ],
+            subscriptionClients: ["codex"])
+        expect(
+            confirmedOnboardingSummary.records.isEmpty && confirmedOnboardingSummary.unsuggestedCount == 0,
+            "a source already declared is neither proposed nor counted as unsuggested")
+
+        // Suggestion-line copy names the source, provider, and proposed
+        // target, including the two non-assignment shapes a suggestion may
+        // take (an unspecified provider, an excluded target).
+        let assignedOnboardingLine = AttributionOnboardingCard.suggestionLine(
+            UsageAttribution.Record(client: "claude", provider: "openai", state: .assigned("codex")))
+        let excludedOnboardingLine = AttributionOnboardingCard.suggestionLine(
+            UsageAttribution.Record(client: "opencode", provider: "", state: .excluded))
+        expect(
+            assignedOnboardingLine.contains(ClientRegistry.style("claude").displayName)
+                && assignedOnboardingLine.contains(ClientRegistry.style("codex").displayName)
+                && excludedOnboardingLine.contains(UsageAttributionSettings.Copy.unspecifiedProvider.localized)
+                && excludedOnboardingLine.contains(UsageAttributionSettings.Copy.excluded.localized),
+            "onboarding suggestion line names the source, provider, and proposed target")
+
+        // `accept` is the one write path Settings' "Accept all" and the card's
+        // "Apply suggestions" both call — pin that it writes the identical
+        // confirmed/suggestions raw a hand-rolled accept-all would, and that
+        // an empty acceptance list writes nothing at all.
+        let onboardingAcceptDefaultsName =
+            "Syrtis.SelfTest.AttributionOnboarding.Accept.\(UUID().uuidString)"
+        if let onboardingAcceptDefaults = UserDefaults(suiteName: onboardingAcceptDefaultsName) {
+            defer { onboardingAcceptDefaults.removePersistentDomain(forName: onboardingAcceptDefaultsName) }
+            let priorConfirmed = [
+                UsageAttribution.Record(
+                    client: "gemini", provider: "google", state: .assigned("antigravity")),
+            ]
+            let priorSuggestions = [
+                UsageAttribution.Record(client: "opencode", provider: "xai", state: .assigned("grok")),
+                UsageAttribution.Record(client: "cursor", provider: "openai", state: .excluded),
+            ]
+            let priorConfirmedRaw = priorConfirmed.reduce(String?.none) {
+                UsageAttribution.confirmedRaw(updating: $0, record: $1)
+            }
+            let priorSuggestionsRaw = priorSuggestions.reduce(String?.none) {
+                UsageAttribution.suggestionsRaw(updating: $0, record: $1)
+            }
+            onboardingAcceptDefaults.set(priorConfirmedRaw, forKey: UsageAttribution.confirmedKey)
+            onboardingAcceptDefaults.set(priorSuggestionsRaw, forKey: UsageAttribution.suggestionsKey)
+
+            // What a hand-rolled accept-all (Settings' old inline body) would
+            // produce for the same inputs, computed independently of `accept`.
+            let expectedConfirmedRaw = UsageAttribution.confirmedRaw(
+                updating: priorConfirmedRaw, records: priorSuggestions)
+            let removals = priorSuggestions.map {
+                UsageAttribution.Record(
+                    client: $0.client, provider: $0.provider, model: $0.model, state: .unassigned)
+            }
+            let expectedSuggestionsRaw = UsageAttribution.suggestionsRaw(
+                updating: priorSuggestionsRaw, records: removals)
+
+            let acceptFailure = UsageAttributionSettings.accept(
+                priorSuggestions, defaults: onboardingAcceptDefaults)
+            expect(
+                acceptFailure == nil
+                    && onboardingAcceptDefaults.string(forKey: UsageAttribution.confirmedKey)
+                        == expectedConfirmedRaw
+                    && onboardingAcceptDefaults.string(forKey: UsageAttribution.suggestionsKey)
+                        == expectedSuggestionsRaw
+                    && UsageAttribution.confirmed(defaults: onboardingAcceptDefaults).records.contains(
+                        UsageAttribution.Record(
+                            client: "opencode", provider: "xai", state: .assigned("grok")))
+                    && UsageAttribution.suggestions(defaults: onboardingAcceptDefaults).records.isEmpty,
+                "accept writes the same confirmed and suggestions raw a hand-rolled accept-all would "
+                    + "for the same records")
+
+            let beforeNoopConfirmed = onboardingAcceptDefaults.string(forKey: UsageAttribution.confirmedKey)
+            let beforeNoopSuggestions =
+                onboardingAcceptDefaults.string(forKey: UsageAttribution.suggestionsKey)
+            let noopFailure = UsageAttributionSettings.accept([], defaults: onboardingAcceptDefaults)
+            expect(
+                noopFailure == nil
+                    && onboardingAcceptDefaults.string(forKey: UsageAttribution.confirmedKey)
+                        == beforeNoopConfirmed
+                    && onboardingAcceptDefaults.string(forKey: UsageAttribution.suggestionsKey)
+                        == beforeNoopSuggestions,
+                "accept with no records writes nothing")
+
+            // A confirmed table the codec cannot read must not be replaced,
+            // and neither table may change: the caller shows the message.
+            onboardingAcceptDefaults.set("not json", forKey: UsageAttribution.confirmedKey)
+            let beforeFailureSuggestions =
+                onboardingAcceptDefaults.string(forKey: UsageAttribution.suggestionsKey)
+            let failure = UsageAttributionSettings.accept(
+                [UsageAttribution.Record(client: "opencode", provider: "xai", state: .assigned("grok"))],
+                defaults: onboardingAcceptDefaults)
+            expect(
+                failure != nil
+                    && onboardingAcceptDefaults.string(forKey: UsageAttribution.confirmedKey) == "not json"
+                    && onboardingAcceptDefaults.string(forKey: UsageAttribution.suggestionsKey)
+                        == beforeFailureSuggestions,
+                "accept over an unreadable confirmed table writes nothing and returns a message")
+        } else {
+            expect(false, "isolated onboarding accept defaults suite is available")
+        }
+
         // QD-1: retain date, attribution bucket, and canonical model while
         // resolving each raw contribution-client row.
         let oneDayContributions = [contributionFixture(contributionJSON(

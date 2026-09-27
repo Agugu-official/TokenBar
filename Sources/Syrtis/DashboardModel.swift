@@ -2591,6 +2591,14 @@ private struct DashboardSnapshot {
         switch view {
         case .overview, .models, .stats:
             await ensureModelReport(priority: .userInitiated)
+        // The attribution card on the Quota lens needs the report to offer
+        // anything, so the lens asks for it while the card can still show.
+        // Once asked, the report is kept current like on Overview
+        // (`retryModelIfStale`) until the slice changes, even if the card is
+        // declined or applied in the meantime: the same cost Overview always
+        // pays. Nothing asks for it on Quota after that.
+        case .quota where AttributionOnboardingCard.mayShow():
+            await ensureModelReport(priority: .userInitiated)
         default:
             break
         }

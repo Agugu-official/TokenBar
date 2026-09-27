@@ -494,6 +494,77 @@ public enum UsageAttributionSettings {
         }
     }
 
+    /// What the onboarding card shows: up to one acceptance record per
+    /// unassigned source that has a suggestion, plus how many unassigned
+    /// sources have none. Built from the same `suggestionRecords` /
+    /// `rows` / `acceptanceRecords` the Settings page uses — this does not
+    /// re-derive the policy, only reads its result for a surface that has no
+    /// stored suggestions table of its own to consult.
+    public struct OnboardingSummary: Equatable, Sendable {
+        public let records: [UsageAttribution.Record]
+        public let unsuggestedCount: Int
+
+        public init(records: [UsageAttribution.Record], unsuggestedCount: Int) {
+            self.records = records
+            self.unsuggestedCount = unsuggestedCount
+        }
+    }
+
+    public static func onboardingSummary(
+        entries: [ModelReportEntry],
+        confirmed: [UsageAttribution.Record],
+        subscriptionClients: [String],
+        routedSubscriptions: RoutedSubscriptions = [:]
+    ) -> OnboardingSummary {
+        let suggestions = suggestionRecords(
+            entries: entries, confirmed: confirmed,
+            subscriptionClients: subscriptionClients, routedSubscriptions: routedSubscriptions)
+        let allRows = rows(entries: entries, confirmed: confirmed, suggestions: suggestions)
+        let unassignedCount = allRows.reduce(into: 0) { count, row in
+            if case .unassigned = row.state { count += 1 }
+        }
+        let records = acceptanceRecords(rows: allRows)
+        return OnboardingSummary(records: records, unsuggestedCount: unassignedCount - records.count)
+    }
+
+    /// The accept-all WRITE path: confirm every proposed record, then remove
+    /// each one from the suggestions table so it stops being offered again.
+    /// Both Settings' "Accept all" button and the onboarding card call this —
+    /// it is the one place that decides what gets written, so the two
+    /// surfaces cannot drift into confirming records by different rules.
+    ///
+    /// Returns the failure message to show, or nil on success (including the
+    /// no-op success of an empty `records`). Confirmed and suggestions are
+    /// only written once both raw encodings succeed, so a rejected write
+    /// never leaves the two tables inconsistent with each other.
+    public static func accept(
+        _ records: [UsageAttribution.Record], defaults: UserDefaults = .standard
+    ) -> String? {
+        guard !records.isEmpty else { return nil }
+
+        let confirmedTable = UsageAttribution.confirmed(defaults: defaults)
+        let confirmedRaw = UsageAttribution.confirmedRaw(
+            updating: defaults.object(forKey: UsageAttribution.confirmedKey), records: records)
+        guard let confirmedRaw else {
+            return writeFailure(table: confirmedTable, records: records, result: confirmedRaw)?.message
+        }
+
+        let removals = records.map {
+            UsageAttribution.Record(
+                client: $0.client, provider: $0.provider, model: $0.model, state: .unassigned)
+        }
+        let suggestionsTable = UsageAttribution.suggestions(defaults: defaults)
+        let suggestionsRaw = UsageAttribution.suggestionsRaw(
+            updating: defaults.object(forKey: UsageAttribution.suggestionsKey), records: removals)
+        guard let suggestionsRaw else {
+            return writeFailure(table: suggestionsTable, records: removals, result: suggestionsRaw)?.message
+        }
+
+        defaults.set(confirmedRaw, forKey: UsageAttribution.confirmedKey)
+        defaults.set(suggestionsRaw, forKey: UsageAttribution.suggestionsKey)
+        return nil
+    }
+
     public static func writeFailure(
         table: UsageAttribution.Table,
         record: UsageAttribution.Record,

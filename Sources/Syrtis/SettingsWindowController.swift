@@ -20,10 +20,44 @@ final class SettingsWindowController {
     /// instead of the top of the first page.
     enum Destination {
         case discord
+        case usageAttribution
 
-        var page: SettingsPanel.Page { .general }
-        /// Matched by a `.id(...)` on the section itself.
-        var anchor: String { "settings.section.discord" }
+        var page: SettingsPanel.Page {
+            switch self {
+            case .discord: return .general
+            case .usageAttribution: return .usageAttribution
+            }
+        }
+
+        /// Matched by a `.id(...)` on the section itself, or nil when
+        /// selecting the page already puts the destination at the top —
+        /// the usage-attribution page has exactly one section, so there is
+        /// nothing further to scroll to.
+        var anchor: String? {
+            switch self {
+            case .discord: return Self.discordAnchor
+            case .usageAttribution: return nil
+            }
+        }
+
+        /// The Discord section's `.id`, non-optional on purpose: tagging the
+        /// section with `anchor` itself would give it an `Optional<String>`
+        /// id, which never equals the `String` handed to `scrollTo`, and the
+        /// intro card's "Open Settings" would stop scrolling to it.
+        static let discordAnchor = "settings.section.discord"
+    }
+
+    /// For a control inside the popover: close the popover first, then show
+    /// on the next runloop turn, as the popover's own gear button does
+    /// (`PopoverView.openSettingsWindow`). Showing in the same turn as the
+    /// popover's animated close puts both vibrant windows in one CoreAnimation
+    /// transaction and the native switch thumbs lose their first frame; and
+    /// leaving the popover open keeps its polling running behind Settings.
+    func showFromPopover(scrollingTo destination: Destination? = nil) {
+        if let popover = NSApp.keyWindow, popover !== window {
+            popover.performClose(nil)
+        }
+        DispatchQueue.main.async { self.show(scrollingTo: destination) }
     }
 
     func show(scrollingTo destination: Destination? = nil) {
@@ -41,7 +75,9 @@ final class SettingsWindowController {
             // fires the scroll — and is exactly what an ordinary reopen must
             // NOT do, since it would discard the page the user was last on.
             host?.rootView = destination.map {
-                AnyView(SettingsWindowView(destination: $0).id($0.anchor + UUID().uuidString))
+                AnyView(
+                    SettingsWindowView(destination: $0)
+                        .id(($0.anchor ?? $0.page.rawValue) + UUID().uuidString))
             } ?? AnyView(SettingsWindowView())
         }
         let firstShow = !window.isVisible

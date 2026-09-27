@@ -92,9 +92,16 @@ struct UsageAttributionBreakdownCard: View {
                     .foregroundStyle(.secondary)
             case .rows:
                 if confirmed.isEmpty {
-                    Text(UsageAttributionBreakdown.Copy.hint.localized)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Button {
+                        SettingsWindowController.shared.showFromPopover(scrollingTo: .usageAttribution)
+                    } label: {
+                        Text(UsageAttributionBreakdown.Copy.hint.localized)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .underline()
+                            .multilineTextAlignment(.leading)
+                    }
+                    .buttonStyle(.plain)
                 }
                 VStack(spacing: 6) {
                     ForEach(rows ?? []) { row in
