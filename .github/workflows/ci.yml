@@ -142,6 +142,12 @@ jobs:
       # compiles rusqlite's bundled C. Pushes never read this cache and always
       # build in full, so a stale library cannot survive past the merge.
       #
+      # A hit also skips the Rust unit tests below, so the key covers what they
+      # read as well: Fixtures/ and Tests/fixtures/ (agent_usage.rs and
+      # model_report.rs load a fixture from each). Those do not change the
+      # library's bytes; they are here so a fixture-only change still runs the
+      # tests.
+      #
       # Each part is assigned before use: a failure inside `$(...)` in the echo
       # would not trip `set -e`, and an empty engine term would let a PR that
       # only moves the submodule link the previous engine.
@@ -153,7 +159,7 @@ jobs:
           rustc_id=$(rustc -V | shasum | cut -c1-12)
           engine=$(git rev-parse HEAD:vendor/tokscale-core)
           image="${ImageOS:?}-${ImageVersion:?}"
-          echo "key=rustlib-v1-${RUNNER_OS}-${RUNNER_ARCH}-${image}-${rustc_id}-${engine}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/**', '.cargo/**', '.github/workflows/ci.yml') }}" >> "$GITHUB_OUTPUT"
+          echo "key=rustlib-v1-${RUNNER_OS}-${RUNNER_ARCH}-${image}-${rustc_id}-${engine}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/**', '.cargo/**', '.github/workflows/ci.yml', 'Fixtures/**', 'Tests/fixtures/**') }}" >> "$GITHUB_OUTPUT"
 
       # PR-only. Main always builds from source: it is the only writer of this
       # cache, so reading it there would carry an entry forward instead of
@@ -177,9 +183,17 @@ jobs:
 
       # Saves on main only: a PR's own entry is scoped to that PR and would only
       # evict main's entries from the 10 GB budget.
+      #
+      # shared-key names the entry explicitly (it replaces rust-cache's
+      # key-plus-job-id part); ci-release.yml restores the same one. It was
+      # renamed from the implicit `build` when the unit tests and Clippy were
+      # added: rust-cache never re-saves a key that already exists, so under
+      # the old name the dev/test-profile dependencies would never have been
+      # stored and both steps would have compiled them cold on every run.
       - uses: Swatinem/rust-cache@v2
         if: steps.scope.outputs.docs_only != 'true' && (steps.rustlib-restore.outputs.cache-hit != 'true')
         with:
+          shared-key: build-with-tests
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # --locked: the key names Cargo.lock, so the build must be held to it. A
@@ -188,6 +202,40 @@ jobs:
       - name: Build Rust staticlib
         if: steps.scope.outputs.docs_only != 'true' && (steps.rustlib-restore.outputs.cache-hit != 'true')
         run: cargo build --release --locked
+
+      # The Rust unit tests and Clippy, on every run that builds Rust: a PR
+      # whose Rust inputs or the fixtures its tests read changed (a cache hit
+      # means neither did, so both are skipped with the build; see the key
+      # above) and every push to main. Until now they
+      # ran only as local gates (docs/knowledge/verification.md). Measured on
+      # runs 36313333899 and 36317158008: test 94-103 s and clippy 52-54 s
+      # with a cold dev/test profile, 33 s and 8 s once rust-cache holds it.
+      #
+      # Clippy reports warnings without failing on them: tb_core_ffi had 12 lib
+      # and 19 lib-test warnings on run 36320004486, so `-D warnings` would
+      # turn CI red before any change. What fails here is an error-level lint,
+      # which includes Clippy's deny-by-default correctness group.
+      #
+      # tb_core_ffi only: vendor/tokscale-core declares `#![deny(clippy::all)]`
+      # and the toolchain is the floating stable, so a new Rust release adding
+      # a lint the engine trips would turn every PR and main red at once, and
+      # the tag gate would then hold releases on code nobody here changed. The
+      # engine's lints stay with the local gate (`cargo clippy --workspace
+      # --all-targets`) and with the upstream sync.
+      #
+      # `-p` alone does not do that: the engine is a path dependency and a
+      # workspace member, so cargo does not cap its lints, and Clippy still
+      # lints its lib target. `--no-deps` does. Measured with clippy 1.97.1: a
+      # needless `return` injected into the engine failed `-p tb_core_ffi`
+      # (exit 101) and passed with `--no-deps`; an `x == x` (eq_op, deny by
+      # default) injected into tb_core_ffi still failed with `--no-deps`.
+      - name: Rust unit tests
+        if: steps.scope.outputs.docs_only != 'true' && (steps.rustlib-restore.outputs.cache-hit != 'true')
+        run: cargo test -p tb_core_ffi --locked
+
+      - name: Clippy
+        if: steps.scope.outputs.docs_only != 'true' && (steps.rustlib-restore.outputs.cache-hit != 'true')
+        run: cargo clippy -p tb_core_ffi --all-targets --locked --no-deps
 
       # The copy main saves is taken here, from this exact cargo invocation.
       - name: Stage Rust library for the cache
