@@ -53,7 +53,7 @@ selftest: build
 # keyed on the identifier being nil, but not one keyed on the production string
 # itself, which would take the safe branch here and the other branch only once
 # installed. CI closes that by passing the empty override, which is what the
-# push-to-main gate actually runs — see .github/workflows/ci.yml. An ephemeral
+# push-to-main gate actually runs — see .github/workflows/ci-release.yml. An ephemeral
 # runner has no installation to pollute; a developer's Mac does.
 #
 # Empty means "whatever scripts/bundle.sh defaults to", which IS the shipping

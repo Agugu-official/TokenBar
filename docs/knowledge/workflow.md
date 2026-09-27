@@ -4,8 +4,8 @@ id: kb-workflow
 kind: canonical
 scope: repository
 read_when: creating a branch, reviewing a change, touching external contributions, or preparing integration
-last_verified: 2026-09-15
-sources: ["AGENTS.md", ".github/workflows/ci.yml", ".github/workflows/release.yml", "vendor/README.md", "public GitHub contribution history"]
+last_verified: 2026-09-27
+sources: ["AGENTS.md", ".github/workflows/ci.yml", ".github/workflows/ci-release.yml", ".github/workflows/release.yml", "vendor/README.md", "public GitHub contribution history"]
 ---
 
 # Engineering workflow and authorization
