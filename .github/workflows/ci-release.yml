@@ -7,8 +7,8 @@ name: CI (release configuration)
 # because that job would appear on every PR as a "skipped" check, and a merge
 # loop that waits for every check to pass reads a skipped one as neither.
 #
-# Only main pushes run it. Before tagging, both this run and ci.yml's run for
-# the commit must be green.
+# Only main pushes run it. A tag needs both this run and ci.yml's run for the
+# commit green; release.yml checks that first (scripts/check_ci_gate.sh).
 on:
   push:
     branches: [main]
