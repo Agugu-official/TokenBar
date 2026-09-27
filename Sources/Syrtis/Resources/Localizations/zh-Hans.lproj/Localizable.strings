@@ -581,3 +581,5 @@
 "Loading Grok Bot limits…" = "正在加载 Grok Bot 额度…";
 "Sign in to Grok Bot on this Mac, then refresh to see its weekly limits." = "在这台 Mac 登录 Grok Bot，再刷新以查看每周额度。";
 "No local usage records in this range." = "此期间没有本地用量记录。";
+"The tokens and amounts below stay at 0 until usage is attributed to this subscription." = "用量归属到这个订阅之前，下面每一行的 token 与金额都会是 0。";
+"Set up usage attribution…" = "设置用量归属…";

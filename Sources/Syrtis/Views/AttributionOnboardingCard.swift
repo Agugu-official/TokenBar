@@ -18,6 +18,13 @@ enum AttributionOnboardingCard {
     /// growing the card without bound.
     static let maxVisibleLines = 4
 
+    /// The card has to stand out from the dashboard cards around it: in its
+    /// first round it was a plain DashCard and the maintainer did not notice
+    /// it. An accent wash and an accent border, both kept low enough that the
+    /// card still reads as part of the panel.
+    static let accentFill = 0.10
+    static let accentStroke = 0.55
+
     enum Copy {
         static let title = "Attribute usage to subscriptions"
         static let subtitle = "Quota history shows no tokens or API-equivalent value until usage is attributed."
@@ -28,11 +35,16 @@ enum AttributionOnboardingCard {
         static let notNow = "Not now"
         static let setUpManually = "Set up manually…"
         static let applySuggestions = "Apply suggestions"
+        /// Under the window history, where every row reads 0 / $0.00 until
+        /// something is attributed: the zeros are the missing attribution,
+        /// not a quiet window.
+        static let historyZeroNote = "The tokens and amounts below stay at 0 until usage is attributed to this subscription."
+        static let setUpLink = "Set up usage attribution…"
 
         static var all: [String] {
             [
                 title, subtitle, suggestionLine, moreCount, unsuggestedHint,
-                notNow, setUpManually, applySuggestions,
+                notNow, setUpManually, applySuggestions, historyZeroNote, setUpLink,
             ]
         }
     }
@@ -56,6 +68,17 @@ enum AttributionOnboardingCard {
     /// — see `GrokBotKeychainConsent`'s note on the same contrast. This flag
     /// records an ANSWER ("not now"), so a user who has not yet decided keeps
     /// seeing the card on every open; only tapping "Not now" suppresses it.
+    /// The gates that do not need the dashboard's data: whether the card could
+    /// still appear once the report arrives. Decides whether a lens that does
+    /// not otherwise need the model report fetches it for the card.
+    static func mayShow(
+        defaults: UserDefaults = .standard, arguments: [String] = CommandLine.arguments
+    ) -> Bool {
+        UsageAttribution.confirmed(defaults: defaults).records.isEmpty
+            && defaults.object(forKey: dismissedKey) as? Bool != true
+            && !BuildIdentity.isNonUserRuntime(arguments)
+    }
+
     static func markDismissed(defaults: UserDefaults = .standard) {
         defaults.set(true, forKey: dismissedKey)
     }
@@ -128,6 +151,14 @@ struct AttributionOnboardingCardView: View {
             DashCard(AttributionOnboardingCard.Copy.title) {
                 content(summary)
             }
+            .background(
+                Color.accentColor.opacity(AttributionOnboardingCard.accentFill),
+                in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(
+                        Color.accentColor.opacity(AttributionOnboardingCard.accentStroke),
+                        lineWidth: 1))
         }
     }
 
@@ -152,7 +183,7 @@ struct AttributionOnboardingCardView: View {
                     id: \.offset
                 ) { _, record in
                     Text(AttributionOnboardingCard.suggestionLine(record))
-                        .font(.caption2)
+                        .font(.caption)
                         .lineLimit(1)
                 }
                 if summary.records.count > AttributionOnboardingCard.maxVisibleLines {
@@ -195,5 +226,16 @@ struct AttributionOnboardingCardView: View {
                 }
             }
         }
+    }
+}
+
+/// The link every "nothing attributed yet" surface uses to reach the page.
+struct AttributionSetupLink: View {
+    var body: some View {
+        Button(AttributionOnboardingCard.Copy.setUpLink.localized) {
+            SettingsWindowController.shared.show(scrollingTo: .usageAttribution)
+        }
+        .buttonStyle(.link)
+        .font(.caption)
     }
 }

@@ -2591,6 +2591,12 @@ private struct DashboardSnapshot {
         switch view {
         case .overview, .models, .stats:
             await ensureModelReport(priority: .userInitiated)
+        // The attribution card on the Quota lens needs the report to offer
+        // anything. Only while the card can still show: once something is
+        // attributed or the card is declined, Quota goes back to not
+        // fetching it.
+        case .quota where AttributionOnboardingCard.mayShow():
+            await ensureModelReport(priority: .userInitiated)
         default:
             break
         }

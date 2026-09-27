@@ -568,23 +568,36 @@ struct QuotaHistoryCard: View {
     private var equivalence: some View {
         let counted = shownRows
         if !counted.isEmpty {
+            let row = WindowEquivalence.aggregate(
+                subscription: clientId,
+                records: UsageAttribution.parseRaw(attributionRaw).records,
+                cycles: counted.map {
+                    WindowEquivalence.Cycle(
+                        deltaPercent: $0.cycle.usedPercent,
+                        spanTokens: $0.spanTokens, spanCost: $0.spanCost,
+                        observedFraction: $0.cycle.observedFraction,
+                        risingRuns: $0.cycle.risingRuns)
+                })
             Text(WindowEquivalence.text(
-                WindowEquivalence.aggregate(
-                    subscription: clientId,
-                    records: UsageAttribution.parseRaw(attributionRaw).records,
-                    cycles: counted.map {
-                        WindowEquivalence.Cycle(
-                            deltaPercent: $0.cycle.usedPercent,
-                            spanTokens: $0.spanTokens, spanCost: $0.spanCost,
-                            observedFraction: $0.cycle.observedFraction,
-                            risingRuns: $0.cycle.risingRuns)
-                    }),
-                tokens: Format.compactTokens, money: Format.usdOrBelowCent))
+                row, tokens: Format.compactTokens, money: Format.usdOrBelowCent))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.bottom, 2)
+            // Every row below reads 0 / $0.00 in this state, which looks like
+            // a quiet window rather than a missing setting unless it is said.
+            if case .undeclared = row {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(AttributionOnboardingCard.Copy.historyZeroNote.localized)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    AttributionSetupLink()
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 4)
+            }
         }
     }
 

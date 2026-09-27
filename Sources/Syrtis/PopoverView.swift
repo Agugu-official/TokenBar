@@ -751,42 +751,49 @@ struct PopoverView: View {
                         agentUsage: model.agentUsage)
                 }
             case .quota:
-                QuotaView(
-                    singleClient: singleClient, clientIds: clientIds,
-                    trace: model.trace, agentUsage: model.agentUsage,
-                    usageAttempted: model.agentUsageAttempted,
-                    // Scoped to the tab being drawn: the history card belongs to
-                    // one client, and a failure recorded against another is not
-                    // an answer about this one.
-                    scanFailed: singleClient.map(model.windowScanFailed(for:)) ?? false,
-                    curveUnreadable: model.quotaCurveUnreadable,
-                    // Both lenses now. The gate here used to pass `[:]` on a
-                    // client tab, because `@Observable` tracks per property and
-                    // reading this on a lens that drew no sparkline would make
-                    // every `refreshWindowQuotaHalves()` write invalidate this
-                    // body for nothing. That lens draws one: its Agent-limits
-                    // card has the same recent-consumption indicator as the
-                    // all-agent one, and the indicator is computed from these
-                    // curves — so the gate was not saving work, it was blanking
-                    // a feature.
-                    windowCurves: model.windowCurves,
-                    windowCard: quotaUsageClient.flatMap { model.windowCards[$0] },
-                    quotaCycles: model.quotaCycles, quotaHistory: model.quotaHistory,
-                    colors: model.colors,
-                    // Folded from the series model rather than from the raw
-                    // payload: that model refuses to publish day buckets built
-                    // under a timezone it cannot vouch for, and calling the
-                    // fold directly would silently skip that check.
-                    windowSummaries: model.quotaWindowSummaries,
-                    stripUnreadableClients: model.quotaUnreadableClients,
-                    heatmaps: model.quotaHeatmaps,
-                    heatmapWindows: model.quotaHeatmapWindows,
-                    equivalences: model.quotaEquivalences,
-                    trend: series.points.map {
-                        SubscriptionTrendFold.build(
-                            points: $0, today: Format.todayKey(),
-                            days: Self.trendDays)
-                    })
+                VStack(spacing: 12) {
+                    // On every tab: this lens is where the window history reads
+                    // 0 / $0.00 until usage is attributed, so the offer has to be
+                    // here, not only on the global Overview.
+                    AttributionOnboardingCardView(
+                        modelReport: model.modelReport, agentUsage: model.agentUsage)
+                    QuotaView(
+                        singleClient: singleClient, clientIds: clientIds,
+                        trace: model.trace, agentUsage: model.agentUsage,
+                        usageAttempted: model.agentUsageAttempted,
+                        // Scoped to the tab being drawn: the history card belongs to
+                        // one client, and a failure recorded against another is not
+                        // an answer about this one.
+                        scanFailed: singleClient.map(model.windowScanFailed(for:)) ?? false,
+                        curveUnreadable: model.quotaCurveUnreadable,
+                        // Both lenses now. The gate here used to pass `[:]` on a
+                        // client tab, because `@Observable` tracks per property and
+                        // reading this on a lens that drew no sparkline would make
+                        // every `refreshWindowQuotaHalves()` write invalidate this
+                        // body for nothing. That lens draws one: its Agent-limits
+                        // card has the same recent-consumption indicator as the
+                        // all-agent one, and the indicator is computed from these
+                        // curves — so the gate was not saving work, it was blanking
+                        // a feature.
+                        windowCurves: model.windowCurves,
+                        windowCard: quotaUsageClient.flatMap { model.windowCards[$0] },
+                        quotaCycles: model.quotaCycles, quotaHistory: model.quotaHistory,
+                        colors: model.colors,
+                        // Folded from the series model rather than from the raw
+                        // payload: that model refuses to publish day buckets built
+                        // under a timezone it cannot vouch for, and calling the
+                        // fold directly would silently skip that check.
+                        windowSummaries: model.quotaWindowSummaries,
+                        stripUnreadableClients: model.quotaUnreadableClients,
+                        heatmaps: model.quotaHeatmaps,
+                        heatmapWindows: model.quotaHeatmapWindows,
+                        equivalences: model.quotaEquivalences,
+                        trend: series.points.map {
+                            SubscriptionTrendFold.build(
+                                points: $0, today: Format.todayKey(),
+                                days: Self.trendDays)
+                        })
+                }
             case .models:
                 ModelsView(
                     report: model.modelReport, clientIds: clientIds, colors: model.colors,
