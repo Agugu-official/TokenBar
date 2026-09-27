@@ -343,7 +343,7 @@ struct SubscriptionTrendCard: View {
     private func undeclaredHint(_ trend: SubscriptionTrend) -> some View {
         if trend.targets == [SubscriptionTrendFold.unassignedTarget] {
             Button {
-                SettingsWindowController.shared.show(scrollingTo: .usageAttribution)
+                SettingsWindowController.shared.showFromPopover(scrollingTo: .usageAttribution)
             } label: {
                 Text("Nothing is classified yet. Settings › Usage attribution splits this by subscription.")
                     .font(.system(size: 9))

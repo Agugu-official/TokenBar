@@ -201,7 +201,7 @@ struct AttributionOnboardingCardView: View {
                 .foregroundStyle(.secondary)
 
                 Button(AttributionOnboardingCard.Copy.setUpManually.localized) {
-                    SettingsWindowController.shared.show(scrollingTo: .usageAttribution)
+                    SettingsWindowController.shared.showFromPopover(scrollingTo: .usageAttribution)
                 }
                 .buttonStyle(.plain)
                 .font(.caption)
@@ -225,7 +225,7 @@ struct AttributionOnboardingCardView: View {
 struct AttributionSetupLink: View {
     var body: some View {
         Button(AttributionOnboardingCard.Copy.setUpLink.localized) {
-            SettingsWindowController.shared.show(scrollingTo: .usageAttribution)
+            SettingsWindowController.shared.showFromPopover(scrollingTo: .usageAttribution)
         }
         .buttonStyle(.link)
         .font(.caption)

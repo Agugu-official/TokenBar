@@ -93,7 +93,7 @@ struct UsageAttributionBreakdownCard: View {
             case .rows:
                 if confirmed.isEmpty {
                     Button {
-                        SettingsWindowController.shared.show(scrollingTo: .usageAttribution)
+                        SettingsWindowController.shared.showFromPopover(scrollingTo: .usageAttribution)
                     } label: {
                         Text(UsageAttributionBreakdown.Copy.hint.localized)
                             .font(.caption)

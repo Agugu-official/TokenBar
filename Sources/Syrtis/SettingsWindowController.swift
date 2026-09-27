@@ -47,6 +47,19 @@ final class SettingsWindowController {
         static let discordAnchor = "settings.section.discord"
     }
 
+    /// For a control inside the popover: close the popover first, then show
+    /// on the next runloop turn, as the popover's own gear button does
+    /// (`PopoverView.openSettingsWindow`). Showing in the same turn as the
+    /// popover's animated close puts both vibrant windows in one CoreAnimation
+    /// transaction and the native switch thumbs lose their first frame; and
+    /// leaving the popover open keeps its polling running behind Settings.
+    func showFromPopover(scrollingTo destination: Destination? = nil) {
+        if let popover = NSApp.keyWindow, popover !== window {
+            popover.performClose(nil)
+        }
+        DispatchQueue.main.async { self.show(scrollingTo: destination) }
+    }
+
     func show(scrollingTo destination: Destination? = nil) {
         let existing = self.window
         let window = existing ?? makeWindow(destination: destination)
