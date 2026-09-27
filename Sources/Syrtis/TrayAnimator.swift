@@ -5,7 +5,8 @@ import TokenBarCore
 struct TrayAnimationCPUTestConfiguration {
     let style: String
     let animated: Bool
-    let tokensPerMinute = 1_000_000.0
+    /// The top of the speed curve, so the harness measures the worst case.
+    let tokensPerMinute = TrayAnimator.animationCapTokensPerMinute
 
     static let current: TrayAnimationCPUTestConfiguration? = {
         let prefix = "--tray-animation-cpu-test="
@@ -13,7 +14,7 @@ struct TrayAnimationCPUTestConfiguration {
         else { return nil }
         let value = String(argument.dropFirst(prefix.count))
         switch value {
-        case "cat", "parrot":
+        case "cat", "parrot", TrayAnimator.sandStyle:
             return TrayAnimationCPUTestConfiguration(style: value, animated: true)
         case "static":
             return TrayAnimationCPUTestConfiguration(style: "cat", animated: false)
@@ -42,12 +43,16 @@ final class TrayAnimator {
     private let cpuTest = TrayAnimationCPUTestConfiguration.current
 #endif
     /// Frame sets keyed by "<style>|<dark|light>".
-    private let frames: [String: [NSImage]]
+    /// Cat and parrot load at init; sand sets load on first use
+    /// (`loadSandFramesIfNeeded`), since 1,152 frames are wasted on everyone
+    /// who never picks the style.
+    private var frames: [String: [NSImage]]
     private var loadTask: Task<Void, Never>?
     private var quotaTask: Task<Void, Never>?
     private var presentedAnimationKey: String?
     private var isStopped = true
-    /// RunCat load signal in [0, 100]: tokens/min ÷ 10K, so 1M tok/min = 100.
+    /// Load signal: the pace-scaled tokens/min ÷ 10K, capped at
+    /// `animationCapTokensPerMinute` (3M, so at most 300).
     private var load: Double = 0
     /// Latest snapshot returned by this poller. A newer payload accepted by a
     /// dashboard or Settings poll wins through the shared publication state.
@@ -71,9 +76,7 @@ final class TrayAnimator {
             ? UserDefaults.standard.object(forKey: Self.lastRemainingKey) as? Double
             : nil
         var sets: [String: [NSImage]] = [:]
-        for (style, dir) in [("cat", "anim-cat2"), ("parrot", "anim-parrot")]
-            + (0..<Self.sandLevels).map({ ("sand\($0)", "anim-sand\($0)") })
-        {
+        for (style, dir) in [("cat", "anim-cat2"), ("parrot", "anim-parrot")] {
             sets["\(style)|dark"] = Self.loadFrames(directory: dir)
             sets["\(style)|light"] = Self.loadFrames(directory: "\(dir)-light")
         }
@@ -153,7 +156,8 @@ final class TrayAnimator {
         isStopped = false
 #if DEBUG
         if let cpuTest {
-            load = Self.animationLoad(tokensPerMinute: cpuTest.tokensPerMinute)
+            load = Self.animationLoad(
+                tokensPerMinute: AnimationPace.current().scaled(cpuTest.tokensPerMinute))
             tokensPerMinRate = cpuTest.tokensPerMinute
             refreshIcon()
             reportCPUTestReady(cpuTest)
@@ -440,10 +444,48 @@ final class TrayAnimator {
         sandThresholds.filter { tokensPerMinute >= $0 }.count
     }
 
+    /// Every style that animates (the others are gauges). One list for the
+    /// tray, the Settings controls and the pace onboarding card.
+    nonisolated static let animatedStyles = ["cat", "parrot", sandStyle]
+
+    /// A level must be passed by this factor before it changes, so a rate
+    /// hovering at a threshold does not swap frame sets every 30 s poll: each
+    /// swap restarts the loop and re-rasterises 144 frames on the main thread.
+    nonisolated static let sandHysteresis = 1.2
+
+    /// The level to show for `tokensPerMinute` (already pace-scaled), given
+    /// the level shown now. Moving up needs the rate to clear the threshold
+    /// by `sandHysteresis`; moving down needs it to fall that far below.
+    nonisolated static func sandLevel(tokensPerMinute: Double, current: Int?) -> Int {
+        let raw = sandLevel(tokensPerMinute: tokensPerMinute)
+        guard let current, raw != current else { return raw }
+        if raw > current {
+            let confirmed = sandLevel(tokensPerMinute: tokensPerMinute / sandHysteresis)
+            return max(current, confirmed)
+        }
+        let confirmed = sandLevel(tokensPerMinute: tokensPerMinute * sandHysteresis)
+        return min(current, confirmed)
+    }
+
+    private var sandLevelShown: Int?
+
+    private func loadSandFramesIfNeeded() {
+        guard frames["sand0|dark"] == nil else { return }
+        for level in 0..<Self.sandLevels {
+            frames["sand\(level)|dark"] = Self.loadFrames(directory: "anim-sand\(level)")
+            frames["sand\(level)|light"] = Self.loadFrames(directory: "anim-sand\(level)-light")
+        }
+    }
+
     /// The frame-set key for a style: the sand style resolves to its level.
+    /// `load` already holds the pace-scaled rate; every threshold is below the
+    /// cap, so `load * 10_000` reads it back without a second pace lookup.
     private func frameStyle(_ style: String) -> String {
         guard style == Self.sandStyle else { return style }
-        return "sand\(Self.sandLevel(tokensPerMinute: AnimationPace.current().scaled(tokensPerMinRate ?? 0)))"
+        loadSandFramesIfNeeded()
+        let level = Self.sandLevel(tokensPerMinute: load * 10_000, current: sandLevelShown)
+        sandLevelShown = level
+        return "sand\(level)"
     }
 
     private func refreshIcon() {
@@ -492,8 +534,9 @@ final class TrayAnimator {
     private func reportCPUTestReady(_ test: TrayAnimationCPUTestConfiguration) {
         let frameCount = currentFrames().count
         let duration = Self.baseAnimationDuration(frameCount: frameCount)
-        let speed = test.animated ? Self.animationLayerSpeed(load: load) : 0
-        let fps = test.animated ? Self.effectiveAnimationFPS(load: load) : 0
+        // The speed actually handed to the layer: sand plays at its fixed rate.
+        let speed = test.animated ? Double(animationSpeed) : 0
+        let fps = 2 * speed
         print(String(
             format: "TRAY_CPU_TEST_READY style=%@ animated=%@ frames=%d base_duration=%.3f speed=%.3f fps=%.3f",
             test.style, test.animated.description, frameCount, duration, speed, fps))

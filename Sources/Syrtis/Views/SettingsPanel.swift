@@ -306,8 +306,8 @@ struct SettingsPanel: View {
                         selection: $animationPaceRaw,
                         options: AnimationPace.allCases.map { ($0.rawValue, $0.label) })
                     hint((AnimationPace(rawValue: animationPaceRaw) ?? .default).detail)
+                    hint("The cat and parrot speed up and the sand gets busier as the live token rate climbs. The pace sets how much traffic reaches the top: Light at 600K tokens/min, Moderate at 3M, Heavy at 10M.")
                 }
-                hint("The cat and parrot speed up and the sand gets busier as the live token rate climbs. The pace sets how much traffic reaches the top: Light at 600K tokens/min, Moderate at 3M, Heavy at 10M.")
             } else {
                 radioGroup(
                     selection: $iconColoringRaw,
@@ -1114,8 +1114,7 @@ struct SettingsPanel: View {
     }
 
     private var isAnimatedStyle: Bool {
-        animationStyle == "cat" || animationStyle == "parrot"
-            || animationStyle == TrayAnimator.sandStyle
+        TrayAnimator.animatedStyles.contains(animationStyle)
     }
 
     /// Shows the resolved auto height while 0 (auto), the chosen value once set.

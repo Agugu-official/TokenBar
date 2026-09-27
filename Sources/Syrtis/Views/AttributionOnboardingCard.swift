@@ -139,11 +139,15 @@ struct AttributionOnboardingCardView: View {
         let _ = (confirmedRaw, dismissed)
         let mayShow = AttributionOnboardingCard.mayShow()
         let summary = mayShow ? summary : nil
-        if AttributionOnboardingCard.isVisible(mayShow: mayShow, summary: summary), let summary {
-            DashCard(AttributionOnboardingCard.Copy.title) {
-                content(summary)
+        OnboardingCardContainer(
+            visible: AttributionOnboardingCard.isVisible(mayShow: mayShow, summary: summary)
+        ) {
+            if let summary {
+                DashCard(AttributionOnboardingCard.Copy.title) {
+                    content(summary)
+                }
+                .onboardingCardStyle()
             }
-            .onboardingCardStyle()
         }
     }
 
@@ -243,4 +247,32 @@ struct OnboardingCardStyle: ViewModifier {
 
 extension View {
     func onboardingCardStyle() -> some View { modifier(OnboardingCardStyle()) }
+}
+
+/// Hosts an onboarding card and animates it away when it is answered: it
+/// fades while sliding up and shrinking toward its top edge, and the cards
+/// below close the gap over the same curve, instead of the card vanishing in
+/// one frame. The maintainer asked for a dismissal animation on every card.
+struct OnboardingCardContainer<Card: View>: View {
+    let visible: Bool
+    @ViewBuilder let card: () -> Card
+
+    /// Long enough to read as a deliberate exit, short enough not to hold up
+    /// the dashboard behind it.
+    static var dismissAnimation: Animation { .easeInOut(duration: 0.32) }
+    static var removal: AnyTransition {
+        .opacity
+            .combined(with: .move(edge: .top))
+            .combined(with: .scale(scale: 0.96, anchor: .top))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if visible {
+                card()
+                    .transition(.asymmetric(insertion: .opacity, removal: Self.removal))
+            }
+        }
+        .animation(Self.dismissAnimation, value: visible)
+    }
 }

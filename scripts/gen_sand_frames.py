@@ -4,9 +4,9 @@
 A small shoal after the landing page's sand animation
 (landing/src/components/Hero.astro): a smooth dune whose crest drifts side
 to side, with fine grains falling onto it. Every moving part has a period
-that divides FRAMES, so the sequence loops without a seam. Playback speed is
-not baked in: TrayAnimator plays the frames faster as tokens/min rises, as it
-does for the cat and parrot.
+that divides FRAMES, so the sequence loops without a seam. The frames are
+drawn for one playback rate (FPS); TrayAnimator plays every level at that
+rate and shows usage by choosing the level, not by speeding the loop up.
 
 Monochrome like the cat and parrot (white on a dark menu bar, black on a
 light one). Two looks were rejected by the maintainer at menu-bar size: a
@@ -185,7 +185,9 @@ def main(dark_dir, light_dir):
             img.save(os.path.join(out, f"frame-{f:03d}.png"))
 
 if __name__ == "__main__":
-    if len(sys.argv) > 3:
+    if len(sys.argv) not in (3, 7):
+        sys.exit(__doc__.strip().splitlines()[-1])
+    if len(sys.argv) == 7:
         FALLING = int(sys.argv[3])
         CREST_SCALE = float(sys.argv[4])
         BASE_H = float(sys.argv[5])

@@ -1336,24 +1336,25 @@ enum SelfTest {
             "animation pace rescales the sand levels too")
         expect(
             AnimationPaceOnboarding.isVisible(
-                style: "sand", animate: true, hasChosen: false, attributionCardMayShow: false,
-                isNonUserRuntime: false)
+                style: "sand", animate: true, hasChosen: false, isNonUserRuntime: false)
                 && !AnimationPaceOnboarding.isVisible(
-                    style: "sand", animate: true, hasChosen: true, attributionCardMayShow: false,
-                    isNonUserRuntime: false)
+                    style: "sand", animate: true, hasChosen: true, isNonUserRuntime: false)
                 && !AnimationPaceOnboarding.isVisible(
-                    style: "ring", animate: true, hasChosen: false, attributionCardMayShow: false,
-                    isNonUserRuntime: false)
+                    style: "ring", animate: true, hasChosen: false, isNonUserRuntime: false)
                 && !AnimationPaceOnboarding.isVisible(
-                    style: "cat", animate: false, hasChosen: false, attributionCardMayShow: false,
-                    isNonUserRuntime: false)
+                    style: "cat", animate: false, hasChosen: false, isNonUserRuntime: false)
                 && !AnimationPaceOnboarding.isVisible(
-                    style: "cat", animate: true, hasChosen: false, attributionCardMayShow: true,
-                    isNonUserRuntime: false)
-                && !AnimationPaceOnboarding.isVisible(
-                    style: "cat", animate: true, hasChosen: false, attributionCardMayShow: false,
-                    isNonUserRuntime: true),
-            "pace onboarding shows only for an animating icon, before a pace is picked, after the attribution card")
+                    style: "cat", animate: true, hasChosen: false, isNonUserRuntime: true),
+            "pace onboarding shows only for an animating icon, before a pace is picked, in a user runtime")
+        // Hysteresis: a rate at a threshold does not flip the level back and forth.
+        expect(
+            TrayAnimator.sandLevel(tokensPerMinute: 310_000, current: 1) == 1
+                && TrayAnimator.sandLevel(tokensPerMinute: 370_000, current: 1) == 2
+                && TrayAnimator.sandLevel(tokensPerMinute: 290_000, current: 2) == 2
+                && TrayAnimator.sandLevel(tokensPerMinute: 240_000, current: 2) == 1
+                && TrayAnimator.sandLevel(tokensPerMinute: 2_000_000, current: 0) == 3
+                && TrayAnimator.sandLevel(tokensPerMinute: 310_000, current: nil) == 2,
+            "sand level changes only once the rate clears a threshold by 20%")
         expect(TrayAnimator.baseAnimationDuration(frameCount: 5) == 2.5, "tray five-frame base duration")
         expect(TrayAnimator.baseAnimationDuration(frameCount: 10) == 5, "tray ten-frame base duration")
 

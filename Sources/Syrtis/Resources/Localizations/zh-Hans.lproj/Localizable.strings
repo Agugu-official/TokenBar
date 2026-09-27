@@ -585,8 +585,6 @@
 
 "Without a suggestion: %lld — set them in Settings." = "没有建议的来源：%lld 个，请到“设置”手动指定。";
 "Sand shoal" = "流沙";
-"Standard" = "标准";
-"Heavy" = "重度";
 "Occasional use, or a plan like Claude Pro" = "偶尔使用，或像 Claude Pro 这类方案";
 "How busy are your agents?" = "你的 agent 平时有多忙？";
 "The menu-bar animation follows your live token rate. Pick the range that fits how you work; you can change it later in Settings." = "菜单栏动画会跟着实时的 token 速率变化。选一个符合你使用习惯的范围，之后可以在“设置”里修改。";

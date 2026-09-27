@@ -185,9 +185,6 @@
 
 "Without a suggestion: %lld — set them in Settings." = "Without a suggestion: %lld — set them in Settings.";
 "Sand shoal" = "Sand shoal";
-"Light" = "Light";
-"Standard" = "Standard";
-"Heavy" = "Heavy";
 "Occasional use, or a plan like Claude Pro" = "Occasional use, or a plan like Claude Pro";
 "How busy are your agents?" = "How busy are your agents?";
 "The menu-bar animation follows your live token rate. Pick the range that fits how you work; you can change it later in Settings." = "The menu-bar animation follows your live token rate. Pick the range that fits how you work; you can change it later in Settings.";

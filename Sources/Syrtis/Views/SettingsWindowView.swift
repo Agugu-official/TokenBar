@@ -468,8 +468,8 @@ private struct MenuBarMock: View {
             let frames = PreviewFrames.frames(
                 style: animationStyle, dark: dark,
                 level: TrayAnimator.sandLevel(
-                    tokensPerMinute: AnimationPace(rawValue: paceRaw).map { $0.scaled(tokensPerMin ?? 0) }
-                        ?? AnimationPace.default.scaled(tokensPerMin ?? 0)))
+                    tokensPerMinute: (AnimationPace(rawValue: paceRaw) ?? .default)
+                        .scaled(tokensPerMin ?? 0)))
             if frames.isEmpty {
                 Image(systemName: "chart.bar.fill")
                     .font(.system(size: 12))
