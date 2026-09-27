@@ -769,6 +769,7 @@ struct PopoverView: View {
                     // under a timezone it cannot vouch for, and calling the
                     // fold directly would silently skip that check.
                     windowSummaries: model.quotaWindowSummaries,
+                    stripUnreadableClients: model.quotaUnreadableClients,
                     heatmaps: model.quotaHeatmaps,
                     heatmapWindows: model.quotaHeatmapWindows,
                     equivalences: model.quotaEquivalences,

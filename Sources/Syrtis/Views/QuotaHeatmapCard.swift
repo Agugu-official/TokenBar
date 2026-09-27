@@ -21,6 +21,9 @@ struct QuotaHeatmapCard: View {
     /// without a scan.
     var equivalences: [String: WindowEquivalence.Row] = [:]
     var attempted = true
+    /// Same signal as `QuotaHistoryStripCard.unreadable`: with no window to
+    /// draw, an unread one means the absence is not a recorded one (#355).
+    var unreadable = false
 
     @AppStorage("tokenbar.heatmap.window") private var selectedRaw = ""
     @State private var cardFrame: CGRect = .zero
@@ -67,6 +70,12 @@ struct QuotaHeatmapCard: View {
                 // of the truth, and hid the one line that explains it.
                 Text("%@%% consumed, but every pair of readings was too far apart to place on the grid. It fills in as sampling gets denser."
                     .localized(Self.percent(grid.unplacedPercent)))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else if attempted, unreadable, windows.isEmpty {
+                Text("Quota history could not be read. It will be retried.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

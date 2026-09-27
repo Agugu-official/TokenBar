@@ -4,7 +4,7 @@ id: kb-plan-codex-historical-pace-v2
 kind: plan
 scope: repository
 read_when: reading the retired Codex weekly v2 design or schema-2 migration history
-last_verified: 2026-07-31
+last_verified: 2026-09-27
 sources: ["crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_usage.rs", "Sources/TokenBarCore/AgentUsage.swift", "Sources/TokenBarCore/UsagePace.swift", "Sources/CrossCheckHarness/main.swift", "docs/knowledge/architecture.md", "docs/knowledge/verification.md", "docs/knowledge/plans/provider-quota-pace.md", "public CodexBar PR #901", "public CodexBar PR #1581"]
 superseded_by: provider-quota-pace.md
 superseded_on: 2026-07-17
@@ -73,7 +73,7 @@ TokenBar 的本機 token 與 cost history 不代表 OpenAI subscription quota un
 | Sampling cadence | reset 先 round 到 5 分鐘，再套 30 分鐘／1 percentage-point write threshold | 對齊 CodexBar 的 bounded live-history cadence，避免 reset jitter 繞過 throttle |
 | Complete week | Dedupe 後至少 6 筆，window 開始後 24 小時與 reset 前 24 小時都有 coverage | 避免單筆、局部或滑動 reset fragment 被當成完整週 |
 | Historical threshold | 3 個完整週才產生 historical pace；5 個完整週才公開 run-out probability | 對齊 CodexBar 的 confidence boundary |
-| Evaluator baseline | Store cadence 對齊 CodexBar `4abfbb6c`；evaluator 以 `f986661480c7862bc42b09ad37e5dc781a7353d3` 為基準，但 historical expectation 允許高於 linear baseline | 個人歷史曲線負責描述實際節奏；quota safety 由獨立 risk／ETA evaluator 判斷，避免前期集中但整週安全的使用模式被誤標為超前 |
+| Evaluator baseline | Store cadence 對齊 CodexBar `4abfbb6c`；evaluator 以 CodexBar [`f986661480c7862bc42b09ad37e5dc781a7353d3`](https://github.com/steipete/CodexBar/commit/f986661480c7862bc42b09ad37e5dc781a7353d3)（#1581）為基準，但 historical expectation 允許高於 linear baseline | 個人歷史曲線負責描述實際節奏；quota safety 由獨立 risk／ETA evaluator 判斷，避免前期集中但整週安全的使用模式被誤標為超前 |
 | Retention | 保留 56 天 v2 samples | 容納最多約 8 週，同時限制檔案成長 |
 | Backfill | 第一版不實作 dashboard backfill | TokenBar 沒有相應 dashboard auth、daily breakdown 與 account-authority contract |
 | Cache schema | 不變更 vendored message cache schema | 這是獨立 quota-history store 與 FFI presentation payload，不改 parser serialized output |
@@ -149,7 +149,7 @@ Swift 可以用 `actual - expected` 計算現有 pace stage 與顯示文字，�
 | 1. Introduce v2 store | `crates/tb_core_ffi/src/agent_history.rs`、`crates/tb_core_ffi/src/agent_usage.rs` | 新 filename/schema、account fail-closed、normalized write key、dedupe、coverage、56-day retention、corrupt quarantine、atomic write 與 serialization guard | v1 sentinel bytes／mtime 不變；unknown owner 不碰 store；v2 可 record、reload、recover、prune |
 | 2. Port evaluator | `crates/tb_core_ffi/src/agent_history.rs` | 169-point monotonic curves、recency weighting、Linear baseline blend、capped-curve extension、current-actual shift、weighted risk／ETA | Rust fixtures 對齊 public CodexBar worked cases |
 | 3. Replace payload seam | `crates/tb_core_ffi/src/agent_usage.rs`、`Sources/CTB/include/ctb.h`、`Sources/TokenBarCore/AgentUsage.swift` | 用 nested `historicalPace` 取代 top-level historical scalars，並更新 payload contract comment；C function 與 envelope 不變 | Rust JSON fixture 能由 Swift decode；缺欄位仍走 Linear |
-| 4. Make presentation coherent | `Sources/TokenBarCore/UsagePace.swift`、`Sources/TokenBar/Views/AgentLimitsCard.swift`、selftest fixtures | Historical mode 接受 Rust ETA／will-last／risk，Linear mode 維持現況 | 不再出現 evaluator 判定會耗盡但 UI 顯示 `Lasts until reset` |
+| 4. Make presentation coherent | `Sources/TokenBarCore/UsagePace.swift`、`Sources/Syrtis/Views/AgentLimitsCard.swift`、selftest fixtures | Historical mode 接受 Rust ETA／will-last／risk，Linear mode 維持現況 | 不再出現 evaluator 判定會耗盡但 UI 顯示 `Lasts until reset` |
 | 5. Complete handoff | Relevant canonical docs、release notes、`Sources/CrossCheckHarness/main.swift` if required | 更新 durable behavior、驗證證據與 rollout caveat；跑完整 116-case baseline，區分 intended historical mismatch 與 unrelated regression，並交付 nested fixture／Windows port delta | Docs gate、full code gate、非 historical cross-check 與 diff review 完成；未取得跨 repo 授權前不修改 Windows 或宣稱新 historical parity，停在 integration authorization 前 |
 
 每個 Stage 完成後都應保留單一 concern 的 checkpoint。若 Stage 1 無法證明 v1 完全未被碰觸，或 Stage 3 仍讓 Rust 與 Swift 各自判斷 historical run-out，應停止而不是繼續疊加 UI workaround。

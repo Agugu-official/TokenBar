@@ -16,6 +16,9 @@ struct QuotaHistoryStripCard: View {
     /// strip above never waits on it either way.
     var equivalences: [String: WindowEquivalence.Row] = [:]
     var attempted = true
+    /// Whether a window in scope could not be read and has nothing drawn for
+    /// it. An empty strip is then not evidence that nothing was recorded.
+    var unreadable = false
 
     private static let stripHeight: CGFloat = 26
     private static let barGap: CGFloat = 1.5
@@ -41,6 +44,12 @@ struct QuotaHistoryStripCard: View {
                         row(summary)
                     }
                 }
+            } else if attempted, unreadable {
+                Text("Quota history could not be read. It will be retried.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else if attempted {
                 Text("No completed windows recorded yet. They accumulate as Syrtis runs.")
                     .font(.caption)
