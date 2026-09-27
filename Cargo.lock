@@ -1724,7 +1724,6 @@ dependencies = [
  "tokio",
  "tokscale-core",
  "tower-service",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

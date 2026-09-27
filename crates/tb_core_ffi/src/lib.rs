@@ -23,8 +23,6 @@ mod agent_kiro;
 mod agent_opencode_go;
 mod agent_quota_duration;
 mod agent_quota_history;
-#[cfg(target_os = "windows")]
-mod agent_storage_windows;
 mod agent_usage;
 mod agents_report;
 mod claude_config_dirs;
