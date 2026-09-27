@@ -325,6 +325,24 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
     func tokensPerMin() async throws -> Double { DemoData.tokensPerMin }
 }
 
+/// The window a NEGATIVE probe gives the event it asserts never happens.
+///
+/// `waitUntil`'s deadline is generous because a positive wait only pays it on
+/// the way to a failure. A probe for something that must not happen pays it on
+/// every pass: nine such probes held each suite run for 9 × 5 s, and the push
+/// pipeline runs the suite twice.
+///
+/// 500 ms, chosen by the maintainer (2026-09-27). Measured on the xcode-27
+/// runner (run 36277549879) with each probe's defect restored, five suite runs
+/// each: at the eight probes that use this window the race showed within
+/// 2.62 ms at the slowest, far under half of it, and each of their assertions
+/// failed. A race slower than the window would pass here; that is the trade.
+///
+/// `modelRaced` keeps the default: restoring its defect in that run did not
+/// make the race appear, so nothing shows how fast it would, and a short window
+/// there would be unmeasured.
+private let negativeProbeWindow: Duration = .milliseconds(500)
+
 /// Wait for a condition another task has to establish.
 ///
 /// Bounded by a deadline rather than by an iteration count. A fixed number of
@@ -6424,7 +6442,7 @@ enum SelfTest {
             let reopenLoad = Task { await reopened.load() }
             _ = await waitUntil { await reopenSource.hasPendingGraph(year: reopenYear) }
             let reopenLens = Task { await reopened.ensureModelData(for: .overview) }
-            let reopenRaced = await waitUntil { await reopenSource.modelCallCount() > 0 }
+            let reopenRaced = await waitUntil(timeout: negativeProbeWindow) { await reopenSource.modelCallCount() > 0 }
             // Folds in the fixture's own health: without confirming the snapshot
             // really restored payload-without-model, "did not race" would also
             // hold on a reopen that never reached the gate at all.
@@ -6463,7 +6481,7 @@ enum SelfTest {
             let refreshGateLens = Task {
                 await refreshGateModel.ensureModelData(for: .overview)
             }
-            let refreshGateRaced = await waitUntil {
+            let refreshGateRaced = await waitUntil(timeout: negativeProbeWindow) {
                 await refreshGateSource.modelCallCount() > 0
             }
             // Folds in the fixture's own health: without confirming the refresh
@@ -6660,7 +6678,7 @@ enum SelfTest {
             }
             // The older fetch completes and commits nothing.
             await chainSource.releaseGraph(year: chainYear, index: 0, day: 3)
-            let chainRaced = await waitUntil { await chainSource.modelCallCount() > 0 }
+            let chainRaced = await waitUntil(timeout: negativeProbeWindow) { await chainSource.modelCallCount() > 0 }
             // Folds in the fixture's own health: without confirming a payload was
             // restored and both fetches actually overlapped, "did not race" would
             // also hold on a request that never reached the gate.
@@ -6696,7 +6714,7 @@ enum SelfTest {
             await lazySource.blockHourly(year: lazyYear)
             // The refresh is now the older, overtaken fetch.
             await lazySource.releaseGraph(year: lazyYear, index: 0, day: 3)
-            let lazyRefetched = await waitUntil {
+            let lazyRefetched = await waitUntil(timeout: negativeProbeWindow) {
                 await lazySource.hasPendingHourly(year: lazyYear)
             }
             // Folds in the fixture's own health: without confirming the lens was
@@ -6771,6 +6789,91 @@ enum SelfTest {
             await healModel.retryMissingModelForTest()
             let healCurrentAfterRefresh =
                 await healSource.modelCallCount() == healCallsAfterRefresh
+
+            // #191 — prices refresh independently of the logs, so a report
+            // current for an unchanged graph generation still expires. Same
+            // model and generation as the idempotent retry just above; only
+            // the report's age moves.
+            healModel.ageModelReportForTesting(by: DashboardModel.modelReportMaxAge - 60)
+            await healModel.retryMissingModelForTest()
+            let pricingFreshNotRefetched =
+                await healSource.modelCallCount() == healCallsAfterRefresh
+            healModel.ageModelReportForTesting(by: 120)
+            await healModel.retryMissingModelForTest()
+            let pricingStaleRefetchedOnce =
+                await healSource.modelCallCount() == healCallsAfterRefresh + 1
+            await healModel.retryMissingModelForTest()
+            let pricingRefetchResetsAge =
+                await healSource.modelCallCount() == healCallsAfterRefresh + 1
+            // A fetch time in the future means the clock moved back. Counting
+            // that as fresh would freeze prices for the size of the jump.
+            healModel.ageModelReportForTesting(by: -7_200)
+            await healModel.retryMissingModelForTest()
+            let pricingClockBackRefetches =
+                await healSource.modelCallCount() == healCallsAfterRefresh + 2
+
+            // #191 on a reopen. A same-process snapshot carrying an expired
+            // report must not count as current: that would skip the restore
+            // gate, and the expired report would be re-fetched against a
+            // restored payload before `load()` confirms it — the scan beside
+            // the graph that LP3 exists to prevent.
+            let agedYear = "2042"
+            let agedSource = ControlledTurnUsageDataSource()
+            let agedSeed = DashboardModel(
+                cachesSnapshot: true, source: agedSource, initialYear: agedYear)
+            await agedSeed.load()
+            await agedSeed.ensureModelData(for: .overview)
+            let agedSeedCalls = await agedSource.modelCallCount()
+            let agedSeeded = agedSeed.modelReport != nil && agedSeedCalls == 1
+            agedSeed.ageModelReportForTesting(by: DashboardModel.modelReportMaxAge + 60)
+            await agedSource.blockGraph(year: agedYear)
+            let agedReopened = DashboardModel(
+                cachesSnapshot: true, source: agedSource, initialYear: agedYear)
+            let agedRestored = agedReopened.modelReport != nil
+            let agedLens = Task { await agedReopened.ensureModelData(for: .overview) }
+            let agedRaced = await waitUntil(timeout: negativeProbeWindow) { await agedSource.modelCallCount() > 1 }
+            let agedLoad = Task { await agedReopened.load() }
+            _ = await waitUntil { await agedSource.hasPendingGraph(year: agedYear) }
+            await agedSource.releaseGraph(year: agedYear)
+            await agedLoad.value
+            await agedLens.value
+            let agedFinalCalls = await agedSource.modelCallCount()
+            let pricingReopenGatedThenRefetched =
+                agedSeeded && agedRestored && !agedRaced && agedFinalCalls == 2
+
+            // Inside the restore headroom: still fresh, so nothing is
+            // re-fetched, but too close to expiry to skip the gate — it could
+            // expire before the first lens call. Observed as the lens call
+            // not returning until `load()` settles the gate.
+            actor Done { var value = false; func set() { value = true } }
+            let edgeYear = "2043"
+            let edgeSource = ControlledTurnUsageDataSource()
+            let edgeSeed = DashboardModel(
+                cachesSnapshot: true, source: edgeSource, initialYear: edgeYear)
+            await edgeSeed.load()
+            await edgeSeed.ensureModelData(for: .overview)
+            edgeSeed.ageModelReportForTesting(
+                by: DashboardModel.modelReportMaxAge
+                    - DashboardModel.modelReportRestoreHeadroom / 2)
+            await edgeSource.blockGraph(year: edgeYear)
+            let edgeReopened = DashboardModel(
+                cachesSnapshot: true, source: edgeSource, initialYear: edgeYear)
+            let edgeDone = Done()
+            let edgeLens = Task {
+                await edgeReopened.ensureModelData(for: .overview)
+                await edgeDone.set()
+            }
+            let edgeReturnedBeforeLoad = await waitUntil(timeout: .milliseconds(300)) {
+                await edgeDone.value
+            }
+            let edgeLoad = Task { await edgeReopened.load() }
+            _ = await waitUntil { await edgeSource.hasPendingGraph(year: edgeYear) }
+            await edgeSource.releaseGraph(year: edgeYear)
+            await edgeLoad.value
+            await edgeLens.value
+            let edgeCalls = await edgeSource.modelCallCount()
+            let pricingRestoreHeadroomGates =
+                edgeReopened.modelReport != nil && !edgeReturnedBeforeLoad && edgeCalls == 1
 
             // A reload may call the shared seam unconditionally; modelWanted is
             // what keeps a graph-only dashboard from paying for a model scan.
@@ -6935,7 +7038,7 @@ enum SelfTest {
             let monthlyDrive = Task {
                 await noHourlyModel.ensureData(for: .monthly, clients: clients)
             }
-            let hourlyReappeared = await waitUntil {
+            let hourlyReappeared = await waitUntil(timeout: negativeProbeWindow) {
                 await noHourlySource.hasPendingHourly(year: yearA)
             }
             let emptyDidNotFetch = !hourlyReappeared
@@ -7203,7 +7306,7 @@ enum SelfTest {
             // Wait for the outcome instead of sampling immediately: the third
             // task had not been scheduled yet when this read the counter, so
             // the assertion passed even with the defect restored.
-            let abaThirdStarted = await waitUntil { await abaSource.modelCallCount() >= 3 }
+            let abaThirdStarted = await waitUntil(timeout: negativeProbeWindow) { await abaSource.modelCallCount() >= 3 }
             let abaNoThirdScan = !abaThirdStarted
             await abaSource.releaseModel()
             await abaSecond.value
@@ -7301,6 +7404,12 @@ enum SelfTest {
                 "healRefreshPriority": healRefreshPriority,
                 "healedAfterRefresh": healedAfterRefresh,
                 "healCurrentAfterRefresh": healCurrentAfterRefresh,
+                "pricingFreshNotRefetched": pricingFreshNotRefetched,
+                "pricingStaleRefetchedOnce": pricingStaleRefetchedOnce,
+                "pricingRefetchResetsAge": pricingRefetchResetsAge,
+                "pricingReopenGatedThenRefetched": pricingReopenGatedThenRefetched,
+                "pricingClockBackRefetches": pricingClockBackRefetches,
+                "pricingRestoreHeadroomGates": pricingRestoreHeadroomGates,
                 "neverWantedGenerationAdvanced": neverWantedGenerationAdvanced,
                 "neverWantedSkippedModel": neverWantedSkippedModel,
                 "phantomIssuedNoScan": phantomIssuedNoScan,
@@ -7449,6 +7558,22 @@ enum SelfTest {
             turnTransitionChecks?["healedAfterRefresh"] == true
                 && turnTransitionChecks?["healCurrentAfterRefresh"] == true,
             "manual Refresh returns with the model report healed for the committed generation")
+        expect(
+            turnTransitionChecks?["pricingFreshNotRefetched"] == true,
+            "#191: a report younger than modelReportMaxAge is not re-fetched for an unchanged generation")
+        expect(
+            turnTransitionChecks?["pricingStaleRefetchedOnce"] == true
+                && turnTransitionChecks?["pricingRefetchResetsAge"] == true,
+            "#191: an expired report is re-fetched once for an unchanged generation, and the re-fetch restarts its age")
+        expect(
+            turnTransitionChecks?["pricingReopenGatedThenRefetched"] == true,
+            "#191: a reopen restoring an expired report waits for load() before re-fetching it, then re-fetches once")
+        expect(
+            turnTransitionChecks?["pricingClockBackRefetches"] == true,
+            "#191: a fetch time in the future (clock moved back) counts as expired")
+        expect(
+            turnTransitionChecks?["pricingRestoreHeadroomGates"] == true,
+            "#191: a restored report within the headroom of expiry installs the load() gate without re-fetching")
         expect(
             turnTransitionChecks?["neverWantedGenerationAdvanced"] == true
                 && turnTransitionChecks?["neverWantedSkippedModel"] == true,
@@ -11493,7 +11618,7 @@ enum SelfTest {
             // called `gatedGraph` yet), so the old code fell straight through
             // every guard and scanned immediately.
             let gateLens = Task { await gateModel.ensureModelData(for: .overview) }
-            let gateRaced = await waitUntil { await gateSource.modelCallCount() > 0 }
+            let gateRaced = await waitUntil(timeout: negativeProbeWindow) { await gateSource.modelCallCount() > 0 }
             results["gateModelTaskFirstDidNotRace"] = !gateRaced
             // A DIFFERENT caller (not the one awaiting the gate) is what
             // finally calls load() — proving the gate is fulfilled by ANY

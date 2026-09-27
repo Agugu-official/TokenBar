@@ -4,7 +4,7 @@ id: kb-history-liquid-glass
 kind: canonical
 scope: repository
 read_when: considering a glass, popover, panel, or transparency redesign
-last_verified: 2026-09-25
+last_verified: 2026-09-27
 sources: ["sanitized local experiment source", "sanitized Liquid Glass project memory", "Sources/Syrtis/GlassBackground.swift", "Sources/Syrtis/Views/Cards.swift", "Sources/Syrtis/GlassPanelPresenter.swift", "Sources/Syrtis/StatusItemController.swift", "macOS 27.0 SDK AppKit headers (NSStatusItem.h, NSGlassEffectView.h)", "2026-09-24/25 live panel spike rounds"]
 ---
 
@@ -82,7 +82,7 @@ A hover-tooltip z-order bug independently exposed the same behavior: the Streaks
 
 ## Shipping recipe
 
-Below macOS 27 the shipping app keeps the popover and this card recipe in `Sources/TokenBar/Views/Cards.swift`:
+Below macOS 27 the shipping app keeps the popover and this card recipe in `Sources/Syrtis/Views/Cards.swift`:
 
 ```swift
 // GlassCardBackground (Views/Cards.swift), macOS 26 branch
@@ -99,7 +99,7 @@ The backdrop remains `PopoverBackdrop` backed by `NSVisualEffectView(.hudWindow,
 
 The 2026-09 resumption checked the macOS 27.0 SDK against both walls. `Glass` still offers only `.regular`, `.clear`, and `.identity` plus `tint` and `interactive`, and `NSGlassEffectView.Style` still has Regular and Clear (the only addition is `effectIsInteractive`), so the second wall stands. The first wall fell to a new API: `NSStatusItem.expandedInterfaceDelegate` and `NSStatusItemExpandedInterfaceSession` let a status item that shows its own window participate in menu-bar tracking. The earlier spike's unsolved edge — a picker inside the panel resigning key and closing it through `windowDidResignKey` — no longer exists, because the session, not key status, decides when the panel closes.
 
-`GlassPanelPresenter` (`Sources/TokenBar/GlassPanelPresenter.swift`) owns the panel; `StatusItemController` sets itself as the delegate of the main item and every client item on macOS 27+ and routes each session to the presenter.
+`GlassPanelPresenter` (`Sources/Syrtis/GlassPanelPresenter.swift`) owns the panel; `StatusItemController` sets itself as the delegate of the main item and every client item on macOS 27+ and routes each session to the presenter.
 
 The API exists only in the macOS 27 SDK, so the app now builds with Xcode 27: `ci.yml` and `release.yml` run on GitHub's `xcode-27` image (a public preview as of 2026-09), which carries Xcode 27.0 build 27A266a. The previous `macos-26` image carries Xcode 26.6 and cannot compile the delegate. Compiling the panel out for an older SDK is not an option: it builds, runs, and ships a release without the panel, the #343 trap described in `GlassBackground.swift`.
 
