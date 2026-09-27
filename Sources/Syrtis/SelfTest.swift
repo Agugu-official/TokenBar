@@ -12794,6 +12794,70 @@ enum SelfTest {
             expect(passed, "#359: \(label)")
         }
 
+        // UNVERIFIED-IDENTITY. The engine marks a window `accountScope` when it
+        // could not verify the account (Antigravity through `agy`), records no
+        // history for it and binds no curve, so the read throws on every
+        // publication. #355 took that throw for a failed read and the strip
+        // said the history "will be retried", forever. The same window
+        // without the mark is the control: it proves the fixture reaches the
+        // path where a throw does mark the client.
+        func antigravityWindow(_ generation: UInt64, verified: Bool) -> AgentUsagePayload {
+            let pace = verified
+                ? #"{"state":"learningHistory","windowKey":"model.gemini.v1","durationSeconds":18000,"durationSource":"provider","completeCycles":0}"#
+                : #"{"state":"unavailable","windowKey":"model.gemini.v1","completeCycles":0,"reason":"accountScope"}"#
+            let duration = verified ? #","durationSeconds":18000,"windowMinutes":300"# : ""
+            let json = """
+            {"generatedAt":"t","publicationGeneration":\(generation),"agents":[
+             {"clientId":"antigravity","source":"agy","updatedAt":"t","windows":[
+              {"cardId":"model.gemini.v1","label":"Gemini","usedPercent":10,
+               "remainingPercent":90,"resetsAt":"\(wIso)"\(duration),"paceStatus":\(pace)}]}]}
+            """
+            return try! JSONDecoder().decode(AgentUsagePayload.self, from: Data(json.utf8))
+        }
+        let unverifiedIdentity: [String: Bool]? = awaitMainActorValue {
+            AgentUsagePublicationCoordinator.resetForTesting()
+            defer { AgentUsagePublicationCoordinator.resetForTesting() }
+            let src = WindowScanCountingSource(payload: antigravityWindow(20, verified: true))
+            src.failCurveReadClients = ["antigravity"]
+            let m = DashboardModel(source: src, initialYear: nil)
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+            // Antigravity's own tab, so the history card's read runs too.
+            m.windowUsageClient = "antigravity"
+            @MainActor func publish(_ payload: AgentUsagePayload) async {
+                src.payload = payload
+                let poll = Task { await m.pollAgentUsage() }
+                var spins = 0
+                while m.agentUsage?.publicationGeneration != payload.publicationGeneration,
+                      spins < 2_000
+                {
+                    try? await Task.sleep(for: .milliseconds(1))
+                    spins += 1
+                }
+                poll.cancel()
+                ClaudeExtraRoots.RegistryChange.signal()
+                await poll.value
+            }
+            var out: [String: Bool] = [:]
+            await publish(antigravityWindow(20, verified: true))
+            out["control: a verified window whose read throws marks its client"] =
+                m.quotaUnreadableClients == ["antigravity"]
+            out["control: and the history card reports the read failure"] =
+                m.quotaCurveUnreadable
+            src.curveReads = []
+            await publish(antigravityWindow(21, verified: false))
+            out["an accountScope window is not read"] =
+                !src.curveReads.contains { $0.client == "antigravity" }
+            out["an accountScope window does not mark its client unreadable"] =
+                m.quotaUnreadableClients.isEmpty
+            out["the history card does not report a read failure for it"] =
+                !m.quotaCurveUnreadable
+            return out
+        }
+        expect(unverifiedIdentity != nil, "UNVERIFIED-IDENTITY fixture completes")
+        for (label, passed) in (unverifiedIdentity ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "UNVERIFIED-IDENTITY: \(label)")
+        }
+
         // CURVE-CACHE. Every curve read makes the engine load and parse the
         // whole quota history store, and the synchronous refresh used to read
         // each window once per surface: 14 reads, 134ms of a 140ms pass on the

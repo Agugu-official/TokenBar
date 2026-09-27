@@ -8,9 +8,10 @@
 /// `vendor/tokscale-core/src/model_alias.rs`): Grok Build keys turn usage by
 /// `grok-<version>-build` while the session names `grok-<version>` (#118).
 ///
-/// Presentation only. Anything that matches a model id — quota scopes,
-/// attribution records, color-table construction from raw rows — keeps the
-/// raw id. `Tests/fixtures/model-grouping-cases.json` is checked against both
+/// Presentation only. Anything that matches a model id — quota scopes and
+/// attribution records — keeps the raw id. `ModelColorMap` groups on both
+/// sides, construction and lookup, so a raw entry and a raw lookup still meet
+/// and the two ids share one shade. `Tests/fixtures/model-grouping-cases.json` is checked against both
 /// this function (SelfTest) and the engine (tb_core_ffi test). That binds the
 /// two on those inputs only: an engine rule that widens beyond the table, or
 /// a user alias map once the app installs one, would not be caught by it.
