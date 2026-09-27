@@ -3696,15 +3696,23 @@ fn load_store_at_with_mode(
         // failure is some `last_activity_at` above the ceiling, and the repair
         // either drops that series or lowers the timestamp.
         let clock_repaired = !validate_store_at(&store, validation_now);
+        let series_before = store.series.len();
         let store = if clock_repaired {
             repair_store_at(store, validation_now, quarantine_now)
         } else {
             store
         };
+        // Dropping a whole series is the one repair that cannot be undone, and
+        // it can be caused by a clock that is behind rather than by the file:
+        // a sample stamped past a ceiling that has stepped back. Kept in memory
+        // only, it comes back once the clock catches up. So nothing from this
+        // load is persisted on the repair's account; a transaction whose body
+        // changes the store still saves it, as it did before `repaired` existed.
+        let erased_series = store.series.len() < series_before;
         return Ok(LoadedStore {
             store,
             quarantined: false,
-            repaired: dropped || clock_repaired,
+            repaired: (dropped || clock_repaired) && !erased_series,
         });
     }
 
@@ -8777,30 +8785,9 @@ mod tests {
             rollover: None,
             samples: Vec::new(),
         };
-        // A sample stamped past the ceiling makes `repair_store_at` drop the
-        // whole series: the destructive branch, now also written to disk.
-        let reset = upper_bound + DAY;
-        let tainted_sample = QuotaSample {
-            reset_at: reset,
-            duration_seconds: 2 * DAY,
-            duration_source: DurationSource::Provider,
-            used_percent: 40.0,
-            sampled_at: upper_bound + 5,
-            origin: SampleOrigin::LiveV3,
-            plan: None,
-        };
-        let tainted = SeriesState {
-            provider_id: "grok".into(),
-            account_scope: "acct".into(),
-            window_key: "weekly.v1".into(),
-            active_reset_at: Some(reset),
-            last_activity_at: tainted_sample.sampled_at,
-            rollover: None,
-            samples: vec![tainted_sample],
-        };
         let mut store = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
-            series: vec![trigger, sibling, tainted],
+            series: vec![trigger, sibling],
         };
         store.series.sort_by(series_order);
         // Control: the file on disk leads the ceiling, so the loader repairs it.
@@ -8825,7 +8812,7 @@ mod tests {
         assert_eq!(
             windows,
             ["premium_interactions.v1", "session.v1"],
-            "the clamped trigger and the sibling are written; the tainted series is not"
+            "the clamped trigger and the sibling are both written"
         );
 
         no_op_transaction(&path, observation_now, upper_bound);
@@ -8880,6 +8867,64 @@ mod tests {
 
         no_op_transaction(&path, now, now);
         assert_eq!(save_call_count(), 1, "a repaired file is not rewritten");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_series_erased_by_the_clock_is_not_written_by_a_no_op_transaction() {
+        let (directory, path) = temp_path("persist-no-erase");
+        let upper_bound = 37_000_000;
+        let observation_now = upper_bound - 100;
+        let reset = upper_bound + DAY;
+        // A sample stamped past the ceiling: a clock that stepped back makes
+        // `repair_store_at` drop this whole series.
+        let tainted_sample = QuotaSample {
+            reset_at: reset,
+            duration_seconds: 2 * DAY,
+            duration_source: DurationSource::Provider,
+            used_percent: 40.0,
+            sampled_at: upper_bound + 5,
+            origin: SampleOrigin::LiveV3,
+            plan: None,
+        };
+        let tainted = SeriesState {
+            provider_id: "grok".into(),
+            account_scope: "acct".into(),
+            window_key: "weekly.v1".into(),
+            active_reset_at: Some(reset),
+            last_activity_at: tainted_sample.sampled_at,
+            rollover: None,
+            samples: vec![tainted_sample],
+        };
+        // A sibling that also needs the clamp, so the save would happen if the
+        // erasure did not hold it back.
+        let clamped = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "session.v1".into(),
+            active_reset_at: None,
+            last_activity_at: upper_bound + 50,
+            rollover: None,
+            samples: Vec::new(),
+        };
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![tainted, clamped],
+        };
+        store.series.sort_by(series_order);
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        // Control: the loader really does erase the series in memory.
+        let loaded =
+            load_store_at_with_mode(StorageMode::Generic, &path, upper_bound, observation_now)
+                .unwrap();
+        assert_eq!(loaded.store.series.len(), 1);
+
+        reset_save_call_count();
+        no_op_transaction(&path, observation_now, upper_bound);
+        assert_eq!(save_call_count(), 0, "an erasure must not be written");
+        assert_eq!(fs::read(&path).unwrap(), bytes);
 
         fs::remove_dir_all(directory).unwrap();
     }
