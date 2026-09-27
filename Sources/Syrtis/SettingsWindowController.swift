@@ -35,10 +35,16 @@ final class SettingsWindowController {
         /// nothing further to scroll to.
         var anchor: String? {
             switch self {
-            case .discord: return "settings.section.discord"
+            case .discord: return Self.discordAnchor
             case .usageAttribution: return nil
             }
         }
+
+        /// The Discord section's `.id`, non-optional on purpose: tagging the
+        /// section with `anchor` itself would give it an `Optional<String>`
+        /// id, which never equals the `String` handed to `scrollTo`, and the
+        /// intro card's "Open Settings" would stop scrolling to it.
+        static let discordAnchor = "settings.section.discord"
     }
 
     func show(scrollingTo destination: Destination? = nil) {

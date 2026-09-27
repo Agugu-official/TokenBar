@@ -2691,6 +2691,21 @@ enum SelfTest {
                     && onboardingAcceptDefaults.string(forKey: UsageAttribution.suggestionsKey)
                         == beforeNoopSuggestions,
                 "accept with no records writes nothing")
+
+            // A confirmed table the codec cannot read must not be replaced,
+            // and neither table may change: the caller shows the message.
+            onboardingAcceptDefaults.set("not json", forKey: UsageAttribution.confirmedKey)
+            let beforeFailureSuggestions =
+                onboardingAcceptDefaults.string(forKey: UsageAttribution.suggestionsKey)
+            let failure = UsageAttributionSettings.accept(
+                [UsageAttribution.Record(client: "opencode", provider: "xai", state: .assigned("grok"))],
+                defaults: onboardingAcceptDefaults)
+            expect(
+                failure != nil
+                    && onboardingAcceptDefaults.string(forKey: UsageAttribution.confirmedKey) == "not json"
+                    && onboardingAcceptDefaults.string(forKey: UsageAttribution.suggestionsKey)
+                        == beforeFailureSuggestions,
+                "accept over an unreadable confirmed table writes nothing and returns a message")
         } else {
             expect(false, "isolated onboarding accept defaults suite is available")
         }
