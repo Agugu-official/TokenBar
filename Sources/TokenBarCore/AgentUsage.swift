@@ -799,12 +799,26 @@ package struct AgentUsageTransportLogEntry: Equatable, Sendable {
     package let osCode: Int32?
 }
 
-private let agentUsageTransportLogClientIds: Set<String> = [
-    // "grok-bot", "kiro" and "opencode" carry the Grok Bot, Kiro and OpenCode
-    // Go subscription quotas; keep their transport diagnostics attributable
-    // instead of rewriting them to "unknown" like an unsupported id.
-    "codex", "claude", "antigravity", "copilot", "grok", "grok-bot", "kiro", "opencode",
-]
+/// Payload of `tb_quota_provider_ids`: `{"ids": [...]}`.
+public struct QuotaProviderIds: Decodable, Sendable {
+    public let ids: [String]
+}
+
+/// The client ids whose transport diagnostics keep their name in the log; any
+/// other id is written as "unknown". Derived from the engine's provider table
+/// rather than listed here, so a new provider is attributable the moment it is
+/// registered (#324). If the engine cannot answer, the set is empty and every
+/// id logs as "unknown": the same fail-closed treatment an unlisted id always
+/// had, never a raw id that was not vetted.
+private let agentUsageTransportLogClientIds: Set<String> = {
+    // A failed call is already logged by `TBCore.unwrap`; an empty success is
+    // not, and it would silently anonymize every provider for the process.
+    let ids = Set((try? TBCore.quotaProviderIds()) ?? [])
+    if ids.isEmpty {
+        ffiLog.error("quota provider ids unavailable; transport diagnostics log as unknown")
+    }
+    return ids
+}()
 
 private let agentUsageTransportLogCategories: Set<String> = [
     "timeout", "dns", "tls", "connectionRefused", "connectionReset",

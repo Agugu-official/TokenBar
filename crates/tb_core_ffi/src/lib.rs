@@ -1044,8 +1044,24 @@ pub extern "C" fn tb_tokens_per_min() -> *mut c_char {
     })
 }
 
-/// OAuth quota cards (`AgentUsagePayload` in agentUsage.ts) for
-/// codex/claude/antigravity/copilot/grok/grok-bot, fetched concurrently. Network-bound —
+/// The quota provider ids, in card order: `{"ids": ["codex", ...]}`. Read
+/// straight from `agent_usage::QUOTA_PROVIDERS`, so Swift derives anything that
+/// must know the provider set from here rather than keeping its own list (#324).
+/// Offline and reads no user data; like every `tb_*` entry it goes through
+/// `guarded`, which initializes the rayon pool on first use.
+#[no_mangle]
+pub extern "C" fn tb_quota_provider_ids() -> *mut c_char {
+    guarded("tb_quota_provider_ids", || {
+        let ids: Vec<&str> = agent_usage::QUOTA_PROVIDERS
+            .iter()
+            .map(|provider| provider.id)
+            .collect();
+        envelope(Ok(serde_json::json!({ "ids": ids })))
+    })
+}
+
+/// OAuth quota cards (`AgentUsagePayload` in agentUsage.ts) for every provider
+/// in `agent_usage::QUOTA_PROVIDERS`, fetched concurrently. Network-bound —
 /// call from a background thread. Per-provider failures land in each
 /// snapshot's `error` field; the call itself only fails on serialization.
 /// The publication gate assigns `publicationGeneration` and serializes the
@@ -1058,7 +1074,7 @@ pub extern "C" fn tb_agent_usage() -> *mut c_char {
         guarded("tb_agent_usage", || {
             // No outer timeout on purpose: each provider carries its own 30s
             // per-request reqwest timeout (which covers connect, so nothing hangs
-            // unbounded), and they run concurrently via tokio::join!. A single outer
+            // unbounded), and `run` fetches them concurrently. A single outer
             // ceiling would instead collapse the whole payload to one error — losing
             // the providers that already succeeded — and could cut off the legitimate
             // expired-token path (sequential refresh + fetch, up to ~60s).

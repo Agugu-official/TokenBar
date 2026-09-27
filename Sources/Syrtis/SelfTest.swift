@@ -8278,6 +8278,46 @@ enum SelfTest {
                 },
             "demo quota cards carry the canonical card identities their provider declares")
 
+        // #324: every quota provider the engine registers must be known to
+        // each Swift surface keyed by client id. The ids come from the
+        // engine's own table over FFI, so a provider added there and missed
+        // here fails a check naming it instead of shipping a silent gap.
+        let engineProviderIds = (try? TBCore.quotaProviderIds()) ?? []
+        // Control: an empty or foreign answer would satisfy every check in
+        // the loop below without testing anything.
+        expect(
+            !engineProviderIds.isEmpty && engineProviderIds.contains("codex")
+                && Set(engineProviderIds).count == engineProviderIds.count,
+            "the engine lists its quota providers, without duplicates")
+        let providerIcons = MainActor.assumeIsolated {
+            AgentIconView.availableOfficialClientIDs()
+        }
+        let demoQuotaClients = Set(quota.agents.map(\.clientId))
+        func transportAttribution(_ clientId: String) -> String? {
+            let json = """
+                {"generatedAt":"now","agents":[{"clientId":"\(clientId)","source":"fixture",\
+                "updatedAt":"now","windows":[],"transportDiagnostic":{"category":"timeout"}}]}
+                """
+            guard let payload = try? JSONDecoder().decode(
+                AgentUsagePayload.self, from: Data(json.utf8)) else { return nil }
+            return agentUsageTransportLogEntries(payload).first?.clientId
+        }
+        // Control: an id outside the table is still logged as "unknown".
+        expect(
+            transportAttribution("not-a-provider") == "unknown",
+            "transport diagnostics for an unregistered client id stay unattributed")
+        for id in engineProviderIds {
+            expect(registryClients.contains(id), "quota provider \(id) has a ClientRegistry entry")
+            expect(providerIcons.contains(id), "quota provider \(id) has an official icon that loads")
+            expect(demoQuotaClients.contains(id), "demo quota shows a card for quota provider \(id)")
+        }
+        // Not repeated per id: the allowlist is built from this same list, so
+        // a per-id check could only fail if the list were empty, which the
+        // control above already catches. Checked once end to end instead.
+        expect(
+            transportAttribution("codex") == "codex",
+            "transport diagnostics for a registered provider keep its name")
+
         let firstDemoWindows = quota.agents.first?.uniqueCardWindows ?? []
         let secondDemoWindows = quota.agents.dropFirst().first?.uniqueCardWindows ?? []
         let demoLearningDuration = firstDemoWindows.first

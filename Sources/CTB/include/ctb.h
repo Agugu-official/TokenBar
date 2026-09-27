@@ -85,8 +85,12 @@ char *tb_usage_trace(int64_t window_secs);
 // Live rate: {"tokensPerMin": <number>} (10-minute-window average).
 char *tb_tokens_per_min(void);
 
-// OAuth quota cards (AgentUsagePayload) for codex/claude/antigravity/copilot/grok.
-// Network-bound; per-provider failures are reported inside each snapshot.
+// The quota provider ids in card order: {"ids": ["codex", ...]}. Offline, reads
+// no user data; the single registration point is agent_usage::QUOTA_PROVIDERS.
+char *tb_quota_provider_ids(void);
+
+// OAuth quota cards (AgentUsagePayload) for every provider tb_quota_provider_ids
+// lists. Network-bound; per-provider failures are reported inside each snapshot.
 char *tb_agent_usage(void);
 
 // Read-only quota curve snapshot for one series selected by the latest

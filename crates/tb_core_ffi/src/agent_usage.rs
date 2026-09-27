@@ -1523,43 +1523,95 @@ fn apply_provider_outcome(
     )
 }
 
-pub async fn run(publication_generation: u64) -> AgentUsagePayload {
-    let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-    let (codex, claude, antigravity, copilot, grok, grokbot, kiro, opencode_go) = tokio::join!(
-        fetch_codex(),
-        fetch_claude_accounts(),
-        fetch_antigravity(),
-        fetch_copilot(),
-        fetch_grok(),
-        fetch_grokbot(),
-        fetch_kiro(),
-        fetch_opencode_go()
-    );
-    let mut agents = vec![codex];
+/// One provider's fetch, adapted to the shape `run` flattens: every snapshot
+/// the provider wants on screen, in order, and nothing when it has none (a
+/// provider that only appears when signed in returns an empty list rather than
+/// a bare not-signed-in error card).
+///
+/// Not `Send`: the Claude fetch runs its extra accounts on a `LocalSet`. That
+/// costs nothing here, because `tb_agent_usage` drives `run` with
+/// `RUNTIME.block_on` on the calling thread, exactly as it drove the
+/// `tokio::join!` this replaced.
+type ProviderFetch = Pin<Box<dyn Future<Output = Vec<AgentUsageSnapshot>>>>;
+
+pub(crate) struct QuotaProvider {
+    /// The `client_id` this provider's snapshots carry. Not enforced: each
+    /// `fetch_*` still writes its own literal, and nothing checks the two
+    /// agree. A mismatch would leave that provider without a `usable_success`
+    /// rule at runtime and log its transport diagnostics as "unknown", while
+    /// every test here passes, because they all walk this id.
+    pub(crate) id: &'static str,
+    fetch: fn() -> ProviderFetch,
+}
+
+fn provider_fetch<F>(future: F) -> ProviderFetch
+where
+    F: Future<Output = Vec<AgentUsageSnapshot>> + 'static,
+{
+    Box::pin(future)
+}
+
+/// Every quota provider, in the order its cards appear. This is the one place a
+/// provider is registered: `run` fetches from it, `tb_quota_provider_ids`
+/// hands its ids to Swift (which derives its transport-log allowlist from
+/// them), and the consistency tests walk it, so a provider added here and
+/// missed elsewhere fails a named test instead of shipping a silent gap (#324).
+pub(crate) const QUOTA_PROVIDERS: &[QuotaProvider] = &[
+    QuotaProvider {
+        id: "codex",
+        fetch: || provider_fetch(async { vec![fetch_codex().await] }),
+    },
     // The primary first, then any extra config directories. With none
     // configured this is the single Claude card it has always been.
-    agents.extend(claude);
-    agents.push(antigravity);
-    // Copilot only appears when signed in (via opencode); skip a bare not-signed-in error card.
-    if let Some(copilot) = copilot {
-        agents.push(copilot);
-    }
+    QuotaProvider {
+        id: "claude",
+        fetch: || provider_fetch(fetch_claude_accounts()),
+    },
+    QuotaProvider {
+        id: "antigravity",
+        fetch: || provider_fetch(async { vec![fetch_antigravity().await] }),
+    },
+    // Copilot only appears when signed in (via opencode).
+    QuotaProvider {
+        id: "copilot",
+        fetch: || provider_fetch(async { fetch_copilot().await.into_iter().collect() }),
+    },
     // Grok only appears when ~/.grok/auth.json has credentials.
-    if let Some(grok) = grok {
-        agents.push(grok);
-    }
+    QuotaProvider {
+        id: "grok",
+        fetch: || provider_fetch(async { fetch_grok().await.into_iter().collect() }),
+    },
     // Grok Bot only appears when a desktop or Cursor login exists.
-    if let Some(grokbot) = grokbot {
-        agents.push(grokbot);
-    }
+    QuotaProvider {
+        id: "grok-bot",
+        fetch: || provider_fetch(async { fetch_grokbot().await.into_iter().collect() }),
+    },
     // Kiro only appears when signed in (kiro-cli store or Kiro IDE token file).
-    if let Some(kiro) = kiro {
-        agents.push(kiro);
-    }
+    QuotaProvider {
+        id: "kiro",
+        fetch: || provider_fetch(async { fetch_kiro().await.into_iter().collect() }),
+    },
     // OpenCode Go only appears when opencode auth.json holds an "opencode-go" api key.
-    if let Some(opencode_go) = opencode_go {
-        agents.push(opencode_go);
-    }
+    QuotaProvider {
+        id: "opencode",
+        fetch: || provider_fetch(async { fetch_opencode_go().await.into_iter().collect() }),
+    },
+];
+
+/// Run every fetch concurrently and concatenate the results in the order the
+/// fetches were given, whatever order they finish in. `join_all` polls all of
+/// them on every wake, as the `tokio::join!` this replaced did.
+async fn fetch_in_order(fetches: Vec<ProviderFetch>) -> Vec<AgentUsageSnapshot> {
+    futures_util::future::join_all(fetches)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+pub async fn run(publication_generation: u64) -> AgentUsagePayload {
+    let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let agents = fetch_in_order(QUOTA_PROVIDERS.iter().map(|p| (p.fetch)()).collect()).await;
     AgentUsagePayload {
         generated_at,
         publication_generation,
@@ -1799,9 +1851,9 @@ async fn fetch_codex() -> AgentUsageSnapshot {
 
 /// The `source` a required provider card reports for a failed fetch.
 ///
-/// Codex, Claude and Antigravity are pushed into `agents` whether or not the
-/// user has them — `run` only filters the optional providers by whether a login
-/// exists. So for these three, "a card is present" says nothing about whether
+/// Codex, Claude and Antigravity always contribute a card whether or not the
+/// user has them — only the optional providers' adapters in `QUOTA_PROVIDERS`
+/// return nothing when no login exists. So for these three, "a card is present" says nothing about whether
 /// anything is configured, and the payload has to carry the difference: the Swift
 /// side reads `isSetupPlaceholder`, and through it `configuredClientIds`, to
 /// decide which quota sources earn a tab. Reporting `oauth` for a card that has
@@ -1944,7 +1996,7 @@ async fn fetch_claude_accounts() -> Vec<AgentUsageSnapshot> {
     // Concurrent, not sequential. An earlier version ran these in a loop and
     // justified it as "one extra account costs one more round trip on a 60s
     // poll", which measures the wrong thing: each request owns a 30-second
-    // timeout, and the provider-wide `tokio::join!` above cannot return until
+    // timeout, and the provider-wide join in `run` cannot return until
     // this function does, so a slow Claude account holds back the already
     // finished Codex, Copilot, Grok and Antigravity cards for as long as it
     // takes — and Settings sets no limit on how many accounts there are, so
@@ -7906,15 +7958,10 @@ mod tests {
 
     #[tokio::test]
     async fn verified_binding_failure_prevents_every_provider_request() {
-        for provider in [
-            "codex",
-            "claude",
-            "grok",
-            "copilot",
-            "antigravity",
-            "kiro",
-            "opencode",
-        ] {
+        // The ids label one generic call rather than dispatching per provider;
+        // walking the table keeps the label list from drifting (it had lost
+        // grok-bot) without claiming more coverage than the call gives.
+        for provider in QUOTA_PROVIDERS.iter().map(|provider| provider.id) {
             let sends = std::cell::Cell::new(0);
             let result: Result<(), &str> =
                 request_after_verified_binding(Err::<(), _>("scope unavailable"), |()| async {
@@ -7925,6 +7972,109 @@ mod tests {
             assert_eq!(result, Err("scope unavailable"), "{provider}");
             assert_eq!(sends.get(), 0, "{provider}");
         }
+    }
+
+    // ---- #324: the provider table is the single registration point ----
+
+    fn table_test_snapshot(client_id: &str) -> AgentUsageSnapshot {
+        cache_test_snapshot(
+            client_id,
+            Err(AccountScopeError::NoTrustedEvidence),
+            Utc.timestamp_opt(1_800_000_000, 0).single().unwrap(),
+        )
+    }
+
+    fn ids(snapshots: &[AgentUsageSnapshot]) -> Vec<&str> {
+        snapshots.iter().map(|s| s.client_id.as_str()).collect()
+    }
+
+    fn stub(snapshots: Vec<AgentUsageSnapshot>) -> ProviderFetch {
+        provider_fetch(async move { snapshots })
+    }
+
+    #[test]
+    fn the_provider_table_is_todays_card_order() {
+        // Pinned on purpose. The consistency checks walk the table, so they
+        // stop checking a provider that is REMOVED from it; this is the check
+        // that covers every provider for that case (a few older selftests
+        // happen to name codex, kiro and opencode directly).
+        let ids: Vec<&str> = QUOTA_PROVIDERS.iter().map(|p| p.id).collect();
+        assert_eq!(
+            ids,
+            ["codex", "claude", "antigravity", "copilot", "grok", "grok-bot", "kiro", "opencode"]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetches_land_in_table_order_whatever_order_they_finish_in() {
+        let slow_first = provider_fetch(async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            vec![table_test_snapshot("a")]
+        });
+        let out = fetch_in_order(vec![slow_first, stub(vec![table_test_snapshot("b")])]).await;
+        assert_eq!(ids(&out), ["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn an_empty_fetch_contributes_no_card_and_a_multi_account_fetch_keeps_its_order() {
+        let out = fetch_in_order(vec![
+            stub(vec![table_test_snapshot("a")]),
+            stub(Vec::new()),
+            stub(vec![table_test_snapshot("c1"), table_test_snapshot("c2")]),
+        ])
+        .await;
+        assert_eq!(ids(&out), ["a", "c1", "c2"]);
+    }
+
+    #[tokio::test]
+    async fn fetches_run_concurrently() {
+        // Each stub finishes only after the other has started, so awaiting
+        // them one after another deadlocks and the timeout fails the test.
+        let (a_started, a_seen) = tokio::sync::oneshot::channel::<()>();
+        let (b_started, b_seen) = tokio::sync::oneshot::channel::<()>();
+        let a = provider_fetch(async move {
+            a_started.send(()).unwrap();
+            b_seen.await.unwrap();
+            vec![table_test_snapshot("a")]
+        });
+        let b = provider_fetch(async move {
+            b_started.send(()).unwrap();
+            a_seen.await.unwrap();
+            vec![table_test_snapshot("b")]
+        });
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            fetch_in_order(vec![a, b]),
+        )
+        .await
+        .expect("fetches must be polled concurrently");
+        assert_eq!(ids(&out), ["a", "b"]);
+    }
+
+    #[test]
+    fn every_provider_in_the_table_has_a_usable_success_rule() {
+        // Checks the table id against the arms. It does NOT check that a
+        // provider's fetch emits that id; see `QuotaProvider::id`.
+        let base = table_test_snapshot("any").windows[0].clone();
+        let card = |id: &str| base.clone().with_identity(id, Some(id.to_string()), None, None);
+        for provider in QUOTA_PROVIDERS {
+            let mut snapshot = table_test_snapshot(provider.id);
+            snapshot.windows = vec![
+                card("session.v1"),
+                card("billing.weekly.v1"),
+                card(agent_grokbot::WEEKLY_WINDOW_KEY),
+            ];
+            assert!(
+                usable_success(&snapshot),
+                "{} has no usable_success rule; a transient failure would drop its last-good card",
+                provider.id
+            );
+        }
+        // Control: the same success shape under an id outside the table is
+        // refused, so the loop above is not passing on a catch-all.
+        let mut stranger = table_test_snapshot("not-a-provider");
+        stranger.windows = vec![card("session.v1")];
+        assert!(!usable_success(&stranger));
     }
 
     #[derive(Debug)]
