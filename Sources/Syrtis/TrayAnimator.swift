@@ -208,11 +208,18 @@ final class TrayAnimator {
             rawValue: UserDefaults.standard.string(forKey: IconColoring.storageKey) ?? ""
         ) ?? .warningOnly
         presentedAnimationKey = nil
+        let stale = Self.readingIsStale(
+            payload: quota,
+            persistedSelection: UserDefaults.standard.string(forKey: Self.quotaSourceKey)
+                ?? QuotaResolver.auto,
+            excluding: ClientRegistry.quotaExcludedClients(),
+            defaults: source.allowsQuotaCachePersistence ? .standard : nil,
+            now: Date())
         controller?.setStaticIcon(
             TrayIcons.image(
                 style: gaugeStyle, remaining: quotaRemaining,
                 dark: controller?.isDarkAppearance ?? true,
-                coloring: coloring),
+                coloring: coloring, stale: stale),
             isTemplate: false)
     }
 
@@ -260,7 +267,49 @@ final class TrayAnimator {
         } else {
             defaults?.removeObject(forKey: Self.lastRemainingKey)
         }
+        if remaining != nil, let payload,
+           let resolvedAt = QuotaSelectionPolicy.resolvedAt(
+               payload: payload, persistedSelection: persistedSelection, excluding: excluding)
+        {
+            defaults?.set(resolvedAt.timeIntervalSince1970, forKey: Self.lastResolvedAtKey)
+        } else {
+            defaults?.removeObject(forKey: Self.lastResolvedAtKey)
+        }
         return remaining
+    }
+
+    /// Fetch time of the snapshot behind the persisted scalar (#8), written
+    /// beside `lastRemainingKey` by `applyQuotaRemaining`. It only matters when
+    /// the outer payload is missing and the cached scalar is drawn; with a
+    /// payload, the age is read from the payload itself.
+    nonisolated static let lastResolvedAtKey = "tokenbar.quota.lastResolvedAt"
+
+    /// How old the gauge's reading may be before it is drawn as stale. Tens of
+    /// minutes, not a small multiple of the 300 s poll. 30 min chosen by the
+    /// maintainer (2026-09-27).
+    nonisolated static let quotaStaleAfter: TimeInterval = 30 * 60
+
+    /// Whether the drawn reading is older than `quotaStaleAfter` (#8). With a
+    /// payload, the age comes from the same resolve that produced the value, so
+    /// value and age cannot come from different writers; without one, from the
+    /// stamp persisted beside the cached scalar. Unknown age is not stale.
+    /// Shared by the tray and the Settings preview. Nil defaults (demo mode)
+    /// are never stale.
+    nonisolated static func readingIsStale(
+        payload: AgentUsagePayload?,
+        persistedSelection: String,
+        excluding: Set<String>,
+        defaults: UserDefaults?,
+        now: Date
+    ) -> Bool {
+        guard let defaults else { return false }
+        let resolvedAt = payload.map {
+            QuotaSelectionPolicy.resolvedAt(
+                payload: $0, persistedSelection: persistedSelection, excluding: excluding)
+        } ?? (defaults.object(forKey: lastResolvedAtKey) as? Double)
+            .map(Date.init(timeIntervalSince1970:))
+        guard let resolvedAt else { return false }
+        return now.timeIntervalSince(resolvedAt) > quotaStaleAfter
     }
 
     private func reconcileQuotaRemaining(with payload: AgentUsagePayload) {
@@ -425,6 +474,10 @@ final class TrayAnimator {
                         persistSelection: { self.persistQuotaSelectionMigration(for: $0) },
                         render: { self.renderGaugeIcon() },
                         notify: { self.onQuotaUpdated?() })
+                } else {
+                    // Nothing changed but the reading's age; re-render so the
+                    // stale marker (#8) can appear without a successful poll.
+                    self.renderGaugeIcon()
                 }
                 // Interruptible. This poll is the Auto gauge's only source, and
                 // it is the one poll that runs with no window open — the launch
