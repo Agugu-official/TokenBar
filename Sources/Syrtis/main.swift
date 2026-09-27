@@ -35,8 +35,8 @@ if CommandLine.arguments.contains("--selftest") {
     SelfTest.run()
 }
 
-if CommandLine.arguments.contains("--demo") {
-    DemoData.ignoreLocalVisibility(in: .standard)
+if DemoData.ignoresLocalVisibility {
+    DemoData.ignoreLocalVisibility()
 }
 
 // First launch after the Syrtis rename: move TokenBar.app to Syrtis.app and

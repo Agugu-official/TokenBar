@@ -24,15 +24,31 @@ enum DemoData {
     /// visibility settings in the argument domain — exactly what passing
     /// `-tokenbar.tabs.hidden "" -tokenbar.limits.hidden ""` does — so every
     /// reader, `@AppStorage` included, sees nothing hidden, and nothing is
-    /// written to disk. The trade: hiding a tab in Settings during a demo run
-    /// has no visible effect, since the argument domain outranks the stored
-    /// value.
-    static func ignoreLocalVisibility(in defaults: UserDefaults) {
-        var arguments = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+    /// written to disk.
+    ///
+    /// The argument domain is process-wide whichever `UserDefaults` instance
+    /// sets it, so this is applied once, from `main`, and never from a test.
+    static func ignoreLocalVisibility() {
+        let defaults = UserDefaults.standard
+        defaults.setVolatileDomain(
+            visibilityArguments(defaults.volatileDomain(forName: UserDefaults.argumentDomain)),
+            forName: UserDefaults.argumentDomain)
+    }
+
+    /// The argument domain with both visibility keys blanked and everything
+    /// else, `-AppleLanguages` included, kept.
+    static func visibilityArguments(_ current: [String: Any]) -> [String: Any] {
+        var arguments = current
         arguments[ClientRegistry.tabHiddenKey] = ""
         arguments[ClientRegistry.limitsHiddenKey] = ""
-        defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        return arguments
     }
+
+    /// Whether this process runs the override: `main` applies it exactly when
+    /// this is true. Settings disables its visibility toggles on it, because
+    /// they read the blanked value and a toggle would write "hidden = just
+    /// this one" over the list actually stored on disk.
+    static let ignoresLocalVisibility = CommandLine.arguments.contains("--demo")
     /// The subscriptions that have recorded history in the demo. A handful,
     /// not every client: the lens is read in screenshots, and a real user has
     /// a few subscriptions rather than one per registered client. Every other

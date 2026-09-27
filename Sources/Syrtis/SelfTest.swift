@@ -7958,22 +7958,20 @@ enum SelfTest {
                "#228: the demo serves curves for exactly its history subscriptions' windows (\(demoCurveWindows) served)")
         expect(demoCurveChecks,
                "#228: every demo curve has enough observed cycles, a weekday-heavy heatmap, and a running cycle matching its card")
-        // Demo mode ignores this Mac's hidden tabs and limits: a scratch suite
-        // with both set reads them back empty once the override is applied,
-        // and an unrelated argument survives it.
-        if let suite = UserDefaults(suiteName: "syrtis.selftest.demo-visibility") {
-            suite.set("codex", forKey: ClientRegistry.tabHiddenKey)
-            suite.set("copilot", forKey: ClientRegistry.limitsHiddenKey)
-            suite.setVolatileDomain(["unrelated": "kept"], forName: UserDefaults.argumentDomain)
-            let hiddenBefore = suite.string(forKey: ClientRegistry.tabHiddenKey) == "codex"
-            DemoData.ignoreLocalVisibility(in: suite)
-            expect(hiddenBefore
-                       && suite.string(forKey: ClientRegistry.tabHiddenKey) == ""
-                       && suite.string(forKey: ClientRegistry.limitsHiddenKey) == ""
-                       && suite.string(forKey: "unrelated") == "kept",
-                   "#228: demo mode reads no hidden tabs or limits, and keeps other arguments")
-            suite.removePersistentDomain(forName: "syrtis.selftest.demo-visibility")
-        }
+        // Demo mode ignores this Mac's hidden tabs and limits. Tested on the
+        // pure transform: the argument domain is process-wide, and setting it
+        // here would strip this run's own `-AppleLanguages`.
+        let demoArgs = DemoData.visibilityArguments([
+            ClientRegistry.tabHiddenKey: "codex",
+            ClientRegistry.limitsHiddenKey: "copilot",
+            "AppleLanguages": ["en"],
+        ])
+        expect(demoArgs[ClientRegistry.tabHiddenKey] as? String == ""
+                   && demoArgs[ClientRegistry.limitsHiddenKey] as? String == ""
+                   && demoArgs["AppleLanguages"] as? [String] == ["en"],
+               "#228: demo mode blanks hidden tabs and limits and keeps other arguments")
+        expect(!DemoData.ignoresLocalVisibility,
+               "#228: the selftest process never applies the demo visibility override")
         // Through the model, which is what the screenshots render: the lookups
         // only resolve once the published generation reaches it.
         let demoLens: (summaries: Int, heatmaps: Int)? = awaitMainActorValue {
