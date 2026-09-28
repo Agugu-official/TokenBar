@@ -19,9 +19,10 @@ The sources they were made from are kept beside them: `background.html` (the art
 
 ## Regenerating after a design change
 
-Run outside the repository checkout's tracked tree (for example in a scratch directory), with Google Chrome and a Python virtualenv:
+Run in a scratch directory outside the checkout, with Google Chrome and a Python virtualenv (`REPO` is the checkout):
 
 ```sh
+cp "$REPO/assets/dmg/background.html" "$REPO/assets/dmg/dmgbuild_settings.py" .
 python3 -m venv venv && ./venv/bin/pip install dmgbuild
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 "$CHROME" --headless=new --force-device-scale-factor=2 --window-size=660,400 \

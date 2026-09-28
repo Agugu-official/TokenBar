@@ -23,6 +23,13 @@ grep -qx 'source=Notarized Developer ID' <<<"$GATEKEEPER" || fail "Gatekeeper do
 MNT=$(mktemp -d)
 trap 'hdiutil detach "$MNT" -quiet 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true' EXIT
 hdiutil attach "$DMG" -nobrowse -readonly -noverify -mountpoint "$MNT" -quiet
+# Exactly what make_dmg.sh stages, with the layout byte-identical to the
+# committed assets: anything else added before signing fails here.
+ENTRIES=$(ls -A1 "$MNT" | LC_ALL=C sort | tr '\n' ' ')
+[ "$ENTRIES" = ".DS_Store .background.tiff Applications Syrtis.app " ] || fail "unexpected DMG contents: $ENTRIES"
+ASSETS="$(cd "$(dirname "$0")/../assets/dmg" && pwd)"
+cmp -s "$MNT/.DS_Store" "$ASSETS/DS_Store" || fail ".DS_Store differs from assets/dmg/DS_Store"
+cmp -s "$MNT/.background.tiff" "$ASSETS/background.tiff" || fail ".background.tiff differs from assets/dmg/background.tiff"
 [ "$(readlink "$MNT/Applications" 2>/dev/null)" = /Applications ] || fail "DMG has no Applications link to /Applications"
 "$(dirname "$0")/verify_signed_app.sh" "$MNT/Syrtis.app" "$TEAM"
 echo "verified: $DMG"
