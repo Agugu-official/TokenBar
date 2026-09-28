@@ -86,6 +86,7 @@ struct PopoverView: View {
     /// How many calendar days the trend covers. Two weeks reads as a rhythm
     /// without turning each column into a sliver at popover width.
     private static let trendDays = 14
+    private static let contentTop = "popover.content.top"
 
 
     private var activeView: Binding<AppView> {
@@ -211,11 +212,17 @@ struct PopoverView: View {
                 .padding(.bottom, 10)
             PanelDivider()
             GeometryReader { viewport in
+                ScrollViewReader { proxy in
                 ScrollView {
-                    content
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(OverlayScrollerEnforcer())
+                    // Zero-height marker: switching tab or view scrolls back
+                    // here instead of keeping the previous lens's offset.
+                    VStack(spacing: 0) {
+                        Color.clear.frame(height: 0).id(Self.contentTop)
+                        content
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(OverlayScrollerEnforcer())
+                    }
                 }
                 // Live global frame for tooltip clamp. While the height
                 // handle is dragged, publish nil so placement falls back to
@@ -227,6 +234,10 @@ struct PopoverView: View {
                     dragBase == nil ? viewport.frame(in: .global) : nil)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
+                .onChange(of: "\(activeTab)|\(activeViewRaw)") {
+                    proxy.scrollTo(Self.contentTop, anchor: .top)
+                }
+                }
             }
             PanelDivider()
             footer
