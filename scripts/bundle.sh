@@ -125,7 +125,22 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-echo "==> ad-hoc codesign"
-codesign --force --deep --sign - "$APP"
+# Sparkle's XPC services exist for sandboxed apps. Syrtis is not sandboxed and
+# leaves SUEnableInstallerLauncherService off, so they never run; Sparkle's
+# docs allow removing them, which also spares signing Downloader.xpc with its
+# own entitlements.
+rm -rf "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices" \
+       "$APP/Contents/Frameworks/Sparkle.framework/XPCServices"
+
+# SIGN_IDENTITY set (e.g. "Developer ID Application: … (TEAMID)"): sign for
+# notarization (see codesign_app.sh). Unset: ad-hoc, which is what local builds
+# and the release workflow's `build` job use; the release signs in `sign`.
+if [ -n "${SIGN_IDENTITY:-}" ]; then
+  echo "==> codesign: $SIGN_IDENTITY"
+  "$(dirname "$0")/codesign_app.sh" "$APP" "$SIGN_IDENTITY"
+else
+  echo "==> ad-hoc codesign"
+  codesign --force --deep --sign - "$APP"
+fi
 
 echo "==> done: $APP"

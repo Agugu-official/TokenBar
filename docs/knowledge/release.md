@@ -19,7 +19,8 @@ sources: [".github/workflows/release.yml", "scripts/check_ci_gate.sh", ".github/
 - [Delivery map](#delivery-map)
 - [Application release](#application-release)
 - [Local network usage description](#local-network-usage-description)
-- [Code signing and local secret storage](#code-signing-and-local-secret-storage)
+- [Developer ID signing and notarization](#developer-id-signing-and-notarization)
+- [Local secret storage](#local-secret-storage)
 - [Sparkle and appcast](#sparkle-and-appcast)
 - [Sparkle is compiled here, not taken from the prebuilt artifact](#sparkle-is-compiled-here-not-taken-from-the-prebuilt-artifact)
 - [Migration principle](#migration-principle)
@@ -34,10 +35,10 @@ sources: [".github/workflows/release.yml", "scripts/check_ci_gate.sh", ".github/
 
 ```mermaid
 flowchart LR
-    TAG[Version tag] --> BUILD[Build and bundle]
-    BUILD --> SIGN[Sparkle and legacy signatures]
-    SIGN --> RELEASE[GitHub Release assets and notes]
-    RELEASE --> FEED[Generate multi-item appcast]
+    TAG[Version tag] --> BUILD[build: unsigned bundle]
+    BUILD --> SIGN[sign: Developer ID, notarize, verify, appcast]
+    SIGN --> RELEASE[publish: GitHub Release assets and notes]
+    RELEASE --> FEED[Appcast commit on main]
     RELEASE --> CASK[Bump Homebrew cask]
     RELEASE --> BADGE[Refresh install-count branch]
     FEED --> APP[In-app Sparkle update]
@@ -59,7 +60,7 @@ Either form triggers the workflow identically — `push: tags: ["v*"]`, with the
 
 | Artifact or action | Source of truth | Verification |
 |---|---|---|
-| Native app bundle | `.github/workflows/release.yml` and `scripts/bundle.sh` | Bundle launches and is ad-hoc signed as expected |
+| Native app bundle | `.github/workflows/release.yml` (`build` → `sign`) with `scripts/bundle.sh`, `codesign_app.sh`, `notarize_app.sh` | `scripts/verify_signed_app.sh` passes on the app extracted from the final archive: Developer ID of the expected team, hardened runtime, no entitlements, stapled, Gatekeeper `Notarized Developer ID` |
 | Sparkle archive/signature | Release workflow and Sparkle tools | EdDSA signature verifies against the published archive |
 | GitHub Release body | Hand-written `release-notes/<tag>.md`, assembled by `release_notes.sh` with GitHub's contributor tail | Body has accurate changes, links, and contribution credit |
 | Sparkle / appcast text | Hand-written `release-notes/<tag>.txt`, assembled by `release_notes.sh` with the `Thanks:` credit line | Same change set as the body, no markdown, figures agree with it |
@@ -79,7 +80,33 @@ Whether a tunnel-free path prompts was not measured. This document records the p
 
 When `SelfTest.run` is executing inside an `.app`, it reads `Bundle.main`'s actual `NSLocalNetworkUsageDescription` and requires a nonempty `String`. A missing key, a blank string, and a non-string value fail that run. A bare SwiftPM executable has no app `Info.plist`, so the same check does not apply there and `make selftest` stays valid. The check keys off the bundle being an `.app`, not the shipping bundle identifier, and it is part of the release binary rather than a `#if DEBUG` block. It reads `Bundle.main` directly, with no production helper added for the test. `make selftest-bundled` is what exercises it.
 
-## Code signing and local secret storage
+## Developer ID signing and notarization
+
+Release builds are signed with the maintainer's Developer ID Application certificate and notarized, starting with the first release cut by the three-job workflow (2026-09). Local builds stay ad-hoc unless `SIGN_IDENTITY` is set for `scripts/bundle.sh`.
+
+| Job | Holds | Does |
+|---|---|---|
+| `build` | nothing (read-only token, no Environment) | Rust + Swift build, ad-hoc bundle, release notes, `unsigned.tar` artifact |
+| `sign` | `release` Environment: Developer ID .p12 + password, notary API key, Sparkle key; the tap key for an emptiness check only | Temporary keychain, re-sign inside-out, notarize (verdict from JSON, not exit code), staple, verify the extracted archive, appcast |
+| `publish` | `release` Environment: tap deploy key; `contents`/`actions` write | GitHub Release, appcast commit on main, badge dispatch, tap cask |
+
+- **Secrets live in the `release` Environment** (deployment policy: `v*` tags and `main`; required reviewer: the maintainer), never at repository level. Environment variables: `NOTARY_KEY_ID`, `NOTARY_ISSUER_ID`, `APPLE_TEAM_ID`. A `v*` tag ruleset restricts creating, moving and deleting release tags to the maintainer.
+- **Dry run:** `workflow_dispatch` on `main` builds, signs, notarizes and verifies as a tag would, checks that every key the tag path reads is present, and publishes nothing; the signed archive is a one-day artifact.
+- **The Sparkle key alone can push an update.** Tested 2026-09-28: an installed Developer-ID build accepted an ad-hoc update through Sparkle, so Sparkle gates on the EdDSA signature, not on the code-signing identity. The same test showed an installed ad-hoc v2.1.0 updating to a Developer-ID build, which is the path every existing user takes.
+- **No entitlements.** Keychain reads go through a child `/usr/bin/security`, the Rust core is statically linked and nothing is loaded at runtime. Adding any entitlement is a maintainer decision; `verify_signed_app.sh` fails a release that carries one.
+- **Sparkle's XPC services are removed** by `bundle.sh`: Syrtis is not sandboxed and keeps `SUEnableInstallerLauncherService` off, and Sparkle's documentation allows removing them.
+
+**Revocation.** A leaked notary key: revoke it in App Store Connect → Users and Access → Integrations, create a new one, replace the Environment secret and variable. A leaked Developer ID certificate: revoke it at developer.apple.com → Certificates and contact Apple; what revocation does to builds already notarized has to be confirmed with Apple's documentation at that time before relying on it. A leaked Sparkle key needs a key rotation through Sparkle's documented procedure.
+
+**Residual risk.** The split keeps the keys away from the build, not the build away from the release: a compromised toolchain or dependency in `build` can still hand `sign` a tampered app, and it would be signed and notarized. There is no independent build-to-sign provenance check (it would need a reproducible or second build); SHA-pinned actions and a cache-free build narrow it.
+
+**A publish that stops partway.** `publish` creates the GitHub Release, then pushes the appcast, then bumps the tap, and cannot undo an earlier step. Before re-running anything, check the three places: the release page has `Syrtis.app.tar.gz` (and `latest.json` for a stable tag); `appcast.xml` on main has an item for the version; `Casks/syrtis.rb` in the tap names the version and the archive's sha256. If it failed before `gh release create`, re-run the `publish` job. If it failed after, a re-run stops at `gh release create` because the release exists; finish the missing steps by hand from the `signed` artifact (kept one day) instead of re-tagging.
+
+**Rollback.** Reverting to the ad-hoc chain is possible (ad-hoc updates install over Developer-ID builds, above), but the reverted workflow reads repository-level secrets, which are deleted once the Environment holds them: the maintainer restores them first. The normal recovery from a bad signed release is a new signed tag.
+
+## Local secret storage
+
+> 下段寫於 Developer ID 簽署之前（當時 release bundle 為 ad-hoc）。Keychain 遷移仍是另立 plan 的後續工作。
 
 目前SwiftPM與release bundle都是ad-hoc signed；這能驗證bundle完整性流程，但不提供跨rebuild／update穩定的Developer ID designated requirement。因此provider pace的account-scope installation key不得依賴restrictive Keychain ACL，現行source of truth是hardened Application Support目錄內的exact 32-byte owner-only file（directory `0700`、file `0600`）。既有開發用Keychain item不讀取、不刪除、不更新、不遷移。
 
@@ -101,7 +128,7 @@ Source comes from SwiftPM's own checkout under `.build/checkouts/Sparkle`, which
 
 > **Updater rule：** this is the highest-consequence single point in the release chain. A defective framework breaks updating for the entire installed base at once, and the cask is `auto_updates true`, so `brew upgrade` is not a rescue channel. `scripts/bundle.sh` therefore asserts on the binary it just copied — the bundled `Autoupdate` must reference `SUNormalizedInstallationPath` — and fails the build otherwise. The assertion is on the shipping artifact rather than on source text, and it discriminates: the official prebuilt scores zero under the same check. Do not weaken it into a source scan, and do not make embedding the framework conditional; an app assembled without an updater looks fine and silently never updates again.
 
-CI runs `scripts/bundle.sh` on pushes to `main` through `make selftest-bundled` (in `.github/workflows/ci-release.yml`, which runs beside `ci.yml`; both runs must be green before a tag, and release.yml's `gate` job, `scripts/check_ci_gate.sh`, stops the release otherwise: the tag still exists, but the `release` job, which signs and publishes, needs the gate and does not run), so a broken Sparkle build fails there rather than after a tag is pushed. Upgrading Sparkle now means rebuilding it here; the prebuilt artifact cannot simply be consumed again.
+CI runs `scripts/bundle.sh` on pushes to `main` through `make selftest-bundled` (in `.github/workflows/ci-release.yml`, which runs beside `ci.yml`; both runs must be green before a tag, and release.yml's `gate` job, `scripts/check_ci_gate.sh`, stops the release otherwise: the tag still exists, but `build`, `sign` and `publish` need the gate and do not run), so a broken Sparkle build fails there rather than after a tag is pushed. Upgrading Sparkle now means rebuilding it here; the prebuilt artifact cannot simply be consumed again.
 
 ## Migration principle
 
@@ -131,7 +158,7 @@ Keep English and `zh-tw` copy aligned, preserve original Syrtis design, and trea
 
 The release notes path has two forms and two published surfaces: the GitHub Release body and the Sparkle appcast description. The legacy Tauri manifest is frozen at v1.20.2 and does not carry the current notes.
 
-The two bodies are hand-written and bound to the tag by filename (`release-notes/<tag>.{md,txt}`), so they are deterministic and a missing one fails the release job rather than inheriting the previous version's text. What is still assembled at run time is the contributor credit line and GitHub's changelog tail: both come from the API under `GH_TOKEN` and are silently absent without it. So local preview text is still not proof of the CI artifact — the bodies will match, the credit and tail may not.
+The two bodies are hand-written and bound to the tag by filename (`release-notes/<tag>.{md,txt}`), so they are deterministic and a missing one fails the release's `build` job rather than inheriting the previous version's text. What is still assembled at run time is the contributor credit line and GitHub's changelog tail: both come from the API under `GH_TOKEN` and are silently absent without it. So local preview text is still not proof of the CI artifact — the bodies will match, the credit and tail may not.
 
 A durable escaping regression occurred when a note first contained literal `<`: awk replacement semantics turned `&lt;` into `<lt;`. The renderer lives in [`scripts/render_notes_html.sh`](../../scripts/render_notes_html.sh), which `make_appcast.sh` calls with the sidecar path; `make_appcast.sh` keeps the empty-notes guard, because an empty sidecar becomes an empty `<description>`. `render_notes_html.sh --self-test` renders a fixture containing literal `<`, `&`, `>`, an already-escaped `&lt;` and `]]>`, compares the result byte for byte, and runs in CI's release-notes contract step, so a broken `esc()` in the shipping file fails there. `>` is escaped even though HTML does not need it, because the output is embedded in CDATA, where a raw `]]>` ends the section; whether `generate_appcast` splits it when embedding is unverified, and escaping removes the question.
 
