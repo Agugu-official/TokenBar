@@ -1,7 +1,7 @@
 #!/bin/bash
-# Notarize a signed Syrtis.app and staple the ticket to it.
+# Notarize a signed Syrtis.app or installer DMG and staple the ticket to it.
 #
-#   scripts/notarize_app.sh <Syrtis.app>
+#   scripts/notarize_app.sh <Syrtis.app | Syrtis.dmg>
 #
 # Credentials, one of:
 #   NOTARY_PROFILE                               a notarytool keychain profile (local)
@@ -21,12 +21,18 @@ fi
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
-ditto -c -k --keepParent "$APP" "$WORK/submit.zip"
+# An app (a directory) is submitted as a zip; a DMG (a file) as itself.
+if [ -d "$APP" ]; then
+  SUBMIT="$WORK/submit.zip"
+  ditto -c -k --keepParent "$APP" "$SUBMIT"
+else
+  SUBMIT="$APP"
+fi
 
 # Bounded wait. A non-zero exit fails the run even if the JSON says
 # Accepted, but only after the log below has been fetched.
 RC=0
-xcrun notarytool submit "$WORK/submit.zip" "${AUTH[@]}" --wait --timeout 60m \
+xcrun notarytool submit "$SUBMIT" "${AUTH[@]}" --wait --timeout 60m \
   --output-format json > "$WORK/result.json" || RC=$?
 field() { python3 -c 'import json,sys
 try: print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))

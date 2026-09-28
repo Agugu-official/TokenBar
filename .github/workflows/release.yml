@@ -166,8 +166,9 @@ jobs:
     # this job too, and the dry run would end green having signed nothing.
     if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: xcode-27
-    # Notarization usually takes minutes; this bounds a stalled queue.
-    timeout-minutes: 90
+    # Two notarizations (app, then DMG), each allowed 60 min by
+    # notarize_app.sh; they usually take minutes. This bounds a stalled queue.
+    timeout-minutes: 150
     environment: release
     permissions:
       contents: read
@@ -271,6 +272,18 @@ jobs:
           tar -xzf Syrtis.app.tar.gz -C check
           scripts/verify_signed_app.sh check/Syrtis.app "$APPLE_TEAM_ID"
 
+          # Installer DMG around the signed, stapled app: assembled with
+          # hdiutil from the committed layout (assets/dmg), then signed,
+          # notarized and stapled itself, and verified mounted.
+          DMG="Syrtis-$VERSION.dmg"
+          scripts/make_dmg.sh work/Syrtis.app "$DMG"
+          # The keychain relocks after 30 idle minutes, and the app's
+          # notarization wait may have been longer.
+          security unlock-keychain -p "$KC_PW" "$KC"
+          codesign --force --timestamp --sign "$IDENTITY" --keychain "$KC" "$DMG"
+          NOTARY_KEY_FILE="$P8" scripts/notarize_app.sh "$DMG"
+          scripts/verify_signed_dmg.sh "$DMG" "$APPLE_TEAM_ID"
+
       # generate_appcast comes from resolving Sparkle's pinned package here,
       # not from the build artifact, which the unprivileged job produced.
       - name: Sign and build appcast
@@ -296,6 +309,7 @@ jobs:
           name: signed
           path: |
             Syrtis.app.tar.gz
+            Syrtis-*.dmg
             sha256.txt
             appcast.xml
             release-notes.txt
@@ -384,7 +398,7 @@ jobs:
         working-directory: ${{ runner.temp }}/signed
         run: |
           PRERELEASE_FLAG=""
-          ASSETS="Syrtis.app.tar.gz"
+          ASSETS="Syrtis.app.tar.gz Syrtis-$VERSION.dmg"
           case "$VERSION" in
             *-*) PRERELEASE_FLAG="--prerelease";;
             *) ASSETS="$ASSETS latest.json";;  # frozen legacy Tauri manifest

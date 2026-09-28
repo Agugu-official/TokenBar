@@ -1,0 +1,86 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=GFS+Didot&family=Hanken+Grotesk:wght@400;500&family=JetBrains+Mono&display=swap" rel="stylesheet">
+<style>
+  /* DMG window background, 660x400 pt, rendered at 2x.
+     Icons (not drawn here): app at (170, 205), Applications at (490, 205),
+     128 pt, labels below them. Keep art out of y 140-300 around both. */
+  :root {
+    /* Light identity (landing light theme): Finder draws icon labels in
+       black in both appearances, so the background stays light. */
+    --bg: #F3F5F4;
+    --teal: #1B5E56;
+    --sand: #85692C;
+    --muted: #536663;
+    --line: #D6DFDD;
+  }
+  html, body { margin: 0; width: 660px; height: 400px; overflow: hidden; }
+  body {
+    background:
+      radial-gradient(420px 260px at 8% 0%, rgba(27,94,86,0.07), transparent 70%),
+      radial-gradient(380px 240px at 100% 100%, rgba(189,159,95,0.12), transparent 70%),
+      var(--bg);
+    font-family: "Hanken Grotesk", -apple-system, sans-serif;
+    position: relative;
+  }
+  .mark {
+    position: absolute; top: 34px; left: 0; right: 0; text-align: center;
+    font-family: "GFS Didot", "Didot", serif; font-size: 40px; color: var(--teal);
+    letter-spacing: 0.5px;
+  }
+  .tag {
+    position: absolute; top: 88px; left: 0; right: 0; text-align: center;
+    font-size: 13px; color: var(--muted); letter-spacing: 0.3px;
+  }
+  /* The drag: a trail of sand grains thickening toward the arrow head. */
+  svg.drag { position: absolute; left: 250px; top: 181px; }
+  .verb {
+    position: absolute; top: 236px; left: 250px; width: 160px; text-align: center;
+    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px;
+    color: var(--sand); opacity: 0.85; letter-spacing: 0.4px;
+  }
+  /* Sediment strata along the floor, as on the landing page and OG card. */
+  .strata { position: absolute; left: 40px; right: 40px; bottom: 30px; }
+  .strata div { height: 1px; margin-top: 7px; }
+</style>
+</head>
+<body>
+  <div class="mark">Σύρτις</div>
+  <div class="tag">Where your tokens settle.</div>
+
+  <svg class="drag" width="160" height="48" viewBox="0 0 160 48">
+    <g id="grains"></g>
+    <path d="M134 14 L150 24 L134 34" fill="none" stroke="#85692C" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+  <div class="verb">σύρω · drag</div>
+
+  <div class="strata">
+    <div style="background: #D6DFDD; width: 100%"></div>
+    <div style="background: rgba(27,94,86,0.35); width: 74%"></div>
+    <div style="background: rgba(189,159,95,0.6); width: 52%"></div>
+    <div style="background: #D6DFDD; width: 88%"></div>
+  </div>
+
+  <script>
+    // Deterministic grains (seeded), denser and larger toward the head.
+    let s = 7;
+    const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
+    const g = document.getElementById('grains');
+    for (let i = 0; i < 150; i++) {
+      const t = Math.pow(rnd(), 0.6);            // bias toward the head
+      const x = 6 + t * 128;
+      const spread = 7 * (1 - t) + 1.5;          // loose at the tail, tight at the head
+      const y = 24 + (rnd() - 0.5) * 2 * spread;
+      const r = 0.45 + t * 0.9;
+      const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      c.setAttribute('cx', x.toFixed(2)); c.setAttribute('cy', y.toFixed(2));
+      c.setAttribute('r', r.toFixed(2));
+      c.setAttribute('fill', '#9C7C3A');
+      c.setAttribute('opacity', (0.25 + t * 0.7).toFixed(2));
+      g.appendChild(c);
+    }
+  </script>
+</body>
+</html>
