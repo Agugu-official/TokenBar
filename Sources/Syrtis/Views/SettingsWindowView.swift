@@ -105,6 +105,8 @@ struct SettingsWindowView: View {
             .joined(separator: "|")
     }
 
+    private static let pageTop = "settings.page.top"
+
     var body: some View {
         HStack(spacing: 0) {
             // The footer rides in the List's own safe area, not a sibling VStack:
@@ -122,19 +124,28 @@ struct SettingsWindowView: View {
             Divider().ignoresSafeArea(edges: .top)
             ScrollViewReader { proxy in
                 ScrollView {
-                    SettingsPanel(
-                        page: selectedPage,
-                        agentUsage: model.agentUsage,
-                        modelReport: model.modelReport,
-                        presentClients: model.stats?.presentClients,
-                        isLoading: isInitialLoad,
-                        reportLoading: model.modelLoading)
-                        .padding(14)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(OverlayScrollerEnforcer())
+                    // Zero-height marker at the top of the page, so switching
+                    // pages can scroll back to it; a ScrollView keeps its
+                    // offset when only its content changes.
+                    VStack(spacing: 0) {
+                        Color.clear.frame(height: 0).id(Self.pageTop)
+                        SettingsPanel(
+                            page: selectedPage,
+                            agentUsage: model.agentUsage,
+                            modelReport: model.modelReport,
+                            presentClients: model.stats?.presentClients,
+                            isLoading: isInitialLoad,
+                            reportLoading: model.modelLoading)
+                            .padding(14)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(OverlayScrollerEnforcer())
+                    }
                 }
                 .scrollIndicators(.never)
                 .frame(width: 354)
+                .onChange(of: selectedPage) {
+                    proxy.scrollTo(Self.pageTop, anchor: .top)
+                }
                 .onAppear {
                     guard let destination else { return }
                     selectedPage = destination.page

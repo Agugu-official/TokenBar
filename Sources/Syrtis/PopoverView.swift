@@ -227,6 +227,12 @@ struct PopoverView: View {
                     dragBase == nil ? viewport.frame(in: .global) : nil)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
+                // A new ScrollView per tab and view: the incoming lens starts
+                // at the top while the outgoing one fades out where it was.
+                // Scrolling one shared ScrollView back up would show the old
+                // lens scroll before the crossfade, and delay it.
+                .id(lensKey)
+                .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .top)))
             }
             PanelDivider()
             footer
@@ -674,13 +680,15 @@ struct PopoverView: View {
         }
     }
 
+    /// Identity of the visible lens. The content ScrollView is keyed on it,
+    /// so switching either the tab or the view swaps the whole scroll view,
+    /// and the crossfade transition lives there.
+    private var lensKey: String { "\(activeTab)|\(activeViewRaw)" }
+
     /// Lens router. The client tab picks *which* data (clientIds slice), the
-    /// view switch picks *how* it is broken down; the two compose. Switching
-    /// either crossfades with a subtle scale (id swap drives the transition).
+    /// view switch picks *how* it is broken down; the two compose.
     @ViewBuilder private var lens: some View {
         lensContent
-            .id("\(activeTab)|\(activeViewRaw)")
-            .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .top)))
     }
 
     @ViewBuilder private var lensContent: some View {
