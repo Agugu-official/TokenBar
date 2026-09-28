@@ -88,6 +88,26 @@ enum AttributionOnboardingCard {
     /// — see `GrokBotKeychainConsent`'s note on the same contrast. This flag
     /// records an ANSWER ("not now"), so a user who has not yet decided keeps
     /// seeing the card on every open; only tapping "Not now" suppresses it.
+    /// The proposals the card would offer for this data, or nil before it
+    /// has loaded. Shared by the card and the setup header's count.
+    static func summary(
+        modelReport: ModelReport?, agentUsage: AgentUsagePayload?
+    ) -> UsageAttributionSettings.OnboardingSummary? {
+        guard let modelReport, let agentUsage else { return nil }
+        return UsageAttributionSettings.onboardingSummary(
+            entries: modelReport.entries,
+            confirmed: [],
+            subscriptionClients: UsageAttributionSettings.subscriptionClients(from: agentUsage),
+            routedSubscriptions: UsageAttributionSettings.routedSubscriptions(from: agentUsage))
+    }
+
+    /// Whether the card is on screen for this data right now.
+    static func shows(modelReport: ModelReport?, agentUsage: AgentUsagePayload?) -> Bool {
+        let may = mayShow()
+        return isVisible(
+            mayShow: may, summary: may ? summary(modelReport: modelReport, agentUsage: agentUsage) : nil)
+    }
+
     static func markDismissed(defaults: UserDefaults = .standard) {
         defaults.set(true, forKey: dismissedKey)
     }
@@ -127,12 +147,7 @@ struct AttributionOnboardingCardView: View {
     /// report and the agent-usage payload the popover already polls — never
     /// from the stored suggestions table, which Settings alone fills.
     private var summary: UsageAttributionSettings.OnboardingSummary? {
-        guard let modelReport, let agentUsage else { return nil }
-        return UsageAttributionSettings.onboardingSummary(
-            entries: modelReport.entries,
-            confirmed: [],
-            subscriptionClients: UsageAttributionSettings.subscriptionClients(from: agentUsage),
-            routedSubscriptions: UsageAttributionSettings.routedSubscriptions(from: agentUsage))
+        AttributionOnboardingCard.summary(modelReport: modelReport, agentUsage: agentUsage)
     }
 
     var body: some View {
@@ -257,6 +272,12 @@ struct OnboardingCardContainer<Card: View>: View {
     let visible: Bool
     @ViewBuilder let card: () -> Card
 
+    /// The gap below a visible card. It lives inside the conditional, so a
+    /// dismissed card takes its gap with it: parents stack these with no
+    /// spacing of their own. Stack spacing on the parent kept a gap for every
+    /// hidden card, and the space grew with each card answered.
+    static var gap: CGFloat { 12 }
+
     /// Long enough to read as a deliberate exit, short enough not to hold up
     /// the dashboard behind it.
     static var dismissAnimation: Animation { .easeInOut(duration: 0.32) }
@@ -270,6 +291,7 @@ struct OnboardingCardContainer<Card: View>: View {
         VStack(spacing: 0) {
             if visible {
                 card()
+                    .padding(.bottom, Self.gap)
                     .transition(.asymmetric(insertion: .opacity, removal: Self.removal))
             }
         }

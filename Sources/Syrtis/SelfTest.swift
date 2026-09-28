@@ -1336,16 +1336,16 @@ enum SelfTest {
             "animation pace rescales the sand levels too")
         expect(
             AnimationPaceOnboarding.isVisible(
-                style: "sand", animate: true, hasChosen: false, isNonUserRuntime: false)
+                style: "sand", animate: true, answered: false, isNonUserRuntime: false)
                 && !AnimationPaceOnboarding.isVisible(
-                    style: "sand", animate: true, hasChosen: true, isNonUserRuntime: false)
+                    style: "sand", animate: true, answered: true, isNonUserRuntime: false)
                 && !AnimationPaceOnboarding.isVisible(
-                    style: "ring", animate: true, hasChosen: false, isNonUserRuntime: false)
+                    style: "ring", animate: true, answered: false, isNonUserRuntime: false)
                 && !AnimationPaceOnboarding.isVisible(
-                    style: "cat", animate: false, hasChosen: false, isNonUserRuntime: false)
+                    style: "cat", animate: false, answered: false, isNonUserRuntime: false)
                 && !AnimationPaceOnboarding.isVisible(
-                    style: "cat", animate: true, hasChosen: false, isNonUserRuntime: true),
-            "pace onboarding shows only for an animating icon, before a pace is picked, in a user runtime")
+                    style: "cat", animate: true, answered: false, isNonUserRuntime: true),
+            "pace onboarding shows only for an animating icon, until it is answered, in a user runtime")
         // Hysteresis: a rate at a threshold does not flip the level back and forth.
         expect(
             TrayAnimator.sandLevel(tokensPerMinute: 310_000, current: 1) == 1
@@ -1355,6 +1355,46 @@ enum SelfTest {
                 && TrayAnimator.sandLevel(tokensPerMinute: 2_000_000, current: 0) == 3
                 && TrayAnimator.sandLevel(tokensPerMinute: 310_000, current: nil) == 2,
             "sand level changes only once the rate clears a threshold by 20%")
+        // Onboarding setup (v1): each step answers on its own; the last answer
+        // completes setup; "Skip setup" completes it and settles the pace and
+        // attribution cards too. Existing users are not exempt: nothing here
+        // reads whether a setting was changed before.
+        let onboardingSuite = "Syrtis.SelfTest.OnboardingSetup.\(UUID().uuidString)"
+        if let d = UserDefaults(suiteName: onboardingSuite) {
+            defer { d.removePersistentDomain(forName: onboardingSuite) }
+            d.set("parrot", forKey: TrayAnimator.styleKey)   // an existing user's choice
+            expect(
+                !OnboardingSetup.isCompleted(defaults: d)
+                    && OnboardingSetup.Step.allCases.allSatisfy { !OnboardingSetup.isAnswered($0, defaults: d) },
+                "onboarding: an existing user with settings still starts with every step open")
+            expect(
+                OnboardingSetup.remaining(defaults: d, paceCardShows: true, attributionCardShows: false)
+                    == OnboardingSetup.Step.allCases.count + 1,
+                "onboarding: the count includes the pace card when it shows")
+            OnboardingSetup.answer(.icon, defaults: d)
+            expect(
+                OnboardingSetup.isAnswered(.icon, defaults: d) && !OnboardingSetup.isAnswered(.title, defaults: d)
+                    && !OnboardingSetup.isCompleted(defaults: d),
+                "onboarding: answering one step leaves the others open")
+            for step in OnboardingSetup.Step.allCases { OnboardingSetup.answer(step, defaults: d) }
+            expect(OnboardingSetup.isCompleted(defaults: d), "onboarding: the last answer completes setup")
+        } else {
+            expect(false, "isolated onboarding defaults suite is available")
+        }
+        let skipSuite = "Syrtis.SelfTest.OnboardingSkip.\(UUID().uuidString)"
+        if let d = UserDefaults(suiteName: skipSuite) {
+            defer { d.removePersistentDomain(forName: skipSuite) }
+            OnboardingSetup.skipAll(defaults: d)
+            expect(
+                OnboardingSetup.isCompleted(defaults: d)
+                    && OnboardingSetup.Step.allCases.allSatisfy { OnboardingSetup.isAnswered($0, defaults: d) }
+                    && AnimationPace.hasChosen(defaults: d)
+                    && d.bool(forKey: AnimationPaceOnboarding.answeredKey)
+                    && d.bool(forKey: AttributionOnboardingCard.dismissedKey),
+                "onboarding: Skip setup completes it and settles the pace and attribution cards")
+        } else {
+            expect(false, "isolated onboarding skip suite is available")
+        }
         expect(TrayAnimator.baseAnimationDuration(frameCount: 5) == 2.5, "tray five-frame base duration")
         expect(TrayAnimator.baseAnimationDuration(frameCount: 10) == 5, "tray ten-frame base duration")
 

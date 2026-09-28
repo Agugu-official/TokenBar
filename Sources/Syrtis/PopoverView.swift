@@ -702,14 +702,14 @@ struct PopoverView: View {
             let turnClientIds = Self.supportedTurnClients(clientIds)
             switch effectiveView {
             case .overview:
-                VStack(spacing: 12) {
+                VStack(spacing: 0) {  // onboarding containers carry their own gap
                     // Only on the global tab: a single client's usage is
                     // already known whose subscription it belongs to, so
                     // there is nothing here for that tab to onboard.
                     if activeTab == ClientTray.overviewTab {
-                        AttributionOnboardingCardView(
+                        OnboardingSetupCards(
+                            presentClients: displayClients,
                             modelReport: model.modelReport, agentUsage: model.agentUsage)
-                        AnimationPaceOnboardingCardView()
                     }
                     OverviewView(
                         payload: payload, clientIds: clientIds, stats: activeStats,
@@ -752,7 +752,7 @@ struct PopoverView: View {
                         agentUsage: model.agentUsage)
                 }
             case .quota:
-                VStack(spacing: 12) {
+                VStack(spacing: 0) {  // onboarding containers carry their own gap
                     // On every tab: this lens is where the window history reads
                     // 0 / $0.00 until usage is attributed, so the offer has to be
                     // here, not only on the global Overview.

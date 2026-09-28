@@ -2,9 +2,9 @@ import SwiftUI
 import TokenBarCore
 
 /// Asks, once, how much token traffic the animated menu-bar icon should be
-/// scaled for (`AnimationPace`). The flag is the answer itself: picking a pace
-/// here or in Settings ends the card, and until then the icon runs at
-/// `.moderate`.
+/// scaled for (`AnimationPace`). Picking a pace applies it at once so it can be
+/// tried on the live icon; "Done" answers the card. Until a pace is picked the
+/// icon runs at `.moderate`.
 enum AnimationPaceOnboarding {
     enum Copy {
         static let title = "How busy are your agents?"
@@ -22,18 +22,25 @@ enum AnimationPaceOnboarding {
         case .heavy: (Color(red: 0.66, green: 0.40, blue: 0.86), Color(red: 0.48, green: 0.25, blue: 0.74))
         }
     }
-    /// Option wash and border strength over the card's own accent wash.
+    /// Option wash and border strength over the card's own accent wash; the
+    /// picked option is drawn stronger so the current choice is obvious.
     static let optionFill = 0.16
     static let optionStroke = 0.45
+    static let selectedFill = 0.34
+    static let selectedStroke = 0.95
+
+    /// Set by "Done" (or "Skip setup"). Choosing a pace alone does not answer
+    /// the card: the maintainer wanted to try several before confirming.
+    static let answeredKey = OnboardingSetup.keyPrefix + "pace"
 
     /// Shown for an animated icon that is animating, before any pace was
     /// picked, in a user runtime. Independent of the other onboarding cards:
     /// the maintainer asked for every card to show at once rather than one
     /// appearing only after another is answered.
     static func isVisible(
-        style: String, animate: Bool, hasChosen: Bool, isNonUserRuntime: Bool
+        style: String, animate: Bool, answered: Bool, isNonUserRuntime: Bool
     ) -> Bool {
-        TrayAnimator.animatedStyles.contains(style) && animate && !hasChosen && !isNonUserRuntime
+        TrayAnimator.animatedStyles.contains(style) && animate && !answered && !isNonUserRuntime
     }
 }
 
@@ -41,13 +48,15 @@ struct AnimationPaceOnboardingCardView: View {
     @AppStorage(TrayAnimator.styleKey) private var style = "cat"
     @AppStorage(TrayAnimator.animateKey) private var animate = true
     @AppStorage(AnimationPace.storageKey) private var paceRaw = ""
+    @AppStorage(AnimationPaceOnboarding.answeredKey) private var answered = false
 
     private var visible: Bool {
         AnimationPaceOnboarding.isVisible(
-            style: style, animate: animate,
-            hasChosen: AnimationPace(rawValue: paceRaw) != nil,
+            style: style, animate: animate, answered: answered,
             isNonUserRuntime: BuildIdentity.isNonUserRuntime(CommandLine.arguments))
     }
+
+    private var current: AnimationPace { AnimationPace(rawValue: paceRaw) ?? .default }
 
     var body: some View {
         OnboardingCardContainer(visible: visible) {
@@ -65,9 +74,20 @@ struct AnimationPaceOnboardingCardView: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    Text(AnimationPaceOnboarding.Copy.recommended.localized)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                    HStack {
+                        Text(AnimationPaceOnboarding.Copy.recommended.localized)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        Spacer()
+                        Button(OnboardingSetupCopy.done.localized) {
+                            if AnimationPace(rawValue: paceRaw) == nil {
+                                paceRaw = AnimationPace.default.rawValue
+                            }
+                            answered = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
                 }
             }
             .onboardingCardStyle()
@@ -76,6 +96,7 @@ struct AnimationPaceOnboardingCardView: View {
 
     private func option(_ pace: AnimationPace) -> some View {
         let tint = AnimationPaceOnboarding.tint(pace)
+        let picked = pace == current
         let gradient = LinearGradient(
             colors: [tint.top, tint.bottom], startPoint: .top, endPoint: .bottom)
         return HStack(spacing: 8) {
@@ -93,12 +114,14 @@ struct AnimationPaceOnboardingCardView: View {
         .padding(.vertical, 5)
         .padding(.horizontal, 8)
         .background(
-            gradient.opacity(AnimationPaceOnboarding.optionFill),
+            gradient.opacity(
+                picked ? AnimationPaceOnboarding.selectedFill : AnimationPaceOnboarding.optionFill),
             in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .strokeBorder(
-                    tint.top.opacity(AnimationPaceOnboarding.optionStroke),
-                    lineWidth: 1))
+                    tint.top.opacity(
+                        picked ? AnimationPaceOnboarding.selectedStroke : AnimationPaceOnboarding.optionStroke),
+                    lineWidth: picked ? 1.5 : 1))
     }
 }

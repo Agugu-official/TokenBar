@@ -142,15 +142,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Deferred like the other launch-time windows: an alert racing the
-        // status item's first render fights it for the main runloop turn.
-        // Gated on the same demo/test arguments the connection is, so an
-        // `--icon-gallery` or `--demo` run never interrupts with it.
-        if DiscordPresence.mayConnect(arguments: CommandLine.arguments, enabled: true) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                DiscordIntro.presentIfNeeded()
-            }
-        }
+        // The launch-time Discord alert is replaced by the Discord setup card
+        // (OnboardingSetupCards), which asks the same question without a modal.
         lastDiscordEnabled = DiscordPresence.enabled()
         lastCostStyle = DiscordPresence.costStyle()
         lastComponents = DiscordPresence.components()
