@@ -240,7 +240,7 @@
 "Counts toward %@" = "计入 %@";
 "Suggested: counts toward %@" = "建议：计入 %@";
 "Suggested: not a subscription" = "建议：不计入订阅";
-"Usage couldn't be loaded, so there's nothing to sort yet." = "用量加载失败，目前没有可以分类的项目。";
+"Usage couldn't be loaded, so there's nothing to classify yet." = "用量加载失败，目前没有可以分类的项目。";
 "Usage breakdown is unavailable right now." = "暂时无法显示用量明细。";
 "Unspecified provider" = "未指定提供商";
 "Classification for %@" = "%@ 的分类";

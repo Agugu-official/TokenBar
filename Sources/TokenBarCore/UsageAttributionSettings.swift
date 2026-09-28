@@ -21,7 +21,7 @@ public enum UsageAttributionSettings {
         public static let noRows = "No usage split by provider in this range."
         /// The report request finished without one. Distinct from `noRows`,
         /// which is an answer about a report that did arrive.
-        public static let unavailable = "Usage couldn't be loaded, so there's nothing to sort yet."
+        public static let unavailable = "Usage couldn't be loaded, so there's nothing to classify yet."
         public static let acceptSuggestions = "Accept all suggestions (%lld)"
         public static let suggestionsHint = "Suggestions don't change anything until you accept them."
         public static let source = "%@ · %@"

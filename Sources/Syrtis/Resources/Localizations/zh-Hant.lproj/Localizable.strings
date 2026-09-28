@@ -241,7 +241,7 @@
 "Counts toward %@" = "計入 %@";
 "Suggested: counts toward %@" = "建議：計入 %@";
 "Suggested: not a subscription" = "建議：不是訂閱";
-"Usage couldn't be loaded, so there's nothing to sort yet." = "用量載入失敗，目前沒有可以分類的項目。";
+"Usage couldn't be loaded, so there's nothing to classify yet." = "用量載入失敗，目前沒有可以分類的項目。";
 "Usage breakdown is unavailable right now." = "目前無法顯示用量拆分。";
 "Unspecified provider" = "未指定供應商";
 "Classification for %@" = "%@ 的分類";
