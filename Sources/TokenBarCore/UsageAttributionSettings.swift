@@ -4,7 +4,7 @@ import Foundation
 public enum UsageAttributionSettings {
     public enum Copy {
         public static let section = "Usage attribution"
-        public static let classifyHint = "Choose which subscription each source's usage counts toward. This is your own labeling; Syrtis doesn't read any billing records."
+        public static let classifyHint = "Pick which subscription each source's usage counts toward. This only changes how Syrtis groups your usage; it doesn't read your bills."
         /// Two facts about provider identity, deliberately in one hint, and
         /// both hedged for a reason.
         ///
@@ -17,13 +17,13 @@ public enum UsageAttributionSettings {
         /// classifiable source. Neither half can be stated flatly: "nothing is
         /// merged" is false for Claude Code, and "Codex is reported as OpenAI"
         /// is false for OpenClaw. Hence "some clients".
-        public static let canonicalizationHint = "Providers are matched exactly as each tool reports them, so routes that look related can show up as separate rows, each with its own setting. Some tools merge providers before reporting (Vertex AI shows up as Anthropic, Codex as OpenAI), and a merged row can't be split here."
-        public static let noRows = "No usage split by provider in this range."
+        public static let canonicalizationHint = "Providers are matched exactly as each tool reports them, so similar ones can appear on separate rows. Some tools merge providers before reporting (Vertex AI shows up as Anthropic, Codex as OpenAI), and those rows can't be split."
+        public static let noRows = "No usage in this range lists a provider."
         /// The report request finished without one. Distinct from `noRows`,
         /// which is an answer about a report that did arrive.
-        public static let unavailable = "Usage couldn't be loaded, so there's nothing to classify yet."
+        public static let unavailable = "Usage couldn't be loaded."
         public static let acceptSuggestions = "Accept all suggestions (%lld)"
-        public static let suggestionsHint = "Suggestions don't change anything until you accept them."
+        public static let suggestionsHint = "Suggestions apply only when you accept them."
         public static let source = "%@ · %@"
         public static let observed = "Observed %@ tokens · %@"
         public static let classification = "Classification"

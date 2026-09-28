@@ -841,7 +841,7 @@ struct AgentLimitsCard: View {
 
     @ViewBuilder private func claudeSetupPrompt() -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Using a Claude `setup-token`? Syrtis picks up `CLAUDE_CODE_OAUTH_TOKEN` from your login shell. If your limits don't appear, save the token in Keychain: run this command, then paste the token when asked.")
+            Text("Using a Claude `setup-token`? Syrtis reads `CLAUDE_CODE_OAUTH_TOKEN` from your login shell. If your limits don't show, save the token to Keychain with this command:")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -884,7 +884,7 @@ struct AgentLimitsCard: View {
                 // failed is the whole point: a generic error would send them
                 // looking for a problem in Syrtis, and the collapsed
                 // "not reading your limits" line would imply they chose this.
-                Text("macOS didn't allow access to the Grok Bot login, so Syrtis stopped asking. Choose Allow to try again; macOS will ask for permission.")
+                Text("macOS blocked access to the Grok Bot login, so Syrtis stopped asking. Choose Allow to try again.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -912,7 +912,7 @@ struct AgentLimitsCard: View {
                 // mistake that produced the first draft. Reassurance that
                 // cannot be checked does not belong in a permission prompt,
                 // even when it is probably true.
-                Text("Grok Bot keeps its login in your Keychain. To show your weekly limits, Syrtis needs to read it, and macOS will ask you to allow that. Syrtis then sends the login to Grok Bot's usage service (api2.cursor.sh) to look up your limits. It never stores or logs the login, and sends it nowhere else.")
+                Text("To show your weekly Grok Bot limits, Syrtis reads Grok Bot's login from your Keychain after macOS asks you. The login is sent only to Grok Bot's usage service (api2.cursor.sh) and is never saved or logged.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

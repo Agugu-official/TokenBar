@@ -48,7 +48,7 @@
 "No activity in this window" = "這個時間窗內沒有活動";
 "No data" = "沒有資料";
 "Checking…" = "查詢中…";
-"No clients have usage yet." = "目前還沒有用戶端有用量。";
+"No clients found yet." = "目前還沒有找到用戶端。";
 "No supported agents yet" = "目前沒有支援的 Agent";
 "Checking agent limits…" = "正在查詢額度…";
 
@@ -154,9 +154,9 @@
 "consent.action.allow" = "允許";
 "Not now" = "暫時不要";
 "Waiting for macOS…" = "等待 macOS 回應…";
-"Grok Bot keeps its login in your Keychain. To show your weekly limits, Syrtis needs to read it, and macOS will ask you to allow that. Syrtis then sends the login to Grok Bot's usage service (api2.cursor.sh) to look up your limits. It never stores or logs the login, and sends it nowhere else." = "Grok Bot 把登入資訊存在你的鑰匙圈。要顯示每週額度，Syrtis 需要讀取它，macOS 會詢問你是否允許。之後 Syrtis 會把登入資訊送到 Grok Bot 的用量服務（api2.cursor.sh）查詢額度。Syrtis 不會儲存或記錄它，也不會送到其他地方。";
-"Syrtis isn't reading your Grok Bot limits." = "Syrtis 目前沒有讀取你的 Grok Bot 額度。";
-"macOS didn't allow access to the Grok Bot login, so Syrtis stopped asking. Choose Allow to try again; macOS will ask for permission." = "macOS 沒有允許存取 Grok Bot 的登入資訊，所以 Syrtis 不再詢問。按「允許」可以再試一次，macOS 會再跳出權限詢問。";
+"To show your weekly Grok Bot limits, Syrtis reads Grok Bot's login from your Keychain after macOS asks you. The login is sent only to Grok Bot's usage service (api2.cursor.sh) and is never saved or logged." = "要顯示 Grok Bot 的每週額度，Syrtis 需要讀取鑰匙圈裡的 Grok Bot 登入資訊，macOS 會先詢問你。登入資訊只會送到 Grok Bot 的用量服務（api2.cursor.sh），不會儲存或記錄。";
+"Syrtis isn't reading your Grok Bot limits." = "Syrtis 沒有讀取你的 Grok Bot 額度。";
+"macOS blocked access to the Grok Bot login, so Syrtis stopped asking. Choose Allow to try again." = "macOS 拒絕了 Grok Bot 登入資訊的存取，Syrtis 不再詢問。按「允許」可以再試一次。";
 "Error" = "錯誤";
 "Live" = "使用中";
 "No quota" = "無額度";
@@ -181,7 +181,7 @@
 "%@ — %lld%% last known quota remaining" = "%1$@ — 上次已知剩餘額度 %2$lld%%";
 "%@, %lld percent last known quota remaining" = "%1$@，上次已知剩餘額度 %2$lld%%";
 "Copy command" = "複製指令";
-"Using a Claude `setup-token`? Syrtis picks up `CLAUDE_CODE_OAUTH_TOKEN` from your login shell. If your limits don't appear, save the token in Keychain: run this command, then paste the token when asked." = "使用 Claude 的 `setup-token` 嗎？Syrtis 會從你的登入 shell 讀取 `CLAUDE_CODE_OAUTH_TOKEN`。如果額度沒有出現，請把 token 存進鑰匙圈：執行以下指令，出現提示時貼上 token。";
+"Using a Claude `setup-token`? Syrtis reads `CLAUDE_CODE_OAUTH_TOKEN` from your login shell. If your limits don't show, save the token to Keychain with this command:" = "使用 Claude 的 `setup-token`？Syrtis 會從登入 shell 讀取 `CLAUDE_CODE_OAUTH_TOKEN`。額度沒有出現的話，用這個指令把 token 存進鑰匙圈：";
 
 /* ===== 時間格式 ===== */
 "Jan" = "1月";
@@ -209,7 +209,7 @@
 "Menubar icon" = "選單列圖示";
 "Quota source" = "額度來源";
 "Individual items" = "個別項目";
-"No clients can have their own item yet." = "目前還沒有能單獨放上選單列的用戶端。";
+"No clients with quota yet." = "目前還沒有提供額度的用戶端。";
 "Looking for eligible clients…" = "正在尋找符合資格的用戶端…";
 "View tabs" = "分頁";
 "Client tabs (top bar)" = "用戶端分頁（頂端列）";
@@ -228,11 +228,11 @@
 "API-list-price equivalent" = "API 列表價格等值";
 "Nothing is classified yet. Classify sources in Settings → Usage attribution." = "目前尚未分類任何內容。請前往「設定」→「用量歸屬」分類來源。";
 "No attributed usage in this range." = "這個區間沒有歸屬用量。";
-"Choose which subscription each source's usage counts toward. This is your own labeling; Syrtis doesn't read any billing records." = "為每個來源選擇它的用量要算進哪個訂閱。這是你自己的標記，Syrtis 不會讀取任何帳單紀錄。";
-"Providers are matched exactly as each tool reports them, so routes that look related can show up as separate rows, each with its own setting. Some tools merge providers before reporting (Vertex AI shows up as Anthropic, Codex as OpenAI), and a merged row can't be split here." = "供應商名稱會照各工具回報的原樣比對，所以看起來相關的路由可能分成好幾列，各自設定。有些工具回報前就把供應商合併了（Vertex AI 顯示成 Anthropic、Codex 顯示成 OpenAI），合併過的列在這裡拆不開。";
-"No usage split by provider in this range." = "這段期間沒有按供應商區分的用量。";
+"Pick which subscription each source's usage counts toward. This only changes how Syrtis groups your usage; it doesn't read your bills." = "為每個來源選擇用量要算進哪個訂閱。這只影響 Syrtis 怎麼歸類用量，不會讀取你的帳單。";
+"Providers are matched exactly as each tool reports them, so similar ones can appear on separate rows. Some tools merge providers before reporting (Vertex AI shows up as Anthropic, Codex as OpenAI), and those rows can't be split." = "供應商照各工具回報的名稱比對，相近的可能分成不同列。有些工具回報前會先合併（Vertex AI 算成 Anthropic、Codex 算成 OpenAI），這些列無法再拆開。";
+"No usage in this range lists a provider." = "這段期間沒有標示供應商的用量。";
 "Accept all suggestions (%lld)" = "接受所有建議（%lld）";
-"Suggestions don't change anything until you accept them." = "建議在你接受之前不會改變任何設定。";
+"Suggestions apply only when you accept them." = "建議要你接受後才會套用。";
 "%@ · %@" = "%1$@ · %2$@";
 "Observed %@ tokens · %@" = "觀察到 %@ tokens · %@";
 "Classification" = "分類";
@@ -241,7 +241,7 @@
 "Counts toward %@" = "計入 %@";
 "Suggested: counts toward %@" = "建議：計入 %@";
 "Suggested: not a subscription" = "建議：不是訂閱";
-"Usage couldn't be loaded, so there's nothing to classify yet." = "用量載入失敗，目前沒有可以分類的項目。";
+"Usage couldn't be loaded." = "無法載入用量。";
 "Usage breakdown is unavailable right now." = "目前無法顯示用量拆分。";
 "Unspecified provider" = "未指定供應商";
 "Classification for %@" = "%@ 的分類";
@@ -266,15 +266,15 @@
 "Show today's usage on Discord" = "在 Discord 顯示今日用量";
 "Open Settings" = "開啟設定";
 "1.2M tokens today" = "今日 1.2M token";
-"Off by default. When on, your Discord profile shows what you tick below (today's tokens, a client name, a cost range or rounded amount) for the client you choose, with a link to Syrtis's source. It updates while you work, so it also shows when you are active. Anyone who can see your profile can read and keep each update; turning this off stops new updates but can't take back ones already sent. Hidden clients are never included. Changes here reach your profile in about 15 seconds." = "預設關閉。開啟後，你的 Discord 個人檔案會顯示下方勾選的內容（今日 token 數、用戶端名稱、花費級距或取整金額），依你選的用戶端計算，並附上 Syrtis 原始碼連結。工作時會持續更新，所以也看得出你何時在用。看得到你個人檔案的人都能讀取並保存每次更新；關閉只會停止之後的更新，已送出的內容收不回。已隱藏的用戶端一律不會送出。這裡的變更約 15 秒內出現在個人檔案上。";
+"Off by default. When on, your Discord profile shows what you tick below and updates while you work, so people can also see when you're active. Anyone who can see your profile can keep what was shown; turning this off can't take it back. Hidden clients and days with no usage are never shown." = "預設關閉。開啟後，Discord 個人檔案會顯示下方勾選的項目，並在你工作時更新，所以別人也看得出你何時在用。看得到你個人檔案的人可以留存顯示過的內容，關閉也收不回。已隱藏的用戶端和沒有用量的日子不會顯示。";
 "Include today's tokens" = "包含今日 token 數";
 "Include the client name" = "包含用戶端名稱";
 "Include cost" = "包含花費";
-"Untick everything and nothing is published." = "全部取消勾選，就什麼都不會送出。";
+"Untick everything to show nothing." = "全部取消勾選就不會顯示任何內容。";
 "Show cost as a figure instead of a range" = "以金額而非級距顯示花費";
-"A range puts you in the same band as everyone else in it. An amount is rounded to whole dollars, never cents, but it still says more about you, every day. With one client chosen above, it is that tool's spend for the day." = "級距會把你和同一區間的其他人放在一起。金額會取整到美元、不含美分，但每天都會多透露一些。如果上方選了單一用戶端，這就是那個工具當天的花費。";
+"A range is shared by many people. A whole-dollar amount says more about you." = "級距是很多人共用的區間；整數美元金額會透露更多關於你的資訊。";
 "Whichever client you used most" = "用量最高的用戶端";
-"With one client chosen, only its usage is published, so the numbers can differ from the menu bar, which counts every client, including ones Syrtis doesn't recognize. The cost is then that tool's spend for the day, not your whole day's." = "選了單一用戶端，就只會送出它的用量，所以數字可能和選單列不同；選單列會計入所有用戶端，包括 Syrtis 不認得的。花費也會變成那個工具當天的金額，不是你整天的總額。";
+"Picking one client shows only its usage and spend, so the numbers may not match the menu bar." = "選擇單一用戶端時只顯示它的用量和花費，數字可能和選單列不同。";
 "Live preview — settings apply immediately." = "即時預覽，設定會立即套用。";
 "Takes effect the next time Syrtis starts." = "下次啟動 Syrtis 時生效。";
 "Restart Syrtis?" = "重新啟動 Syrtis？";
@@ -315,27 +315,27 @@
 
 "Add config dir…" = "加入設定資料夾…";
 "Add" = "加入";
-"Not found right now. It stays in the list in case it's on a drive that isn't connected, or the path has a typo you'll fix." = "目前找不到。先留在清單裡，以防它在還沒接上的磁碟上，或路徑打錯了之後會修正。";
+"Folder not found. Kept in case the drive is disconnected or the path needs fixing." = "找不到這個資料夾。先保留，以防磁碟沒接上或路徑待修正。";
 
 /* ===== 設定：說明文字 ===== */
 "Spins faster as the live token rate climbs (idle 2 fps, 1M tokens/min tops out at 40 fps)." = "即時 token 速率越高轉得越快（閒置 2 fps，每分鐘 100 萬 tokens 時達到上限 40 fps）。";
-"Gauge icons empty as the chosen quota window runs down. With \"Color on warning only\", the icon stays one color until less than 25% is left (amber), then 10% (red), like the battery icon." = "儀表圖示會隨所選額度時間窗用掉而變空。選「僅警示時上色」時，圖示平常維持單色，剩不到 25% 轉琥珀色、不到 10% 轉紅色，和電池圖示一樣。";
-"Which quota the gauge icons and the \"Quota left\" title show. Auto picks the window closest to running out." = "決定儀表圖示和「剩餘額度」標題顯示哪個額度。「自動」會挑最接近用完的時間窗。";
-"The main Syrtis item always stays. You can add an item for each client that shows its chosen quota window; Auto picks that client's tightest window that is still reporting normally." = "Syrtis 主項目一定會保留。另外可以為個別用戶端加上項目，顯示它選定的額度時間窗；「自動」會挑該用戶端讀數正常、剩餘最少的時間窗。";
-"Off hides the Agent limits card everywhere: the Overview summary, each client's tab, and this preview. Cost and token numbers stay." = "關閉後，Agent 額度卡片在所有地方都會隱藏：總覽摘要、各用戶端分頁和這裡的預覽。花費和 token 數字照常顯示。";
-"On: bars fill up as you use quota. Off: bars show what's left and shrink. Either way, the color warns when quota runs low." = "開啟：長條隨用量變長。關閉：長條顯示剩餘量，越用越短。兩種都會在額度偏低時變色提醒。";
-"Marks how far you are over or under the expected use so far. Historical learns how you use each quota window, and shows the Linear estimate, labeled, until it has learned enough. Linear assumes even use up to the reset. Off hides the marker." = "標示目前用量比預期多或少多少。歷史：學習你在每個額度時間窗的使用習慣，學會之前先顯示線性估計並加上標示。線性：假設額度在重置前平均用掉。關閉：不顯示標記。";
-"Hides only this client's quota card, here and on its own tab; the tab and its cost and token numbers stay. Useful for an account with no quota to show, such as Claude Console. Grayed out when the tab itself is hidden below, because a hidden tab hides its quota card too." = "只隱藏這個用戶端的額度卡片（這裡和它自己的分頁）；分頁本身和花費、token 數字都會保留。適合沒有額度可顯示的帳號，例如 Claude Console。如果下方已經把分頁整個隱藏，這裡會變灰，因為隱藏分頁會連額度卡片一起隱藏。";
-"Off removes the view from the tab row in the popover. Cost and token numbers are not affected." = "關閉後，這個畫面會從彈出視窗的分頁列移除。花費和 token 數字不受影響。";
-"Drag to reorder; the order applies to both the top tabs and the quota cards. You can also drag a tab in the top bar. The switch shows or hides a client's tab, and hiding it also hides its quota card." = "拖曳可調整順序，頂端分頁和額度卡片都會照這個順序。也可以直接在頂端分頁列拖曳。開關用來顯示或隱藏用戶端的分頁，隱藏時它的額度卡片也會一起隱藏。";
-"The switch shows or hides a client's tab, and hiding it also hides its quota card. Clients that only report quota, with no usage logs on this Mac (such as Antigravity), have no tab; they are listed here so you can place their quota card. The order applies to both tabs and quota cards." = "開關用來顯示或隱藏用戶端的分頁，隱藏時它的額度卡片也會一起隱藏。只回報額度、這台 Mac 上沒有用量紀錄的用戶端（例如 Antigravity）沒有分頁，列在這裡是為了排它的額度卡片。順序同時套用到分頁和額度卡片。";
-"Only affects the live session card. On: one row per agent and model. Off: one row per app." = "只影響即時工作階段卡片。開啟：每個 agent 和模型各一列。關閉：每個 app 一列。";
-"You can also drag the handle at the bottom edge of the popover. The width is fixed; Auto uses about 60% of your screen height." = "也可以拖曳彈出視窗底部的把手。寬度固定；「自動」約為螢幕高度的 60%。";
-"How often the menu bar re-reads your agents' logs. The dashboard updates whenever you open the popover, and the live tokens-per-minute figure updates every few seconds either way." = "選單列多久重新讀取一次 agent 的紀錄檔。儀表板每次打開彈出視窗都會更新；即時每分鐘 token 數不受這個設定影響，每幾秒更新一次。";
-"Syrtis started as a fork of tokcat by handlecusion. Log parsing and pricing come from tokscale by Junho Yeo; the menu bar design draws on CodexBar by Peter Steinberger; the running cat comes from RunCat by Takuto Nakamura. MIT licensed." = "Syrtis 最初是從 handlecusion 的 tokcat 分支出來的。紀錄解析和計價來自 Junho Yeo 的 tokscale；選單列設計參考 Peter Steinberger 的 CodexBar；奔跑的貓來自 Takuto Nakamura 的 RunCat。採用 MIT 授權。";
-"For a second Claude account, run Claude Code with CLAUDE_CONFIG_DIR set to a separate folder, then add that folder here. Its usage is added to the same totals everywhere in Syrtis; there is no per-account view." = "要加第二個 Claude 帳號，請用 CLAUDE_CONFIG_DIR 指向另一個資料夾來執行 Claude Code，再把那個資料夾加到這裡。它的用量會併入 Syrtis 各處的同一份總計，不會分帳號顯示。";
-"%lld of %lld folder(s) can't be read right now. Syrtis will try again on the next scan." = "%2$lld 個資料夾中有 %1$lld 個目前讀不到，Syrtis 下次掃描時會再試。";
-"%lld path(s) can't be used as a scan folder, so they weren't added." = "有 %lld 個路徑不能當作掃描資料夾，所以沒有加入。";
+"Gauge icons empty as quota is used. \"Color on warning only\" keeps one color until 25% is left, then amber, and red at 10%." = "儀表圖示會隨額度用掉而變空。「僅警示時上色」平常維持單色，剩 25% 轉琥珀色，剩 10% 轉紅色。";
+"Which quota the gauge icon and the \"Quota left\" title follow. Auto follows whichever window, across all your agents, has the least left." = "儀表圖示和「剩餘額度」標題要看哪個額度。「自動」會跟著所有 agent 中剩最少的那個。";
+"Add a separate menu bar item for a client, showing one of its quota windows. Auto shows the one with the least left." = "為用戶端另外加一個選單列項目，顯示它的其中一個額度。「自動」顯示剩最少的那個。";
+"Off hides the quota card on Overview and on every client tab." = "關閉後，總覽和各用戶端分頁都不顯示額度卡片。";
+"On: bars show how much you've used. Off: bars show what's left." = "開啟：長條顯示已用多少。關閉：長條顯示還剩多少。";
+"Shows whether you're using quota faster or slower than expected. Historical compares with your past windows and uses Linear until it has enough history. Linear assumes even use until the reset." = "標示你用額度比預期快還是慢。歷史：和你過去的時間窗比較，歷史不夠時先用線性。線性：假設到重置前平均使用。";
+"Hide one client's quota card and keep its tab. Grayed out when the tab is hidden, which already hides the card." = "隱藏單一用戶端的額度卡片，分頁保留。分頁已隱藏時會變灰，因為隱藏分頁就不會有卡片。";
+"Hide views you don't use from the tab row." = "把用不到的畫面從分頁列隱藏。";
+"Drag to order tabs and quota cards. The switch hides a client's tab and its quota card." = "拖曳調整分頁和額度卡片的順序。開關會隱藏用戶端的分頁和額度卡片。";
+"Drag to order tabs and quota cards. The switch hides a client's tab and its quota card. Clients that only report quota, such as Antigravity, have no tab and are listed only for ordering." = "拖曳調整分頁和額度卡片的順序。開關會隱藏用戶端的分頁和額度卡片。只回報額度的用戶端（例如 Antigravity）沒有分頁，在這裡只能排順序。";
+"On: the live session card gives each agent and model its own row. Off: one row per app." = "開啟：即時工作階段卡片每個 agent 和模型各一列。關閉：每個 app 一列。";
+"You can also drag the bottom edge of the popover. Auto uses about 60% of your screen height." = "也可以直接拖曳彈出視窗底部。「自動」約為螢幕高度的 60%。";
+"How often Syrtis rereads all logs in full. In between, new activity still shows up within 5 minutes." = "Syrtis 多久完整重讀一次所有紀錄檔。兩次之間，新的用量仍會在 5 分鐘內出現。";
+"Syrtis started as a fork of tokcat by handlecusion. Log parsing and pricing come from tokscale by Junho Yeo, the menu bar design draws on CodexBar by Peter Steinberger, and the running cat comes from RunCat by Takuto Nakamura. MIT licensed." = "Syrtis 最初是從 handlecusion 的 tokcat 分支出來的。紀錄解析和計價來自 Junho Yeo 的 tokscale；選單列設計參考 Peter Steinberger 的 CodexBar；奔跑的貓來自 Takuto Nakamura 的 RunCat。採用 MIT 授權。";
+"For another Claude account, run Claude Code with CLAUDE_CONFIG_DIR set to its own folder and add that folder here. Its usage joins your totals; accounts aren't shown separately." = "另一個 Claude 帳號：用 CLAUDE_CONFIG_DIR 指定它自己的資料夾來執行 Claude Code，再把資料夾加到這裡。它的用量會算進總計，不會分帳號顯示。";
+"%lld of %lld folders can't be read right now; Syrtis will retry on the next scan." = "%2$lld 個資料夾中有 %1$lld 個暫時讀不到，下次掃描會再試。";
+"%lld path(s) can't be scanned and weren't added." = "有 %lld 個路徑無法掃描，沒有加入。";
 
 /* ===== 步調（pace）=====
    片段各自查表後以 " · " 串接，分隔符與語言無關，因此逐片段翻譯是安全的。
@@ -436,7 +436,7 @@
 "Today" = "今天";
 "%lld%% ahead of pace" = "超前步調 %lld%%";
 "Layout: Chart" = "版面：曲線";
-"Full: the wide card with a pace bar. Classic: the earlier compact layout, without pace. Chart: each window's quota over time, with the pace estimate as a second line; a window with no recorded history shows as a bar." = "完整：寬版卡片，含步調長條。經典：原本的精簡版面，不含步調。曲線：把每個時間窗的額度畫成隨時間變化的線，步調估計是第二條線；還沒有歷史紀錄的時間窗改用長條顯示。";
+"Full: bar with a pace marker. Classic: compact bar, no pace. Chart: quota over time, with pace as a second line; windows without history show a bar." = "完整：長條加步調標記。經典：精簡長條，沒有步調。曲線：額度隨時間的變化，步調是第二條線；沒有歷史的時間窗仍顯示長條。";
 
 /* ===== 逐訂閱用量 ===== */
 
@@ -467,7 +467,7 @@
 "Limits" = "Agent 額度";
 "Chart" = "用量圖";
 "Trace" = "即時追蹤";
-"Which cards Overview shows, and in what order. The usage chart can't be hidden: Overview is where you land when other views are hidden, so it always keeps one card. Cost and token numbers are not affected." = "決定「總覽」顯示哪些卡片、以什麼順序排列。用量圖不能隱藏：其他畫面都隱藏時會回到總覽，所以它至少要留一張卡片。花費和 token 數字不受影響。";
+"Choose which cards Overview shows. The usage chart always stays." = "選擇總覽要顯示哪些卡片。用量圖一定會保留。";
 "by reset %lld%%" = "重置時 %lld%%";
 "No usage this day" = "這天沒有用量";
 "Most recent window" = "最近一個時間窗";
@@ -571,7 +571,7 @@
 "More than 25% remaining, other text, or unavailable quota" = "剩餘超過 25%、其他文字，或額度無法取得";
 "More than 10% and up to 25% remaining" = "剩餘超過 10% 至 25%";
 "10% or less remaining" = "剩餘 10% 或以下";
-"Custom colors change with each item's remaining quota: normal above 25%, low above 10%, very low at 10% or less. Other text, and quota Syrtis can't read, stays normal. Automatic keeps the default colors." = "自訂顏色會隨各項目的剩餘額度改變：高於 25% 是正常色，高於 10% 是偏低色，10% 以下（含）是不足色。其他文字和讀不到的額度一律用正常色。選「自動」維持預設配色。";
+"Custom colors follow remaining quota: normal above 25%, low at 25% or less, very low at 10% or less. A stale reading always turns grey." = "自訂顏色會隨剩餘額度改變：高於 25% 為正常，25% 以下為偏低，10% 以下為不足。讀數過時時一律變灰。";
 
 /* Grok Bot quota setup */
 "Loading Grok Bot limits…" = "正在載入 Grok Bot 額度…";

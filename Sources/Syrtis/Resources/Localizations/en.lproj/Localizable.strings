@@ -120,7 +120,7 @@
 "Chart" = "Chart";
 "Trace" = "Trace";
 "Streaks" = "Streaks";
-"Which cards Overview shows, and in what order. The usage chart can't be hidden: Overview is where you land when other views are hidden, so it always keeps one card. Cost and token numbers are not affected." = "Which cards Overview shows, and in what order. The usage chart can't be hidden: Overview is where you land when other views are hidden, so it always keeps one card. Cost and token numbers are not affected.";
+"Choose which cards Overview shows. The usage chart always stays." = "Choose which cards Overview shows. The usage chart always stays.";
 "by reset %lld%%" = "by reset %lld%%";
 "No usage this day" = "No usage this day";
 "Most recent window" = "Most recent window";
