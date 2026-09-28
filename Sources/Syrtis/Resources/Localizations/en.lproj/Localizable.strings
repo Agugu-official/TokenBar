@@ -120,7 +120,7 @@
 "Chart" = "Chart";
 "Trace" = "Trace";
 "Streaks" = "Streaks";
-"Which cards the Overview lens shows, in this order. The usage chart cannot be hidden — Overview is where every hidden lens falls back to, so it has to keep something. Cost and token data are unaffected." = "Which cards the Overview lens shows, in this order. The usage chart cannot be hidden — Overview is where every hidden lens falls back to, so it has to keep something. Cost and token data are unaffected.";
+"Which cards Overview shows, and in what order. The usage chart can't be hidden: Overview is where you land when other views are hidden, so it always keeps one card. Cost and token numbers are not affected." = "Which cards Overview shows, and in what order. The usage chart can't be hidden: Overview is where you land when other views are hidden, so it always keeps one card. Cost and token numbers are not affected.";
 "by reset %lld%%" = "by reset %lld%%";
 "No usage this day" = "No usage this day";
 "Most recent window" = "Most recent window";

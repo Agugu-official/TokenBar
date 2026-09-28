@@ -291,7 +291,7 @@ struct SettingsPanel: View {
                     }
                 }
             }
-            hint("Custom colors follow each item's remaining quota: normal above 25%, low above 10% through 25%, and very low at 10% or below. Other text and unavailable quota use the normal color. Automatic keeps the original colors.")
+            hint("Custom colors change with each item's remaining quota: normal above 25%, low above 10%, very low at 10% or less. Other text, and quota Syrtis can't read, stays normal. Automatic keeps the default colors.")
         }
 
         section("Menubar icon") {
@@ -311,13 +311,13 @@ struct SettingsPanel: View {
                 radioGroup(
                     selection: $iconColoringRaw,
                     options: IconColoring.allCases.map { ($0.rawValue, $0.label) })
-                hint("Gauge icons drain as the selected quota window empties. \"Color on warning only\" stays monochrome until under 25% left (amber) and 10% (red), like the battery icon.")
+                hint("Gauge icons empty as the chosen quota window runs down. With \"Color on warning only\", the icon stays one color until less than 25% is left (amber), then 10% (red), like the battery icon.")
             }
         }
 
         section("Quota source") {
             quotaSourcePicker()
-            hint("Feeds the gauge icons and the \"Quota left\" title. Auto follows whichever window is closest to running out.")
+            hint("Which quota the gauge icons and the \"Quota left\" title show. Auto picks the window closest to running out.")
         }
 
         individualItemsSection()
@@ -335,11 +335,11 @@ struct SettingsPanel: View {
             officialClients: AgentIconView.availableOfficialClientIDs())
 
         section("Individual items") {
-            hint("Keep the main Syrtis item. Optional client items show each client's selected quota window; Auto chooses the tightest healthy window for that client.")
+            hint("The main Syrtis item always stays. You can add an item for each client that shows its chosen quota window; Auto picks that client's tightest window that is still reporting normally.")
             if rows.isEmpty, isLoading {
                 LoadingLine(title: "Looking for eligible clients…")
             } else if rows.isEmpty {
-                Text("No eligible individual clients yet.")
+                Text("No clients can have their own item yet.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
@@ -450,20 +450,20 @@ struct SettingsPanel: View {
     ) -> some View {
         section("Agent limits") {
             toggleRow("Show Agent limits card", isOn: $limitsEnabled)
-            hint("Off hides the Agent-limits quota card everywhere — the Overview summary, every client's own tab, and this preview. Cost/token data is unaffected.")
+            hint("Off hides the Agent limits card everywhere: the Overview summary, each client's tab, and this preview. Cost and token numbers stay.")
 
             if limitsEnabled {
                 toggleRow("Show as used", isOn: $limitsAsUsed)
-                hint("On, bars count up as quota is used; off, they count down to what's left. The color always warns as quota runs low.")
+                hint("On: bars fill up as you use quota. Off: bars show what's left and shrink. Either way, the color warns when quota runs low.")
                 radioGroup(
                     selection: $layoutRaw,
                     options: LimitsLayout.allCases.map { ($0.rawValue, "Layout: \($0.rawValue.capitalized)") })
-                hint("Full is the wide card with the pace bar; Classic is the original compact layout without pace; Chart draws each window's quota over time, with the pace estimate as a second line. Chart needs recorded quota history and falls back to a bar for windows that have none.")
+                hint("Full: the wide card with a pace bar. Classic: the earlier compact layout, without pace. Chart: each window's quota over time, with the pace estimate as a second line; a window with no recorded history shows as a bar.")
                 if LimitsLayout(rawValue: layoutRaw) != .classic {
                     radioGroup(
                         selection: $paceModeRaw,
                         options: PaceMode.allCases.map { ($0.rawValue, "Pace: \($0.rawValue.capitalized)") })
-                    hint("The deficit/reserve marker. Historical learns each quota window's usage pattern; during learning, the Linear estimate is labeled; Linear uses the exact reset duration; Off hides the marker.")
+                    hint("Marks how far you are over or under the expected use so far. Historical learns how you use each quota window, and shows the Linear estimate, labeled, until it has learned enough. Linear assumes even use up to the reset. Off hides the marker.")
                 }
 
                 if !limitOrdered.isEmpty {
@@ -506,7 +506,7 @@ struct SettingsPanel: View {
                         }
                     }
                     .glassCard(cornerRadius: 8)
-                    hint("Hides only that client's quota card here and on its own tab — the tab and its cost/token data stay visible. Useful for accounts with no OAuth quota (e.g. Claude Console). Grayed out when the tab itself is hidden below, since a hidden tab always hides its quota card too.")
+                    hint("Hides only this client's quota card, here and on its own tab; the tab and its cost and token numbers stay. Useful for an account with no quota to show, such as Claude Console. Grayed out when the tab itself is hidden below, because a hidden tab hides its quota card too.")
                 }
             }
         }
@@ -537,7 +537,7 @@ struct SettingsPanel: View {
                 }
             }
             .glassCard(cornerRadius: 8)
-            hint("Which cards the Overview lens shows, in this order. The usage chart cannot be hidden — Overview is where every hidden lens falls back to, so it has to keep something. Cost and token data are unaffected.")
+            hint("Which cards Overview shows, and in what order. The usage chart can't be hidden: Overview is where you land when other views are hidden, so it always keeps one card. Cost and token numbers are not affected.")
         }
 
         section("View tabs") {
@@ -565,19 +565,19 @@ struct SettingsPanel: View {
                 }
             }
             .glassCard(cornerRadius: 8)
-            hint("Off removes a tab from the popover's tab row. Cost/token data is unaffected.")
+            hint("Off removes the view from the tab row in the popover. Cost and token numbers are not affected.")
         }
 
         section("Client tabs (top bar)") {
             let hiddenSet = ClientRegistry.parseIdSet(tabsHiddenRaw)
 
             if tabsUniverse.isEmpty {
-                Text("No clients with usage data yet.")
+                Text("No clients have usage yet.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Drag to set the order used by both the top tabs and the quota cards — or drag a tab directly in the top bar. The switch shows/hides a client's top tab (hiding also drops its quota card).")
+                    Text("Drag to reorder; the order applies to both the top tabs and the quota cards. You can also drag a tab in the top bar. The switch shows or hides a client's tab, and hiding it also hides its quota card.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
 
@@ -654,12 +654,12 @@ struct SettingsPanel: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            hint("Present clients have a switch to show/hide their top tab — hiding also removes that client's quota card. Quota-only clients (OAuth quota, no local sessions, e.g. Antigravity) have no tab, so they appear here only to order their quota card. Drag order applies to both top tabs and quota cards.")
+            hint("The switch shows or hides a client's tab, and hiding it also hides its quota card. Clients that only report quota, with no usage logs on this Mac (such as Antigravity), have no tab; they are listed here so you can place their quota card. The order applies to both tabs and quota cards.")
         }
 
         section("Live trace") {
             toggleRow("Split by agent / model", isOn: $detailedTrace)
-            hint("Affects the live-session card only: on, each agent & model gets its own row; off, rows collapse to one per app.")
+            hint("Only affects the live session card. On: one row per agent and model. Off: one row per app.")
         }
 
         section("Popover size") {
@@ -689,7 +689,7 @@ struct SettingsPanel: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
             .glassCard(cornerRadius: 8)
-            hint("Or drag the handle at the bottom edge of the popover. Width is fixed; \"Auto\" fits about 60% of your screen height.")
+            hint("You can also drag the handle at the bottom edge of the popover. The width is fixed; Auto uses about 60% of your screen height.")
         }
     }
 
@@ -712,7 +712,6 @@ struct SettingsPanel: View {
         section(UsageAttributionSettings.Copy.section) {
             hint(UsageAttributionSettings.Copy.classifyHint)
             hint(UsageAttributionSettings.Copy.canonicalizationHint)
-            hint(UsageAttributionSettings.Copy.declarationHint)
 
             if let attributionNotice {
                 Text(attributionNotice.localized)
@@ -929,7 +928,7 @@ struct SettingsPanel: View {
                 options: Self.refreshIntervalOptions.map {
                     (String($0), $0 == 60 ? "Every hour" : "Every %lld min".localized($0))
                 })
-            hint("How often the tray re-reads your logs. The dashboard refreshes when the popover opens; live tokens/min updates every few seconds regardless.")
+            hint("How often the menu bar re-reads your agents' logs. The dashboard updates whenever you open the popover, and the live tokens-per-minute figure updates every few seconds either way.")
         }
 
         section("Discord") {
@@ -943,7 +942,7 @@ struct SettingsPanel: View {
             // user reads BEFORE opting in, rather than only next to the switch
             // itself. Saying "a cost range" while a setting below can turn it
             // into a figure would describe a state the app may not be in.
-            hint("Off by default. Publishes what you pick below — today's tokens, a client name, a cost range or rounded figure — for whichever client you choose, and a link to Syrtis's source to your Discord profile. It updates while you work, so your active hours show too. Anyone who can see your profile can read and keep every update; switching this off stops new ones but cannot unshare what already went out. Hidden clients are never included, and a change here reaches your profile within about 15 seconds.")
+            hint("Off by default. When on, your Discord profile shows what you tick below (today's tokens, a client name, a cost range or rounded amount) for the client you choose, with a link to Syrtis's source. It updates while you work, so it also shows when you are active. Anyone who can see your profile can read and keep each update; turning this off stops new updates but can't take back ones already sent. Hidden clients are never included. Changes here reach your profile in about 15 seconds.")
             toggleRow("Include today's tokens", isOn: componentBinding(.tokens))
             toggleRow("Include the client name", isOn: componentBinding(.client))
             toggleRow("Include cost", isOn: componentBinding(.cost))
@@ -952,7 +951,7 @@ struct SettingsPanel: View {
             // carrying the app name, image and button, refreshing while you
             // work — so it is treated as switching the feature off for as long
             // as it stays empty.
-            hint("Untick everything and nothing is published at all.")
+            hint("Untick everything and nothing is published.")
             // Read here, not inside the options expression: `selection()` goes
             // to UserDefaults and registers no SwiftUI dependency, so the list
             // would keep a de-listed selection visible after the user picked
@@ -988,12 +987,12 @@ struct SettingsPanel: View {
             // Two consequences, and neither is obvious from the control. The
             // first reads as a bug when it is a decision; the second is the one
             // that compounds with the switch below it.
-            hint("Naming one client publishes only its usage, so the totals can differ from the menu bar, which counts every client including ones Syrtis does not recognise. The cost becomes that one tool's daily spend rather than the whole day's.")
+            hint("With one client chosen, only its usage is published, so the numbers can differ from the menu bar, which counts every client, including ones Syrtis doesn't recognize. The cost is then that tool's spend for the day, not your whole day's.")
             toggleRow("Show cost as a figure instead of a range", isOn: $discordWholeDollars)
             // Says what the trade is, not that there is one. A range puts you
             // in a group; a figure is closer to a value only you have, and a
             // sequence of them across weeks is closer still.
-            hint("A range keeps you among everyone else in that band. A figure is rounded to the dollar, never cents, but still says more about you — every day. With one client named above, it becomes that tool's daily spend.")
+            hint("A range puts you in the same band as everyone else in it. An amount is rounded to whole dollars, never cents, but it still says more about you, every day. With one client chosen above, it is that tool's spend for the day.")
         }
         .id(SettingsWindowController.Destination.discordAnchor)
 
@@ -1031,7 +1030,7 @@ struct SettingsPanel: View {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .font(.caption2)
                                 .foregroundStyle(.orange)
-                                .help("Not found on disk right now — kept in the list in case it's an unmounted drive or a typo you'll fix.".localized)
+                                .help("Not found right now. It stays in the list in case it's on a drive that isn't connected, or the path has a typo you'll fix.".localized)
                         }
                         Button {
                             claudeExtraRoots.removeAll { $0 == path }
@@ -1053,14 +1052,14 @@ struct SettingsPanel: View {
             .buttonStyle(.plain)
             .padding(.horizontal, 10)
             if let result = claudeExtraRootsResult, !result.unreadable.isEmpty {
-                hint("%lld of %lld path(s) can't be read right now — this is retried automatically on the next scan.".localized(
+                hint("%lld of %lld folder(s) can't be read right now. Syrtis will try again on the next scan.".localized(
                     result.unreadable.count, result.registeredCount))
             }
             if let result = claudeExtraRootsResult, !result.rejected.isEmpty {
-                hint("%lld path(s) can't be used as a scan folder and were not added.".localized(
+                hint("%lld path(s) can't be used as a scan folder, so they weren't added.".localized(
                     result.rejected.count))
             }
-            hint("For a second Claude account, run it with CLAUDE_CONFIG_DIR pointed at an isolated folder, then add that folder here. Its usage is merged into the totals above everywhere in Syrtis — there is no separate per-account view.")
+            hint("For a second Claude account, run Claude Code with CLAUDE_CONFIG_DIR set to a separate folder, then add that folder here. Its usage is added to the same totals everywhere in Syrtis; there is no per-account view.")
         }
         .onAppear { refreshMissingClaudeRoots() }
     }
@@ -1108,7 +1107,7 @@ struct SettingsPanel: View {
                         .labelsHidden()
                 }
             }
-            hint("Syrtis began as a fork of tokcat by handlecusion. Parsing & pricing come from tokscale by Junho Yeo; the menu-bar patterns reference CodexBar by Peter Steinberger; the running cat traces back to RunCat by Takuto Nakamura. MIT licensed.")
+            hint("Syrtis started as a fork of tokcat by handlecusion. Log parsing and pricing come from tokscale by Junho Yeo; the menu bar design draws on CodexBar by Peter Steinberger; the running cat comes from RunCat by Takuto Nakamura. MIT licensed.")
         }
     }
 
