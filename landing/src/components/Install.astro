@@ -1,7 +1,8 @@
 ---
-// Platform-switched install block: macOS is Homebrew-only (no GitHub
-// Releases download — ad-hoc signed, not notarized, until the post-v2.0
-// signing PR), Windows gets the two Syrtis-Windows installers plus Scoop.
+// Platform-switched install block: macOS gets the notarized DMG (a link to
+// the latest release page, because the DMG's file name carries the version
+// and releases/latest/download needs a fixed name) plus Homebrew; Windows
+// gets the two Syrtis-Windows installers plus Scoop.
 // Rendered twice per page (hero + closing); pre-selected by the visitor's
 // OS client-side, default macOS when unknown, matching the prototype.
 import { t, type Locale } from '../i18n/copy'
@@ -15,12 +16,15 @@ const c = t(locale).install
     <button type="button" data-os="win">Windows</button>
   </div>
   <div class="panel" data-panel="mac">
+    <div class="btns">
+      <a class="btn" href="https://github.com/Nanako0129/syrtis/releases/latest">{c.macDmg}</a>
+    </div>
+    <span class="note">{c.macNote}</span>
     <div class="cmd">
       <code>brew install --cask nanako0129/tap/syrtis</code>
       <button type="button" class="btn" data-copy data-copy-label={c.copy} data-copied-label={c.copied} data-selected-label={c.selected}>{c.copy}</button>
     </div>
     <span class="copied-hint" aria-live="polite"></span>
-    <span class="note">{c.macNote}</span>
   </div>
   <div class="panel" data-panel="win" hidden>
     <div class="btns">
