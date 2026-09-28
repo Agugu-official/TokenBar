@@ -23,16 +23,19 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 ditto -c -k --keepParent "$APP" "$WORK/submit.zip"
 
-# Bounded wait; a non-zero exit still falls through to the log below.
+# Bounded wait. A non-zero exit fails the run even if the JSON says
+# Accepted, but only after the log below has been fetched.
+RC=0
 xcrun notarytool submit "$WORK/submit.zip" "${AUTH[@]}" --wait --timeout 60m \
-  --output-format json > "$WORK/result.json" || echo "notarytool submit exited non-zero" >&2
+  --output-format json > "$WORK/result.json" || RC=$?
 field() { python3 -c 'import json,sys
 try: print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))
 except Exception: print("")' "$WORK/result.json" "$1"; }
 STATUS=$(field status)
 ID=$(field id)
 echo "notarization $ID: $STATUS"
-if [ "$STATUS" != "Accepted" ]; then
+if [ "$STATUS" != "Accepted" ] || [ "$RC" -ne 0 ]; then
+  echo "notarytool submit exit status $RC" >&2
   [ -n "$ID" ] && xcrun notarytool log "$ID" "${AUTH[@]}" || true
   exit 1
 fi

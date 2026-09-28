@@ -178,6 +178,16 @@ jobs:
         with:
           persist-credentials: false
 
+      # Backstop for the Environment's deployment policy: signing runs only
+      # for a `v*` tag push or a dry run dispatched on main, even if that
+      # policy is ever loosened or missing.
+      - name: Require a release ref
+        run: |
+          case "$GITHUB_EVENT_NAME:$GITHUB_REF" in
+            push:refs/tags/v*|workflow_dispatch:refs/heads/main) ;;
+            *) echo "error: signing refused for $GITHUB_EVENT_NAME on $GITHUB_REF" >&2; exit 1 ;;
+          esac
+
       # Into RUNNER_TEMP, never over the checkout: the artifact comes from
       # the unprivileged job, and unpacked here it could replace the scripts
       # this job runs with the keys.
@@ -306,6 +316,13 @@ jobs:
     env:
       VERSION: ${{ needs.build.outputs.version }}
     steps:
+      - name: Require a release tag
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/v*) ;;
+            *) echo "error: publishing refused for $GITHUB_REF" >&2; exit 1 ;;
+          esac
+
       # Before anything is published (also checked in `sign`).
       - name: Require the tap deploy key
         if: ${{ !contains(github.ref_name, '-') }}
