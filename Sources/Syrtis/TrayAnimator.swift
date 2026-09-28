@@ -544,14 +544,15 @@ final class TrayAnimator {
     }
 
     private func updateAnimationSpeedIfPresented() {
-        guard QuotaIconStyle(rawValue: currentStyle) == nil, animateEnabled,
-              presentedAnimationKey != nil
-        else { return }
-        // Sand changes frame set, not speed, when usage crosses a level.
+        guard QuotaIconStyle(rawValue: currentStyle) == nil else { return }
+        // Sand changes frame set, not speed, when usage crosses a level. It
+        // does so with animation off too: the still frame is the level's dune,
+        // so a static sand icon still has to follow usage.
         if currentStyle == Self.sandStyle {
             refreshIcon()
             return
         }
+        guard animateEnabled, presentedAnimationKey != nil else { return }
         controller?.setAnimationSpeed(animationSpeed)
     }
 
