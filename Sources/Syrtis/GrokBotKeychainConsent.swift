@@ -14,10 +14,8 @@ import TokenBarCore
 /// copy: a full explanation for someone who has not been asked, a one-line row
 /// with a way back for someone who said no.
 ///
-/// Deliberately NOT `DiscordIntro`'s "write the flag when PRESENTED" rule.
-/// That flag suppresses a one-time interruption, so presenting it is the event
-/// worth recording. This one records an ANSWER to a question; writing it on
-/// presentation would record a decision the user never made, and the wrong one
+/// The flag records an ANSWER to a question, never the fact of having been
+/// shown; writing it on presentation would record a decision the user never made, and the wrong one
 /// in both directions — a granted-by-default read they never agreed to, or a
 /// permanent decline from someone who closed the popover to think about it.
 /// Not `@MainActor`: everything here is either an immutable constant or a
@@ -29,7 +27,7 @@ enum GrokBotKeychainConsent {
 
     /// `object(forKey:) as? Bool` rather than `bool(forKey:)`, which cannot
     /// tell "no" from "not asked" — it answers `false` for both, and those two
-    /// need different copy. Same convention as `DiscordIntro`.
+    /// need different copy.
     static func answer(defaults: UserDefaults = .standard) -> Bool? {
         defaults.object(forKey: storageKey) as? Bool
     }

@@ -10,8 +10,8 @@ enum OnboardingSetupCopy {
     static let skipAll = "Skip setup"
 
     static let agentsTitle = "Agents on this Mac"
-    static let agentsBody = "Syrtis reads usage from these agents' local logs. Choose which ones get a tab, or keep them all."
-    static let agentsNone = "No agent usage found yet. Tabs appear as agents write their logs."
+    static let agentsBody = "Syrtis found these agents on this Mac. Choose which ones get a tab, or keep them all."
+    static let agentsNone = "No agents found yet. A tab appears once an agent writes its logs or reports a limit."
     static let chooseTabs = "Choose tabs…"
     static let looksGood = "Looks good"
 
@@ -28,16 +28,19 @@ enum OnboardingSetupCopy {
     static let loginOn = "Start at login"
     static let loginOff = "Not now"
     static let loginAlreadyOn = "Syrtis already starts at login."
+    static let loginFailed = "macOS did not add Syrtis to your login items. Check System Settings → General → Login Items."
 
     static let discordTitle = "Discord"
     static let discordBody = "Your Discord profile can show today's usage. It is off unless you turn it on, and Settings shows exactly what would appear."
+    static let discordAlreadyOn = "Discord is showing your usage. Settings has what appears and how to stop it."
     static let discordSetUp = "Set up in Settings…"
     static let discordNo = "Not now"
 
     static var all: [String] {
         [headerTitle, headerRemaining, skipAll, agentsTitle, agentsBody, agentsNone, chooseTabs,
          looksGood, iconTitle, iconBody, titleTitle, titleBody, done, loginTitle, loginBody,
-         loginOn, loginOff, loginAlreadyOn, discordTitle, discordBody, discordSetUp, discordNo]
+         loginOn, loginOff, loginAlreadyOn, loginFailed, discordTitle, discordBody, discordAlreadyOn,
+         discordSetUp, discordNo]
     }
 }
 
@@ -64,39 +67,47 @@ struct OnboardingSetupCards: View {
     @AppStorage(AttributionOnboardingCard.dismissedKey) private var attributionDismissed = false
 
     private var userRuntime: Bool { !BuildIdentity.isNonUserRuntime(CommandLine.arguments) }
+    private var loginAvailable: Bool { AutostartService.isAvailable }
 
     private func shows(_ step: OnboardingSetup.Step, _ answered: Bool) -> Bool {
         userRuntime && !completed && !answered
     }
 
-    private var remaining: Int {
-        let _ = (attributionRaw, attributionDismissed, paceRaw)
-        return OnboardingSetup.remaining(
+    /// Computed once per body and passed to the header: the attribution half
+    /// walks the whole model report, and used to be evaluated separately for
+    /// the header's visibility and for its text.
+    private func remaining(attributionShows: Bool) -> Int {
+        OnboardingSetup.remaining(
+            loginAvailable: loginAvailable,
             paceCardShows: AnimationPaceOnboarding.isVisible(
                 style: style, animate: animate, answered: paceAnswered,
                 isNonUserRuntime: !userRuntime),
-            attributionCardShows: AttributionOnboardingCard.shows(
-                modelReport: modelReport, agentUsage: agentUsage))
+            attributionCardShows: attributionShows)
     }
 
     var body: some View {
+        let _ = (attributionRaw, attributionDismissed, paceRaw)
+        let left = remaining(attributionShows: AttributionOnboardingCard.shows(
+            modelReport: modelReport, agentUsage: agentUsage))
         // No stack spacing: each container carries its own gap (see
         // `OnboardingCardContainer.gap`).
         VStack(spacing: 0) {
-            OnboardingCardContainer(visible: userRuntime && remaining > 0) { header }
+            OnboardingCardContainer(visible: userRuntime && left > 0) { header(left) }
             OnboardingCardContainer(visible: shows(.agents, agentsAnswered)) { agentsCard }
             OnboardingCardContainer(visible: shows(.icon, iconAnswered)) { iconCard }
             OnboardingCardContainer(visible: shows(.title, titleAnswered)) { titleCard }
             AnimationPaceOnboardingCardView()
             AttributionOnboardingCardView(modelReport: modelReport, agentUsage: agentUsage)
-            OnboardingCardContainer(visible: shows(.login, loginAnswered)) { LoginCard() }
+            OnboardingCardContainer(visible: loginAvailable && shows(.login, loginAnswered)) {
+                LoginCard()
+            }
             OnboardingCardContainer(visible: shows(.discord, discordAnswered)) { discordCard }
         }
     }
 
     // MARK: - Header
 
-    private var header: some View {
+    private func header(_ remaining: Int) -> some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(OnboardingSetupCopy.headerTitle.localized).font(.headline)
@@ -146,11 +157,6 @@ struct OnboardingSetupCards: View {
 
     // MARK: - Icon
 
-    private var iconOptions: [(value: String, label: String)] {
-        [("cat", "Spinning cat"), ("parrot", "Party parrot"), (TrayAnimator.sandStyle, "Sand shoal")]
-            + QuotaIconStyle.allCases.map { ($0.rawValue, $0.label) }
-    }
-
     private var iconCard: some View {
         DashCard(OnboardingSetupCopy.iconTitle) {
             VStack(alignment: .leading, spacing: 8) {
@@ -159,7 +165,7 @@ struct OnboardingSetupCards: View {
                     .fixedSize(horizontal: false, vertical: true)
                 // Picking applies at once, so the live menu-bar icon can be
                 // tried; "Done" answers the card.
-                choiceGrid(options: iconOptions, selected: style) { style = $0 }
+                choiceGrid(options: TrayAnimator.iconStyleOptions, selected: style) { style = $0 }
                 doneRow { OnboardingSetup.answer(.icon) }
             }
         }
@@ -188,19 +194,33 @@ struct OnboardingSetupCards: View {
     private var discordCard: some View {
         DashCard(OnboardingSetupCopy.discordTitle) {
             VStack(alignment: .leading, spacing: 8) {
-                Text(OnboardingSetupCopy.discordBody.localized)
+                Text((DiscordPresence.enabled()
+                    ? OnboardingSetupCopy.discordAlreadyOn : OnboardingSetupCopy.discordBody).localized)
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                answerRow(
-                    secondary: (OnboardingSetupCopy.discordNo, {
-                        DiscordIntro.markShown()
-                        OnboardingSetup.answer(.discord)
-                    }),
-                    primary: (OnboardingSetupCopy.discordSetUp, {
-                        DiscordIntro.markShown()
-                        SettingsWindowController.shared.showFromPopover(scrollingTo: .discord)
-                        OnboardingSetup.answer(.discord)
-                    }))
+                // Two buttons of equal weight, neither filled nor the default:
+                // a prominent "set up" next to a plain "no" is a thumb on the
+                // scale, and this card only points at the Settings disclosure.
+                HStack(spacing: 10) {
+                    Spacer()
+                    if DiscordPresence.enabled() {
+                        Button(OnboardingSetupCopy.done.localized) {
+                            OnboardingSetup.perform(.notNow) {}
+                        }
+                        .buttonStyle(.bordered).controlSize(.small)
+                    } else {
+                        Button(OnboardingSetupCopy.discordNo.localized) {
+                            OnboardingSetup.perform(.notNow) {}
+                        }
+                        .buttonStyle(.bordered).controlSize(.small)
+                        Button(OnboardingSetupCopy.discordSetUp.localized) {
+                            OnboardingSetup.perform(.setUp) {
+                                SettingsWindowController.shared.showFromPopover(scrollingTo: .discord)
+                            }
+                        }
+                        .buttonStyle(.bordered).controlSize(.small)
+                    }
+                }
             }
         }
         .onboardingCardStyle()
@@ -263,6 +283,7 @@ struct OnboardingSetupCards: View {
 /// for an existing user instead of offering to turn it on.
 private struct LoginCard: View {
     @State private var enabled: Bool?
+    @State private var failed = false
 
     var body: some View {
         DashCard(OnboardingSetupCopy.loginTitle) {
@@ -271,6 +292,11 @@ private struct LoginCard: View {
                     .localized)
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if failed {
+                    Text(OnboardingSetupCopy.loginFailed.localized)
+                        .font(.caption2).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 HStack(spacing: 10) {
                     Spacer()
                     if enabled == true {
@@ -283,8 +309,14 @@ private struct LoginCard: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Button(OnboardingSetupCopy.loginOn.localized) {
-                            AutostartService.setEnabled(true)
-                            OnboardingSetup.answer(.login)
+                            // Answered only when it took: a failed register
+                            // (for example Syrtis switched off under Login
+                            // Items) keeps the card, with the reason.
+                            if AutostartService.setEnabled(true) {
+                                OnboardingSetup.answer(.login)
+                            } else {
+                                failed = true
+                            }
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)

@@ -297,8 +297,7 @@ struct SettingsPanel: View {
         section("Menubar icon") {
             radioGroup(
                 selection: $animationStyle,
-                options: [("cat", "Spinning cat"), ("parrot", "Party parrot"), ("sand", "Sand shoal")]
-                    + QuotaIconStyle.allCases.map { ($0.rawValue, $0.label) })
+                options: TrayAnimator.iconStyleOptions)
             if isAnimatedStyle {
                 toggleRow("Animate based on token usage", isOn: $animateTray)
                 if animateTray {

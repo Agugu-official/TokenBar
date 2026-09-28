@@ -708,7 +708,9 @@ struct PopoverView: View {
                     // there is nothing here for that tab to onboard.
                     if activeTab == ClientTray.overviewTab {
                         OnboardingSetupCards(
-                            presentClients: displayClients,
+                            // Every present agent, hidden tabs included: the
+                            // card asks which ones get a tab.
+                            presentClients: presentTabClients,
                             modelReport: model.modelReport, agentUsage: model.agentUsage)
                     }
                     OverviewView(

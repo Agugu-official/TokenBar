@@ -267,8 +267,6 @@
 "Open Settings" = "打开设置";
 "Not now" = "暂不";
 "1.2M tokens today" = "今日 1.2M token";
-"Claude Code · $10-50" = "Claude Code · $10-50";
-"Your Discord profile can show what you have been building today. Pick exactly what appears — or nothing at all — in Settings." = "你的 Discord 个人资料可以显示今天的开发活动。显示哪些内容——或不显示任何内容——可在设置中选择。";
 "Off by default. Publishes what you pick below — today's tokens, a client name, a cost range or rounded figure — for whichever client you choose, and a link to Syrtis's source to your Discord profile. It updates while you work, so your active hours show too. Anyone who can see your profile can read and keep every update; switching this off stops new ones but cannot unshare what already went out. Hidden clients are never included, and a change here reaches your profile within about 15 seconds." = "默认关闭。它会根据你选择的客户端，将下方勾选的内容——今日 token 数、客户端名称、费用区间或取整金额——以及 Syrtis 源代码链接发布到 Discord 个人资料。工作期间会持续更新，因此也会暴露活跃时段。任何能查看你个人资料的人都可以读取并保存每次更新；关闭后只会停止新的发布，无法撤回已经发布的内容。隐藏的客户端绝不会包含在内；此处更改约在 15 秒内显示在个人资料中。";
 "Include today's tokens" = "包含今日 token 数";
 "Include the client name" = "包含客户端名称";
@@ -599,8 +597,8 @@
 "%lld left · everything here is also in Settings" = "还有 %lld 项・这里的每一项都能在“设置”里改";
 "Skip setup" = "跳过设置";
 "Agents on this Mac" = "这台 Mac 上的 agent";
-"Syrtis reads usage from these agents' local logs. Choose which ones get a tab, or keep them all." = "Syrtis 会读取这些 agent 的本机记录。你可以选择哪些要有标签页，或全部保留。";
-"No agent usage found yet. Tabs appear as agents write their logs." = "还没找到 agent 用量。agent 写下记录后就会出现标签页。";
+"Syrtis found these agents on this Mac. Choose which ones get a tab, or keep them all." = "Syrtis 在这台 Mac 上找到了这些 agent。选择哪些要有标签页，或全部保留。";
+"No agents found yet. A tab appears once an agent writes its logs or reports a limit." = "还没有找到任何 agent。agent 写入日志或报告额度后，就会出现标签页。";
 "Choose tabs…" = "选择标签页…";
 "Looks good" = "这样就好";
 "Menu-bar icon" = "菜单栏图标";
@@ -613,3 +611,5 @@
 "Your Discord profile can show today's usage. It is off unless you turn it on, and Settings shows exactly what would appear." = "你的 Discord 个人资料可以显示今天的用量。没有开启就不会显示，“设置”里会列出确切会出现的内容。";
 "Set up in Settings…" = "到“设置”设置…";
 "Done" = "完成";
+"Discord is showing your usage. Settings has what appears and how to stop it." = "Discord 已在显示你的用量。要查看显示哪些内容、或如何关闭，请前往设置。";
+"macOS did not add Syrtis to your login items. Check System Settings → General → Login Items." = "macOS 没有把 Syrtis 添加到登录项。请前往“系统设置 → 通用 → 登录项”查看。";

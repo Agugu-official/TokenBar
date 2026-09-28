@@ -3,9 +3,7 @@ import TokenBarCore
 
 /// The card that makes usage attribution findable without opening Settings.
 ///
-/// Unlike `DiscordIntro` (whose flag is written the moment the card is
-/// PRESENTED, so a feature the user already turned off is never explained
-/// again), this follows `GrokBotKeychainConsent`'s rule instead: the flag
+/// Like `GrokBotKeychainConsent`, the flag
 /// records an ANSWER — "not now" — never the fact of having been shown. A
 /// user who has not yet decided keeps seeing the card every time Overview
 /// opens, because nothing here is a one-time interruption; it is a standing
@@ -84,10 +82,6 @@ enum AttributionOnboardingCard {
         return !summary.records.isEmpty || summary.unsuggestedCount > 0
     }
 
-    /// Deliberately NOT `DiscordIntro`'s "write the flag when PRESENTED" rule
-    /// — see `GrokBotKeychainConsent`'s note on the same contrast. This flag
-    /// records an ANSWER ("not now"), so a user who has not yet decided keeps
-    /// seeing the card on every open; only tapping "Not now" suppresses it.
     /// The proposals the card would offer for this data, or nil before it
     /// has loaded. Shared by the card and the setup header's count.
     static func summary(
@@ -108,6 +102,9 @@ enum AttributionOnboardingCard {
             mayShow: may, summary: may ? summary(modelReport: modelReport, agentUsage: agentUsage) : nil)
     }
 
+    /// This flag records an ANSWER ("Not now", or "Skip setup"), not the fact
+    /// of having been shown, so a user who has not yet decided keeps seeing
+    /// the card on every open.
     static func markDismissed(defaults: UserDefaults = .standard) {
         defaults.set(true, forKey: dismissedKey)
     }

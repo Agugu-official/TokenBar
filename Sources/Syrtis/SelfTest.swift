@@ -2624,8 +2624,7 @@ enum SelfTest {
             !AttributionOnboardingCard.isVisible(mayShow: false, summary: offering),
             "onboarding card hides whenever mayShow is false, whatever the data offers")
 
-        // "Not now" records an ANSWER, never the fact of being shown — the
-        // contrast `GrokBotKeychainConsent` documents against `DiscordIntro`.
+        // "Not now" records an ANSWER, never the fact of being shown.
         // A user who has not yet decided keeps seeing the card on every open.
         let onboardingDismissDefaultsName =
             "Syrtis.SelfTest.AttributionOnboarding.Dismiss.\(UUID().uuidString)"
@@ -9791,65 +9790,41 @@ enum SelfTest {
             "a turn that both replaces content and adds some still retires the old payload, "
                 + "while a turn that only adds does not (mutation: an AND instead of an OR lets "
                 + "a payload built for the previous selection reach the socket)")
-        // The intro card. One contract, behavioural: nothing it does turns the
-        // feature on. A source scan counting writes to the key name is exactly
-        // the shape #148 removed and #147 showed gets relocated around.
-        let dpIntroSuite = "Syrtis.SelfTest.DiscordIntro"
-        if let dpIntroDefaults = UserDefaults(suiteName: dpIntroSuite) {
-            defer { UserDefaults.standard.removePersistentDomain(forName: dpIntroSuite) }
-            // Deciding CONSUMES the flag: presentation is what marks it, not
-            // the choice, so a card that returns until the user picks the
-            // preferred action is impossible.
-            let dpIntroFirst = DiscordIntro.consume(defaults: dpIntroDefaults)
-            let dpIntroAgain = DiscordIntro.consume(defaults: dpIntroDefaults)
-            var dpIntroOpened = 0
+        // The onboarding Discord card. One contract, behavioural: nothing it
+        // does turns the feature on. A source scan counting writes to the key
+        // name is exactly the shape #148 removed and #147 showed gets
+        // relocated around.
+        let dpCardSuite = "Syrtis.SelfTest.OnboardingDiscord.\(UUID().uuidString)"
+        if let dpCardDefaults = UserDefaults(suiteName: dpCardSuite) {
+            defer { UserDefaults.standard.removePersistentDomain(forName: dpCardSuite) }
+            var dpCardOpened = 0
             // Read, never written: the process's own domain is where a card
             // that enabled the feature would actually write, and an assertion
-            // confined to the isolated suite cannot see that. Measured — a
-            // mutation adding `UserDefaults.standard.set(true, forKey:)` to the
-            // openSettings branch passed the suite-only form of this check.
+            // confined to the isolated suite cannot see that. Measured on the
+            // launch-time intro this card replaced — a mutation adding
+            // `UserDefaults.standard.set(true, forKey:)` to its settings
+            // branch passed the suite-only form of this check.
             //
-            // Known limit, stated rather than papered over: this detects a
-            // CHANGE, so it cannot see a write of `true` over an existing
-            // `true`. Under `swift run` that domain starts empty, so the case
-            // only arises from a previous mutation run leaving the key behind —
-            // which happened while writing this, and silently disabled the
-            // check. Asserting the key is absent beforehand would be the
-            // stronger form, but it would fail on a bundled run for
-            // any user who has the feature switched on.
-            let dpIntroStandardBefore =
+            // Known limit: this detects a CHANGE, so it cannot see a write of
+            // `true` over an existing `true`. Asserting the key is absent
+            // beforehand would fail on a bundled run for any user who has the
+            // feature switched on.
+            let dpCardStandardBefore =
                 UserDefaults.standard.object(forKey: DiscordPresence.enabledKey) as? Bool
-            DiscordIntro.perform(.openSettings) { dpIntroOpened += 1 }
-            DiscordIntro.perform(.notNow) { dpIntroOpened += 1 }
-            let dpIntroStandardAfter =
+            OnboardingSetup.perform(.setUp, defaults: dpCardDefaults) { dpCardOpened += 1 }
+            OnboardingSetup.perform(.notNow, defaults: dpCardDefaults) { dpCardOpened += 1 }
+            let dpCardStandardAfter =
                 UserDefaults.standard.object(forKey: DiscordPresence.enabledKey) as? Bool
             expect(
-                dpIntroFirst && !dpIntroAgain && dpIntroOpened == 1
-                    && !DiscordPresence.enabled(defaults: dpIntroDefaults)
-                    && dpIntroStandardBefore == dpIntroStandardAfter,
-                "the intro card is shown once, marked by being presented rather than acted on, "
-                    + "and NEITHER action turns the feature on (mutation: an enable button, or "
-                    + "marking it shown only on the preferred choice, fails here)")
-            // Already using it: nothing to introduce, and interrupting would be
-            // noise. Asserted on a second suite so the flag above cannot be
-            // what makes this pass.
-            let dpIntroOnSuite = "Syrtis.SelfTest.DiscordIntroOn"
-            if let dpIntroOn = UserDefaults(suiteName: dpIntroOnSuite) {
-                defer { UserDefaults.standard.removePersistentDomain(forName: dpIntroOnSuite) }
-                dpIntroOn.set(true, forKey: DiscordPresence.enabledKey)
-                let dpIntroSkipped = DiscordIntro.consume(defaults: dpIntroOn)
-                // The upgrade path: they had it on before this card existed, so
-                // they never see it — and must not see it later if they switch
-                // off. Skipping has to consume the flag, not defer it.
-                dpIntroOn.set(false, forKey: DiscordPresence.enabledKey)
-                expect(!dpIntroSkipped && !DiscordIntro.consume(defaults: dpIntroOn),
-                    "someone already using the feature is not introduced to it, and switching it "
-                        + "off later does not introduce them either (mutation: skipping without "
-                        + "consuming the flag shows the card to a user who deliberately turned "
-                        + "the feature off)")
-            }
+                dpCardOpened == 1
+                    && OnboardingSetup.isAnswered(.discord, defaults: dpCardDefaults)
+                    && !DiscordPresence.enabled(defaults: dpCardDefaults)
+                    && dpCardStandardBefore == dpCardStandardAfter,
+                "the onboarding Discord card opens Settings only from its set-up button, both "
+                    + "buttons answer the card, and NEITHER turns the feature on (mutation: an "
+                    + "enable in either branch fails here)")
         } else {
-            expect(false, "the isolated intro suite could not be created")
+            expect(false, "the isolated onboarding Discord suite could not be created")
         }
 
         // MARK: - Discord Rich Presence transport (DISCORD-PRESENCE M2a)

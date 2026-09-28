@@ -27,9 +27,13 @@ enum OnboardingSetup {
         defaults.bool(forKey: completedKey)
     }
 
-    static func answer(_ step: Step, defaults: UserDefaults = .standard) {
+    static func answer(
+        _ step: Step, defaults: UserDefaults = .standard, loginAvailable: Bool = true
+    ) {
         defaults.set(true, forKey: answeredKey(step))
-        if Step.allCases.allSatisfy({ defaults.bool(forKey: answeredKey($0)) }) {
+        if applicableSteps(loginAvailable: loginAvailable)
+            .allSatisfy({ defaults.bool(forKey: answeredKey($0)) })
+        {
             defaults.set(true, forKey: completedKey)
         }
     }
@@ -47,12 +51,33 @@ enum OnboardingSetup {
         AttributionOnboardingCard.markDismissed(defaults: defaults)
     }
 
+    /// The Discord card's two actions. Neither turns the feature on: the only
+    /// route to on is the Settings toggle, where the full disclosure is (the
+    /// contract the launch-time intro carried before this card replaced it).
+    enum DiscordChoice { case setUp, notNow }
+
+    static func perform(
+        _ choice: DiscordChoice, defaults: UserDefaults = .standard, openSettings: () -> Void
+    ) {
+        if choice == .setUp { openSettings() }
+        answer(.discord, defaults: defaults)
+    }
+
+    /// Steps that apply here. Start-at-login needs an app bundle (a bare
+    /// `make run` executable has no login-item identity), so it is left out,
+    /// and not counted, where it cannot work.
+    static func applicableSteps(loginAvailable: Bool) -> [Step] {
+        Step.allCases.filter { $0 != .login || loginAvailable }
+    }
+
     /// Cards still waiting for an answer, counting the pace and attribution
     /// cards only when they would show.
     static func remaining(
-        defaults: UserDefaults = .standard, paceCardShows: Bool, attributionCardShows: Bool
+        defaults: UserDefaults = .standard, loginAvailable: Bool = true,
+        paceCardShows: Bool, attributionCardShows: Bool
     ) -> Int {
-        Step.allCases.filter { !isAnswered($0, defaults: defaults) }.count
+        applicableSteps(loginAvailable: loginAvailable)
+            .filter { !isAnswered($0, defaults: defaults) }.count
             + (paceCardShows ? 1 : 0) + (attributionCardShows ? 1 : 0)
     }
 }

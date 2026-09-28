@@ -199,8 +199,8 @@
 "%lld left · everything here is also in Settings" = "%lld left · everything here is also in Settings";
 "Skip setup" = "Skip setup";
 "Agents on this Mac" = "Agents on this Mac";
-"Syrtis reads usage from these agents' local logs. Choose which ones get a tab, or keep them all." = "Syrtis reads usage from these agents' local logs. Choose which ones get a tab, or keep them all.";
-"No agent usage found yet. Tabs appear as agents write their logs." = "No agent usage found yet. Tabs appear as agents write their logs.";
+"Syrtis found these agents on this Mac. Choose which ones get a tab, or keep them all." = "Syrtis found these agents on this Mac. Choose which ones get a tab, or keep them all.";
+"No agents found yet. A tab appears once an agent writes its logs or reports a limit." = "No agents found yet. A tab appears once an agent writes its logs or reports a limit.";
 "Choose tabs…" = "Choose tabs…";
 "Looks good" = "Looks good";
 "Menu-bar icon" = "Menu-bar icon";
@@ -213,3 +213,5 @@
 "Your Discord profile can show today's usage. It is off unless you turn it on, and Settings shows exactly what would appear." = "Your Discord profile can show today's usage. It is off unless you turn it on, and Settings shows exactly what would appear.";
 "Set up in Settings…" = "Set up in Settings…";
 "Done" = "Done";
+"Discord is showing your usage. Settings has what appears and how to stop it." = "Discord is showing your usage. Settings has what appears and how to stop it.";
+"macOS did not add Syrtis to your login items. Check System Settings → General → Login Items." = "macOS did not add Syrtis to your login items. Check System Settings → General → Login Items.";
