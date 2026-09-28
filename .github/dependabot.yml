@@ -1,7 +1,56 @@
-# Keeps the SHA-pinned actions in the workflows current (weekly PRs).
+# Dependabot: one grouped PR per ecosystem per week, minor and patch only.
+# Major versions are ignored here and upgraded deliberately, one at a time;
+# they change behaviour (for example actions/checkout 6 → 7).
+#
+# Not covered on purpose: the vendor/tokscale-core submodule. The engine pin
+# is moved by hand (it is shared with Syrtis-Windows and its cross-check
+# oracle), never by a bot.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: swift
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      swift:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: npm
+    directory: /landing
+    schedule:
+      interval: weekly
+    groups:
+      landing:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
