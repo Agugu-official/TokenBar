@@ -208,7 +208,7 @@
 "Menu-bar text" = "Menu-bar text";
 "What shows next to the icon." = "What shows next to the icon.";
 "Start at login" = "Start at login";
-"Open Syrtis automatically when you log in, so the menu bar is always current." = "Open Syrtis automatically when you log in, so the menu bar is always current.";
+"Open Syrtis when you log in to your Mac, so your usage is always in the menu bar." = "Open Syrtis when you log in to your Mac, so your usage is always in the menu bar.";
 "Syrtis already starts at login." = "Syrtis already starts at login.";
 "Your Discord profile can show today's usage. It is off unless you turn it on, and Settings shows exactly what would appear." = "Your Discord profile can show today's usage. It is off unless you turn it on, and Settings shows exactly what would appear.";
 "Set up in Settings…" = "Set up in Settings…";

@@ -606,7 +606,7 @@
 "Menu-bar text" = "菜单栏文字";
 "What shows next to the icon." = "图标旁边要显示什么。";
 "Start at login" = "登录时启动";
-"Open Syrtis automatically when you log in, so the menu bar is always current." = "登录时自动打开 Syrtis，菜单栏就会一直是最新的。";
+"Open Syrtis when you log in to your Mac, so your usage is always in the menu bar." = "登录 Mac 后自动打开 Syrtis，菜单栏随时看得到用量。";
 "Syrtis already starts at login." = "Syrtis 已经会在登录时启动。";
 "Your Discord profile can show today's usage. It is off unless you turn it on, and Settings shows exactly what would appear." = "你的 Discord 个人资料可以显示今天的用量。没有开启就不会显示，“设置”里会列出确切会出现的内容。";
 "Set up in Settings…" = "到“设置”设置…";

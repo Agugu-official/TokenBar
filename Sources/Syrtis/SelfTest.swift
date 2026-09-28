@@ -1368,18 +1368,40 @@ enum SelfTest {
                     && OnboardingSetup.Step.allCases.allSatisfy { !OnboardingSetup.isAnswered($0, defaults: d) },
                 "onboarding: an existing user with settings still starts with every step open")
             expect(
-                OnboardingSetup.remaining(defaults: d, paceCardShows: true, attributionCardShows: false)
+                OnboardingSetup.remaining(
+                    defaults: d, loginAvailable: true, paceCardShows: true, attributionCardShows: false)
                     == OnboardingSetup.Step.allCases.count + 1,
                 "onboarding: the count includes the pace card when it shows")
-            OnboardingSetup.answer(.icon, defaults: d)
+            OnboardingSetup.answer(.icon, defaults: d, loginAvailable: true)
             expect(
                 OnboardingSetup.isAnswered(.icon, defaults: d) && !OnboardingSetup.isAnswered(.title, defaults: d)
                     && !OnboardingSetup.isCompleted(defaults: d),
                 "onboarding: answering one step leaves the others open")
-            for step in OnboardingSetup.Step.allCases { OnboardingSetup.answer(step, defaults: d) }
+            for step in OnboardingSetup.Step.allCases where step != .login {
+                OnboardingSetup.answer(step, defaults: d, loginAvailable: true)
+            }
+            expect(!OnboardingSetup.isCompleted(defaults: d),
+                "onboarding: with the login card shown, setup waits for its answer")
+            OnboardingSetup.answer(.login, defaults: d, loginAvailable: true)
             expect(OnboardingSetup.isCompleted(defaults: d), "onboarding: the last answer completes setup")
         } else {
             expect(false, "isolated onboarding defaults suite is available")
+        }
+        // Where the login card is hidden (no app bundle), the other answers
+        // complete setup: completion counts the same steps the cards show.
+        let noLoginSuite = "Syrtis.SelfTest.OnboardingNoLogin.\(UUID().uuidString)"
+        if let d = UserDefaults(suiteName: noLoginSuite) {
+            defer { d.removePersistentDomain(forName: noLoginSuite) }
+            for step in OnboardingSetup.Step.allCases where step != .login {
+                OnboardingSetup.answer(step, defaults: d, loginAvailable: false)
+            }
+            expect(
+                OnboardingSetup.isCompleted(defaults: d)
+                    && OnboardingSetup.remaining(
+                        defaults: d, loginAvailable: false, paceCardShows: false, attributionCardShows: false) == 0,
+                "onboarding: without a login card, answering the shown cards completes setup")
+        } else {
+            expect(false, "isolated no-login onboarding suite is available")
         }
         let skipSuite = "Syrtis.SelfTest.OnboardingSkip.\(UUID().uuidString)"
         if let d = UserDefaults(suiteName: skipSuite) {

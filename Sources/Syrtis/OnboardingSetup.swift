@@ -28,7 +28,8 @@ enum OnboardingSetup {
     }
 
     static func answer(
-        _ step: Step, defaults: UserDefaults = .standard, loginAvailable: Bool = true
+        _ step: Step, defaults: UserDefaults = .standard,
+        loginAvailable: Bool = AutostartService.isAvailable
     ) {
         defaults.set(true, forKey: answeredKey(step))
         if applicableSteps(loginAvailable: loginAvailable)
@@ -73,7 +74,7 @@ enum OnboardingSetup {
     /// Cards still waiting for an answer, counting the pace and attribution
     /// cards only when they would show.
     static func remaining(
-        defaults: UserDefaults = .standard, loginAvailable: Bool = true,
+        defaults: UserDefaults = .standard, loginAvailable: Bool = AutostartService.isAvailable,
         paceCardShows: Bool, attributionCardShows: Bool
     ) -> Int {
         applicableSteps(loginAvailable: loginAvailable)

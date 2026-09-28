@@ -24,7 +24,7 @@ enum OnboardingSetupCopy {
     static let done = "Done"
 
     static let loginTitle = "Start at login"
-    static let loginBody = "Open Syrtis automatically when you log in, so the menu bar is always current."
+    static let loginBody = "Open Syrtis when you log in to your Mac, so your usage is always in the menu bar."
     static let loginOn = "Start at login"
     static let loginOff = "Not now"
     static let loginAlreadyOn = "Syrtis already starts at login."
