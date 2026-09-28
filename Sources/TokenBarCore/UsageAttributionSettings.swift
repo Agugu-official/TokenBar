@@ -4,7 +4,7 @@ import Foundation
 public enum UsageAttributionSettings {
     public enum Copy {
         public static let section = "Usage attribution"
-        public static let classifyHint = "Classify each observed client/provider source against the subscription it should count toward. Nothing here is inferred as a billing event."
+        public static let classifyHint = "Pick which subscription each source's usage counts toward. This only changes how Syrtis groups your usage; it doesn't read your bills."
         /// Two facts about provider identity, deliberately in one hint, and
         /// both hedged for a reason.
         ///
@@ -17,14 +17,13 @@ public enum UsageAttributionSettings {
         /// classifiable source. Neither half can be stated flatly: "nothing is
         /// merged" is false for Claude Code, and "Codex is reported as OpenAI"
         /// is false for OpenClaw. Hence "some clients".
-        public static let canonicalizationHint = "Provider IDs are compared exactly as the source emitted them, so related-looking routes may appear as separate rows and be classified independently. Some clients merge them before reporting — Vertex AI arriving as Anthropic, Codex as OpenAI — and a row that arrived merged cannot be split here."
-        public static let declarationHint = "A declaration is your classification, not a billing fact."
-        public static let noRows = "No provider-split usage in this range."
+        public static let canonicalizationHint = "Providers are matched exactly as each tool reports them, so similar ones can appear on separate rows. Some tools merge providers before reporting (Vertex AI shows up as Anthropic, Codex as OpenAI), and those rows can't be split."
+        public static let noRows = "No usage in this range lists a provider."
         /// The report request finished without one. Distinct from `noRows`,
         /// which is an answer about a report that did arrive.
-        public static let unavailable = "Usage could not be loaded, so there is nothing to classify yet."
+        public static let unavailable = "Usage couldn't be loaded."
         public static let acceptSuggestions = "Accept all suggestions (%lld)"
-        public static let suggestionsHint = "Suggestions are proposals; they do not change your classification until accepted."
+        public static let suggestionsHint = "Suggestions apply only when you accept them."
         public static let source = "%@ · %@"
         public static let observed = "Observed %@ tokens · %@"
         public static let classification = "Classification"
@@ -38,7 +37,7 @@ public enum UsageAttributionSettings {
 
         public static var all: [String] {
             [
-                section, classifyHint, canonicalizationHint, declarationHint, noRows, unavailable,
+                section, classifyHint, canonicalizationHint, noRows, unavailable,
                 acceptSuggestions, suggestionsHint, source, observed, classification,
                 unassigned, excluded, assigned, suggested, suggestedExcluded, unspecifiedProvider,
                 classificationFor,

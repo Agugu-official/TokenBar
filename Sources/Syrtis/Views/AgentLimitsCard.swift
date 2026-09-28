@@ -841,7 +841,7 @@ struct AgentLimitsCard: View {
 
     @ViewBuilder private func claudeSetupPrompt() -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Using a Claude `setup-token`? Syrtis auto-detects `CLAUDE_CODE_OAUTH_TOKEN` from your login shell. If limits don't appear, store the token in Keychain — run this, then paste the token at the prompt:")
+            Text("Using a Claude `setup-token`? Syrtis reads `CLAUDE_CODE_OAUTH_TOKEN` from your login shell. If your limits don't show, save the token to Keychain with this command:")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -884,12 +884,12 @@ struct AgentLimitsCard: View {
                 // failed is the whole point: a generic error would send them
                 // looking for a problem in Syrtis, and the collapsed
                 // "not reading your limits" line would imply they chose this.
-                Text("macOS did not allow access to the Grok Bot login, so Syrtis stopped asking. Choose Allow to try again — macOS will show its permission dialog.")
+                Text("macOS blocked access to the Grok Bot login, so Syrtis stopped asking. Choose Allow to try again.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } else if consentDeclined {
-                Text("Syrtis is not reading your Grok Bot limits.")
+                Text("Syrtis isn't reading your Grok Bot limits.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -912,7 +912,7 @@ struct AgentLimitsCard: View {
                 // mistake that produced the first draft. Reassurance that
                 // cannot be checked does not belong in a permission prompt,
                 // even when it is probably true.
-                Text("Grok Bot stores its login in your Keychain. To show your weekly limits, Syrtis needs to read it — macOS will ask you to allow this. The login is then sent to Grok Bot's usage endpoint (api2.cursor.sh) to look up your limits. Syrtis never stores it, never logs it, and sends it nowhere else.")
+                Text("To show your weekly Grok Bot limits, Syrtis reads Grok Bot's login from your Keychain after macOS asks you. The login is sent only to Grok Bot's usage service (api2.cursor.sh) and is never saved or logged.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

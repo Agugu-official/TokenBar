@@ -3105,7 +3105,7 @@ enum SelfTest {
         expect(
             UsageAttributionSettings.Copy.all.contains(UsageAttributionSettings.Copy.canonicalizationHint)
                 && UsageAttributionSettings.Copy.canonicalizationHint.contains(
-                    "compared exactly as the source emitted")
+                    "matched exactly as each tool reports them")
                 && !UsageAttributionSettings.Copy.canonicalizationHint.contains("canonicalized"),
             "attribution copy describes exact provider comparison")
 
@@ -3118,11 +3118,11 @@ enum SelfTest {
         // reported as OpenAI" is false for OpenClaw.
         expect(
             UsageAttributionSettings.Copy.canonicalizationHint.contains(
-                "Vertex AI arriving as Anthropic")
+                "Vertex AI shows up as Anthropic")
                 && UsageAttributionSettings.Copy.canonicalizationHint.contains(
                     "Codex as OpenAI")
                 && UsageAttributionSettings.Copy.canonicalizationHint.contains(
-                    "Some clients merge them"),
+                    "Some tools merge providers"),
             "attribution copy discloses merged routes as something only some clients do")
 
         let zeroSourceRows = UsageAttributionSettings.rows(
