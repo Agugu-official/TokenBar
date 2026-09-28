@@ -21,6 +21,9 @@ grep -q 'flags=.*(runtime)' <<<"$INFO" || fail "hardened runtime flag missing"
 
 SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
 for code in "$APP" "$SPARKLE" "$SPARKLE/Versions/B/Autoupdate" "$SPARKLE/Versions/B/Updater.app"; do
+  # A path that is gone would read as "no entitlements"; a changed Sparkle
+  # layout has to fail here, not be skipped.
+  [ -e "$code" ] || fail "$code is missing; update this list to Sparkle's current layout"
   ENT=$(codesign -d --entitlements - --xml "$code" 2>/dev/null || true)
   [ -z "$ENT" ] || fail "$code carries entitlements; adding any needs the maintainer's sign-off"
 done

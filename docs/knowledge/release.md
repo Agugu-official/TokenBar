@@ -87,7 +87,7 @@ Release builds are signed with the maintainer's Developer ID Application certifi
 | Job | Holds | Does |
 |---|---|---|
 | `build` | nothing (read-only token, no Environment) | Rust + Swift build, ad-hoc bundle, release notes, `unsigned.tar` artifact |
-| `sign` | `release` Environment: Developer ID .p12 + password, notary API key, Sparkle key | Temporary keychain, re-sign inside-out, notarize (verdict from JSON, not exit code), staple, verify the extracted archive, appcast |
+| `sign` | `release` Environment: Developer ID .p12 + password, notary API key, Sparkle key; the tap key for an emptiness check only | Temporary keychain, re-sign inside-out, notarize (verdict from JSON, not exit code), staple, verify the extracted archive, appcast |
 | `publish` | `release` Environment: tap deploy key; `contents`/`actions` write | GitHub Release, appcast commit on main, badge dispatch, tap cask |
 
 - **Secrets live in the `release` Environment** (deployment policy: `v*` tags and `main`; required reviewer: the maintainer), never at repository level. Environment variables: `NOTARY_KEY_ID`, `NOTARY_ISSUER_ID`, `APPLE_TEAM_ID`. A `v*` tag ruleset restricts creating, moving and deleting release tags to the maintainer.
@@ -98,7 +98,7 @@ Release builds are signed with the maintainer's Developer ID Application certifi
 
 **Revocation.** A leaked notary key: revoke it in App Store Connect → Users and Access → Integrations, create a new one, replace the Environment secret and variable. A leaked Developer ID certificate: revoke it at developer.apple.com → Certificates and contact Apple; what revocation does to builds already notarized has to be confirmed with Apple's documentation at that time before relying on it. A leaked Sparkle key needs a key rotation through Sparkle's documented procedure.
 
-**Rollback.** Reverting to the ad-hoc chain is possible (ad-hoc updates install over Developer-ID builds, above), but the reverted workflow reads repository-level secrets, which no longer exist: the maintainer restores them first. The normal recovery from a bad signed release is a new signed tag.
+**Rollback.** Reverting to the ad-hoc chain is possible (ad-hoc updates install over Developer-ID builds, above), but the reverted workflow reads repository-level secrets, which are deleted once the Environment holds them: the maintainer restores them first. The normal recovery from a bad signed release is a new signed tag.
 
 ## Local secret storage
 
