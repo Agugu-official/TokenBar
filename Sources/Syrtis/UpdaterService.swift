@@ -15,7 +15,7 @@ import Sparkle
 final class UpdaterService: NSObject, SPUUpdaterDelegate {
     static let shared = UpdaterService()
 
-    static var isAvailable: Bool { Bundle.main.bundleURL.pathExtension == "app" }
+    nonisolated static var isAvailable: Bool { Bundle.main.bundleURL.pathExtension == "app" }
 
     /// Display version of an available update (nil = up to date / unknown).
     private(set) var availableVersion: String?
@@ -72,7 +72,7 @@ final class UpdaterService: NSObject, SPUUpdaterDelegate {
 /// has no main-app service identity to register).
 @MainActor
 enum AutostartService {
-    static var isAvailable: Bool { UpdaterService.isAvailable }
+    nonisolated static var isAvailable: Bool { UpdaterService.isAvailable }
 
     nonisolated static func readEnabled() async -> Bool {
         await Task.detached(priority: .utility) {

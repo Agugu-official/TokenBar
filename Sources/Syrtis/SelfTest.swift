@@ -1336,16 +1336,16 @@ enum SelfTest {
             "animation pace rescales the sand levels too")
         expect(
             AnimationPaceOnboarding.isVisible(
-                style: "sand", animate: true, hasChosen: false, isNonUserRuntime: false)
+                style: "sand", animate: true, answered: false, isNonUserRuntime: false)
                 && !AnimationPaceOnboarding.isVisible(
-                    style: "sand", animate: true, hasChosen: true, isNonUserRuntime: false)
+                    style: "sand", animate: true, answered: true, isNonUserRuntime: false)
                 && !AnimationPaceOnboarding.isVisible(
-                    style: "ring", animate: true, hasChosen: false, isNonUserRuntime: false)
+                    style: "ring", animate: true, answered: false, isNonUserRuntime: false)
                 && !AnimationPaceOnboarding.isVisible(
-                    style: "cat", animate: false, hasChosen: false, isNonUserRuntime: false)
+                    style: "cat", animate: false, answered: false, isNonUserRuntime: false)
                 && !AnimationPaceOnboarding.isVisible(
-                    style: "cat", animate: true, hasChosen: false, isNonUserRuntime: true),
-            "pace onboarding shows only for an animating icon, before a pace is picked, in a user runtime")
+                    style: "cat", animate: true, answered: false, isNonUserRuntime: true),
+            "pace onboarding shows only for an animating icon, until it is answered, in a user runtime")
         // Hysteresis: a rate at a threshold does not flip the level back and forth.
         expect(
             TrayAnimator.sandLevel(tokensPerMinute: 310_000, current: 1) == 1
@@ -1355,6 +1355,68 @@ enum SelfTest {
                 && TrayAnimator.sandLevel(tokensPerMinute: 2_000_000, current: 0) == 3
                 && TrayAnimator.sandLevel(tokensPerMinute: 310_000, current: nil) == 2,
             "sand level changes only once the rate clears a threshold by 20%")
+        // Onboarding setup (v1): each step answers on its own; the last answer
+        // completes setup; "Skip setup" completes it and settles the pace and
+        // attribution cards too. Existing users are not exempt: nothing here
+        // reads whether a setting was changed before.
+        let onboardingSuite = "Syrtis.SelfTest.OnboardingSetup.\(UUID().uuidString)"
+        if let d = UserDefaults(suiteName: onboardingSuite) {
+            defer { d.removePersistentDomain(forName: onboardingSuite) }
+            d.set("parrot", forKey: TrayAnimator.styleKey)   // an existing user's choice
+            expect(
+                !OnboardingSetup.isCompleted(defaults: d)
+                    && OnboardingSetup.Step.allCases.allSatisfy { !OnboardingSetup.isAnswered($0, defaults: d) },
+                "onboarding: an existing user with settings still starts with every step open")
+            expect(
+                OnboardingSetup.remaining(
+                    defaults: d, loginAvailable: true, paceCardShows: true, attributionCardShows: false)
+                    == OnboardingSetup.Step.allCases.count + 1,
+                "onboarding: the count includes the pace card when it shows")
+            OnboardingSetup.answer(.icon, defaults: d, loginAvailable: true)
+            expect(
+                OnboardingSetup.isAnswered(.icon, defaults: d) && !OnboardingSetup.isAnswered(.title, defaults: d)
+                    && !OnboardingSetup.isCompleted(defaults: d),
+                "onboarding: answering one step leaves the others open")
+            for step in OnboardingSetup.Step.allCases where step != .login {
+                OnboardingSetup.answer(step, defaults: d, loginAvailable: true)
+            }
+            expect(!OnboardingSetup.isCompleted(defaults: d),
+                "onboarding: with the login card shown, setup waits for its answer")
+            OnboardingSetup.answer(.login, defaults: d, loginAvailable: true)
+            expect(OnboardingSetup.isCompleted(defaults: d), "onboarding: the last answer completes setup")
+        } else {
+            expect(false, "isolated onboarding defaults suite is available")
+        }
+        // Where the login card is hidden (no app bundle), the other answers
+        // complete setup: completion counts the same steps the cards show.
+        let noLoginSuite = "Syrtis.SelfTest.OnboardingNoLogin.\(UUID().uuidString)"
+        if let d = UserDefaults(suiteName: noLoginSuite) {
+            defer { d.removePersistentDomain(forName: noLoginSuite) }
+            for step in OnboardingSetup.Step.allCases where step != .login {
+                OnboardingSetup.answer(step, defaults: d, loginAvailable: false)
+            }
+            expect(
+                OnboardingSetup.isCompleted(defaults: d)
+                    && OnboardingSetup.remaining(
+                        defaults: d, loginAvailable: false, paceCardShows: false, attributionCardShows: false) == 0,
+                "onboarding: without a login card, answering the shown cards completes setup")
+        } else {
+            expect(false, "isolated no-login onboarding suite is available")
+        }
+        let skipSuite = "Syrtis.SelfTest.OnboardingSkip.\(UUID().uuidString)"
+        if let d = UserDefaults(suiteName: skipSuite) {
+            defer { d.removePersistentDomain(forName: skipSuite) }
+            OnboardingSetup.skipAll(defaults: d)
+            expect(
+                OnboardingSetup.isCompleted(defaults: d)
+                    && OnboardingSetup.Step.allCases.allSatisfy { OnboardingSetup.isAnswered($0, defaults: d) }
+                    && AnimationPace.hasChosen(defaults: d)
+                    && d.bool(forKey: AnimationPaceOnboarding.answeredKey)
+                    && d.bool(forKey: AttributionOnboardingCard.dismissedKey),
+                "onboarding: Skip setup completes it and settles the pace and attribution cards")
+        } else {
+            expect(false, "isolated onboarding skip suite is available")
+        }
         expect(TrayAnimator.baseAnimationDuration(frameCount: 5) == 2.5, "tray five-frame base duration")
         expect(TrayAnimator.baseAnimationDuration(frameCount: 10) == 5, "tray ten-frame base duration")
 
@@ -2584,8 +2646,7 @@ enum SelfTest {
             !AttributionOnboardingCard.isVisible(mayShow: false, summary: offering),
             "onboarding card hides whenever mayShow is false, whatever the data offers")
 
-        // "Not now" records an ANSWER, never the fact of being shown — the
-        // contrast `GrokBotKeychainConsent` documents against `DiscordIntro`.
+        // "Not now" records an ANSWER, never the fact of being shown.
         // A user who has not yet decided keeps seeing the card on every open.
         let onboardingDismissDefaultsName =
             "Syrtis.SelfTest.AttributionOnboarding.Dismiss.\(UUID().uuidString)"
@@ -9751,65 +9812,41 @@ enum SelfTest {
             "a turn that both replaces content and adds some still retires the old payload, "
                 + "while a turn that only adds does not (mutation: an AND instead of an OR lets "
                 + "a payload built for the previous selection reach the socket)")
-        // The intro card. One contract, behavioural: nothing it does turns the
-        // feature on. A source scan counting writes to the key name is exactly
-        // the shape #148 removed and #147 showed gets relocated around.
-        let dpIntroSuite = "Syrtis.SelfTest.DiscordIntro"
-        if let dpIntroDefaults = UserDefaults(suiteName: dpIntroSuite) {
-            defer { UserDefaults.standard.removePersistentDomain(forName: dpIntroSuite) }
-            // Deciding CONSUMES the flag: presentation is what marks it, not
-            // the choice, so a card that returns until the user picks the
-            // preferred action is impossible.
-            let dpIntroFirst = DiscordIntro.consume(defaults: dpIntroDefaults)
-            let dpIntroAgain = DiscordIntro.consume(defaults: dpIntroDefaults)
-            var dpIntroOpened = 0
+        // The onboarding Discord card. One contract, behavioural: nothing it
+        // does turns the feature on. A source scan counting writes to the key
+        // name is exactly the shape #148 removed and #147 showed gets
+        // relocated around.
+        let dpCardSuite = "Syrtis.SelfTest.OnboardingDiscord.\(UUID().uuidString)"
+        if let dpCardDefaults = UserDefaults(suiteName: dpCardSuite) {
+            defer { UserDefaults.standard.removePersistentDomain(forName: dpCardSuite) }
+            var dpCardOpened = 0
             // Read, never written: the process's own domain is where a card
             // that enabled the feature would actually write, and an assertion
-            // confined to the isolated suite cannot see that. Measured — a
-            // mutation adding `UserDefaults.standard.set(true, forKey:)` to the
-            // openSettings branch passed the suite-only form of this check.
+            // confined to the isolated suite cannot see that. Measured on the
+            // launch-time intro this card replaced — a mutation adding
+            // `UserDefaults.standard.set(true, forKey:)` to its settings
+            // branch passed the suite-only form of this check.
             //
-            // Known limit, stated rather than papered over: this detects a
-            // CHANGE, so it cannot see a write of `true` over an existing
-            // `true`. Under `swift run` that domain starts empty, so the case
-            // only arises from a previous mutation run leaving the key behind —
-            // which happened while writing this, and silently disabled the
-            // check. Asserting the key is absent beforehand would be the
-            // stronger form, but it would fail on a bundled run for
-            // any user who has the feature switched on.
-            let dpIntroStandardBefore =
+            // Known limit: this detects a CHANGE, so it cannot see a write of
+            // `true` over an existing `true`. Asserting the key is absent
+            // beforehand would fail on a bundled run for any user who has the
+            // feature switched on.
+            let dpCardStandardBefore =
                 UserDefaults.standard.object(forKey: DiscordPresence.enabledKey) as? Bool
-            DiscordIntro.perform(.openSettings) { dpIntroOpened += 1 }
-            DiscordIntro.perform(.notNow) { dpIntroOpened += 1 }
-            let dpIntroStandardAfter =
+            OnboardingSetup.perform(.setUp, defaults: dpCardDefaults) { dpCardOpened += 1 }
+            OnboardingSetup.perform(.notNow, defaults: dpCardDefaults) { dpCardOpened += 1 }
+            let dpCardStandardAfter =
                 UserDefaults.standard.object(forKey: DiscordPresence.enabledKey) as? Bool
             expect(
-                dpIntroFirst && !dpIntroAgain && dpIntroOpened == 1
-                    && !DiscordPresence.enabled(defaults: dpIntroDefaults)
-                    && dpIntroStandardBefore == dpIntroStandardAfter,
-                "the intro card is shown once, marked by being presented rather than acted on, "
-                    + "and NEITHER action turns the feature on (mutation: an enable button, or "
-                    + "marking it shown only on the preferred choice, fails here)")
-            // Already using it: nothing to introduce, and interrupting would be
-            // noise. Asserted on a second suite so the flag above cannot be
-            // what makes this pass.
-            let dpIntroOnSuite = "Syrtis.SelfTest.DiscordIntroOn"
-            if let dpIntroOn = UserDefaults(suiteName: dpIntroOnSuite) {
-                defer { UserDefaults.standard.removePersistentDomain(forName: dpIntroOnSuite) }
-                dpIntroOn.set(true, forKey: DiscordPresence.enabledKey)
-                let dpIntroSkipped = DiscordIntro.consume(defaults: dpIntroOn)
-                // The upgrade path: they had it on before this card existed, so
-                // they never see it — and must not see it later if they switch
-                // off. Skipping has to consume the flag, not defer it.
-                dpIntroOn.set(false, forKey: DiscordPresence.enabledKey)
-                expect(!dpIntroSkipped && !DiscordIntro.consume(defaults: dpIntroOn),
-                    "someone already using the feature is not introduced to it, and switching it "
-                        + "off later does not introduce them either (mutation: skipping without "
-                        + "consuming the flag shows the card to a user who deliberately turned "
-                        + "the feature off)")
-            }
+                dpCardOpened == 1
+                    && OnboardingSetup.isAnswered(.discord, defaults: dpCardDefaults)
+                    && !DiscordPresence.enabled(defaults: dpCardDefaults)
+                    && dpCardStandardBefore == dpCardStandardAfter,
+                "the onboarding Discord card opens Settings only from its set-up button, both "
+                    + "buttons answer the card, and NEITHER turns the feature on (mutation: an "
+                    + "enable in either branch fails here)")
         } else {
-            expect(false, "the isolated intro suite could not be created")
+            expect(false, "the isolated onboarding Discord suite could not be created")
         }
 
         // MARK: - Discord Rich Presence transport (DISCORD-PRESENCE M2a)

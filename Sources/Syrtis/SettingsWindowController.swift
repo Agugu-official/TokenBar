@@ -21,11 +21,13 @@ final class SettingsWindowController {
     enum Destination {
         case discord
         case usageAttribution
+        case dashboard
 
         var page: SettingsPanel.Page {
             switch self {
             case .discord: return .general
             case .usageAttribution: return .usageAttribution
+            case .dashboard: return .dashboard
             }
         }
 
@@ -36,7 +38,7 @@ final class SettingsWindowController {
         var anchor: String? {
             switch self {
             case .discord: return Self.discordAnchor
-            case .usageAttribution: return nil
+            case .usageAttribution, .dashboard: return nil
             }
         }
 

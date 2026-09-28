@@ -473,6 +473,13 @@ final class TrayAnimator {
     /// tray, the Settings controls and the pace onboarding card.
     nonisolated static let animatedStyles = ["cat", "parrot", sandStyle]
 
+    /// Every menu-bar icon choice with its label, for Settings and the setup
+    /// card, so the two cannot drift apart.
+    nonisolated static var iconStyleOptions: [(value: String, label: String)] {
+        [("cat", "Spinning cat"), ("parrot", "Party parrot"), (sandStyle, "Sand shoal")]
+            + QuotaIconStyle.allCases.map { ($0.rawValue, $0.label) }
+    }
+
     /// A level must be passed by this factor before it changes, so a rate
     /// hovering at a threshold does not swap frame sets every 30 s poll: each
     /// swap restarts the loop and re-rasterises 144 frames on the main thread.
