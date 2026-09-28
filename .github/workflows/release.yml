@@ -311,10 +311,12 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     # One publication at a time; a second tag waits instead of racing the
-    # first for appcast.xml.
+    # first for appcast.xml. `queue: max` keeps every waiting tag: the
+    # default `single` would cancel a pending publish when a third arrives.
     concurrency:
       group: release-publish
       cancel-in-progress: false
+      queue: max
     permissions:
       contents: write
       actions: write   # dispatches update-install-count.yml
