@@ -93,7 +93,7 @@ jobs:
           # rather than a copy of it: literal <, &, >, an escaped &lt; and ]]>.
           scripts/render_notes_html.sh --self-test
 
-          # The tag gate release.yml runs before its release job, against a
+          # The tag gate release.yml runs before its build job, against a
           # fake `gh`: a regression here would otherwise surface only when a
           # real tag is refused or, worse, let through.
           scripts/check_ci_gate_test.sh

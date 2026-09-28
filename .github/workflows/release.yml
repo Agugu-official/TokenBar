@@ -3,14 +3,34 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Dry run: build, sign, notarize and verify exactly as a tag would, and
+  # publish nothing. No release, appcast commit, badge dispatch or tap commit;
+  # the signed archive is kept as a one-day artifact for inspection. The
+  # `release` Environment admits only `v*` tags and `main`, so a dry run from
+  # any other branch stops at the signing job.
+  workflow_dispatch:
 
-permissions:
-  contents: write
-  actions: write   # the badge step dispatches update-install-count.yml; the gate job reads CI runs
+# Every job states its own permissions; nothing is granted by default.
+permissions: {}
+
+# Signing material lives only in the `release` Environment (required reviewer:
+# the maintainer), never in repository secrets:
+#   secrets    DEVELOPER_ID_P12_BASE64, DEVELOPER_ID_P12_PASSWORD, NOTARY_KEY_P8,
+#              SPARKLE_PRIVATE_KEY, HOMEBREW_TAP_SYRTIS_DEPLOY_KEY
+#   variables  NOTARY_KEY_ID, NOTARY_ISSUER_ID, APPLE_TEAM_ID
+# Only `sign` and `publish` enter it.
+# `build` runs the Rust and Swift toolchains and every dependency's build
+# script, so it holds no secret and cannot write to the repository.
+#
+# The Sparkle key alone can push an update: Sparkle checks the EdDSA
+# signature, not the code-signing identity (an installed Developer-ID build
+# accepted an ad-hoc update in local testing, 2026-09-28). Keep the `sign`
+# job minimal for that reason.
+#
+# Actions are pinned by commit SHA; Dependabot keeps the pins current.
 
 jobs:
-  # Two cheap checks on Linux before the macOS job that holds the signing key
-  # and publishes: notes, then gate. The release job needs both.
+  # Two cheap checks on Linux before any macOS job: notes, then gate.
   #
   # The notes are checked here as well as in CI. `release_notes.sh` refuses a
   # missing or empty source on its own, but a nonempty pair whose figures
@@ -18,12 +38,12 @@ jobs:
   # nothing in between. It runs first, so a tag with bad notes fails in
   # seconds.
   notes:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    # Job-level permissions replace the workflow's for this job only.
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
           sparse-checkout: |
@@ -41,6 +61,7 @@ jobs:
   # commit carries this file and the script. See scripts/check_ci_gate.sh for
   # the wait limits and the recovery.
   gate:
+    if: github.event_name == 'push'
     # After notes: a tag whose notes fail cannot release anyway, so the run
     # ends in seconds instead of polling CI for up to half an hour first.
     needs: notes
@@ -52,7 +73,7 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
           sparse-checkout: scripts
@@ -61,8 +82,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: scripts/check_ci_gate.sh "$GITHUB_SHA"
 
-  release:
+  # Unsigned (ad-hoc) build. No Environment, read-only token, no persisted
+  # credentials: this job runs third-party toolchains and build scripts.
+  # No build cache either: the signed binary is built from scratch (the
+  # previous rust-cache step never hit on a tag run).
+  build:
     needs: [notes, gate]
+    # A tag needs both checks; a dry run skips them.
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || (needs.notes.result == 'success' && needs.gate.result == 'success')) }}
     # Xcode 27 (the macOS 27 SDK): the dashboard's glass panel is built on
     # NSStatusItem.expandedInterfaceDelegate, which older SDKs do not have.
     # macos-26 carries Xcode 26.6 and fails to compile it; compiling the panel
@@ -70,29 +97,35 @@ jobs:
     # GlassBackground.swift). `xcode-27` is a GitHub public-preview image as of
     # 2026-09 — expect occasional queueing.
     runs-on: xcode-27
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           fetch-depth: 0
           submodules: recursive
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build and bundle
+      - name: Version
+        id: version
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          BUILD=$(git rev-list --count HEAD)
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0-dryrun.$GITHUB_RUN_NUMBER"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "BUILD=$BUILD" >> "$GITHUB_ENV"
-          scripts/bundle.sh "$VERSION" "$BUILD"
+          echo "BUILD=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
 
-      - name: Archive
-        run: |
-          tar -czf "Syrtis.app.tar.gz" -C dist "Syrtis.app"
-          shasum -a 256 "Syrtis.app.tar.gz" | awk '{print $1}' > sha256.txt
-          echo "SHA256=$(cat sha256.txt)" >> "$GITHUB_ENV"
+      - name: Build and bundle (ad-hoc)
+        run: scripts/bundle.sh "$VERSION" "$BUILD"
 
       # release-notes.txt: plain text for the Sparkle dialog and appcast.
       # release-notes.md: markdown for the GitHub release page, with PR
@@ -104,18 +137,190 @@ jobs:
       # the previous scheme read an unversioned override that a completed
       # release left behind, armed to republish itself on the next tag.
       - name: Assemble release notes
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/release_notes.sh
 
+      # A tar keeps the framework's symlinks and modes; upload-artifact does
+      # not, and Sparkle.framework/Versions/Current would break.
+      - name: Archive the unsigned app
+        run: tar -cf unsigned.tar -C dist Syrtis.app
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unsigned
+          path: |
+            unsigned.tar
+            release-notes.txt
+            release-notes.md
+          if-no-files-found: ignore
+          retention-days: 1
+
+  # Developer ID signing, notarization, verification and the appcast. Runs
+  # only first-party actions, never cargo or the Rust toolchain, never the
+  # built app, and never a tool taken from the build artifact.
+  sign:
+    needs: build
+    # Explicit: without it the skipped `notes`/`gate` of a dry run would skip
+    # this job too, and the dry run would end green having signed nothing.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    runs-on: xcode-27
+    # Notarization usually takes minutes; this bounds a stalled queue.
+    timeout-minutes: 90
+    environment: release
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      # Into RUNNER_TEMP, never over the checkout: the artifact comes from
+      # the unprivileged job, and unpacked here it could replace the scripts
+      # this job runs with the keys.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: unsigned
+          path: ${{ runner.temp }}/unsigned
+
+      # An empty secret must stop the release, not quietly yield an ad-hoc
+      # build (a misnamed secret or a missing `environment:` reads as "").
+      # The Sparkle and tap keys are checked here too (for emptiness only),
+      # so a dry run proves every key a tag reads, and a tag cannot publish
+      # half a release before finding one missing. Values are never printed.
+      - name: Require the signing material
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          HOMEBREW_TAP_SYRTIS_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_SYRTIS_DEPLOY_KEY }}
+          NOTARY_KEY_ID: ${{ vars.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ vars.NOTARY_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          missing=0
+          for name in DEVELOPER_ID_P12_BASE64 DEVELOPER_ID_P12_PASSWORD NOTARY_KEY_P8 SPARKLE_PRIVATE_KEY HOMEBREW_TAP_SYRTIS_DEPLOY_KEY NOTARY_KEY_ID NOTARY_ISSUER_ID APPLE_TEAM_ID; do
+            if [ -z "${!name}" ]; then echo "error: $name is empty in the release Environment" >&2; missing=1; fi
+          done
+          exit "$missing"
+
+      # No `set -x` anywhere in this step: it would print the passwords.
+      - name: Sign, notarize and verify
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ vars.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ vars.NOTARY_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          KC="$RUNNER_TEMP/signing.keychain-db"
+          P12="$RUNNER_TEMP/developer-id.p12"
+          P8="$RUNNER_TEMP/notary.p8"
+          trap 'rm -f "$P12" "$P8"' EXIT
+
+          printf '%s' "$DEVELOPER_ID_P12_BASE64" | base64 -D > "$P12"
+          printf '%s' "$NOTARY_KEY_P8" > "$P8"
+
+          # A throwaway keychain with a random password, locked again after
+          # 30 minutes. `-x` imports the private key as non-extractable.
+          KC_PW=$(openssl rand -base64 32)
+          security create-keychain -p "$KC_PW" "$KC"
+          security set-keychain-settings -lut 1800 "$KC"
+          security unlock-keychain -p "$KC_PW" "$KC"
+          security import "$P12" -k "$KC" -P "$DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign -x
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PW" "$KC" > /dev/null
+          # The runner's keychain paths contain no spaces; xargs strips the
+          # quotes `list-keychains` prints around each one.
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | xargs)
+          rm -f "$P12"
+
+          # By SHA-1, not display name (a renewed certificate shares the name),
+          # and only one whose team matches, before anything is signed.
+          IDENTITY=$(security find-identity -v -p codesigning "$KC" \
+            | awk -v team="($APPLE_TEAM_ID)" 'index($0, "Developer ID Application:") && index($0, team) { print $2; exit }')
+          [ -n "$IDENTITY" ] || { echo "error: no Developer ID Application identity for team $APPLE_TEAM_ID in the certificate" >&2; exit 1; }
+
+          mkdir -p work
+          tar -xf "$RUNNER_TEMP/unsigned/unsigned.tar" -C work
+          scripts/codesign_app.sh work/Syrtis.app "$IDENTITY" "$KC"
+          NOTARY_KEY_FILE="$P8" scripts/notarize_app.sh work/Syrtis.app
+
+          tar -czf Syrtis.app.tar.gz -C work Syrtis.app
+          shasum -a 256 Syrtis.app.tar.gz | awk '{print $1}' > sha256.txt
+
+          # Verify what ships: the app as extracted from the final archive.
+          mkdir -p check
+          tar -xzf Syrtis.app.tar.gz -C check
+          scripts/verify_signed_app.sh check/Syrtis.app "$APPLE_TEAM_ID"
+
+      # generate_appcast comes from resolving Sparkle's pinned package here,
+      # not from the build artifact, which the unprivileged job produced.
       - name: Sign and build appcast
+        if: github.event_name == 'push'
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
+          set -euo pipefail
           umask 077
-          printf '%s' "$SPARKLE_PRIVATE_KEY" > /tmp/sparkle_ed.key
-          scripts/make_appcast.sh "Syrtis.app.tar.gz" "$VERSION" "$GITHUB_REF_NAME" /tmp/sparkle_ed.key release-notes.txt
-          rm -f /tmp/sparkle_ed.key
+          KEY="$RUNNER_TEMP/sparkle_ed.key"
+          trap 'rm -f "$KEY"' EXIT
+          swift package resolve
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$KEY"
+          cp "$RUNNER_TEMP"/unsigned/release-notes.txt "$RUNNER_TEMP"/unsigned/release-notes.md .
+          scripts/make_appcast.sh "Syrtis.app.tar.gz" "$VERSION" "$GITHUB_REF_NAME" "$KEY" release-notes.txt
+
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed
+          path: |
+            Syrtis.app.tar.gz
+            sha256.txt
+            appcast.xml
+            release-notes.txt
+            release-notes.md
+          if-no-files-found: ignore
+          retention-days: 1
+
+  # The only job that writes: GitHub release, appcast on main, badge, tap.
+  # It runs gh and git only.
+  publish:
+    needs: [build, sign]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      actions: write   # dispatches update-install-count.yml
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      # Before anything is published (also checked in `sign`).
+      - name: Require the tap deploy key
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          HOMEBREW_TAP_SYRTIS_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_SYRTIS_DEPLOY_KEY }}
+        run: '[ -n "$HOMEBREW_TAP_SYRTIS_DEPLOY_KEY" ] || { echo "error: HOMEBREW_TAP_SYRTIS_DEPLOY_KEY is empty in the release Environment" >&2; exit 1; }'
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed
+          path: ${{ runner.temp }}/signed
 
       # Legacy Tauri manifest. The old Tauri app's updater endpoint
       # (github.com/Nanako0129/TokenBar/releases/latest/download/latest.json)
@@ -134,11 +339,12 @@ jobs:
         run: |
           set -euo pipefail
           echo "c39de81d85baa99351532952b88ef21074dc7633fc54aab90a2b81873426c0bf  scripts/legacy/tauri-latest.json" | shasum -a 256 -c -
-          cp scripts/legacy/tauri-latest.json latest.json
+          cp scripts/legacy/tauri-latest.json "$RUNNER_TEMP/signed/latest.json"
 
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+        working-directory: ${{ runner.temp }}/signed
         run: |
           PRERELEASE_FLAG=""
           ASSETS="Syrtis.app.tar.gz"
@@ -148,17 +354,28 @@ jobs:
           esac
           NOTES="release-notes.md"
           [[ -s "$NOTES" ]] || NOTES="release-notes.txt"
+          # shellcheck disable=SC2086
           gh release create "$GITHUB_REF_NAME" \
             $ASSETS \
+            --repo "$GITHUB_REPOSITORY" \
             --title "Syrtis $VERSION" \
             --notes-file "$NOTES" $PRERELEASE_FLAG
 
       - name: Publish appcast to main
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git fetch origin main
           git checkout main
+          # The new feed was generated from the tagged commit's appcast.xml.
+          # If main's has changed since (another release landed in between),
+          # copying over it would drop that release's item: stop instead.
+          if ! git diff --quiet "$GITHUB_SHA" origin/main -- appcast.xml; then
+            echo "error: main's appcast.xml changed after $GITHUB_REF_NAME was tagged; regenerate the feed on top of it" >&2
+            exit 1
+          fi
+          cp "$RUNNER_TEMP/signed/appcast.xml" appcast.xml
           git add appcast.xml
           git commit -m "chore(release): appcast for $GITHUB_REF_NAME" || exit 0
           git push origin main
@@ -178,17 +395,24 @@ jobs:
       # `deprecate!`); CI never touches them again, so a heredoc rewrite can
       # never erase that freeze or turn the old cask into a Syrtis install.
       # The deploy key is scoped to `Nanako0129/homebrew-tap` only.
+      #
+      # No quarantine workaround: the app is Developer ID signed and notarized,
+      # so Gatekeeper accepts it as downloaded.
       - name: Bump Homebrew cask (syrtis)
         if: ${{ !contains(github.ref_name, '-') }}
         env:
           HOMEBREW_TAP_SYRTIS_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_SYRTIS_DEPLOY_KEY }}
         run: |
+          set -euo pipefail
           umask 077
-          printf '%s\n' "$HOMEBREW_TAP_SYRTIS_DEPLOY_KEY" > /tmp/tap_deploy_key
-          export GIT_SSH_COMMAND="ssh -i /tmp/tap_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
-          git clone git@github.com:Nanako0129/homebrew-tap.git /tmp/tap
-          mkdir -p /tmp/tap/Casks
-          cat > "/tmp/tap/Casks/syrtis.rb" <<CASK
+          KEY="$RUNNER_TEMP/tap_deploy_key"
+          trap 'rm -f "$KEY"' EXIT
+          printf '%s\n' "$HOMEBREW_TAP_SYRTIS_DEPLOY_KEY" > "$KEY"
+          SHA256=$(cat "$RUNNER_TEMP/signed/sha256.txt")
+          export GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone git@github.com:Nanako0129/homebrew-tap.git "$RUNNER_TEMP/tap"
+          mkdir -p "$RUNNER_TEMP/tap/Casks"
+          cat > "$RUNNER_TEMP/tap/Casks/syrtis.rb" <<CASK
           cask "syrtis" do
             version "$VERSION"
             sha256 "$SHA256"
@@ -204,10 +428,6 @@ jobs:
 
             app "Syrtis.app"
 
-            postflight_steps do
-              run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/Syrtis.app"]
-            end
-
             zap trash: [
               "~/Library/Application Support/com.nyanako.tokenbar",
               "~/Library/Caches/com.nyanako.tokenbar",
@@ -216,10 +436,9 @@ jobs:
             ]
           end
           CASK
-          cd /tmp/tap
+          cd "$RUNNER_TEMP/tap"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Casks
           git commit -m "syrtis $VERSION"
           git push
-          rm -f /tmp/tap_deploy_key
