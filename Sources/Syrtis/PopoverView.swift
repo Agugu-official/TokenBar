@@ -86,7 +86,6 @@ struct PopoverView: View {
     /// How many calendar days the trend covers. Two weeks reads as a rhythm
     /// without turning each column into a sliver at popover width.
     private static let trendDays = 14
-    private static let contentTop = "popover.content.top"
 
 
     private var activeView: Binding<AppView> {
@@ -212,17 +211,11 @@ struct PopoverView: View {
                 .padding(.bottom, 10)
             PanelDivider()
             GeometryReader { viewport in
-                ScrollViewReader { proxy in
                 ScrollView {
-                    // Zero-height marker: switching tab or view scrolls back
-                    // here instead of keeping the previous lens's offset.
-                    VStack(spacing: 0) {
-                        Color.clear.frame(height: 0).id(Self.contentTop)
-                        content
-                            .padding(12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(OverlayScrollerEnforcer())
-                    }
+                    content
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(OverlayScrollerEnforcer())
                 }
                 // Live global frame for tooltip clamp. While the height
                 // handle is dragged, publish nil so placement falls back to
@@ -234,10 +227,12 @@ struct PopoverView: View {
                     dragBase == nil ? viewport.frame(in: .global) : nil)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
-                .onChange(of: "\(activeTab)|\(activeViewRaw)") {
-                    proxy.scrollTo(Self.contentTop, anchor: .top)
-                }
-                }
+                // A new ScrollView per tab and view: the incoming lens starts
+                // at the top while the outgoing one fades out where it was.
+                // Scrolling one shared ScrollView back up would show the old
+                // lens scroll before the crossfade, and delay it.
+                .id(lensKey)
+                .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .top)))
             }
             PanelDivider()
             footer
@@ -685,13 +680,15 @@ struct PopoverView: View {
         }
     }
 
+    /// Identity of the visible lens. The content ScrollView is keyed on it,
+    /// so switching either the tab or the view swaps the whole scroll view,
+    /// and the crossfade transition lives there.
+    private var lensKey: String { "\(activeTab)|\(activeViewRaw)" }
+
     /// Lens router. The client tab picks *which* data (clientIds slice), the
-    /// view switch picks *how* it is broken down; the two compose. Switching
-    /// either crossfades with a subtle scale (id swap drives the transition).
+    /// view switch picks *how* it is broken down; the two compose.
     @ViewBuilder private var lens: some View {
         lensContent
-            .id("\(activeTab)|\(activeViewRaw)")
-            .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .top)))
     }
 
     @ViewBuilder private var lensContent: some View {
