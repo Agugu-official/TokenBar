@@ -67,7 +67,7 @@
 brew install --cask nanako0129/tap/syrtis
 ```
 
-軟體內部更新透過 Sparkle 派送；測試版可於設定（Settings → "Receive beta updates"）中選擇加入。應用程式為 ad-hoc 簽署，未經 Apple 公證（notarized）；正如安裝說明所述，Homebrew cask 會在安裝時自動清除隔離屬性。執行環境需求為搭載 Apple Silicon 晶片的 Mac，且作業系統需為 macOS 14+（Liquid Glass 介面需要 macOS 26，玻璃面板則需要 macOS 27；更早的系統版本會自動退回傳統半透明效果 vibrancy fallback）。從原始碼編譯需要 Xcode 27。若仍在 macOS 11–13 環境，最終的 Tauri 版本依然以 [`tokenbar@legacy`](https://github.com/Nanako0129/TokenBar-Tauri) 維持提供。
+軟體內部更新透過 Sparkle 派送；測試版可於設定（Settings → "Receive beta updates"）中選擇加入。正式版以 Developer ID 簽署並經 Apple 公證（notarized），macOS 開啟時不會出現 Gatekeeper 警告。每個 [GitHub Release](https://github.com/Nanako0129/syrtis/releases/latest) 也附有 DMG，拖進「應用程式」即可安裝。執行環境需求為搭載 Apple Silicon 晶片的 Mac，且作業系統需為 macOS 14+（Liquid Glass 介面需要 macOS 26，玻璃面板則需要 macOS 27；更早的系統版本會自動退回傳統半透明效果 vibrancy fallback）。從原始碼編譯需要 Xcode 27。若仍在 macOS 11–13 環境，最終的 Tauri 版本依然以 [`tokenbar@legacy`](https://github.com/Nanako0129/TokenBar-Tauri) 維持提供。
 
 ## 運作原理
 

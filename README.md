@@ -67,7 +67,7 @@ The dashboard also provides **OAuth quota cards** with pace projections, a live 
 brew install --cask nanako0129/tap/syrtis
 ```
 
-In-app updates arrive via Sparkle; betas ride an opt-in channel (Settings → "Receive beta updates"). The app is ad-hoc signed (not notarized)—the cask clears the quarantine attribute on install, as disclosed. Requires an Apple Silicon Mac on macOS 14+ (Liquid Glass needs macOS 26 and the glass panel macOS 27; earlier systems get a vibrancy fallback). Building from source needs Xcode 27. Still on macOS 11–13? The final Tauri build stays as [`tokenbar@legacy`](https://github.com/Nanako0129/TokenBar-Tauri).
+In-app updates arrive via Sparkle; betas ride an opt-in channel (Settings → "Receive beta updates"). Releases are signed with a Developer ID and notarized by Apple, so macOS opens them without a Gatekeeper warning. Each [GitHub Release](https://github.com/Nanako0129/syrtis/releases/latest) also carries a DMG for a drag-to-Applications install. Requires an Apple Silicon Mac on macOS 14+ (Liquid Glass needs macOS 26 and the glass panel macOS 27; earlier systems get a vibrancy fallback). Building from source needs Xcode 27. Still on macOS 11–13? The final Tauri build stays as [`tokenbar@legacy`](https://github.com/Nanako0129/TokenBar-Tauri).
 
 ## How it works
 
