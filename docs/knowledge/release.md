@@ -98,6 +98,10 @@ Release builds are signed with the maintainer's Developer ID Application certifi
 
 **Revocation.** A leaked notary key: revoke it in App Store Connect → Users and Access → Integrations, create a new one, replace the Environment secret and variable. A leaked Developer ID certificate: revoke it at developer.apple.com → Certificates and contact Apple; what revocation does to builds already notarized has to be confirmed with Apple's documentation at that time before relying on it. A leaked Sparkle key needs a key rotation through Sparkle's documented procedure.
 
+**Residual risk.** The split keeps the keys away from the build, not the build away from the release: a compromised toolchain or dependency in `build` can still hand `sign` a tampered app, and it would be signed and notarized. There is no independent build-to-sign provenance check (it would need a reproducible or second build); SHA-pinned actions and a cache-free build narrow it.
+
+**A publish that stops partway.** `publish` creates the GitHub Release, then pushes the appcast, then bumps the tap, and cannot undo an earlier step. Before re-running anything, check the three places: the release page has `Syrtis.app.tar.gz` (and `latest.json` for a stable tag); `appcast.xml` on main has an item for the version; `Casks/syrtis.rb` in the tap names the version and the archive's sha256. If it failed before `gh release create`, re-run the `publish` job. If it failed after, a re-run stops at `gh release create` because the release exists; finish the missing steps by hand from the `signed` artifact (kept one day) instead of re-tagging.
+
 **Rollback.** Reverting to the ad-hoc chain is possible (ad-hoc updates install over Developer-ID builds, above), but the reverted workflow reads repository-level secrets, which are deleted once the Environment holds them: the maintainer restores them first. The normal recovery from a bad signed release is a new signed tag.
 
 ## Local secret storage
