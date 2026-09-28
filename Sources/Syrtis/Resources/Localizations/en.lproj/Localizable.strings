@@ -184,3 +184,14 @@
 "Set up usage attribution…" = "Set up usage attribution…";
 
 "Without a suggestion: %lld — set them in Settings." = "Without a suggestion: %lld — set them in Settings.";
+"Sand shoal" = "Sand shoal";
+"Occasional use, or a plan like Claude Pro" = "Occasional use, or a plan like Claude Pro";
+"How busy are your agents?" = "How busy are your agents?";
+"The menu-bar animation follows your live token rate. Pick the range that fits how you work; you can change it later in Settings." = "The menu-bar animation follows your live token rate. Pick the range that fits how you work; you can change it later in Settings.";
+"Light pace" = "Light";
+"Moderate pace" = "Moderate";
+"Heavy pace" = "Heavy";
+"Most people: Moderate" = "Most people: Moderate";
+"The cat and parrot speed up and the sand gets busier as the live token rate climbs. The pace sets how much traffic reaches the top: Light at 600K tokens/min, Moderate at 3M, Heavy at 10M." = "The cat and parrot speed up and the sand gets busier as the live token rate climbs. The pace sets how much traffic reaches the top: Light at 600K tokens/min, Moderate at 3M, Heavy at 10M.";
+"A few agents at once, or a plan like Claude Max 5x" = "A few agents at once, or a plan like Claude Max 5x";
+"Lots of agents at once, such as Claude Code's ultracode, or a plan like Claude Max 20x" = "Lots of agents at once, such as Claude Code's ultracode, or a plan like Claude Max 20x";

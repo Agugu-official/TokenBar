@@ -33,6 +33,14 @@ let package = Package(
                 .copy("Resources/anim-cat2-light"),
                 .copy("Resources/anim-parrot"),
                 .copy("Resources/anim-parrot-light"),
+                .copy("Resources/anim-sand0"),
+                .copy("Resources/anim-sand0-light"),
+                .copy("Resources/anim-sand1"),
+                .copy("Resources/anim-sand1-light"),
+                .copy("Resources/anim-sand2"),
+                .copy("Resources/anim-sand2-light"),
+                .copy("Resources/anim-sand3"),
+                .copy("Resources/anim-sand3-light"),
                 .copy("Resources/third-party"),
                 // Keep the .lproj directories at the package resource-bundle
                 // root so direct `swift run` can stage them beside the

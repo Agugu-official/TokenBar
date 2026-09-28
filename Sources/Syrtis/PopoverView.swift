@@ -709,6 +709,7 @@ struct PopoverView: View {
                     if activeTab == ClientTray.overviewTab {
                         AttributionOnboardingCardView(
                             modelReport: model.modelReport, agentUsage: model.agentUsage)
+                        AnimationPaceOnboardingCardView()
                     }
                     OverviewView(
                         payload: payload, clientIds: clientIds, stats: activeStats,

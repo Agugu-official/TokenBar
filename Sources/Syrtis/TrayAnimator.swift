@@ -5,7 +5,8 @@ import TokenBarCore
 struct TrayAnimationCPUTestConfiguration {
     let style: String
     let animated: Bool
-    let tokensPerMinute = 1_000_000.0
+    /// The top of the speed curve, so the harness measures the worst case.
+    let tokensPerMinute = TrayAnimator.animationCapTokensPerMinute
 
     static let current: TrayAnimationCPUTestConfiguration? = {
         let prefix = "--tray-animation-cpu-test="
@@ -13,7 +14,7 @@ struct TrayAnimationCPUTestConfiguration {
         else { return nil }
         let value = String(argument.dropFirst(prefix.count))
         switch value {
-        case "cat", "parrot":
+        case "cat", "parrot", TrayAnimator.sandStyle:
             return TrayAnimationCPUTestConfiguration(style: value, animated: true)
         case "static":
             return TrayAnimationCPUTestConfiguration(style: "cat", animated: false)
@@ -42,12 +43,16 @@ final class TrayAnimator {
     private let cpuTest = TrayAnimationCPUTestConfiguration.current
 #endif
     /// Frame sets keyed by "<style>|<dark|light>".
-    private let frames: [String: [NSImage]]
+    /// Cat and parrot load at init; sand sets load on first use
+    /// (`loadSandFramesIfNeeded`), since 1,152 frames are wasted on everyone
+    /// who never picks the style.
+    private var frames: [String: [NSImage]]
     private var loadTask: Task<Void, Never>?
     private var quotaTask: Task<Void, Never>?
     private var presentedAnimationKey: String?
     private var isStopped = true
-    /// RunCat load signal in [0, 100]: tokens/min ÷ 10K, so 1M tok/min = 100.
+    /// Load signal: the pace-scaled tokens/min ÷ 10K, capped at
+    /// `animationCapTokensPerMinute` (3M, so at most 300).
     private var load: Double = 0
     /// Latest snapshot returned by this poller. A newer payload accepted by a
     /// dashboard or Settings poll wins through the shared publication state.
@@ -142,7 +147,8 @@ final class TrayAnimator {
             // actual change, unrelated writes stay free.
         let tabHidden = d.string(forKey: ClientRegistry.tabHiddenKey) ?? ""
         let limitsHidden = d.string(forKey: ClientRegistry.limitsHiddenKey) ?? ""
-        return [style, animate, quotaSource, lastRemaining, iconColor, tabHidden, limitsHidden]
+        let pace = d.string(forKey: AnimationPace.storageKey) ?? ""
+        return [style, animate, quotaSource, lastRemaining, iconColor, tabHidden, limitsHidden, pace]
             .joined(separator: "|")
     }
 
@@ -150,7 +156,8 @@ final class TrayAnimator {
         isStopped = false
 #if DEBUG
         if let cpuTest {
-            load = Self.animationLoad(tokensPerMinute: cpuTest.tokensPerMinute)
+            load = Self.animationLoad(
+                tokensPerMinute: AnimationPace.current().scaled(cpuTest.tokensPerMinute))
             tokensPerMinRate = cpuTest.tokensPerMinute
             refreshIcon()
             reportCPUTestReady(cpuTest)
@@ -172,6 +179,11 @@ final class TrayAnimator {
                 let next = Self.currentIconSignature()
                 guard next != self.iconSettingsSignature else { return }
                 self.iconSettingsSignature = next
+                // A pace change rescales the rate already held.
+                if let rate = self.tokensPerMinRate {
+                    self.load = Self.animationLoad(
+                        tokensPerMinute: AnimationPace.current().scaled(rate))
+                }
                 if let payload = self.quota {
                     self.reconcileQuotaRemaining(with: payload)
                 }
@@ -380,7 +392,7 @@ final class TrayAnimator {
 
     private func currentFrames() -> [NSImage] {
         let dark = controller?.isDarkAppearance ?? true
-        return frames["\(currentStyle)|\(dark ? "dark" : "light")"]
+        return frames["\(frameStyle(currentStyle))|\(dark ? "dark" : "light")"]
             ?? frames["cat|dark"] ?? []
     }
 
@@ -392,12 +404,32 @@ final class TrayAnimator {
             || UserDefaults.standard.bool(forKey: Self.animateKey)
     }
 
+    /// Load is tokens/min in units of 10k, capped at `animationCapTokensPerMinute`.
     nonisolated static func animationLoad(tokensPerMinute: Double) -> Double {
-        min(max(0, tokensPerMinute) / 10_000.0, 100.0)
+        min(max(0, tokensPerMinute), animationCapTokensPerMinute) / 10_000.0
     }
 
+    /// Below this the loop plays at its idle rate.
+    nonisolated static let animationFloorTokensPerMinute = 50_000.0
+    /// At and above this it plays at its top rate. 1M until the maintainer
+    /// moved it to 3M, where busy machines actually run.
+    nonisolated static let animationCapTokensPerMinute = 3_000_000.0
+    nonisolated static let animationIdleFPS = 2.0
+    nonisolated static let animationTopFPS = 40.0
+
+    /// Frame interval in whole milliseconds. Between the floor and the cap
+    /// the rate rises on a log scale, so every decade of tokens/min changes
+    /// the speed by the same factor; a linear ramp to the cap left the common
+    /// 100k–1M range looking almost idle.
     nonisolated static func animationIntervalMilliseconds(load: Double) -> Int {
-        Int(500.0 / max(1.0, load / 5.0))
+        let tokensPerMinute = load * 10_000.0
+        guard tokensPerMinute > animationFloorTokensPerMinute else {
+            return Int(1000.0 / animationIdleFPS)
+        }
+        let span = log(animationCapTokensPerMinute / animationFloorTokensPerMinute)
+        let t = min(1, log(tokensPerMinute / animationFloorTokensPerMinute) / span)
+        let fps = animationIdleFPS * pow(animationTopFPS / animationIdleFPS, t)
+        return Int(1000.0 / fps)
     }
 
     nonisolated static func animationLayerSpeed(load: Double) -> Double {
@@ -413,7 +445,72 @@ final class TrayAnimator {
     }
 
     private var animationSpeed: Float {
-        Float(Self.animationLayerSpeed(load: load))
+        currentStyle == Self.sandStyle
+            ? Float(Self.sandLayerSpeed)
+            : Float(Self.animationLayerSpeed(load: load))
+    }
+
+    // MARK: - Sand (scripts/gen_sand_frames.py)
+
+    /// The sand style shows usage by how much sand falls, not by how fast the
+    /// loop plays: each level is its own frame set, all drawn for one fixed
+    /// rate. `animationLayerSpeed` plays the cat faster instead.
+    nonisolated static let sandStyle = "sand"
+    nonisolated static let sandLevels = 4
+    /// The rate the sand frames are drawn for (`FPS` in the generator). The
+    /// layer plays a set at 2 fps at speed 1 (`baseAnimationDuration`).
+    nonisolated static let sandFPS = 24.0
+    nonisolated static var sandLayerSpeed: Double { sandFPS / 2.0 }
+    /// Level thresholds in tokens/min on the same log scale as the other
+    /// styles: idle below 50k, then 300k and 1.5M.
+    nonisolated static let sandThresholds: [Double] = [50_000, 300_000, 1_500_000]
+
+    nonisolated static func sandLevel(tokensPerMinute: Double) -> Int {
+        sandThresholds.filter { tokensPerMinute >= $0 }.count
+    }
+
+    /// Every style that animates (the others are gauges). One list for the
+    /// tray, the Settings controls and the pace onboarding card.
+    nonisolated static let animatedStyles = ["cat", "parrot", sandStyle]
+
+    /// A level must be passed by this factor before it changes, so a rate
+    /// hovering at a threshold does not swap frame sets every 30 s poll: each
+    /// swap restarts the loop and re-rasterises 144 frames on the main thread.
+    nonisolated static let sandHysteresis = 1.2
+
+    /// The level to show for `tokensPerMinute` (already pace-scaled), given
+    /// the level shown now. Moving up needs the rate to clear the threshold
+    /// by `sandHysteresis`; moving down needs it to fall that far below.
+    nonisolated static func sandLevel(tokensPerMinute: Double, current: Int?) -> Int {
+        let raw = sandLevel(tokensPerMinute: tokensPerMinute)
+        guard let current, raw != current else { return raw }
+        if raw > current {
+            let confirmed = sandLevel(tokensPerMinute: tokensPerMinute / sandHysteresis)
+            return max(current, confirmed)
+        }
+        let confirmed = sandLevel(tokensPerMinute: tokensPerMinute * sandHysteresis)
+        return min(current, confirmed)
+    }
+
+    private var sandLevelShown: Int?
+
+    private func loadSandFramesIfNeeded() {
+        guard frames["sand0|dark"] == nil else { return }
+        for level in 0..<Self.sandLevels {
+            frames["sand\(level)|dark"] = Self.loadFrames(directory: "anim-sand\(level)")
+            frames["sand\(level)|light"] = Self.loadFrames(directory: "anim-sand\(level)-light")
+        }
+    }
+
+    /// The frame-set key for a style: the sand style resolves to its level.
+    /// `load` already holds the pace-scaled rate; every threshold is below the
+    /// cap, so `load * 10_000` reads it back without a second pace lookup.
+    private func frameStyle(_ style: String) -> String {
+        guard style == Self.sandStyle else { return style }
+        loadSandFramesIfNeeded()
+        let level = Self.sandLevel(tokensPerMinute: load * 10_000, current: sandLevelShown)
+        sandLevelShown = level
+        return "sand\(level)"
     }
 
     private func refreshIcon() {
@@ -425,7 +522,7 @@ final class TrayAnimator {
         }
 
         let dark = controller?.isDarkAppearance ?? true
-        let frameKey = "\(style)|\(dark ? "dark" : "light")"
+        let frameKey = "\(frameStyle(style))|\(dark ? "dark" : "light")"
         let set = frames[frameKey] ?? frames["cat|dark"] ?? []
         guard let first = set.first else {
             controller?.setAnimatedFrames([], speed: animationSpeed)
@@ -447,9 +544,15 @@ final class TrayAnimator {
     }
 
     private func updateAnimationSpeedIfPresented() {
-        guard QuotaIconStyle(rawValue: currentStyle) == nil, animateEnabled,
-              presentedAnimationKey != nil
-        else { return }
+        guard QuotaIconStyle(rawValue: currentStyle) == nil else { return }
+        // Sand changes frame set, not speed, when usage crosses a level. It
+        // does so with animation off too: the still frame is the level's dune,
+        // so a static sand icon still has to follow usage.
+        if currentStyle == Self.sandStyle {
+            refreshIcon()
+            return
+        }
+        guard animateEnabled, presentedAnimationKey != nil else { return }
         controller?.setAnimationSpeed(animationSpeed)
     }
 
@@ -457,8 +560,9 @@ final class TrayAnimator {
     private func reportCPUTestReady(_ test: TrayAnimationCPUTestConfiguration) {
         let frameCount = currentFrames().count
         let duration = Self.baseAnimationDuration(frameCount: frameCount)
-        let speed = test.animated ? Self.animationLayerSpeed(load: load) : 0
-        let fps = test.animated ? Self.effectiveAnimationFPS(load: load) : 0
+        // The speed actually handed to the layer: sand plays at its fixed rate.
+        let speed = test.animated ? Double(animationSpeed) : 0
+        let fps = 2 * speed
         print(String(
             format: "TRAY_CPU_TEST_READY style=%@ animated=%@ frames=%d base_duration=%.3f speed=%.3f fps=%.3f",
             test.style, test.animated.description, frameCount, duration, speed, fps))
@@ -543,7 +647,7 @@ final class TrayAnimator {
     func applyRate(_ rate: Double, generation: Int) {
         guard !isStopped, generation >= lastAppliedRateGen else { return }
         lastAppliedRateGen = generation
-        load = Self.animationLoad(tokensPerMinute: rate)
+        load = Self.animationLoad(tokensPerMinute: AnimationPace.current().scaled(rate))
         tokensPerMinRate = rate
         updateAnimationSpeedIfPresented()
         onQuotaUpdated?()

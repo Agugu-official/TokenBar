@@ -584,3 +584,14 @@
 "Set up usage attribution…" = "设置用量归属…";
 
 "Without a suggestion: %lld — set them in Settings." = "没有建议的来源：%lld 个，请到“设置”手动指定。";
+"Sand shoal" = "流沙";
+"Occasional use, or a plan like Claude Pro" = "偶尔使用，或像 Claude Pro 这类方案";
+"How busy are your agents?" = "你的 agent 平时有多忙？";
+"The menu-bar animation follows your live token rate. Pick the range that fits how you work; you can change it later in Settings." = "菜单栏动画会跟着实时的 token 速率变化。选一个符合你使用习惯的范围，之后可以在“设置”里修改。";
+"Light pace" = "轻度";
+"Moderate pace" = "中度";
+"Heavy pace" = "重度";
+"Most people: Moderate" = "大多数人适合“中度”";
+"The cat and parrot speed up and the sand gets busier as the live token rate climbs. The pace sets how much traffic reaches the top: Light at 600K tokens/min, Moderate at 3M, Heavy at 10M." = "实时 token 速率越高，猫和鹦鹉跑得越快、流沙也越热闹。动画速度决定多大的流量会到顶：轻度是每分钟 60 万 token、中度 300 万、重度 1,000 万。";
+"A few agents at once, or a plan like Claude Max 5x" = "几个 agent 同时跑，或像 Claude Max 5x 这类方案";
+"Lots of agents at once, such as Claude Code's ultracode, or a plan like Claude Max 20x" = "超多 agent 同时跑（例如 Claude Code 的 ultracode），或像 Claude Max 20x 这类方案";

@@ -1293,22 +1293,68 @@ enum SelfTest {
             glassCloseResult.3,
             "glass panel hides directly once no session is open")
 
-        // Tray animation timing: preserve the shipping integer-millisecond
-        // cadence while mapping the runner rate from 2 to 40 fps.
-        let idleLoad = TrayAnimator.animationLoad(tokensPerMinute: 0)
-        let thresholdLoad = TrayAnimator.animationLoad(tokensPerMinute: 50_000)
-        let mediumLoad = TrayAnimator.animationLoad(tokensPerMinute: 100_000)
-        let quantizedLoad = TrayAnimator.animationLoad(tokensPerMinute: 333_000)
-        let fullLoad = TrayAnimator.animationLoad(tokensPerMinute: 1_000_000)
-        let clampedLoad = TrayAnimator.animationLoad(tokensPerMinute: 2_000_000)
-        expect(TrayAnimator.effectiveAnimationFPS(load: idleLoad) == 2, "tray idle is 2 fps")
-        expect(TrayAnimator.effectiveAnimationFPS(load: thresholdLoad) == 2, "tray 50K threshold is 2 fps")
-        expect(TrayAnimator.effectiveAnimationFPS(load: mediumLoad) == 4, "tray 100K is 4 fps")
+        // Tray animation timing: integer-millisecond frame intervals, 2 fps up
+        // to 50k tok/min, a log ramp to 40 fps at the 3M cap.
+        func fps(_ tpm: Double) -> Double {
+            TrayAnimator.effectiveAnimationFPS(load: TrayAnimator.animationLoad(tokensPerMinute: tpm))
+        }
+        expect(fps(0) == 2, "tray idle is 2 fps")
+        expect(fps(50_000) == 2, "tray 50K threshold is 2 fps")
+        expect(fps(3_000_000) == 40, "tray 3M is 40 fps")
+        expect(fps(20_000_000) == 40, "tray speed clamps at 40 fps above 3M")
+        expect(fps(1_000_000) > 17 && fps(1_000_000) < 19, "tray 1M is about 18 fps on the log ramp")
         expect(
-            TrayAnimator.animationIntervalMilliseconds(load: quantizedLoad) == 75,
+            fps(100_000) < fps(300_000) && fps(300_000) < fps(1_000_000)
+                && fps(1_000_000) < fps(2_000_000),
+            "tray speed rises monotonically between the floor and the cap")
+        let rampInterval = TrayAnimator.animationIntervalMilliseconds(
+            load: TrayAnimator.animationLoad(tokensPerMinute: 700_000))
+        expect(
+            fps(700_000) == 1000 / Double(rampInterval),
             "tray cadence preserves integer-ms quantization")
-        expect(TrayAnimator.effectiveAnimationFPS(load: fullLoad) == 40, "tray 1M is 40 fps")
-        expect(TrayAnimator.effectiveAnimationFPS(load: clampedLoad) == 40, "tray speed clamps at 40 fps")
+        expect(
+            TrayAnimator.sandLevel(tokensPerMinute: 49_999) == 0
+                && TrayAnimator.sandLevel(tokensPerMinute: 50_000) == 1
+                && TrayAnimator.sandLevel(tokensPerMinute: 300_000) == 2
+                && TrayAnimator.sandLevel(tokensPerMinute: 1_500_000) == 3,
+            "sand levels switch at 50k, 300k and 1.5M tok/min")
+        // Animation pace: the live rate is divided by the pace's multiplier, so
+        // each pace reaches the top speed at its own traffic level.
+        func pacedFPS(_ pace: AnimationPace, _ tpm: Double) -> Double {
+            TrayAnimator.effectiveAnimationFPS(
+                load: TrayAnimator.animationLoad(tokensPerMinute: pace.scaled(tpm)))
+        }
+        expect(
+            pacedFPS(.light, 600_000) == 40 && pacedFPS(.light, 500_000) < 40
+                && pacedFPS(.moderate, 3_000_000) == 40
+                && pacedFPS(.heavy, 10_002_000) == 40 && pacedFPS(.heavy, 9_000_000) < 40
+                && pacedFPS(.heavy, 3_000_000) < pacedFPS(.moderate, 3_000_000),
+            "animation pace: Light tops out at 600K, Moderate at 3M, Heavy at about 10M")
+        expect(
+            TrayAnimator.sandLevel(tokensPerMinute: AnimationPace.light.scaled(60_000)) == 2
+                && TrayAnimator.sandLevel(tokensPerMinute: AnimationPace.heavy.scaled(1_500_000)) == 2,
+            "animation pace rescales the sand levels too")
+        expect(
+            AnimationPaceOnboarding.isVisible(
+                style: "sand", animate: true, hasChosen: false, isNonUserRuntime: false)
+                && !AnimationPaceOnboarding.isVisible(
+                    style: "sand", animate: true, hasChosen: true, isNonUserRuntime: false)
+                && !AnimationPaceOnboarding.isVisible(
+                    style: "ring", animate: true, hasChosen: false, isNonUserRuntime: false)
+                && !AnimationPaceOnboarding.isVisible(
+                    style: "cat", animate: false, hasChosen: false, isNonUserRuntime: false)
+                && !AnimationPaceOnboarding.isVisible(
+                    style: "cat", animate: true, hasChosen: false, isNonUserRuntime: true),
+            "pace onboarding shows only for an animating icon, before a pace is picked, in a user runtime")
+        // Hysteresis: a rate at a threshold does not flip the level back and forth.
+        expect(
+            TrayAnimator.sandLevel(tokensPerMinute: 310_000, current: 1) == 1
+                && TrayAnimator.sandLevel(tokensPerMinute: 370_000, current: 1) == 2
+                && TrayAnimator.sandLevel(tokensPerMinute: 290_000, current: 2) == 2
+                && TrayAnimator.sandLevel(tokensPerMinute: 240_000, current: 2) == 1
+                && TrayAnimator.sandLevel(tokensPerMinute: 2_000_000, current: 0) == 3
+                && TrayAnimator.sandLevel(tokensPerMinute: 310_000, current: nil) == 2,
+            "sand level changes only once the rate clears a threshold by 20%")
         expect(TrayAnimator.baseAnimationDuration(frameCount: 5) == 2.5, "tray five-frame base duration")
         expect(TrayAnimator.baseAnimationDuration(frameCount: 10) == 5, "tray ten-frame base duration")
 
