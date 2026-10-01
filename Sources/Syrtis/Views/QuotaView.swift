@@ -63,9 +63,14 @@ struct QuotaView: View {
                         note: "Session / weekly / model limits",
                         restrict: true, curves: windowCurves)
                 }
-                if clientIds.count > 1 || windowCard == nil {
-                    // A grouped tab compares independent subscriptions. These
-                    // folds need quota history only, including Bot-only installs.
+                if windowCard == nil {
+                    // No window card to list a history for: a Bot-only Grok
+                    // install, or a tab whose client reports no quota. These
+                    // folds need quota history only. A grouped tab with a
+                    // window card (Grok Build & Bot, Antigravity) takes the
+                    // window history below, the same card as every other
+                    // client tab; its other member's windows stay on the
+                    // all-agent Quota lens.
                     QuotaHistoryStripCard(
                         summaries: windowSummaries.filter { clientIds.contains($0.clientId) },
                         equivalences: equivalences, attempted: usageAttempted,
