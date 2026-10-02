@@ -2638,6 +2638,73 @@ where
     )
 }
 
+/// `retrieveUserQuotaSummary`: the allowance groups agy's `/usage` prints,
+/// e.g. "Gemini Models" and "Claude and GPT models", each with a weekly and a
+/// five-hour bucket. Shape measured on 2026-10-02:
+/// `groups[].{displayName, buckets[].{bucketId, displayName, remainingFraction,
+/// resetTime, window}}`. Labels and card ids follow the agy route
+/// (`parse_agy_usage`), so a captured card reads like the primary's. `None`
+/// on any failure or an empty answer: the caller falls back to the catalog.
+async fn fetch_quota_summary(context: &RemoteContext, now: DateTime<Utc>) -> Option<Vec<UsageWindow>> {
+    let body = match context.project.as_deref() {
+        Some(project) => json!({ "project": project }),
+        None => json!({}),
+    };
+    let response = code_assist_post(
+        &context.client,
+        "retrieveUserQuotaSummary",
+        &body,
+        &context.access_token,
+        context.cache_binding.clone(),
+        true,
+    )
+    .await
+    .ok()?;
+    let windows = windows_from_quota_summary(&response, now);
+    (!windows.is_empty()).then_some(windows)
+}
+
+fn windows_from_quota_summary(body: &str, now: DateTime<Utc>) -> Vec<UsageWindow> {
+    let Ok(response) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+    let text = |value: &Value, key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    let mut windows = Vec::new();
+    for group in response.get("groups").and_then(Value::as_array).into_iter().flatten() {
+        let group_name = text(group, "displayName").unwrap_or_else(|| "Antigravity".to_string());
+        for bucket in group.get("buckets").and_then(Value::as_array).into_iter().flatten() {
+            let Some(id) = text(bucket, "bucketId") else { continue };
+            let Some(fraction) = bucket.get("remainingFraction").and_then(Value::as_f64) else {
+                continue;
+            };
+            let reset = bucket
+                .get("resetTime")
+                .and_then(Value::as_str)
+                .and_then(parse_datetime);
+            let name = text(bucket, "displayName").unwrap_or_else(|| "Limit".to_string());
+            let card_id = format!("agy.{id}.v1");
+            if let Some(window) = quota_window(
+                format!("{group_name} · {name}"),
+                fraction,
+                reset,
+                now,
+                card_id.clone(),
+                Some(card_id),
+            ) {
+                windows.push(window);
+            }
+        }
+    }
+    windows
+}
+
 /// Both the token and the Code Assist requests of a captured account go
 /// through this client. No redirects: the default policy would resend a POST
 /// body carrying the refresh token or the bearer to wherever a 307/308 points.
@@ -2809,6 +2876,11 @@ impl CapturedIo for SystemCapturedIo {
             account_scope,
             cache_binding: Some(cache_binding),
         };
+        // The same grouped allowances agy's `/usage` prints (and the primary
+        // card shows on the agy route); the per-model catalog is the fallback.
+        if let Some(windows) = fetch_quota_summary(&context, now).await {
+            return Ok(context.finish(windows, history_scope));
+        }
         let secondary_history = history_scope.clone();
         fetch_with(
             || async { LocalAttempt::RouteMiss },
@@ -3492,6 +3564,47 @@ mod tests {
         assert_eq!(fetched.windows.len(), 1);
         assert_eq!(fetched.windows[0].label_for_test(), "Gemini 3 Pro");
         assert!((fetched.windows[0].remaining_for_test() - 42.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn quota_summary_maps_like_agy_usage() {
+        let now = DateTime::parse_from_rfc3339("2026-10-02T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        // Shape measured from retrieveUserQuotaSummary on 2026-10-02.
+        let body = json!({
+            "description": "…",
+            "groups": [
+                { "displayName": "Gemini Models", "description": "…", "buckets": [
+                    { "bucketId": "gemini-weekly", "displayName": "Weekly Limit Remaining",
+                      "remainingFraction": 0.968718, "resetTime": "2026-10-08T18:46:28Z", "window": "weekly" },
+                    { "bucketId": "gemini-5h", "displayName": "Five Hour Limit Remaining",
+                      "remainingFraction": 0.8799, "resetTime": "2026-10-02T11:20:43Z", "window": "5h" }
+                ]},
+                { "displayName": "Claude and GPT models", "buckets": [
+                    { "bucketId": "3p-weekly", "displayName": "Weekly Limit Remaining",
+                      "remainingFraction": 1, "resetTime": "2026-10-09T07:58:14Z", "window": "weekly" },
+                    { "displayName": "No id is skipped", "remainingFraction": 1 },
+                    { "bucketId": "3p-5h", "displayName": "Five Hour Limit Remaining", "window": "5h" }
+                ]}
+            ]
+        });
+        let windows = windows_from_quota_summary(&body.to_string(), now);
+        let rows: Vec<(&str, Option<&str>)> = windows
+            .iter()
+            .map(|w| (w.label_for_test(), w.pace_window_key_for_test()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Gemini Models · Weekly Limit Remaining", Some("agy.gemini-weekly.v1")),
+                ("Gemini Models · Five Hour Limit Remaining", Some("agy.gemini-5h.v1")),
+                ("Claude and GPT models · Weekly Limit Remaining", Some("agy.3p-weekly.v1")),
+            ]
+        );
+        assert!((windows[1].remaining_for_test() - 87.99).abs() < 0.01);
+        assert!(windows_from_quota_summary("not json", now).is_empty());
+        assert!(windows_from_quota_summary("{}", now).is_empty());
     }
 
     #[test]
