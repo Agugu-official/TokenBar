@@ -18652,6 +18652,7 @@ enum SelfTest {
         for (label, passed) in (wcpState ?? [:]).sorted(by: { $0.key < $1.key }) {
             expect(passed, "WCP-state \(label)")
         }
+
         let wcpReopen: [String: Bool]? = wcpRun(wcpTwo, client: "claude", setup: { _ in }) { _, src in
             var o: [String: Bool] = [:]
             // A fresh seeding model that writes the shared reopen cache.
@@ -18680,6 +18681,12 @@ enum SelfTest {
             wcpSetAccount("claude", wcpB)
             o["a restored card for the primary is not served once B is resolved"] =
                 wcpIsLoading(reopened.windowCard(for: "claude"))
+            // A1: the restored cycles are the primary's; with B resolved they
+            // must not be drawn before the first refresh.
+            o["control: the restore recorded which account its cycles belong to"] =
+                reopened.quotaCyclesAccount == ""
+            o["restored cycles for the primary are not drawn once B is resolved"] =
+                reopened.cardHistory(for: "claude").pending
             wcpSetAccount("claude", "")
             DashboardModel.invalidateScanDerivedCaches()
             return o

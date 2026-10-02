@@ -244,6 +244,10 @@ private struct DashboardSnapshot {
         /// rebuild on a reopened model can tell "the same window, scan not back
         /// yet" from "a different window", and retain only the former.
         let historyCardId: String?
+        /// The scan slot of the account `cycles` belong to, so a reopened
+        /// model whose resolved account has changed since does not draw them
+        /// (spec rule 3). Nil only for a snapshot that recorded none.
+        var cyclesAccount: String? = nil
     }
 }
 
@@ -436,6 +440,7 @@ private struct DashboardSnapshot {
             quotaHistory = snap.quotaCards.history
             quotaEquivalences = snap.quotaCards.equivalences
             quotaCycles = snap.quotaCards.cycles
+            quotaCyclesAccount = snap.quotaCards.cyclesAccount
             quotaHistoryCardId = snap.quotaCards.historyCardId
             // Seeded from the SAME id, because two separate checks compare
             // against it and both read a nil as "a different window". A
@@ -1164,7 +1169,8 @@ private struct DashboardSnapshot {
                 windowCards: windowCards, windowCardAccounts: windowCardAccounts,
                 windowCurves: windowCurves,
                 history: quotaHistory, equivalences: quotaEquivalences,
-                cycles: quotaCycles, historyCardId: quotaHistoryCardId)))
+                cycles: quotaCycles, historyCardId: quotaHistoryCardId,
+                cyclesAccount: quotaCyclesAccount)))
     }
 
     /// Submit the DISK capture. Deliberately separate from `cacheSnapshot()`
@@ -1233,7 +1239,8 @@ private struct DashboardSnapshot {
                 windowCards: windowCards, windowCardAccounts: windowCardAccounts,
                 windowCurves: windowCurves,
                 history: quotaHistory, equivalences: quotaEquivalences,
-                cycles: quotaCycles, historyCardId: quotaHistoryCardId)))
+                cycles: quotaCycles, historyCardId: quotaHistoryCardId,
+                cyclesAccount: quotaCyclesAccount)))
     }
 
     /// Periodically re-derive every loaded lens so the popover advances while
