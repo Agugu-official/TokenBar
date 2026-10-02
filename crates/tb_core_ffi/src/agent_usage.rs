@@ -202,6 +202,14 @@ pub struct AgentUsageSnapshot {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     transport_diagnostic: Option<SafeTransportDiagnostic>,
+    /// The Antigravity primary on the agy route only: the modification date
+    /// of agy's login item read just before `agy /usage` ran (the same
+    /// attributes-only marker automatic capture watches; not a secret). Swift
+    /// merges this card with a captured account only when its marker equals
+    /// the one that account was confirmed under, so a card fetched before an
+    /// agy sign-in change is never labelled as the account signed in after.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) agy_login_marker: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1380,6 +1388,7 @@ fn empty_error_snapshot(
     transport_diagnostic: Option<SafeTransportDiagnostic>,
 ) -> AgentUsageSnapshot {
     AgentUsageSnapshot {
+        agy_login_marker: None,
         // An error card still belongs to the account that produced it: two
         // accounts of one client are only distinguishable downstream by this
         // field, so an error attributed to the primary would replace its card.
@@ -1738,6 +1747,7 @@ fn grokbot_outcome(
         Ok(Some(data)) => ProviderFetchOutcome::Success {
             cache_binding: data.cache_binding,
             snapshot: AgentUsageSnapshot {
+                agy_login_marker: None,
                 account_key: None,
                 client_id: ProviderId::GrokBot, // replaced by apply_provider_outcome
                 source: "oauth".to_string(),
@@ -1762,6 +1772,7 @@ async fn fetch_grok(id: ProviderId) -> Option<AgentUsageSnapshot> {
         Ok(Some(data)) => ProviderFetchOutcome::Success {
             cache_binding: data.cache_binding,
             snapshot: AgentUsageSnapshot {
+                agy_login_marker: None,
                 account_key: None,
                 client_id: id,
                 source: "oauth".to_string(),
@@ -1794,6 +1805,7 @@ async fn fetch_kiro(id: ProviderId) -> Option<AgentUsageSnapshot> {
                 Ok(data) => ProviderFetchOutcome::Success {
                     cache_binding: Some(data.cache_binding),
                     snapshot: AgentUsageSnapshot {
+                        agy_login_marker: None,
                         account_key: None,
                         client_id: id,
                         source: "oauth".to_string(),
@@ -1829,6 +1841,7 @@ async fn fetch_copilot(id: ProviderId) -> Option<AgentUsageSnapshot> {
                 Ok(data) => ProviderFetchOutcome::Success {
                     cache_binding: Some(data.cache_binding),
                     snapshot: AgentUsageSnapshot {
+                        agy_login_marker: None,
                         account_key: None,
                         client_id: id,
                         source: "oauth".to_string(),
@@ -1864,6 +1877,7 @@ async fn fetch_opencode_go(id: ProviderId) -> Option<AgentUsageSnapshot> {
                 Ok(data) => ProviderFetchOutcome::Success {
                     cache_binding: Some(data.cache_binding),
                     snapshot: AgentUsageSnapshot {
+                        agy_login_marker: None,
                         account_key: None,
                         // The Go subscription quota attaches to the existing
                         // `opencode` client tab, mirroring how the Copilot quota
@@ -1895,6 +1909,7 @@ async fn fetch_antigravity(id: ProviderId) -> AgentUsageSnapshot {
         Ok(fetched) => ProviderFetchOutcome::Success {
             cache_binding: fetched.cache_binding,
             snapshot: AgentUsageSnapshot {
+                agy_login_marker: fetched.agy_login_marker.clone(),
                 account_key: None,
                 client_id: id,
                 source: fetched.source,
@@ -1972,6 +1987,7 @@ fn captured_antigravity_outcome(
         Ok(fetched) => ProviderFetchOutcome::Success {
             cache_binding: fetched.cache_binding,
             snapshot: AgentUsageSnapshot {
+                agy_login_marker: None,
                 account_key: Some(key.to_string()),
                 client_id: id,
                 source: fetched.source,
@@ -2416,6 +2432,7 @@ async fn fetch_codex_inner() -> ProviderFetchOutcome {
 
     ProviderFetchOutcome::Success {
         snapshot: AgentUsageSnapshot {
+            agy_login_marker: None,
             account_key: None,
             client_id: ProviderId::Codex, // replaced by apply_provider_outcome
             source: "oauth".to_string(),
@@ -3041,6 +3058,7 @@ async fn fetch_claude_oauth_usage_request(
         "oauth",
         ProviderFetchOutcome::Success {
             snapshot: AgentUsageSnapshot {
+                agy_login_marker: None,
                 account_key: identity.account_key.clone(),
                 client_id: ProviderId::Claude, // replaced by apply_provider_outcome
                 source: "oauth".to_string(),
@@ -3326,6 +3344,7 @@ async fn claude_header_snapshot(
         };
     ProviderFetchOutcome::Success {
         snapshot: AgentUsageSnapshot {
+            agy_login_marker: None,
             account_key: identity.account_key.clone(),
             client_id: ProviderId::Claude, // replaced by apply_provider_outcome
             source: "setup-token".to_string(),
@@ -6575,6 +6594,7 @@ mod tests {
         now: DateTime<Utc>,
     ) -> AgentUsageSnapshot {
         AgentUsageSnapshot {
+            agy_login_marker: None,
             account_key: None,
             client_id,
             source: "oauth".to_string(),
@@ -6694,6 +6714,7 @@ mod tests {
             generated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
             publication_generation: 1,
             agents: vec![AgentUsageSnapshot {
+                agy_login_marker: None,
                 account_key: None,
                 windows,
                 ..cache_test_snapshot(ProviderId::Claude, Ok(trusted.clone()), now)
@@ -7386,6 +7407,7 @@ mod tests {
         let outcome = match decoded {
             Ok((plan, windows)) => ProviderFetchOutcome::Success {
                 snapshot: AgentUsageSnapshot {
+                    agy_login_marker: None,
                     account_key: None,
                     client_id: ProviderId::Copilot,
                     source: "oauth".to_string(),
@@ -8969,6 +8991,7 @@ mod tests {
             .resolve_current("fixture", "unknown-windows", b"marker")
             .unwrap();
         let mut snapshot = AgentUsageSnapshot {
+            agy_login_marker: None,
             account_key: None,
             client_id: ProviderId::Codex,
             source: "fixture".to_string(),
@@ -9967,6 +9990,7 @@ mod tests {
             .unwrap();
         let expected_scope = account_scope.as_str().to_string();
         let mut snapshot = AgentUsageSnapshot {
+            agy_login_marker: None,
             account_key: None,
             client_id: ProviderId::Claude,
             source: "oauth".to_string(),
@@ -10088,6 +10112,7 @@ mod tests {
             Some(DurationEvidence::contract(86_400)),
         );
         let mut snapshot = AgentUsageSnapshot {
+            agy_login_marker: None,
             account_key: None,
             client_id: ProviderId::Claude,
             source: "oauth".to_string(),
@@ -12155,6 +12180,7 @@ mod tests {
             )
         };
         let mut snapshot = AgentUsageSnapshot {
+            agy_login_marker: None,
             account_key: None,
             client_id: ProviderId::Test("fixture"),
             source: "fixture".to_string(),
@@ -12213,6 +12239,7 @@ mod tests {
             )
         };
         let mut snapshot = AgentUsageSnapshot {
+            agy_login_marker: None,
             account_key: None,
             client_id: ProviderId::Test("fixture"),
             source: "fixture".to_string(),
@@ -12287,6 +12314,7 @@ mod tests {
         let now = 1_700_000_000;
         let reset = Utc.timestamp_opt(now + 86_400, 0).single().unwrap();
         let mut snapshot = AgentUsageSnapshot {
+            agy_login_marker: None,
             account_key: None,
             client_id: ProviderId::Test("fixture"),
             source: "fixture".to_string(),
@@ -12375,6 +12403,7 @@ mod tests {
         let now = 1_700_000_000;
         let reset = Utc.timestamp_opt(now + 86_400, 0).single().unwrap();
         let mut snapshot = AgentUsageSnapshot {
+            agy_login_marker: None,
             account_key: None,
             client_id: ProviderId::Test("fixture"),
             source: "fixture".to_string(),
@@ -12430,6 +12459,7 @@ mod tests {
         let now = 1_700_000_000;
         let reset = Utc.timestamp_opt(now + 86_400, 0).single().unwrap();
         let mut snapshot = AgentUsageSnapshot {
+            agy_login_marker: None,
             account_key: None,
             client_id: ProviderId::Test("fixture"),
             source: "fixture".to_string(),
@@ -12553,6 +12583,7 @@ mod tests {
     fn stage4_scope_error_is_sticky_and_skips_history() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
         let mut snapshot = AgentUsageSnapshot {
+            agy_login_marker: None,
             account_key: None,
             client_id: ProviderId::Test("fixture"),
             source: "fixture".to_string(),
@@ -12654,6 +12685,7 @@ mod tests {
             account_scopes.push(account_scope.as_str().to_string());
             let sampled_at = start + index as i64 * 900;
             let mut snapshot = AgentUsageSnapshot {
+                agy_login_marker: None,
                 account_key: None,
                 client_id: ProviderId::Claude,
                 source: "oauth".to_string(),
@@ -12766,6 +12798,7 @@ mod tests {
         let history_scope = scope.resolve_history("antigravity", None).unwrap();
         let start = 1_800_000_000_i64;
         let mut snapshot = AgentUsageSnapshot {
+            agy_login_marker: None,
             account_key: None,
             client_id: ProviderId::Antigravity,
             source: "cli".to_string(),
@@ -12807,6 +12840,7 @@ mod tests {
             .unwrap();
         let start = 1_800_000_000_i64;
         let mut snapshot = AgentUsageSnapshot {
+            agy_login_marker: None,
             account_key: None,
             client_id: ProviderId::Antigravity,
             source: "local".to_string(),
@@ -12842,6 +12876,7 @@ mod tests {
             .unwrap();
         let start = 1_800_000_000_i64;
         let mut snapshot = AgentUsageSnapshot {
+            agy_login_marker: None,
             account_key: Some("/tmp/extra".to_string()),
             client_id: ProviderId::Claude,
             source: "oauth".to_string(),
@@ -13204,6 +13239,7 @@ mod tests {
             Some(DurationEvidence::contract(5 * 3600)),
         );
         AgentUsageSnapshot {
+            agy_login_marker: None,
             account_key: identity.account_key.clone(),
             client_id: ProviderId::Claude,
             source: "oauth".to_string(),
@@ -13563,6 +13599,7 @@ mod tests {
 
         // The field is not dead: an extra account does carry it.
         let extra = AgentUsageSnapshot {
+            agy_login_marker: None,
             account_key: Some(G_TEST_CONFIG_DIR.to_string()),
             ..cache_test_snapshot(ProviderId::Claude, Ok(account_scope), now)
         };
@@ -13622,6 +13659,7 @@ mod tests {
             round_two,
             ProviderFetchOutcome::Success {
                 snapshot: AgentUsageSnapshot {
+                    agy_login_marker: None,
                     account_key: Some(G_TEST_CONFIG_DIR.to_string()),
                     ..cache_test_snapshot(ProviderId::Claude, Ok(extra_scope.clone()), round_two)
                 },
@@ -13811,6 +13849,7 @@ mod tests {
             generated_at: "2026-07-10T12:00:00.000Z".to_string(),
             publication_generation: 1,
             agents: vec![AgentUsageSnapshot {
+                agy_login_marker: None,
                 account_key: None,
                 client_id: ProviderId::Test("provider-fixture.invalid"),
                 source: "fixture.invalid".to_string(),

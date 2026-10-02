@@ -542,10 +542,13 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
     public let credits: CreditsSnapshot?
     public let error: String?
     public let transportDiagnostic: AgentUsageTransportDiagnostic?
+    /// Antigravity primary on the agy route only: agy's login-item date read
+    /// just before this card was fetched. Display-only (Antigravity dedup).
+    public let agyLoginMarker: String?
 
     private enum CodingKeys: String, CodingKey {
         case clientId, accountKey, source, updatedAt, identity, windows, credits, error,
-            transportDiagnostic
+            transportDiagnostic, agyLoginMarker
     }
 
     public init(from decoder: Decoder) throws {
@@ -560,6 +563,7 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
         self.error = try container.decodeIfPresent(String.self, forKey: .error)
         self.transportDiagnostic = try? container.decode(
             AgentUsageTransportDiagnostic.self, forKey: .transportDiagnostic)
+        self.agyLoginMarker = try container.decodeIfPresent(String.self, forKey: .agyLoginMarker)
     }
 
     /// Backend `source` values that mean "this card is waiting on the user",
@@ -887,6 +891,7 @@ extension AgentUsageSnapshot {
         credits = other.credits
         error = other.error
         transportDiagnostic = other.transportDiagnostic
+        agyLoginMarker = other.agyLoginMarker
     }
 }
 

@@ -17956,14 +17956,20 @@ enum SelfTest {
             }
 
             // Dedup through BOTH accessors, gated on the primary's source.
-            func payload(primarySource: String, primaryError: String? = nil, generation: Int = 7)
+            // The fake's marker is "m1"; an agy card fetched under it is the
+            // current login's card. `primaryMarker` lets a case model a card
+            // fetched before agy's sign-in changed.
+            func payload(primarySource: String, primaryError: String? = nil, generation: Int = 7,
+                         primaryMarker: String? = "m1")
                 -> AgentUsagePayload
             {
-                func agent(_ accountKey: String?, _ source: String, _ email: String, _ error: String?) -> String {
+                func agent(_ accountKey: String?, _ source: String, _ email: String, _ error: String?,
+                           _ marker: String? = nil) -> String {
                     let account = accountKey.map { "\"accountKey\":\"\($0)\"," } ?? ""
                     let error = error.map { ",\"error\":\"\($0)\"" } ?? ""
+                    let marker = marker.map { "\"agyLoginMarker\":\"\($0)\"," } ?? ""
                     return """
-                    {"clientId":"antigravity",\(account)"source":"\(source)","updatedAt":"t",
+                    {"clientId":"antigravity",\(account)\(marker)"source":"\(source)","updatedAt":"t",
                      "identity":{"email":"\(email)","plan":"Pro"}\(error),"windows":[
                      {"cardId":"agy.test.v1","label":"Gemini","usedPercent":40,
                       "remainingPercent":60,"resetsAt":"\(m3fResetIso)",
@@ -17975,7 +17981,7 @@ enum SelfTest {
                 }
                 return try! JSONDecoder().decode(AgentUsagePayload.self, from: Data("""
                     {"generatedAt":"t","publicationGeneration":\(generation),"agents":[
-                      \(agent(nil, primarySource, "primary@example.com", primaryError)),
+                      \(agent(nil, primarySource, "primary@example.com", primaryError, primaryMarker)),
                       \(agent(agKey, "oauth", agEmail, nil))
                     ]}
                     """.utf8))
@@ -18009,6 +18015,19 @@ enum SelfTest {
                 check("AG-5 dedup through latestPayload and TrayAnimator.publishedQuota(nil)",
                       deduped(AgentUsagePublicationCoordinator.latestPayload)
                           && deduped(TrayAnimator.publishedQuota(nil)))
+                // The failure seen on the test bundle: the current account is
+                // confirmed under "m1", but the card on screen was fetched
+                // under an earlier login. It must not take that account's
+                // email, and that account's own card must stay.
+                AgentUsagePublicationCoordinator.resetForTesting()
+                check("AG-5 an agy card fetched under another login marker is not merged",
+                      both(AgentUsagePublicationCoordinator.resolve(
+                          payload(primarySource: "agy", primaryMarker: "m0"))))
+                AgentUsagePublicationCoordinator.resetForTesting()
+                check("AG-5 an agy card with no login marker is not merged",
+                      both(AgentUsagePublicationCoordinator.resolve(
+                          payload(primarySource: "agy", primaryMarker: nil))))
+                AgentUsagePublicationCoordinator.resetForTesting()
                 for source in ["cli", "oauth"] {
                     AgentUsagePublicationCoordinator.resetForTesting()
                     check("AG-5 primary from \(source): both cards, primary keeps its own email",

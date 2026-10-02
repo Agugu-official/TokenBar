@@ -63,6 +63,8 @@ pub(crate) struct Fetched {
     pub history_scope: Result<HistoryScope, AccountScopeError>,
     pub cache_binding: Option<ProviderCacheBinding>,
     pub windows: Vec<UsageWindow>,
+    /// Set only by the agy route: see `AgentUsageSnapshot::agy_login_marker`.
+    pub agy_login_marker: Option<String>,
 }
 
 #[derive(Debug)]
@@ -290,8 +292,12 @@ where
         latch,
         next: AgyLatch::Idle,
     };
+    let fetched_under = marker.clone();
     match run(now).await {
-        Ok(fetched) => Ok(fetched),
+        Ok(mut fetched) => {
+            fetched.agy_login_marker = Some(fetched_under);
+            Ok(fetched)
+        }
         Err(AgyRunError { failure, spawned }) => {
             if spawned {
                 release.next = AgyLatch::Failed(marker);
@@ -827,6 +833,7 @@ fn parse_agy_usage(body: &[u8], now: DateTime<Utc>) -> Result<Fetched, String> {
     }
 
     Ok(Fetched {
+        agy_login_marker: None,
         source: "agy".to_string(),
         identity: None,
         account_scope: Err(AccountScopeError::NoTrustedEvidence),
@@ -943,6 +950,7 @@ fn parse_user_status(body: &str, now: DateTime<Utc>) -> Result<Fetched, String> 
 
     let email = status.email.filter(|value| !value.trim().is_empty());
     Ok(Fetched {
+        agy_login_marker: None,
         source: "cli".to_string(),
         identity: Some(AgentIdentity { email, plan }),
         // Parsing remains pure and hermetic. fetch_local_ide resolves this only
@@ -1023,6 +1031,7 @@ impl RemoteContext {
         history_scope: Result<HistoryScope, AccountScopeError>,
     ) -> Fetched {
         Fetched {
+            agy_login_marker: None,
             source: "oauth".to_string(),
             // google_accounts.active is unrelated local state, not authenticated
             // by the credential that fetched these quotas.
@@ -4225,6 +4234,7 @@ mod tests {
 
     fn orchestration_fetched(source: &str) -> Fetched {
         Fetched {
+            agy_login_marker: None,
             source: source.to_string(),
             identity: None,
             account_scope: Err(AccountScopeError::NoTrustedEvidence),
@@ -4934,7 +4944,11 @@ mod tests {
         })
         .await;
         assert_eq!(runs.get(), 1, "a resolvable endpoint must still spawn agy");
-        assert!(allowed.is_ok());
+        assert_eq!(
+            allowed.unwrap().agy_login_marker.as_deref(),
+            Some("m1"),
+            "an agy card carries the login marker it was fetched under"
+        );
     }
 
     fn marker(value: &str) -> Option<String> {
@@ -5094,6 +5108,7 @@ mod tests {
 
     fn unreachable_probe_fetched(now: DateTime<Utc>) -> Fetched {
         Fetched {
+            agy_login_marker: None,
             source: "agy".to_string(),
             identity: None,
             account_scope: Err(AccountScopeError::NoTrustedEvidence),
@@ -5381,6 +5396,7 @@ pub(crate) mod captured_test_support {
             )
             .expect("a valid window");
             Ok(Fetched {
+                agy_login_marker: None,
                 source: "oauth".to_string(),
                 identity: Some(remote_identity(Some("Paid".to_string()))),
                 account_scope: Ok(account_scope.clone()),

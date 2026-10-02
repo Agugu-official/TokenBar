@@ -278,7 +278,7 @@ final class AntigravityAutoCapture: ObservableObject {
                     ? accounts
                     : AntigravityAccounts.adding(.init(key: key, label: label), to: accounts)
             }
-            if isEnabled { currentAgyKey = key }
+            if isEnabled { setCurrent(key, marker: marker) }
         case .failure(TBCoreError.bridge("paused")):
             paused = true
             currentAgyKey = nil
@@ -287,6 +287,18 @@ final class AntigravityAutoCapture: ObservableObject {
         }
         busy = false
         await pollIfOwed()
+    }
+
+    /// The marker agy's login item carried when `currentAgyKey` was
+    /// confirmed. Dedup also requires the primary card to have been fetched
+    /// under this same marker: a card fetched before an agy sign-in change is
+    /// never labelled as the account signed in after it (observed on the test
+    /// bundle: B's quota shown under A's email right after agy switched to A).
+    private(set) var currentAgyMarker: String?
+
+    private func setCurrent(_ key: String, marker: String?) {
+        currentAgyMarker = marker
+        currentAgyKey = key
     }
 
     /// Before a quota fetch, awaited by both poll loops: read agy's login
@@ -346,8 +358,12 @@ final class AntigravityAutoCapture: ObservableObject {
             defaults.set(
                 AntigravityAccounts.removedKeys(defaults: defaults).filter { $0 != captured.key },
                 forKey: AntigravityAccounts.removedKeysKey)
-            // This read agy's login as it is now, so the key is agy's account.
-            if isEnabled { currentAgyKey = captured.key }
+            // This read agy's login as it is now, so the key is agy's account,
+            // under the marker agy's item carries now.
+            if isEnabled {
+                let marker = try? await Self.detached({ try io.marker() })
+                setCurrent(captured.key, marker: marker)
+            }
             if paused {
                 paused = false
                 lastAttemptedMarker = nil
@@ -431,12 +447,16 @@ final class AntigravityAutoCapture: ObservableObject {
 /// Applied to BOTH `AgentUsagePublicationCoordinator.resolve` and
 /// `.latestPayload`, which every quota consumer reads. Idempotent.
 enum AntigravityDedup {
-    static func apply(_ payload: AgentUsagePayload, currentAgyKey: String?) -> AgentUsagePayload {
+    static func apply(
+        _ payload: AgentUsagePayload, currentAgyKey: String?, currentAgyMarker: String?
+    ) -> AgentUsagePayload {
         guard let key = currentAgyKey,
+              let marker = currentAgyMarker, marker != "present",
               let primaryIndex = payload.agents.firstIndex(where: {
                   $0.clientId == "antigravity" && $0.accountKey == nil
               }),
               payload.agents[primaryIndex].source == "agy",
+              payload.agents[primaryIndex].agyLoginMarker == marker,
               payload.agents[primaryIndex].error == nil,
               let capturedIndex = payload.agents.firstIndex(where: {
                   $0.clientId == "antigravity" && $0.accountKey == key

@@ -97,7 +97,8 @@ enum AgentUsagePublicationCoordinator {
 
     private static func antigravityDedup(_ payload: AgentUsagePayload) -> AgentUsagePayload {
         AntigravityDedup.apply(
-            payload, currentAgyKey: AntigravityAutoCapture.shared.currentAgyKey)
+            payload, currentAgyKey: AntigravityAutoCapture.shared.currentAgyKey,
+            currentAgyMarker: AntigravityAutoCapture.shared.currentAgyMarker)
     }
 
     /// Test seam only: back to the state of a process that has published
@@ -2308,6 +2309,7 @@ private struct DashboardSnapshot {
             // A login change in agy must be seen before this fetch, or its
             // payload is drawn as the previous account (see `prepareForFetch`).
             await TrayAnimator.prepareAntigravityAutoCapture()
+            if Task.isCancelled { break }
             let payload = try? await source.agentUsage()
             if Task.isCancelled { break }
             // Same guard the tray poll carries, for the same reason and in the
