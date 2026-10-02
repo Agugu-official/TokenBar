@@ -18612,7 +18612,15 @@ enum SelfTest {
             o["control: a card built for the primary is served while the primary is resolved"] =
                 !wcpIsLoading(m.windowCard(for: "claude"))
                 && m.windowCardAccounts["claude"] == ""
+            o["control: the primary's history is served while the primary is resolved"] =
+                !m.cardHistory(for: "claude").pending && m.quotaCyclesCardId != nil
             wcpSetAccount("claude", wcpB)
+            // Between the pick and its refresh the model still holds the
+            // primary's cycles; they must not be drawn under B.
+            let between = m.cardHistory(for: "claude")
+            o["the primary's history is not served once B is resolved, and reads as loading"] =
+                between.pending && between.cycles.isEmpty && between.rows.isEmpty
+                && m.quotaCyclesCardId != nil
             o["the primary's held card is not served once B is resolved"] =
                 wcpIsLoading(m.windowCard(for: "claude"))
                 && m.windowCards["claude"] != nil
@@ -18620,6 +18628,8 @@ enum SelfTest {
             o["and B's card is built and served after the refresh"] =
                 !wcpIsLoading(m.windowCard(for: "claude"))
                 && m.windowCardAccounts["claude"] == DashboardModel.scanSlot(wcpB)
+            o["and B's own history is served after the refresh"] =
+                !m.cardHistory(for: "claude").pending
             return o
         }
         for (label, passed) in (wcpState ?? [:]).sorted(by: { $0.key < $1.key }) {

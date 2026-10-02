@@ -1352,6 +1352,24 @@ private struct DashboardSnapshot {
             stored: WindowCardAccount.stored(clientId: clientId))
     }
 
+    /// The cycles and history rows for the open client's card, only while they
+    /// were built for the account and window the card shows NOW. Between an
+    /// account pick and the refresh that rebuilds them, `quotaCycles` still
+    /// holds the previous account's cycles; drawing them under the new account
+    /// is a cross-account history (spec rule 3). `pending` lets the history
+    /// card show its loading state instead of "no earlier windows" meanwhile.
+    /// Same key formula as the writer in `refreshWindowQuotaHalves`.
+    func cardHistory(for clientId: String)
+        -> (cycles: [QuotaCycle], rows: [QuotaHistoryRow], pending: Bool)
+    {
+        let account = cardAccountKey(for: clientId)
+        let expected = WindowCardLoader.selectedCardId(
+            payload: agentUsage, clientId: clientId, accountKey: account
+        ).map { WindowCardLoader.historyKey(pick: $0, accountKey: account) }
+        guard quotaCyclesCardId == expected else { return ([], [], true) }
+        return (quotaCycles, quotaHistory, false)
+    }
+
     /// What the views need for the open client's account pills, header label
     /// and rule-6 line. Nil when the client has no live account at all.
     func cardAccountContext(for clientId: String) -> CardAccountContext? {

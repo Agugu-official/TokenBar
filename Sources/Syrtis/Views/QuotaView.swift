@@ -34,6 +34,9 @@ struct QuotaView: View {
     var quotaCycles: [QuotaCycle] = []
     /// Those cycles joined to local usage; empty while the scan is out.
     var quotaHistory: [QuotaHistoryRow] = []
+    /// The cycles above belong to another account or window than the card
+    /// shows now (an account pick before its refresh landed); draw loading.
+    var historyPending = false
     /// Shared model palette, so a model keeps one colour across the app.
     var colors: ModelColorMap = ModelColorMap(entries: [])
     /// Daily spend stacked by declared subscription, for the all-agent view.
@@ -90,7 +93,8 @@ struct QuotaView: View {
                 } else {
                     QuotaHistoryCard(
                         clientId: singleClient, cycles: quotaCycles,
-                        rows: quotaHistory, colors: colors, attempted: usageAttempted,
+                        rows: quotaHistory, colors: colors,
+                        attempted: usageAttempted && !historyPending,
                         scanFailed: scanFailed, curveUnreadable: curveUnreadable,
                         account: accountContext)
                         // The card holds per-window state — how many rows the

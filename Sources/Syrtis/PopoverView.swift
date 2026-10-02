@@ -801,7 +801,9 @@ struct PopoverView: View {
                                 accountPickTick &+= 1
                             }
                         },
-                        quotaCycles: model.quotaCycles, quotaHistory: model.quotaHistory,
+                        quotaCycles: quotaUsageClient.map { model.cardHistory(for: $0).cycles } ?? model.quotaCycles,
+                        quotaHistory: quotaUsageClient.map { model.cardHistory(for: $0).rows } ?? model.quotaHistory,
+                        historyPending: quotaUsageClient.map { model.cardHistory(for: $0).pending } ?? false,
                         colors: model.colors,
                         // Folded from the series model rather than from the raw
                         // payload: that model refuses to publish day buckets built
