@@ -44,6 +44,12 @@ use std::process::Command;
 pub(crate) const ANTIGRAVITY_UNCONFIGURED_ERROR: &str =
     "Antigravity is not logged in. Re-login in Antigravity.";
 
+/// A Code Assist 401. Written for the primary, whose fix is signing in to
+/// Antigravity again; `fetch_captured_with` replaces it with
+/// `CAPTURED_AUTH_EXPIRED`, because a captured account is not the one
+/// Antigravity is signed in to.
+const ANTIGRAVITY_AUTH_EXPIRED: &str = "Antigravity Google auth expired. Re-login in Antigravity.";
+
 const LANG_SERVICE: &str = "/exa.language_server_pb.LanguageServerService/GetUserStatus";
 const CODE_ASSIST_BASE: &str = "https://cloudcode-pa.googleapis.com/v1internal";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -1542,9 +1548,9 @@ async fn code_assist_post(
                 attempt_binding,
                 diagnostic,
             ),
-            ResponseReadFailure::Terminal(401) => ProviderFetchFailure::terminal(
-                "Antigravity Google auth expired. Re-login in Antigravity.",
-            ),
+            ResponseReadFailure::Terminal(401) => {
+                ProviderFetchFailure::terminal(ANTIGRAVITY_AUTH_EXPIRED)
+            }
             ResponseReadFailure::Terminal(403) => ProviderFetchFailure::terminal(format!(
                 "Antigravity {method} permission was denied."
             )),
@@ -2265,6 +2271,8 @@ const CAPTURED_ITEM_UNREADABLE: &str =
     "Antigravity account credential could not be read. Capture the account again.";
 const CAPTURED_REFRESH_REJECTED: &str =
     "Antigravity account sign-in was rejected. Capture the account again.";
+const CAPTURED_AUTH_EXPIRED: &str =
+    "Antigravity account sign-in expired. Capture the account again.";
 const CAPTURED_IDENTITY_UNVERIFIED: &str = "Antigravity account identity could not be verified.";
 const CAPTURED_CLIENT_UNAVAILABLE: &str = "Antigravity usage client could not be created.";
 
@@ -3071,7 +3079,17 @@ pub(crate) async fn fetch_captured_with<I: CapturedIo>(
             if matches!(failure, ProviderFetchFailure::Terminal { .. }) {
                 lock_tokens(cache).remove(key);
             }
-            return Err(failure);
+            // The quota calls are shared with the primary, whose 401 text
+            // tells the user to sign in to Antigravity again. That is wrong
+            // advice here: Antigravity is signed in to a different account.
+            return Err(match failure {
+                ProviderFetchFailure::Terminal { ref display }
+                    if display == ANTIGRAVITY_AUTH_EXPIRED =>
+                {
+                    ProviderFetchFailure::terminal(CAPTURED_AUTH_EXPIRED)
+                }
+                failure => failure,
+            });
         }
     };
     fetched.identity = Some(AgentIdentity {
@@ -4901,6 +4919,8 @@ pub(crate) mod captured_test_support {
         pub token_calls: RefCell<Vec<(String, String, String)>>,
         pub artifact_calls: Cell<usize>,
         pub quota_calls: Cell<usize>,
+        /// When set, `quota` fails terminally with this display text.
+        pub quota_terminal: Option<&'static str>,
         pub scope: TestRefreshScope,
     }
 
@@ -4916,6 +4936,7 @@ pub(crate) mod captured_test_support {
                 token_calls: RefCell::new(Vec::new()),
                 artifact_calls: Cell::new(0),
                 quota_calls: Cell::new(0),
+                quota_terminal: None,
                 scope: TestRefreshScope::new("antigravity", tag),
             }
         }
@@ -5050,6 +5071,9 @@ pub(crate) mod captured_test_support {
             now: DateTime<Utc>,
         ) -> Result<Fetched, ProviderFetchFailure> {
             self.quota_calls.set(self.quota_calls.get() + 1);
+            if let Some(display) = self.quota_terminal {
+                return Err(ProviderFetchFailure::terminal(display));
+            }
             let window = quota_window(
                 "Gemini".to_string(),
                 0.5,
@@ -5495,6 +5519,31 @@ mod captured_account_tests {
             failure,
             ProviderFetchFailure::Terminal { ref display } if display == CAPTURED_ITEM_MISSING
         ));
+    }
+
+    /// A Code Assist 401 on a captured account asks for a new capture, not
+    /// for an Antigravity re-login, which would sign in the wrong account.
+    /// Other terminal failures pass through unchanged.
+    #[tokio::test]
+    async fn a_captured_401_asks_for_a_new_capture() {
+        let key = captured_key("sub-a");
+        for (from, to) in [
+            (ANTIGRAVITY_AUTH_EXPIRED, CAPTURED_AUTH_EXPIRED),
+            ("some other failure", "some other failure"),
+        ] {
+            let mut io = FakeIo::new("captured-401");
+            io.items
+                .borrow_mut()
+                .insert(key.clone(), stored_value("1//rt-a", AUD, &secret('a')));
+            io.quota_terminal = Some(from);
+            let failure = fetch_captured_with(&io, &new_token_cache(), &key, "a", now())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(failure, ProviderFetchFailure::Terminal { ref display } if display == to),
+                "{from} -> {to}"
+            );
+        }
     }
 
     /// Every capture failure is a fixed code: seeded with sentinel token, sub,

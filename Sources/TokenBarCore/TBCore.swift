@@ -92,6 +92,32 @@ public struct ClaudeConfigDirsResult: Decodable, Equatable, Sendable {
     public let rejected: [RejectedConfigDir]
 }
 
+/// One entry `tb_set_antigravity_accounts` refused, by its position in the
+/// input and a fixed reason. The entry itself is never echoed back.
+public struct RejectedAntigravityAccount: Decodable, Equatable, Sendable {
+    public let index: Int
+    public let reason: String
+}
+
+/// Result of `tb_set_antigravity_accounts`.
+public struct AntigravityAccountsResult: Decodable, Equatable, Sendable {
+    /// Captured accounts now fetched as their own Antigravity card.
+    public let registeredCount: Int
+    public let rejected: [RejectedAntigravityAccount]
+}
+
+/// Success data of `tb_antigravity_capture`: the new account's registry key
+/// (64 hex, not for display) and its label (the Google email, or a fallback).
+public struct AntigravityCapturedAccount: Decodable, Equatable, Sendable {
+    public let key: String
+    public let label: String
+}
+
+/// Success data of `tb_antigravity_remove`.
+package struct AntigravityRemoved: Decodable {
+    package let removed: Bool
+}
+
 /// One client id `tb_set_keychain_consent` refused, and why: the core wires
 /// Keychain consent for a fixed set of clients, and a grant nothing reads
 /// would claim the user was asked about a dialog that still appears unasked.
@@ -195,7 +221,7 @@ public enum TBCore {
     /// error contract is unit-testable (`envelopeContractChecks`) without a real
     /// FFI allocation — feeding a synthetic pointer to `decode` would be unsound,
     /// since `tb_free` must only ever release a Rust-allocated pointer.
-    static func decodeEnvelope<T: Decodable>(_ data: Data) throws -> T {
+    package static func decodeEnvelope<T: Decodable>(_ data: Data) throws -> T {
         let envelope = try JSONDecoder().decode(TBEnvelope<T>.self, from: data)
         guard envelope.ok else {
             throw TBCoreError.bridge(envelope.err ?? "unknown")
@@ -394,6 +420,32 @@ public enum TBCore {
     /// user configured — not the scan subset the core accepted.
     public static func setClaudeConfigDirs(json: String) throws -> ClaudeConfigDirsResult {
         try unwrap(json.withCString { tb_set_claude_config_dirs($0) })
+    }
+
+    /// Replace the process-wide registry of captured Antigravity accounts.
+    /// `json` is `[{"key":"<64 hex>","label":"..."}]`; full-replace semantics,
+    /// `[]` clears it. Malformed JSON throws `bridge("invalid_accounts_json")`
+    /// and leaves the registry unchanged. Holds no secret.
+    public static func setAntigravityAccounts(json: String) throws -> AntigravityAccountsResult {
+        try unwrap(json.withCString { tb_set_antigravity_accounts($0) })
+    }
+
+    /// Copy agy's current Google login into a Syrtis-owned login-keychain
+    /// item. Blocking (spawns `security`, reaches Google): never call on the
+    /// main thread. A failure throws `bridge(<fixed code>)`; the code names no
+    /// account. Does not register the account — the caller adds it to its
+    /// list and calls `setAntigravityAccounts`.
+    public static func antigravityCapture() throws -> AntigravityCapturedAccount {
+        try unwrap(tb_antigravity_capture())
+    }
+
+    /// Delete one captured account's keychain item. Blocking (spawns
+    /// `security`): never call on the main thread. Never revokes at Google.
+    /// Throws `bridge("invalid_key")` or `bridge("keychain_delete_failed")`.
+    /// Does not change the registry.
+    public static func antigravityRemove(key: String) throws {
+        let result: AntigravityRemoved = try unwrap(key.withCString { tb_antigravity_remove($0) })
+        guard result.removed else { throw TBCoreError.bridge("keychain_delete_failed") }
     }
 
     /// Replace the process-wide registry of macOS Keychain consent. `json` is

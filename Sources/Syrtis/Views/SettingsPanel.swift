@@ -115,6 +115,11 @@ struct SettingsPanel: View {
     /// until the first probe lands, so a row shows no warning rather than a
     /// wrong one while the answer is still unknown.
     @State private var missingClaudeRoots: Set<String> = []
+    @State private var antigravityAccounts = AntigravityAccounts.load()
+    /// True while a capture or remove is running off the main actor.
+    @State private var antigravityBusy = false
+    /// A sentence from `AntigravityAccounts.message(for:)`, never a raw code.
+    @State private var antigravityError: String?
     /// 0 = auto (≈60% of the screen). The popover's drag handle writes the
     /// same key, so the two stay in sync.
     @AppStorage(PopoverChrome.heightKey) private var popoverHeight = 0.0
@@ -998,6 +1003,8 @@ struct SettingsPanel: View {
 
         claudeExtraRootsSection()
 
+        antigravityAccountsSection()
+
         section("Language") {
             radioGroup(
                 selection: Binding(
@@ -1062,6 +1069,89 @@ struct SettingsPanel: View {
             hint("For another Claude account, run Claude Code with CLAUDE_CONFIG_DIR set to its own folder and add that folder here. Its usage joins your totals; accounts aren't shown separately.")
         }
         .onAppear { refreshMissingClaudeRoots() }
+    }
+
+    /// Extra Google accounts for Antigravity, each its own card. The copy says
+    /// what is read, where it is kept, where it is sent and what Remove does;
+    /// each claim is checked against `agent_antigravity.rs`'s captured-account
+    /// section, so change them together.
+    @ViewBuilder
+    private func antigravityAccountsSection() -> some View {
+        section("Antigravity accounts") {
+            ForEach(antigravityAccounts, id: \.key) { account in
+                row(account.label) {
+                    Button {
+                        removeAntigravityAccount(account)
+                    } label: {
+                        Image(systemName: "minus.circle")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(antigravityBusy)
+                    .help("Remove".localized)
+                }
+            }
+            Button {
+                captureAntigravityAccount()
+            } label: {
+                Label(
+                    (antigravityBusy ? "Capturing…" : "Capture current agy login").localized,
+                    systemImage: "plus.circle")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+            .disabled(antigravityBusy)
+            .padding(.horizontal, 10)
+            if let antigravityError {
+                Text(antigravityError.localized)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            hint("To add another Google account:\n1. Sign agy in to that account.\n2. Press Capture current agy login.\n3. Sign agy back in to your main account.")
+            hint("Capture only accounts other than the one agy and Antigravity already use. That one has its own row.")
+            hint("Capture reads agy's saved Google login once, when you press the button, and keeps a copy in this Mac's login keychain. Syrtis uses it only with Google's token service and Cloud Code quota service, and its requests identify as Antigravity.")
+            hint("Remove deletes only the copy on this Mac. Google still accepts it until you revoke access in Google Account → third-party access, which also signs Antigravity out of that account.")
+        }
+    }
+
+    private func captureAntigravityAccount() {
+        antigravityBusy = true
+        antigravityError = nil
+        Task {
+            let result = await AntigravityAccounts.capture()
+            antigravityBusy = false
+            switch result {
+            case let .success(captured):
+                commitAntigravityAccounts(AntigravityAccounts.adding(
+                    .init(key: captured.key, label: captured.label), to: antigravityAccounts))
+            case let .failure(error):
+                antigravityError = AntigravityAccounts.message(for: error)
+            }
+        }
+    }
+
+    private func removeAntigravityAccount(_ account: AntigravityAccounts.Account) {
+        antigravityBusy = true
+        antigravityError = nil
+        Task {
+            let result = await AntigravityAccounts.remove(key: account.key)
+            antigravityBusy = false
+            switch result {
+            case .success, .failure(TBCoreError.bridge("invalid_key")):
+                // An invalid key has no keychain item and no card: the core
+                // registry rejects it. Dropping the row is all that is left.
+                commitAntigravityAccounts(antigravityAccounts.filter { $0.key != account.key })
+            case let .failure(error):
+                antigravityError = AntigravityAccounts.message(for: error)
+            }
+        }
+    }
+
+    private func commitAntigravityAccounts(_ accounts: [AntigravityAccounts.Account]) {
+        antigravityAccounts = accounts
+        AntigravityAccounts.save(accounts)
+        AntigravityAccounts.apply()
     }
 
     private func addClaudeExtraRoot() {

@@ -17559,6 +17559,205 @@ enum SelfTest {
             (m3qAccounts ?? []).count == 2,
             "M3-q the two accounts are scanned once each, not once per window")
 
+        // AG. Captured Antigravity accounts (S3).
+        //
+        // AG-1. The key is a hash of the Google account id and must never be
+        // shown: every label surface resolves it through the registry to the
+        // email. The registry lives in a throwaway suite, never the app's own
+        // defaults. Make `AntigravityAccounts.label(for:)` return the key to
+        // watch the label assertions go red.
+        let agKey = String(repeating: "ab", count: 32)
+        let agEmail = "second@example.com"
+        let agSuiteName = "Syrtis.SelfTest.AG.\(UUID().uuidString)"
+        let agDefaults = UserDefaults(suiteName: agSuiteName)!
+        AntigravityAccounts.save(
+            [.init(key: agKey, label: agEmail)], defaults: agDefaults)
+        AntigravityAccounts.installLabelResolver(defaults: agDefaults)
+        func agShowsEmail(_ text: String?, _ label: String) {
+            expect(
+                text?.contains(agEmail) == true && text?.contains(agKey) == false,
+                "AG-1 \(label) shows the captured account's email and never its key")
+        }
+        func agWindowJSON(
+            clientId: String, accountKey: String?, used: Double, resetIso iso: String
+        ) -> String {
+            let account = accountKey.map { "\"accountKey\":\"\($0)\"," } ?? ""
+            return """
+            {"clientId":"\(clientId)",\(account)"source":"oauth","updatedAt":"t",
+             "identity":{"email":"\(agEmail)"},"windows":[
+             {"cardId":"agy.test.v1","label":"Gemini","usedPercent":\(used),
+              "remainingPercent":\(100 - used),"resetsAt":"\(iso)",
+              "durationSeconds":\(m3nDuration),"windowMinutes":\(m3nDuration / 60),
+              "paceStatus":{"state":"learningHistory","windowKey":"agy.test.v1",
+                            "durationSeconds":\(m3nDuration),"durationSource":"provider",
+                            "completeCycles":1}}]}
+            """
+        }
+        func agPayload(resetIso: String) -> AgentUsagePayload {
+            try! JSONDecoder().decode(AgentUsagePayload.self, from: Data("""
+                {"generatedAt":"t","publicationGeneration":1,"agents":[
+                  \(agWindowJSON(clientId: "antigravity", accountKey: agKey, used: 90, resetIso: resetIso)),
+                  \(agWindowJSON(clientId: "antigravity", accountKey: nil, used: 55, resetIso: resetIso))
+                ]}
+                """.utf8))
+        }
+        let agBurnPayload = agPayload(resetIso: m3nResetIso)
+        let agSnapshot = agBurnPayload.agents.first { $0.accountKey == agKey }
+        agShowsEmail(agSnapshot?.accountIdentity.accountLabel, "the limits card's row label")
+        agShowsEmail(agSnapshot?.accountIdentity.accountTooltip, "the limits card's row tooltip")
+        let agSummary = QuotaSummaryFold.build(payload: agBurnPayload)
+        expect(
+            agSummary?.tightestAccountKey == agKey,
+            "AG-1 control: the captured account is the tightest window, so the "
+                + "tightest-line assertion below reads its label")
+        agShowsEmail(agSummary.map { QuotaSummaryLine.tightestName($0) }, "the tightest line")
+        let agBurn = QuotaSummaryFold.build(
+            payload: agBurnPayload, paceMode: .linear, now: burnNow)
+        expect(
+            agBurn?.burning?.accountKey == agKey,
+            "AG-1 control: the captured account is burning fastest")
+        agShowsEmail(agBurn?.burning.map { QuotaSummaryLine.burnName($0) }, "the burn line")
+        agShowsEmail(
+            QuotaHeatmapCard.label(QuotaHeatmapWindow(
+                clientId: "antigravity", accountKey: agKey, cardId: "agy.test.v1",
+                windowLabel: "Gemini", total: 30)),
+            "the heatmap picker")
+        agShowsEmail(
+            QuotaHistoryStripCard.rowLabel(QuotaOverviewFold.summaries(windows: [
+                (clientId: "antigravity", accountKey: agKey, cardId: "agy.test.v1",
+                 label: "Gemini", cycles: [
+                    QuotaCycle(
+                        resetAtMs: 500_000, startMs: 400_000, usedPercent: 30,
+                        sampleCount: 40, observedFraction: 0.9)]),
+            ])[0]),
+            "the history strip row")
+        // A key the registry no longer holds still shows no key.
+        let agUnknown = String(repeating: "cd", count: 32)
+        let agUnknownLabel = AccountIdentity(
+            clientId: "antigravity", accountKey: agUnknown).accountLabel
+        expect(
+            agUnknownLabel != nil && agUnknownLabel?.contains(agUnknown) == false,
+            "AG-1 an unregistered captured key falls back to a generic label, not the key")
+        // Claude is untouched: basename label, full path tooltip, primary nil.
+        let agClaude = AccountIdentity(clientId: "claude", accountKey: m3ExtraKey)
+        expect(
+            agClaude.accountLabel == ".claude-extra" && agClaude.accountTooltip == m3ExtraKey
+                && AccountIdentity(clientId: "antigravity", accountKey: nil).accountLabel == nil,
+            "AG-1 Claude accounts keep the basename label and full-path tooltip, "
+                + "and the Antigravity primary stays unqualified")
+
+        // AG-2. The window-usage scan never receives a captured Antigravity
+        // key: it is not a Claude config directory and Antigravity has no
+        // local logs. The primary is scanned as the control, so an empty
+        // qualifying set cannot pass this. Delete the `hasLocalUsage` guard in
+        // `DashboardModel`'s qualifying-window fold to watch it go red.
+        let agScanned: [String?]? = awaitMainActorValue {
+            // The payload's generation is lower than earlier cases'; without
+            // the reset the coordinator keeps their payload as the newer one.
+            AgentUsagePublicationCoordinator.resetForTesting()
+            defer { AgentUsagePublicationCoordinator.resetForTesting() }
+            let src = WindowScanCountingSource(payload: agPayload(resetIso: m3fResetIso))
+            src.curveByAccount = [
+                nil: m3qCurve(accountUsed: [40, 45, 50]),
+                agKey: m3qCurve(accountUsed: [40, 45, 50]),
+            ]
+            let m = DashboardModel(source: src, initialYear: nil)
+            m.windowCardClients = ["antigravity"]
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while !m.agentUsageAttempted, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            poll.cancel()
+            _ = await poll.value
+            m.windowUsageClient = nil
+            m.quotaLensAllAgents = true
+            DashboardModel.invalidateScanDerivedCaches()
+            src.scans = 0
+            src.scannedAccounts = []
+            await m.refreshWindowUsage()
+            return src.scannedAccounts
+        }
+        expect(
+            agScanned?.contains(where: { $0 == nil }) == true,
+            "AG-2 control: the Antigravity primary's window is scanned")
+        expect(
+            agScanned?.contains(where: { $0 == agKey }) == false,
+            "AG-2 a captured Antigravity key reached the window-usage scan, which "
+                + "looks it up as a Claude config directory")
+
+        // AG-3. The three envelopes decode, and every failure code maps to a
+        // sentence that is not the code.
+        let agAccountsOk: AntigravityAccountsResult? = try? TBCore.decodeEnvelope(Data(
+            #"{"ok":true,"data":{"registeredCount":1,"rejected":[{"index":1,"reason":"invalid key"}]}}"#.utf8))
+        expect(
+            agAccountsOk?.registeredCount == 1
+                && agAccountsOk?.rejected.map(\.index) == [1]
+                && agAccountsOk?.rejected.map(\.reason) == ["invalid key"],
+            "AG-3 the accounts setter's success envelope decodes")
+        let agCaptureOk: AntigravityCapturedAccount? = try? TBCore.decodeEnvelope(Data(
+            #"{"ok":true,"data":{"key":"\#(agKey)","label":"\#(agEmail)"}}"#.utf8))
+        expect(
+            agCaptureOk?.key == agKey && agCaptureOk?.label == agEmail,
+            "AG-3 the capture success envelope decodes")
+        let agRemoveOk: AntigravityRemoved? = try? TBCore.decodeEnvelope(Data(
+            #"{"ok":true,"data":{"removed":true}}"#.utf8))
+        expect(agRemoveOk?.removed == true, "AG-3 the remove success envelope decodes")
+        let agCodes = [
+            "agy_not_signed_in", "agy_login_unreadable", "agy_login_missing_identity",
+            "oauth_client_not_found", "oauth_client_rejected", "refresh_rejected",
+            "refresh_unreachable", "account_mismatch", "invalid_credential_format",
+            "keychain_write_failed", "keychain_delete_failed", "invalid_key",
+        ]
+        for code in agCodes {
+            var thrown: Error?
+            do {
+                let _: AntigravityCapturedAccount = try TBCore.decodeEnvelope(
+                    Data(#"{"ok":false,"err":"\#(code)"}"#.utf8))
+            } catch { thrown = error }
+            let message = thrown.map(AntigravityAccounts.message(for:))
+            expect(
+                message != nil && message?.contains(code) == false
+                    && message?.contains("_") == false,
+                "AG-3 \(code) is decoded as a failure and shown as a sentence, not the code")
+        }
+        expect(
+            Set(agCodes.prefix(11).map {
+                AntigravityAccounts.message(for: TBCoreError.bridge($0))
+            }).count == 10,
+            "AG-3 failure codes map to distinct sentences (the two rejection codes "
+                + "share one), not one catch-all")
+
+        // AG-4. The real FFI, invalid inputs only: a bad key is rejected by
+        // index, malformed JSON is an error, and remove refuses a key that is
+        // not 64 lowercase hex before starting any process. Each call goes
+        // through `takeBytes`, which frees the returned pointer. The real
+        // capture is never called here: it reads agy's login.
+        let agBadKey = try? TBCore.setAntigravityAccounts(
+            json: #"[{"key":"not-hex","label":"x"}]"#)
+        expect(
+            agBadKey?.registeredCount == 0 && agBadKey?.rejected.map(\.index) == [0],
+            "AG-4 the setter rejects a malformed key by index and registers nothing")
+        var agMalformed: String?
+        do { _ = try TBCore.setAntigravityAccounts(json: "{nope") } catch let TBCoreError.bridge(code) {
+            agMalformed = code
+        } catch {}
+        expect(agMalformed == "invalid_accounts_json", "AG-4 malformed setter JSON is invalid_accounts_json")
+        expect(
+            (try? TBCore.setAntigravityAccounts(json: "[]"))?.registeredCount == 0,
+            "AG-4 an empty list clears the registry")
+        for bad in ["not-a-key", String(repeating: "AB", count: 32), agKey + "0"] {
+            var code: String?
+            do { try TBCore.antigravityRemove(key: bad) } catch let TBCoreError.bridge(c) {
+                code = c
+            } catch {}
+            expect(code == "invalid_key", "AG-4 remove refuses a malformed key as invalid_key")
+        }
+        // Not a `defer`: `run()` ends in `exit`, which skips it.
+        AccountIdentity.antigravityLabel = { _ in nil }
+        agDefaults.removePersistentDomain(forName: agSuiteName)
+
         // SC-INV-EQUIV. The lens half of the inverted-range guard, on the one
         // fixture already proven above to produce equivalence rows — an empty
         // fixture would let the "publishes none" assertion pass while

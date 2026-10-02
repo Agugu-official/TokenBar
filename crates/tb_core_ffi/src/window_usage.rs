@@ -22,6 +22,12 @@ use std::time::{Duration, Instant};
 /// `None` is the primary account. An extra Claude account is keyed by its
 /// `CLAUDE_CONFIG_DIR`, the same string its card and its quota curve are keyed
 /// on (`AgentUsageSnapshot::account_key`).
+///
+/// Only Claude accounts reach this. A captured Antigravity account also has an
+/// `account_key` (a 64-hex key, not a path), but Antigravity has no local logs
+/// to scan, so `DashboardModel.refreshWindowUsage` drops those accounts before
+/// it builds a request. A key passed anyway matches no registered root and
+/// gets `NO_REGISTERED_ROOTS`.
 pub(crate) type Account = Option<String>;
 pub(crate) type CacheKey = (Account, i64, i64);
 pub(crate) type CacheEntry = (Instant, u64, Value);

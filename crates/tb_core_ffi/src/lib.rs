@@ -3067,6 +3067,10 @@ mod tests {
 /// because a window belongs to an account and a total across accounts has no
 /// quota to divide by.
 ///
+/// Claude accounts only. A captured Antigravity account's key is not a config
+/// directory and has no local logs; the app does not pass it (see
+/// `window_usage::Account`).
+///
 /// # Safety
 /// `account_key` must be NULL or a valid NUL-terminated string.
 #[no_mangle]

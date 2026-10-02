@@ -749,7 +749,7 @@ struct AgentLimitsCard: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                        .help(row.accountKey ?? account)
+                        .help(row.accountTooltip ?? account)
                 }
                 Spacer()
                 statusBadge(snapshot: snapshot, isLive: isLive)
