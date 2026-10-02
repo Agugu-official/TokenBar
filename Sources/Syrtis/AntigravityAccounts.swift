@@ -64,8 +64,10 @@ enum AntigravityAccounts {
                 lastInstalledPayload = payload
                 return
             }
+            // Cache only what the core accepted, so a failed install is
+            // retried on the next `apply()` instead of being skipped as done.
+            guard (try? TBCore.setAntigravityAccounts(json: payload)) != nil else { return }
             lastInstalledPayload = payload
-            _ = try? TBCore.setAntigravityAccounts(json: payload)
             Task { @MainActor in
                 // Invalidate before signalling, as `ClaudeExtraRoots.install`
                 // does: a woken poll must not be answered from the throttled
