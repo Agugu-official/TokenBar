@@ -344,7 +344,6 @@ final class AntigravityAutoCapture: ObservableObject {
     func remove(_ account: AntigravityAccounts.Account) async {
         guard !busy else { return }
         busy = true
-        defer { busy = false }
         message = nil
         let io = io
         let key = account.key
