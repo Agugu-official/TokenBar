@@ -75,9 +75,8 @@ struct WindowUsageCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         case let .noQuotaHistory(_, label, candidates, cardId):
-            DashCard("%@ window".localized(label.localized), subtitle: "No quota history") {
-                accountHeaderLabel
-            } content: {
+            DashCard("%@ window".localized(label.localized), subtitle: "No quota history",
+                     titleAccessory: accountHeaderLabel) {
                 accountPills
                 windowButtons(candidates: candidates, cardId: cardId)
                 Text("This window has no recorded quota history, so there is no line to draw.".localized)
@@ -101,16 +100,14 @@ struct WindowUsageCard: View {
     private func card(
         _ quota: WindowQuotaHalf, usage: WindowUsageHalf?, scanFailed: Bool
     ) -> some View {
-        DashCard("%@ window".localized(quota.windowLabel.localized), subtitle: stateLine(quota)) {
-            HStack(spacing: 8) {
-                // Header label of a card showing a non-primary account, so it
-                // cannot be read as the primary's (spec 1b). Absent for the
-                // primary, whose header is unchanged.
-                accountHeaderLabel
-                SegmentedPicker(
-                    selection: Binding(get: { asUsed }, set: { asUsed = $0 }),
-                    options: [(value: false, label: "Remaining"), (value: true, label: "Used")])
-            }
+        // Header label of a card showing a non-primary account, so it cannot be
+        // read as the primary's (spec 1b): directly after the title, the
+        // placement both platforms agreed (2026-10-03); absent for the primary.
+        DashCard("%@ window".localized(quota.windowLabel.localized), subtitle: stateLine(quota),
+                 titleAccessory: accountHeaderLabel) {
+            SegmentedPicker(
+                selection: Binding(get: { asUsed }, set: { asUsed = $0 }),
+                options: [(value: false, label: "Remaining"), (value: true, label: "Used")])
         } content: {
             accountPills
             windowButtons(candidates: quota.candidates, cardId: quota.cardId)
@@ -181,14 +178,13 @@ struct WindowUsageCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    @ViewBuilder
-    private var accountHeaderLabel: some View {
-        if let label = AccountPills.headerLabel(account) {
-            Text(verbatim: label)
+    private var accountHeaderLabel: AnyView? {
+        AccountPills.headerLabel(account).map { label in
+            AnyView(Text(verbatim: label)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-                .help(account?.tooltip ?? "")
+                .help(account?.tooltip ?? ""))
         }
     }
 

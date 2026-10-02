@@ -185,26 +185,33 @@ extension View {
 struct DashCard<Content: View>: View {
     let title: String
     var subtitle: String?
+    /// Secondary text set directly after the title on the same line (the
+    /// account a window card shows, when it is not the primary). Not part of
+    /// `subtitle`, which stays as it was, and not `trailing`, which sits at
+    /// the far end of the header where a label reads as unrelated.
+    var titleAccessory: AnyView?
     @ViewBuilder var trailing: () -> AnyView?
     @ViewBuilder var content: () -> Content
 
     init(
-        _ title: String, subtitle: String? = nil,
+        _ title: String, subtitle: String? = nil, titleAccessory: AnyView? = nil,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.title = title
         self.subtitle = subtitle
+        self.titleAccessory = titleAccessory
         self.trailing = { nil }
         self.content = content
     }
 
     init<T: View>(
-        _ title: String, subtitle: String? = nil,
+        _ title: String, subtitle: String? = nil, titleAccessory: AnyView? = nil,
         @ViewBuilder trailing: @escaping () -> T,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.title = title
         self.subtitle = subtitle
+        self.titleAccessory = titleAccessory
         self.trailing = { AnyView(trailing()) }
         self.content = content
     }
@@ -213,8 +220,11 @@ struct DashCard<Content: View>: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title.localized)
-                        .font(.system(size: 13, weight: .semibold))
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(title.localized)
+                            .font(.system(size: 13, weight: .semibold))
+                        if let titleAccessory { titleAccessory }
+                    }
                     if let subtitle {
                         Text(subtitle.localized)
                             .font(.caption)
