@@ -1705,15 +1705,23 @@ private struct DashboardSnapshot {
                                 && $0.observedFraction >= WindowEquivalence.minimumObservedFraction
                         }
                         guard admitted.count >= WindowEquivalence.minimumCycles else { return nil }
+                        let identity = AccountIdentity(
+                            clientId: window.clientId, accountKey: window.accountKey)
+                        // An equivalence divides local usage by quota movement,
+                        // and a captured Antigravity account has no local
+                        // usage. Dropped here, before `refreshWindowUsage`
+                        // builds one scan per qualifying account: its key is
+                        // not a Claude config directory, and passing it would
+                        // send it to the Claude-root lookup in
+                        // `tb_window_usage`.
+                        guard identity.hasLocalUsage else { return nil }
                         // Same key as the grids and the row ids — see
                         // `AccountIdentity.windowKey`. Two accounts of one
                         // client offering the same window would otherwise
                         // collide here, and `uniqueKeysWithValues` traps on a
                         // duplicate key rather than reporting it.
                         return (
-                            AccountIdentity(
-                                clientId: window.clientId, accountKey: window.accountKey
-                            ).windowKey(cardId: window.cardId),
+                            identity.windowKey(cardId: window.cardId),
                             QualifyingWindow(
                                 accountKey: window.accountKey, cycles: admitted)
                         )
@@ -2075,6 +2083,11 @@ private struct DashboardSnapshot {
             // is the same files read once each rather than N passes over
             // everything — measured at 1232ms + 424ms against 2130ms for the
             // single wide scan it replaces.
+            //
+            // Every non-nil key here is a Claude config directory: accounts
+            // without local usage (captured Antigravity accounts) never enter
+            // `qualifyingCycles` — see `AccountIdentity.hasLocalUsage` where
+            // it is built.
             let accounts = Set(qualifyingCycles.values.map { Self.scanSlot($0.accountKey) })
             var scanned = false
             for slot in accounts {

@@ -44,6 +44,12 @@ use std::process::Command;
 pub(crate) const ANTIGRAVITY_UNCONFIGURED_ERROR: &str =
     "Antigravity is not logged in. Re-login in Antigravity.";
 
+/// A Code Assist 401. Written for the primary, whose fix is signing in to
+/// Antigravity again; `fetch_captured_with` replaces it with
+/// `CAPTURED_AUTH_EXPIRED`, because a captured account is not the one
+/// Antigravity is signed in to.
+const ANTIGRAVITY_AUTH_EXPIRED: &str = "Antigravity Google auth expired. Re-login in Antigravity.";
+
 const LANG_SERVICE: &str = "/exa.language_server_pb.LanguageServerService/GetUserStatus";
 const CODE_ASSIST_BASE: &str = "https://cloudcode-pa.googleapis.com/v1internal";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -1542,9 +1548,9 @@ async fn code_assist_post(
                 attempt_binding,
                 diagnostic,
             ),
-            ResponseReadFailure::Terminal(401) => ProviderFetchFailure::terminal(
-                "Antigravity Google auth expired. Re-login in Antigravity.",
-            ),
+            ResponseReadFailure::Terminal(401) => {
+                ProviderFetchFailure::terminal(ANTIGRAVITY_AUTH_EXPIRED)
+            }
             ResponseReadFailure::Terminal(403) => ProviderFetchFailure::terminal(format!(
                 "Antigravity {method} permission was denied."
             )),
@@ -2265,6 +2271,8 @@ const CAPTURED_ITEM_UNREADABLE: &str =
     "Antigravity account credential could not be read. Capture the account again.";
 const CAPTURED_REFRESH_REJECTED: &str =
     "Antigravity account sign-in was rejected. Capture the account again.";
+const CAPTURED_AUTH_EXPIRED: &str =
+    "Antigravity account sign-in expired. Capture the account again.";
 const CAPTURED_IDENTITY_UNVERIFIED: &str = "Antigravity account identity could not be verified.";
 const CAPTURED_CLIENT_UNAVAILABLE: &str = "Antigravity usage client could not be created.";
 
@@ -2630,6 +2638,73 @@ where
     )
 }
 
+/// `retrieveUserQuotaSummary`: the allowance groups agy's `/usage` prints,
+/// e.g. "Gemini Models" and "Claude and GPT models", each with a weekly and a
+/// five-hour bucket. Shape measured on 2026-10-02:
+/// `groups[].{displayName, buckets[].{bucketId, displayName, remainingFraction,
+/// resetTime, window}}`. Labels and card ids follow the agy route
+/// (`parse_agy_usage`), so a captured card reads like the primary's. `None`
+/// on any failure or an empty answer: the caller falls back to the catalog.
+async fn fetch_quota_summary(context: &RemoteContext, now: DateTime<Utc>) -> Option<Vec<UsageWindow>> {
+    let body = match context.project.as_deref() {
+        Some(project) => json!({ "project": project }),
+        None => json!({}),
+    };
+    let response = code_assist_post(
+        &context.client,
+        "retrieveUserQuotaSummary",
+        &body,
+        &context.access_token,
+        context.cache_binding.clone(),
+        true,
+    )
+    .await
+    .ok()?;
+    let windows = windows_from_quota_summary(&response, now);
+    (!windows.is_empty()).then_some(windows)
+}
+
+fn windows_from_quota_summary(body: &str, now: DateTime<Utc>) -> Vec<UsageWindow> {
+    let Ok(response) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+    let text = |value: &Value, key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    let mut windows = Vec::new();
+    for group in response.get("groups").and_then(Value::as_array).into_iter().flatten() {
+        let group_name = text(group, "displayName").unwrap_or_else(|| "Antigravity".to_string());
+        for bucket in group.get("buckets").and_then(Value::as_array).into_iter().flatten() {
+            let Some(id) = text(bucket, "bucketId") else { continue };
+            let Some(fraction) = bucket.get("remainingFraction").and_then(Value::as_f64) else {
+                continue;
+            };
+            let reset = bucket
+                .get("resetTime")
+                .and_then(Value::as_str)
+                .and_then(parse_datetime);
+            let name = text(bucket, "displayName").unwrap_or_else(|| "Limit".to_string());
+            let card_id = format!("agy.{id}.v1");
+            if let Some(window) = quota_window(
+                format!("{group_name} · {name}"),
+                fraction,
+                reset,
+                now,
+                card_id.clone(),
+                Some(card_id),
+            ) {
+                windows.push(window);
+            }
+        }
+    }
+    windows
+}
+
 /// Both the token and the Code Assist requests of a captured account go
 /// through this client. No redirects: the default policy would resend a POST
 /// body carrying the refresh token or the bearer to wherever a 307/308 points.
@@ -2801,6 +2876,11 @@ impl CapturedIo for SystemCapturedIo {
             account_scope,
             cache_binding: Some(cache_binding),
         };
+        // The same grouped allowances agy's `/usage` prints (and the primary
+        // card shows on the agy route); the per-model catalog is the fallback.
+        if let Some(windows) = fetch_quota_summary(&context, now).await {
+            return Ok(context.finish(windows, history_scope));
+        }
         let secondary_history = history_scope.clone();
         fetch_with(
             || async { LocalAttempt::RouteMiss },
@@ -3071,7 +3151,17 @@ pub(crate) async fn fetch_captured_with<I: CapturedIo>(
             if matches!(failure, ProviderFetchFailure::Terminal { .. }) {
                 lock_tokens(cache).remove(key);
             }
-            return Err(failure);
+            // The quota calls are shared with the primary, whose 401 text
+            // tells the user to sign in to Antigravity again. That is wrong
+            // advice here: Antigravity is signed in to a different account.
+            return Err(match failure {
+                ProviderFetchFailure::Terminal { ref display }
+                    if display == ANTIGRAVITY_AUTH_EXPIRED =>
+                {
+                    ProviderFetchFailure::terminal(CAPTURED_AUTH_EXPIRED)
+                }
+                failure => failure,
+            });
         }
     };
     fetched.identity = Some(AgentIdentity {
@@ -3474,6 +3564,47 @@ mod tests {
         assert_eq!(fetched.windows.len(), 1);
         assert_eq!(fetched.windows[0].label_for_test(), "Gemini 3 Pro");
         assert!((fetched.windows[0].remaining_for_test() - 42.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn quota_summary_maps_like_agy_usage() {
+        let now = DateTime::parse_from_rfc3339("2026-10-02T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        // Shape measured from retrieveUserQuotaSummary on 2026-10-02.
+        let body = json!({
+            "description": "…",
+            "groups": [
+                { "displayName": "Gemini Models", "description": "…", "buckets": [
+                    { "bucketId": "gemini-weekly", "displayName": "Weekly Limit Remaining",
+                      "remainingFraction": 0.968718, "resetTime": "2026-10-08T18:46:28Z", "window": "weekly" },
+                    { "bucketId": "gemini-5h", "displayName": "Five Hour Limit Remaining",
+                      "remainingFraction": 0.8799, "resetTime": "2026-10-02T11:20:43Z", "window": "5h" }
+                ]},
+                { "displayName": "Claude and GPT models", "buckets": [
+                    { "bucketId": "3p-weekly", "displayName": "Weekly Limit Remaining",
+                      "remainingFraction": 1, "resetTime": "2026-10-09T07:58:14Z", "window": "weekly" },
+                    { "displayName": "No id is skipped", "remainingFraction": 1 },
+                    { "bucketId": "3p-5h", "displayName": "Five Hour Limit Remaining", "window": "5h" }
+                ]}
+            ]
+        });
+        let windows = windows_from_quota_summary(&body.to_string(), now);
+        let rows: Vec<(&str, Option<&str>)> = windows
+            .iter()
+            .map(|w| (w.label_for_test(), w.pace_window_key_for_test()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Gemini Models · Weekly Limit Remaining", Some("agy.gemini-weekly.v1")),
+                ("Gemini Models · Five Hour Limit Remaining", Some("agy.gemini-5h.v1")),
+                ("Claude and GPT models · Weekly Limit Remaining", Some("agy.3p-weekly.v1")),
+            ]
+        );
+        assert!((windows[1].remaining_for_test() - 87.99).abs() < 0.01);
+        assert!(windows_from_quota_summary("not json", now).is_empty());
+        assert!(windows_from_quota_summary("{}", now).is_empty());
     }
 
     #[test]
@@ -4901,6 +5032,8 @@ pub(crate) mod captured_test_support {
         pub token_calls: RefCell<Vec<(String, String, String)>>,
         pub artifact_calls: Cell<usize>,
         pub quota_calls: Cell<usize>,
+        /// When set, `quota` fails terminally with this display text.
+        pub quota_terminal: Option<&'static str>,
         pub scope: TestRefreshScope,
     }
 
@@ -4916,6 +5049,7 @@ pub(crate) mod captured_test_support {
                 token_calls: RefCell::new(Vec::new()),
                 artifact_calls: Cell::new(0),
                 quota_calls: Cell::new(0),
+                quota_terminal: None,
                 scope: TestRefreshScope::new("antigravity", tag),
             }
         }
@@ -5050,6 +5184,9 @@ pub(crate) mod captured_test_support {
             now: DateTime<Utc>,
         ) -> Result<Fetched, ProviderFetchFailure> {
             self.quota_calls.set(self.quota_calls.get() + 1);
+            if let Some(display) = self.quota_terminal {
+                return Err(ProviderFetchFailure::terminal(display));
+            }
             let window = quota_window(
                 "Gemini".to_string(),
                 0.5,
@@ -5495,6 +5632,31 @@ mod captured_account_tests {
             failure,
             ProviderFetchFailure::Terminal { ref display } if display == CAPTURED_ITEM_MISSING
         ));
+    }
+
+    /// A Code Assist 401 on a captured account asks for a new capture, not
+    /// for an Antigravity re-login, which would sign in the wrong account.
+    /// Other terminal failures pass through unchanged.
+    #[tokio::test]
+    async fn a_captured_401_asks_for_a_new_capture() {
+        let key = captured_key("sub-a");
+        for (from, to) in [
+            (ANTIGRAVITY_AUTH_EXPIRED, CAPTURED_AUTH_EXPIRED),
+            ("some other failure", "some other failure"),
+        ] {
+            let mut io = FakeIo::new("captured-401");
+            io.items
+                .borrow_mut()
+                .insert(key.clone(), stored_value("1//rt-a", AUD, &secret('a')));
+            io.quota_terminal = Some(from);
+            let failure = fetch_captured_with(&io, &new_token_cache(), &key, "a", now())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(failure, ProviderFetchFailure::Terminal { ref display } if display == to),
+                "{from} -> {to}"
+            );
+        }
     }
 
     /// Every capture failure is a fixed code: seeded with sentinel token, sub,

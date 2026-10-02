@@ -1,9 +1,10 @@
 import Foundation
 
 /// Identifies one quota-bearing account within a client. `accountKey` is nil
-/// for the primary account — every account until an extra Claude config
-/// directory is configured — and the `CLAUDE_CONFIG_DIR` absolute path for an
-/// extra Claude account.
+/// for the primary account, the `CLAUDE_CONFIG_DIR` absolute path for an extra
+/// Claude account, and a 64-hex key for a captured Antigravity account. The
+/// Antigravity key is derived from the Google account id and is not for
+/// display: `accountLabel` shows the registry's label instead.
 ///
 /// A pair, never an encoded string. `ClientRegistry.parseIdSet`,
 /// `ClientRegistry.style(_:)`, `quotaExcludedClients()` and `QuotaResolver`
@@ -54,9 +55,36 @@ public struct AccountIdentity: Hashable, Sendable {
     /// limits card and the "work" in the overview line mean the same account.
     public var accountLabel: String? {
         guard let accountKey else { return nil }
+        if clientId == Self.antigravityClientId {
+            // Never the key: it is derived from the Google account id. A key
+            // the registry no longer holds (removed while a payload built
+            // before the removal is still on screen) gets a generic label.
+            return Self.antigravityLabel(accountKey) ?? "Antigravity account".localized
+        }
         let name = (accountKey as NSString).lastPathComponent
         return name.isEmpty ? accountKey : name
     }
+
+    /// The tooltip for `accountLabel`: the full config directory for a Claude
+    /// account, whose label is only the basename, and the label itself for a
+    /// captured Antigravity account, whose key must not be shown.
+    public var accountTooltip: String? {
+        clientId == Self.antigravityClientId ? accountLabel : accountKey
+    }
+
+    /// Whether this account's usage can be read from local logs. Only the
+    /// primary of each client and extra Claude accounts (whose key is a config
+    /// directory) qualify; a captured Antigravity account has no local logs,
+    /// and its key passed to `tb_window_usage` would be looked up as a Claude
+    /// config directory.
+    public var hasLocalUsage: Bool { accountKey == nil || clientId == "claude" }
+
+    public static let antigravityClientId = "antigravity"
+
+    /// Label for a captured Antigravity account's key, from the app's account
+    /// registry (`AntigravityAccounts.installLabelResolver`). Nil when the key
+    /// is not registered. Set once at launch, or by the selftest.
+    nonisolated(unsafe) public static var antigravityLabel: @Sendable (String) -> String? = { _ in nil }
 }
 
 extension AgentUsageSnapshot {

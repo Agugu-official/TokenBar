@@ -117,7 +117,9 @@ char *tb_quota_curve(const char *client_id, const char *account_key, const char 
  * value `tb_quota_curve` takes, so a window's usage and the quota it is
  * divided against are scoped by one string. There is no "every account"
  * argument: a quota window belongs to an account, and a total spanning
- * accounts has no quota reading to divide by. */
+ * accounts has no quota reading to divide by. Claude accounts only: a
+ * captured Antigravity account's key names no config directory, and the app
+ * does not pass it. */
 char *tb_window_usage(const char *account_key, int64_t from_ms, int64_t until_ms);
 // Replace the process-wide extra-scan-paths registry used by every
 // subsequent report/parse call (no restart needed). `json` is an object of

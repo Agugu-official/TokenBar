@@ -611,3 +611,25 @@
 "Done" = "完成";
 "Discord is showing your usage. Settings has what appears and how to stop it." = "Discord 已在显示你的用量。要查看显示哪些内容、或如何关闭，请前往设置。";
 "macOS did not add Syrtis to your login items. Check System Settings → General → Login Items." = "macOS 没有把 Syrtis 添加到登录项。请前往“系统设置 → 通用 → 登录项”查看。";
+
+/* ===== 设置：Antigravity 账户 ===== */
+"Antigravity accounts" = "Antigravity 账户";
+"Antigravity account" = "Antigravity 账户";
+"Capture current agy login" = "捕获当前 agy 登录";
+"Capturing…" = "捕获中…";
+"Remove" = "移除";
+"To add another Google account:\n1. Sign agy in to that account.\n2. Press Capture current agy login.\n3. Sign agy back in to your main account." = "要添加另一个 Google 账户：\n1. 让 agy 登录该账户。\n2. 点按“捕获当前 agy 登录”。\n3. 让 agy 重新登录你的主账户。";
+"Capture only accounts other than the one agy and Antigravity already use. That one has its own row." = "只捕获 agy 和 Antigravity 平时所用账户以外的账户。那个账户已有自己的一行。";
+"Capture reads agy's saved Google login once, when you press the button, and keeps a copy in this Mac's login keychain. Syrtis uses it only with Google's token service and Cloud Code quota service, and its requests identify as Antigravity." = "点按按钮时，捕获会读取一次 agy 保存的 Google 登录，并把副本存入这台 Mac 的登录钥匙串。Syrtis 只会把它用于 Google 的令牌服务和 Cloud Code 额度服务，请求会以 Antigravity 的身份发出。";
+"Remove deletes only the copy on this Mac. Google still accepts it until you revoke access in Google Account → third-party access, which also signs Antigravity out of that account." = "移除只会删除这台 Mac 上的副本。在你到“Google 账号 → 第三方访问权限”撤销访问之前，Google 仍会接受它；撤销也会让 Antigravity 退出该账户。";
+"Couldn't read agy's login. Check that agy is signed in, and allow access if macOS asks." = "无法读取 agy 的登录。请确认 agy 已登录；macOS 询问时请允许访问。";
+"agy's saved login is in a format Syrtis doesn't recognize." = "agy 保存的登录格式 Syrtis 无法识别。";
+"agy's saved login doesn't say which Google account it is. Sign agy in again, then try again." = "agy 保存的登录没有标明是哪个 Google 账户。请让 agy 重新登录后再试一次。";
+"Couldn't match this login to the installed Antigravity or agy." = "这个登录与已安装的 Antigravity 或 agy 不匹配。";
+"Google didn't accept this login. Sign agy in again, then try again." = "Google 不接受这个登录。请让 agy 重新登录后再试一次。";
+"Google couldn't be reached right now. Try again later." = "目前无法连接 Google，请稍后再试。";
+"Google answered for a different account. Nothing was saved." = "Google 回应的是另一个账户，没有保存任何内容。";
+"The login had an unexpected format. Nothing was saved." = "登录的格式不符合预期，没有保存任何内容。";
+"Couldn't save to the login keychain." = "无法存入登录钥匙串。";
+"Couldn't delete the copy from the login keychain." = "无法从登录钥匙串删除副本。";
+"Something went wrong. Try again." = "出现错误，请再试一次。";
