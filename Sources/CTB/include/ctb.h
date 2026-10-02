@@ -150,6 +150,33 @@ char *tb_set_extra_scan_paths(const char *json);
 // themselves and decides whose credential each quota card is fetched with.
 // Passing one where the other is expected fails silently in both directions.
 char *tb_set_claude_config_dirs(const char *json);
+// Replace the process-wide registry of captured Antigravity accounts. `json`
+// is `[{"key":"<64 lowercase hex>","label":"<display label>"}]`, full-replace
+// semantics ([] clears it). Each entry becomes its own Antigravity quota card
+// after the primary, with `accountKey` = `key`. Success data is
+// `{"registeredCount":N,"rejected":[{"index":i,"reason":"..."}]}`; an entry is
+// rejected when it is not `{key,label}` strings, its key is not
+// ^[0-9a-f]{64}$, or it repeats a key. Malformed JSON is the error
+// `invalid_accounts_json` and leaves the registry unchanged. No secret.
+char *tb_set_antigravity_accounts(const char *json);
+// Copy agy's current Google login into a Syrtis-owned login-keychain item
+// (service com.nyanako.tokenbar.antigravity-account, account = key). agy's
+// own item is read once and never written. Blocking (keychain + network):
+// call off the main thread. Success data is `{"key":"<64 hex>","label":"..."}`
+// where `key` = hex(SHA-256("antigravity-account\0" + Google sub)) and
+// `label` is the login's email (or "Antigravity account"). `err` is exactly one
+// fixed code: agy_not_signed_in, agy_login_unreadable,
+// agy_login_missing_identity, oauth_client_not_found, oauth_client_rejected,
+// refresh_rejected, refresh_unreachable, account_mismatch,
+// invalid_credential_format, keychain_write_failed. Does not register the
+// account; the caller adds it and calls tb_set_antigravity_accounts.
+char *tb_antigravity_capture(void);
+// Delete one captured account's keychain item and in-memory access token.
+// `key` must match ^[0-9a-f]{64}$, otherwise `invalid_key` and no process is
+// started. An already-missing item counts as removed. Never revokes at Google.
+// Success data is `{"removed":true}`; `err` is invalid_key or
+// keychain_delete_failed. Does not change the registry.
+char *tb_antigravity_remove(const char *key);
 // Replace the process-wide registry of macOS Keychain consent — which clients
 // the user has agreed to let this process read a Keychain item for. `json` is
 // `{"<public-client-id>": true|false}`, e.g. `{"grok-bot":true}`, full-replace

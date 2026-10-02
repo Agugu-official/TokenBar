@@ -176,8 +176,11 @@ pub struct AgentUsageSnapshot {
     /// is omitted from the wire entirely, so a payload with no extra account
     /// configured is byte-identical to one from before this field existed.
     ///
-    /// The value is the extra account's `CLAUDE_CONFIG_DIR` — the same string
-    /// its durable history is keyed on. It is a separate field rather than an
+    /// For an extra Claude account the value is its `CLAUDE_CONFIG_DIR` — the
+    /// same string its durable history is keyed on. For a captured Antigravity
+    /// account it is `hex(SHA-256("antigravity-account\0" + sub))`, which is
+    /// also its keychain account and the `OpaqueId` of its scopes; the raw
+    /// Google `sub` never reaches the wire. It is a separate field rather than an
     /// encoding inside `client_id` because `ClientRegistry.parseIdSet`,
     /// `style(_:)`, `quotaExcludedClients()` and `QuotaResolver` all compare
     /// client ids for equality, and an encoded id would silently match none of
@@ -248,7 +251,7 @@ impl SafeTransportDiagnostic {
         }
     }
 
-    fn rate_limited(status: u16) -> Self {
+    pub(crate) fn rate_limited(status: u16) -> Self {
         Self {
             category: TransportCategory::RateLimited,
             status: (100..=599).contains(&status).then_some(status),
@@ -256,7 +259,7 @@ impl SafeTransportDiagnostic {
         }
     }
 
-    fn server_error(status: u16) -> Self {
+    pub(crate) fn server_error(status: u16) -> Self {
         Self {
             category: TransportCategory::ServerError,
             status: (100..=599).contains(&status).then_some(status),
@@ -1630,9 +1633,11 @@ pub(crate) const QUOTA_PROVIDERS: &[QuotaProvider] = &[
         id: ProviderId::Claude,
         fetch: |id| provider_fetch(fetch_claude_accounts(id)),
     },
+    // The primary first, then any captured accounts. With none registered
+    // this is the single Antigravity card it has always been.
     QuotaProvider {
         id: ProviderId::Antigravity,
-        fetch: |id| provider_fetch(async move { vec![fetch_antigravity(id).await] }),
+        fetch: |id| provider_fetch(fetch_antigravity_accounts(id)),
     },
     // Copilot only appears when signed in (via opencode).
     QuotaProvider {
@@ -1908,6 +1913,80 @@ async fn fetch_antigravity(id: ProviderId) -> AgentUsageSnapshot {
     let source = required_card_source(&outcome, agent_antigravity::ANTIGRAVITY_UNCONFIGURED_ERROR);
     apply_provider_outcome(id, None, source, outcome)
         .expect("Antigravity is a required provider card")
+}
+
+/// Every Antigravity card: the primary route (unchanged), then one card per
+/// captured account (`agent_antigravity::captured_accounts`), keyed by its
+/// hashed key. With none registered this is the single `fetch_antigravity`
+/// call it was before. Bounded and ordered like `fetch_claude_accounts`.
+async fn fetch_antigravity_accounts(id: ProviderId) -> Vec<AgentUsageSnapshot> {
+    let accounts = agent_antigravity::captured_accounts();
+    if accounts.is_empty() {
+        return vec![fetch_antigravity(id).await];
+    }
+    antigravity_accounts_with(Box::pin(fetch_antigravity(id)), accounts, move |account| {
+        Box::pin(fetch_antigravity_captured(id, account))
+    })
+    .await
+}
+
+type SnapshotFuture = Pin<Box<dyn Future<Output = AgentUsageSnapshot>>>;
+
+async fn antigravity_accounts_with<Each>(
+    primary: SnapshotFuture,
+    accounts: Vec<agent_antigravity::CapturedAccount>,
+    each: Each,
+) -> Vec<AgentUsageSnapshot>
+where
+    Each: Fn(agent_antigravity::CapturedAccount) -> SnapshotFuture,
+{
+    let mut work = vec![primary];
+    work.extend(accounts.into_iter().map(each));
+    join_local_ordered(work).await
+}
+
+async fn fetch_antigravity_captured(
+    id: ProviderId,
+    account: agent_antigravity::CapturedAccount,
+) -> AgentUsageSnapshot {
+    let result = agent_antigravity::fetch_captured(&account.key, &account.label, Utc::now()).await;
+    apply_provider_outcome(
+        id,
+        Some(&account.key),
+        "oauth",
+        captured_antigravity_outcome(id, &account.key, result, Utc::now()),
+    )
+    .expect("a captured Antigravity account always produces a card")
+}
+
+/// A captured account's fetch as an outcome. Never `Absent` and never the
+/// unconfigured marker: a registered account that fails is an error card for
+/// that account alone.
+fn captured_antigravity_outcome(
+    id: ProviderId,
+    key: &str,
+    result: Result<agent_antigravity::Fetched, ProviderFetchFailure>,
+    now: DateTime<Utc>,
+) -> ProviderFetchOutcome {
+    match result {
+        Ok(fetched) => ProviderFetchOutcome::Success {
+            cache_binding: fetched.cache_binding,
+            snapshot: AgentUsageSnapshot {
+                account_key: Some(key.to_string()),
+                client_id: id,
+                source: fetched.source,
+                updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+                identity: fetched.identity,
+                account_scope: fetched.account_scope,
+                history_scope: fetched.history_scope,
+                windows: fetched.windows,
+                credits: None,
+                error: None,
+                transport_diagnostic: None,
+            },
+        },
+        Err(failure) => ProviderFetchOutcome::Failure(failure),
+    }
 }
 
 async fn fetch_codex(id: ProviderId) -> AgentUsageSnapshot {
@@ -13923,5 +14002,147 @@ mod tests {
             .expect("payload serializes as an object")
             .remove("publicationGeneration");
         assert_eq!(fixture["payload"], serialized);
+    }
+
+    /// Captured Antigravity accounts compose after the primary, each through
+    /// its own per-account outcome: a key whose item is gone is an error card
+    /// for that key alone, the others still arrive with their windows, and no
+    /// card carries the token, the raw sub or a Google error_description.
+    #[tokio::test]
+    async fn a_failing_captured_antigravity_account_errors_alone() {
+        use crate::agent_antigravity::captured_test_support::*;
+        use crate::agent_antigravity::CapturedAccount;
+        use std::rc::Rc;
+
+        let mut fake = FakeIo::new("usage-captured");
+        fake.token = Box::new(|_, refresh_token| {
+            if refresh_token.ends_with("-d") {
+                Ok((
+                    400,
+                    r#"{"error":"invalid_grant","error_description":"SENTINELDESC"}"#.to_string(),
+                ))
+            } else {
+                Ok(token_ok("ya29.SENTINELTOKEN", serde_json::json!({})))
+            }
+        });
+        let io = Rc::new(fake);
+        let key = crate::agent_antigravity::captured_key;
+        let (key_a, key_b, key_c, key_d) = (
+            key("SENTINELSUB-a"),
+            key("SENTINELSUB-b"),
+            key("SENTINELSUB-c"),
+            key("SENTINELSUB-d"),
+        );
+        for (k, refresh_token) in [
+            (&key_a, "1//SENTINELTOKEN-a"),
+            (&key_c, "1//SENTINELTOKEN-c"),
+            (&key_d, "1//SENTINELTOKEN-d"),
+        ] {
+            io.items
+                .borrow_mut()
+                .insert(k.clone(), stored_value(refresh_token, AUD, &secret('a')));
+        }
+        // b has no item at all; d's refresh is rejected with a description.
+        let accounts: Vec<CapturedAccount> = [&key_a, &key_b, &key_c, &key_d]
+            .iter()
+            .zip([
+                "a@example.com",
+                "b@example.com",
+                "c@example.com",
+                "d@example.com",
+            ])
+            .map(|(k, label)| CapturedAccount {
+                key: (*k).clone(),
+                label: label.to_string(),
+            })
+            .collect();
+
+        let cache = Rc::new(new_token_cache());
+        let last_good = Rc::new(Mutex::new(ProviderLastGoodCache::default()));
+        let now = Utc::now();
+        let id = ProviderId::Antigravity;
+        let primary_cache = Rc::clone(&last_good);
+        let primary: SnapshotFuture = Box::pin(async move {
+            apply_provider_outcome_with(
+                &primary_cache,
+                id,
+                None,
+                "oauth",
+                now,
+                ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal("primary marker")),
+                |_| {},
+            )
+            .unwrap()
+        });
+        let snapshots = {
+            let io = Rc::clone(&io);
+            antigravity_accounts_with(primary, accounts, move |account| {
+                let io = Rc::clone(&io);
+                let cache = Rc::clone(&cache);
+                let last_good = Rc::clone(&last_good);
+                Box::pin(async move {
+                    let result = crate::agent_antigravity::fetch_captured_with(
+                        &*io,
+                        &cache,
+                        &account.key,
+                        &account.label,
+                        now,
+                    )
+                    .await;
+                    apply_provider_outcome_with(
+                        &last_good,
+                        id,
+                        Some(&account.key),
+                        "oauth",
+                        now,
+                        captured_antigravity_outcome(id, &account.key, result, now),
+                        |_| {},
+                    )
+                    .unwrap()
+                })
+            })
+            .await
+        };
+
+        let keys: Vec<Option<&str>> = snapshots
+            .iter()
+            .map(|snapshot| snapshot.account_key.as_deref())
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                None,
+                Some(key_a.as_str()),
+                Some(key_b.as_str()),
+                Some(key_c.as_str()),
+                Some(key_d.as_str())
+            ],
+            "primary first, then the accounts in registry order"
+        );
+        assert_eq!(snapshots[0].error.as_deref(), Some("primary marker"));
+        for ok in [&snapshots[1], &snapshots[3]] {
+            assert!(ok.error.is_none(), "{:?}", ok.error);
+            assert_eq!(ok.windows.len(), 1);
+            assert_eq!(ok.source, "oauth");
+        }
+        assert_eq!(
+            snapshots[1]
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.email.as_deref()),
+            Some("a@example.com")
+        );
+        assert_eq!(
+            snapshots[2].error.as_deref(),
+            Some(crate::agent_antigravity::CAPTURED_ITEM_MISSING)
+        );
+        assert!(snapshots[2].windows.is_empty());
+        assert!(snapshots[4].error.is_some() && snapshots[4].windows.is_empty());
+        for snapshot in &snapshots {
+            let wire = serde_json::to_string(snapshot).unwrap();
+            for sentinel in ["SENTINELTOKEN", "SENTINELSUB", "SENTINELDESC"] {
+                assert!(!wire.contains(sentinel), "{wire}");
+            }
+        }
     }
 }
