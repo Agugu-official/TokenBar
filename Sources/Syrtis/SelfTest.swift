@@ -8631,6 +8631,19 @@ enum SelfTest {
         let quota = DemoData.agentUsage
         let quotaClients = Set(quota.agents.map(\.clientId))
         let registryClients = Set(ClientRegistry.allIds)
+        // AppDelegate.effectivePublished and DiscordPresence keep only
+        // registered ids, so an engine client missing here would make its
+        // usage vanish (omp moved out of `pi` in the 2026-10 engine sync).
+        // The ids come from the engine's own `ClientId::ALL` over FFI.
+        let engineClientIds = (try? TBCore.engineClientIds()) ?? []
+        // Control: an empty answer would pass the subset check vacuously.
+        expect(
+            engineClientIds.contains("claude") && engineClientIds.contains("pi"),
+            "the engine lists its local clients")
+        let unregisteredEngineClients = Set(engineClientIds).subtracting(registryClients)
+        expect(
+            unregisteredEngineClients.isEmpty,
+            "every engine client is registered (missing: \(unregisteredEngineClients.sorted()))")
         // Usage is per CLIENT, quota is per SUBSCRIPTION, and the two sets are
         // not the same one. They coincided for every registered id until
         // Antigravity's CLI made the difference visible: it publishes real

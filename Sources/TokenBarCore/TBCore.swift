@@ -414,6 +414,12 @@ public enum TBCore {
         return payload.ids
     }
 
+    /// Every local client id the engine attributes usage to. Offline and cheap.
+    public static func engineClientIds() throws -> [String] {
+        let payload: QuotaProviderIds = try unwrap(tb_client_ids())
+        return payload.ids
+    }
+
     /// Live tokens/min estimate (10-minute-window average).
     public static func tokensPerMin() throws -> Double {
         let payload: TokensPerMin = try unwrap(tb_tokens_per_min())
