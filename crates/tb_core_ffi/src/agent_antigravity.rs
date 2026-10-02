@@ -351,13 +351,11 @@ fn lock_agy_latch(latch: &std::sync::Mutex<AgyLatch>) -> std::sync::MutexGuard<'
 ///
 /// Attributes only. Neither `-w` nor `-g` is passed, so the secret is never
 /// requested; a test pins this exact slice so neither can be added silently.
-#[cfg(any(target_os = "macos", test))]
 const AGY_KEYCHAIN_QUERY: &[&str] = &["find-generic-password", "-s", "gemini", "-a", "antigravity"];
 
 /// The value of the `"mdat"<timedate>=` attribute line (modification date) in
 /// `security find-generic-password` output, trimmed. A re-login rewrites the
 /// item, which is what lets it re-arm a latched-off route.
-#[cfg(any(target_os = "macos", test))]
 fn parse_keychain_mdat(stdout: &str) -> Option<String> {
     stdout.lines().find_map(|line| {
         let value = line
@@ -2227,12 +2225,15 @@ fn gemini_home_from(
 // refresh lock, no lineage binding and no compare-and-swap.
 //
 // What crosses each boundary:
-// - agy's own item (`gemini` / `antigravity`) is read once, at capture, through
-//   `/usr/bin/security -w`, and never written.
+// - agy's own item (`gemini` / `antigravity`) is read through
+//   `/usr/bin/security -w` when the user presses Capture, or once per login
+//   change while automatic capture is on (`auto_capture_with`), and never
+//   written. The poll path reads only its attributes (`login_marker_with`).
 // - Syrtis's item (`CAPTURED_SERVICE`, account = key) is written through a
 //   `/usr/bin/security -i` child that receives the command on stdin, so the
 //   secret is never on an argv; reads use `-w` and print only to our pipe.
-// - The raw Google `sub` never leaves `capture_with`. Everything downstream —
+// - The raw Google `sub` never leaves `capture_with` / `auto_capture_with`.
+//   Everything downstream —
 //   the keychain account, the registry, the FFI `accountKey`, the account and
 //   history scopes — uses `captured_key(sub)`.
 // - Every error leaving this section is a fixed code or a literal string: no
@@ -2254,7 +2255,9 @@ const AGY_ITEM_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 const CAPTURED_ITEM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const CAPTURED_FALLBACK_LABEL: &str = "Antigravity account";
 
-/// agy's login item, read with `-w` (the secret). Capture only.
+/// agy's login item, read with `-w` (the secret): when the user presses
+/// Capture, or once per login change while automatic capture is on. Never on
+/// a quota poll, which reads only `AGY_KEYCHAIN_QUERY`'s attributes.
 const AGY_ITEM_READ: &[&str] = &[
     "find-generic-password",
     "-s",
@@ -2586,8 +2589,10 @@ pub(crate) trait CapturedIo {
         timeout: std::time::Duration,
     ) -> Option<SecurityExit>;
     /// The bytes of each Antigravity.app / agy artifact that may embed a
-    /// client. Capture only.
-    async fn client_artifacts(&self) -> Vec<Vec<u8>>;
+    /// client. Called when the user presses Capture, or by an automatic
+    /// capture after a login change (`throttle_login_shell` true: the
+    /// login-shell lookup for `agy` is rate-limited like the quota poll's).
+    async fn client_artifacts(&self, throttle_login_shell: bool) -> Vec<Vec<u8>>;
     /// POST a refresh-token grant; `Ok((status, body))` for any HTTP answer
     /// except 429 / 5xx, which are transient failures like every other
     /// transport failure.
@@ -2754,9 +2759,9 @@ impl CapturedIo for SystemCapturedIo {
         tokio::time::timeout(timeout, run).await.ok().flatten()
     }
 
-    async fn client_artifacts(&self) -> Vec<Vec<u8>> {
+    async fn client_artifacts(&self, throttle_login_shell: bool) -> Vec<Vec<u8>> {
         let mut paths = client_artifact_candidates();
-        paths.extend(agy_cli_artifact_candidates(false).await);
+        paths.extend(agy_cli_artifact_candidates(throttle_login_shell).await);
         paths
             .into_iter()
             .filter_map(|path| std::fs::read(path).ok())
@@ -3014,6 +3019,11 @@ pub(crate) enum CaptureError {
     KeychainWriteFailed,
     InvalidKey,
     KeychainDeleteFailed,
+    /// Automatic capture only: agy's item read ended other than exit 0 or 44
+    /// (a timeout, a cancelled Keychain dialog, any other failure).
+    Paused,
+    /// Automatic capture only: agy has no login item (exit 44).
+    NotSignedIn,
 }
 
 impl CaptureError {
@@ -3031,6 +3041,8 @@ impl CaptureError {
             Self::KeychainWriteFailed => "keychain_write_failed",
             Self::InvalidKey => "invalid_key",
             Self::KeychainDeleteFailed => "keychain_delete_failed",
+            Self::Paused => "paused",
+            Self::NotSignedIn => "not_signed_in",
         }
     }
 }
@@ -3053,57 +3065,201 @@ async fn capture_with<I: CapturedIo>(io: &I) -> Result<CapturedAccount, CaptureE
     let login = parse_agy_login(&agy_item.stdout)?;
     drop(agy_item);
 
-    let clients = clients_for_aud(&login.aud, io.client_artifacts().await);
-    if clients.is_empty() {
-        return Err(CaptureError::OAuthClientNotFound);
-    }
-    let mut accepted = None;
-    for client in clients {
-        let (status, body) = io
-            .token_post(&client, &login.refresh_token, None)
-            .await
-            .map_err(|_| CaptureError::RefreshUnreachable)?;
-        match token_response(status, &body) {
-            Ok(json) => {
-                accepted = Some((client, json));
-                break;
-            }
-            Err(TokenRejection::WrongClient) => continue,
-            Err(TokenRejection::Other) => return Err(CaptureError::RefreshRejected),
-        }
-    }
-    let (client, json) = accepted.ok_or(CaptureError::OAuthClientRejected)?;
+    let (client, json) = refresh_with_issuing_client(io, &login, false).await?;
 
     // The stored id_token is local and untrusted; Google's answer is not.
     if let Some(id_token) = json.get("id_token") {
-        let sub = id_token
-            .as_str()
-            .and_then(jwt_claims)
-            .and_then(|claims| non_empty_str(&claims, "sub").map(str::to_string));
-        if sub.as_deref() != Some(login.sub.as_str()) {
+        if response_sub(Some(id_token)).as_deref() != Some(login.sub.as_str()) {
             return Err(CaptureError::AccountMismatch);
         }
     }
 
-    let credential = StoredCredential {
-        refresh_token: non_empty_str(&json, "refresh_token")
-            .unwrap_or(&login.refresh_token)
-            .to_string(),
-        client,
-    };
     let key = captured_key(&login.sub);
-    let call = write_item_call(&key, &encode_stored(&credential))
-        .ok_or(CaptureError::InvalidCredentialFormat)?;
-    match io.security(call, CAPTURED_ITEM_TIMEOUT).await {
-        Some(SecurityExit { code: Some(0), .. }) => {}
-        _ => return Err(CaptureError::KeychainWriteFailed),
-    }
+    write_captured(io, &key, &login, client, &json).await?;
     Ok(CapturedAccount {
         key,
         label: login
             .email
             .unwrap_or_else(|| CAPTURED_FALLBACK_LABEL.to_string()),
     })
+}
+
+/// One refresh of `login`'s token with the client named by its `aud`,
+/// trying that client's candidate secrets; `invalid_client` /
+/// `unauthorized_client` falls through to the next, any other answer stops.
+async fn refresh_with_issuing_client<I: CapturedIo>(
+    io: &I,
+    login: &AgyLogin,
+    throttle_login_shell: bool,
+) -> Result<(OAuthClient, Value), CaptureError> {
+    let clients = clients_for_aud(&login.aud, io.client_artifacts(throttle_login_shell).await);
+    if clients.is_empty() {
+        return Err(CaptureError::OAuthClientNotFound);
+    }
+    for client in clients {
+        let (status, body) = io
+            .token_post(&client, &login.refresh_token, None)
+            .await
+            .map_err(|_| CaptureError::RefreshUnreachable)?;
+        match token_response(status, &body) {
+            Ok(json) => return Ok((client, json)),
+            Err(TokenRejection::WrongClient) => continue,
+            Err(TokenRejection::Other) => return Err(CaptureError::RefreshRejected),
+        }
+    }
+    Err(CaptureError::OAuthClientRejected)
+}
+
+/// The `sub` of a token response's `id_token`, when it is a decodable JWT.
+fn response_sub(id_token: Option<&Value>) -> Option<String> {
+    id_token
+        .and_then(Value::as_str)
+        .and_then(jwt_claims)
+        .and_then(|claims| non_empty_str(&claims, "sub").map(str::to_string))
+}
+
+/// Write `{refresh_token, client}` to `key`'s item. The refresh token is the
+/// response's when Google rotated it, otherwise the login's.
+async fn write_captured<I: CapturedIo>(
+    io: &I,
+    key: &str,
+    login: &AgyLogin,
+    client: OAuthClient,
+    json: &Value,
+) -> Result<(), CaptureError> {
+    let credential = StoredCredential {
+        refresh_token: non_empty_str(json, "refresh_token")
+            .unwrap_or(&login.refresh_token)
+            .to_string(),
+        client,
+    };
+    let call = write_item_call(key, &encode_stored(&credential))
+        .ok_or(CaptureError::InvalidCredentialFormat)?;
+    match io.security(call, CAPTURED_ITEM_TIMEOUT).await {
+        Some(SecurityExit { code: Some(0), .. }) => Ok(()),
+        _ => Err(CaptureError::KeychainWriteFailed),
+    }
+}
+
+/// What one automatic capture did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AutoCaptured {
+    /// The login was verified at Google and written to its own item.
+    Captured(CapturedAccount),
+    /// Its own item already holds this refresh token: no scan, no request,
+    /// no write.
+    Unchanged(CapturedAccount),
+    /// The user removed this account; nothing was requested or written.
+    SkippedRemoved,
+}
+
+/// The automatic counterpart of `capture_with`, run once per agy login change
+/// while automatic capture is on. Stricter than the manual path, because
+/// nobody pressed a button:
+/// 1. agy's item: exit 0 continues, 44 is `NotSignedIn`, anything else
+///    (timeout, a cancelled Keychain dialog) is `Paused`, which stops further
+///    automatic attempts until the user acts;
+/// 2. a key in `removed_keys` is skipped before any request;
+/// 3. a refresh token its own item already holds is `Unchanged`, with no
+///    client scan, no request and no write;
+/// 4. the client scan uses the throttled login-shell lookup;
+/// 5. the refresh response MUST carry an `id_token` whose `sub` equals the
+///    stored one, else `AccountMismatch` and no write.
+async fn auto_capture_with<I: CapturedIo>(
+    io: &I,
+    removed_keys: &[String],
+) -> Result<AutoCaptured, CaptureError> {
+    let agy_item = match io
+        .security(
+            SecurityCall {
+                argv: security_argv(AGY_ITEM_READ),
+                stdin: None,
+            },
+            AGY_ITEM_READ_TIMEOUT,
+        )
+        .await
+    {
+        Some(SecurityExit {
+            code: Some(0),
+            stdout,
+        }) => stdout,
+        Some(SecurityExit {
+            code: Some(SECURITY_ITEM_NOT_FOUND),
+            ..
+        }) => return Err(CaptureError::NotSignedIn),
+        _ => return Err(CaptureError::Paused),
+    };
+    let login = parse_agy_login(&agy_item)?;
+    drop(agy_item);
+
+    let key = captured_key(&login.sub);
+    if removed_keys.contains(&key) {
+        return Ok(AutoCaptured::SkippedRemoved);
+    }
+
+    let stored_label = login.email.clone();
+    let own = read_item_call(&key).ok_or(CaptureError::InvalidCredentialFormat)?;
+    let unchanged = match io.security(own, CAPTURED_ITEM_TIMEOUT).await {
+        Some(SecurityExit {
+            code: Some(0),
+            stdout,
+        }) => decode_stored(&stdout)
+            .is_some_and(|stored| stored.refresh_token == login.refresh_token),
+        _ => false,
+    };
+    if unchanged {
+        return Ok(AutoCaptured::Unchanged(CapturedAccount {
+            key,
+            label: stored_label.unwrap_or_else(|| CAPTURED_FALLBACK_LABEL.to_string()),
+        }));
+    }
+
+    let (client, json) = refresh_with_issuing_client(io, &login, true).await?;
+    let claims = json
+        .get("id_token")
+        .and_then(Value::as_str)
+        .and_then(jwt_claims);
+    if claims.as_ref().and_then(|claims| non_empty_str(claims, "sub")) != Some(login.sub.as_str()) {
+        return Err(CaptureError::AccountMismatch);
+    }
+    let label = claims
+        .as_ref()
+        .and_then(|claims| non_empty_str(claims, "email"))
+        .map(str::to_string)
+        .or(stored_label)
+        .unwrap_or_else(|| CAPTURED_FALLBACK_LABEL.to_string());
+
+    write_captured(io, &key, &login, client, &json).await?;
+    Ok(AutoCaptured::Captured(CapturedAccount { key, label }))
+}
+
+/// How long the attributes-only marker query may take. No dialog can appear
+/// for it (no secret is requested), so a slow answer is a failure.
+const AGY_MARKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// agy's login marker for the automatic-capture trigger: the item's
+/// modification date, `"present"` when it cannot be parsed, or `"absent"`
+/// (exit 44). Runs only the pinned attributes-only `AGY_KEYCHAIN_QUERY`, so no
+/// secret is requested; stdout is parsed for the `mdat` line and dropped.
+/// Any other outcome is `None`, and the caller does nothing that poll.
+async fn login_marker_with<I: CapturedIo>(io: &I) -> Option<String> {
+    let exit = io
+        .security(
+            SecurityCall {
+                argv: security_argv(AGY_KEYCHAIN_QUERY),
+                stdin: None,
+            },
+            AGY_MARKER_TIMEOUT,
+        )
+        .await?;
+    match exit.code {
+        Some(0) => Some(
+            parse_keychain_mdat(&String::from_utf8_lossy(&exit.stdout))
+                .unwrap_or_else(|| "present".to_string()),
+        ),
+        Some(SECURITY_ITEM_NOT_FOUND) => Some("absent".to_string()),
+        _ => None,
+    }
 }
 
 /// Delete one captured item and its cached access token. Never revokes: the
@@ -3173,6 +3329,14 @@ pub(crate) async fn fetch_captured_with<I: CapturedIo>(
 
 pub(crate) async fn capture() -> Result<CapturedAccount, CaptureError> {
     capture_with(&SystemCapturedIo).await
+}
+
+pub(crate) async fn auto_capture(removed_keys: &[String]) -> Result<AutoCaptured, CaptureError> {
+    auto_capture_with(&SystemCapturedIo, removed_keys).await
+}
+
+pub(crate) async fn login_marker() -> Option<String> {
+    login_marker_with(&SystemCapturedIo).await
 }
 
 pub(crate) async fn remove(key: &str) -> Result<(), CaptureError> {
@@ -5031,6 +5195,13 @@ pub(crate) mod captured_test_support {
         /// `(client_id, client_secret, refresh_token)` per token request.
         pub token_calls: RefCell<Vec<(String, String, String)>>,
         pub artifact_calls: Cell<usize>,
+        /// `throttle_login_shell` of each artifact scan.
+        pub artifact_throttles: RefCell<Vec<bool>>,
+        /// When set, agy's `-w` read ends with this exit code instead of
+        /// following `agy_item`; `Some(None)` is a timeout or a signal.
+        pub agy_read_exit: Option<Option<i32>>,
+        /// stdout of the attributes-only marker query while `agy_item` is set.
+        pub agy_attributes: String,
         pub quota_calls: Cell<usize>,
         /// When set, `quota` fails terminally with this display text.
         pub quota_terminal: Option<&'static str>,
@@ -5048,6 +5219,9 @@ pub(crate) mod captured_test_support {
                 security_calls: RefCell::new(Vec::new()),
                 token_calls: RefCell::new(Vec::new()),
                 artifact_calls: Cell::new(0),
+                artifact_throttles: RefCell::new(Vec::new()),
+                agy_read_exit: None,
+                agy_attributes: String::new(),
                 quota_calls: Cell::new(0),
                 quota_terminal: None,
                 scope: TestRefreshScope::new("antigravity", tag),
@@ -5118,8 +5292,17 @@ pub(crate) mod captured_test_support {
                     exit(self.write_status, Vec::new())
                 }
                 ["find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"] => {
+                    if let Some(code) = self.agy_read_exit {
+                        return code.and_then(|code| exit(code, Vec::new()));
+                    }
                     match &self.agy_item {
                         Some(item) => exit(0, item.clone()),
+                        None => exit(SECURITY_ITEM_NOT_FOUND, Vec::new()),
+                    }
+                }
+                ["find-generic-password", "-s", "gemini", "-a", "antigravity"] => {
+                    match &self.agy_item {
+                        Some(_) => exit(0, self.agy_attributes.clone().into_bytes()),
                         None => exit(SECURITY_ITEM_NOT_FOUND, Vec::new()),
                     }
                 }
@@ -5143,8 +5326,9 @@ pub(crate) mod captured_test_support {
             }
         }
 
-        async fn client_artifacts(&self) -> Vec<Vec<u8>> {
+        async fn client_artifacts(&self, throttle_login_shell: bool) -> Vec<Vec<u8>> {
             self.artifact_calls.set(self.artifact_calls.get() + 1);
+            self.artifact_throttles.borrow_mut().push(throttle_login_shell);
             self.artifacts.clone()
         }
 
@@ -5824,6 +6008,174 @@ mod captured_account_tests {
         );
         set_captured_accounts_from_json("[]").unwrap();
         assert!(captured_accounts().is_empty());
+    }
+
+    // ── automatic capture (S4) ──
+
+    fn auto_io(tag: &str) -> FakeIo {
+        let mut io = FakeIo::new(tag);
+        io.agy_item = Some(agy_item(
+            "1//rt-a",
+            Some(claims("sub-a", AUD, "stored@example.com")),
+        ));
+        io.artifacts = artifacts_where_positional_pick_differs();
+        io.token = Box::new(|_, _| {
+            Ok(token_ok(
+                "ya29.a",
+                json!({ "id_token": jwt(json!({ "sub": "sub-a", "email": "fresh@example.com" })) }),
+            ))
+        });
+        io
+    }
+
+    #[tokio::test]
+    async fn auto_capture_writes_once_with_the_throttled_scan() {
+        let io = auto_io("auto-captured");
+        let key = captured_key("sub-a");
+        assert_eq!(
+            auto_capture_with(&io, &[]).await,
+            Ok(AutoCaptured::Captured(CapturedAccount {
+                key: key.clone(),
+                label: "fresh@example.com".to_string(),
+            })),
+            "the label is Google's answer, not the stored id_token"
+        );
+        assert_eq!(io.writes().len(), 1);
+        assert_eq!(io.token_calls.borrow().len(), 1);
+        assert_eq!(*io.artifact_throttles.borrow(), vec![true]);
+        assert_eq!(decode_value(&io.items.borrow()[&key]).0, "1//rt-a");
+
+        // The manual path keeps the unthrottled lookup.
+        let manual = auto_io("manual-unthrottled");
+        capture_with(&manual).await.unwrap();
+        assert_eq!(*manual.artifact_throttles.borrow(), vec![false]);
+    }
+
+    #[tokio::test]
+    async fn auto_capture_skips_a_removed_key_before_any_request() {
+        let key = captured_key("sub-a");
+        let other = captured_key("sub-b");
+        let io = auto_io("auto-removed");
+        assert_eq!(
+            auto_capture_with(&io, &[other.clone(), key.clone()]).await,
+            Ok(AutoCaptured::SkippedRemoved)
+        );
+        assert_eq!(io.network_calls(), 0);
+        assert_eq!(io.artifact_calls.get(), 0);
+        assert!(io.writes().is_empty());
+        assert_eq!(io.reads_of_captured_items(), 0);
+
+        // Control: another account's removal does not skip this one.
+        let io = auto_io("auto-removed-control");
+        assert!(matches!(
+            auto_capture_with(&io, &[other]).await,
+            Ok(AutoCaptured::Captured(_))
+        ));
+        assert_eq!(io.writes().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_capture_of_a_stored_token_does_nothing() {
+        let key = captured_key("sub-a");
+        let io = auto_io("auto-unchanged");
+        io.items
+            .borrow_mut()
+            .insert(key.clone(), stored_value("1//rt-a", AUD, &secret('a')));
+        assert_eq!(
+            auto_capture_with(&io, &[]).await,
+            Ok(AutoCaptured::Unchanged(CapturedAccount {
+                key: key.clone(),
+                label: "stored@example.com".to_string(),
+            }))
+        );
+        assert_eq!(io.artifact_calls.get(), 0, "no client scan");
+        assert_eq!(io.network_calls(), 0, "no request");
+        assert!(io.writes().is_empty(), "no write");
+
+        // Control: a different stored token is a new login and is captured.
+        let io = auto_io("auto-unchanged-control");
+        io.items
+            .borrow_mut()
+            .insert(key.clone(), stored_value("1//rt-old", AUD, &secret('a')));
+        assert!(matches!(
+            auto_capture_with(&io, &[]).await,
+            Ok(AutoCaptured::Captured(_))
+        ));
+        assert_eq!(io.writes().len(), 1);
+        assert_eq!(decode_value(&io.items.borrow()[&key]).0, "1//rt-a");
+    }
+
+    #[tokio::test]
+    async fn auto_capture_requires_googles_id_token_for_the_same_sub() {
+        for (tag, extra) in [
+            ("auto-no-id-token", json!({})),
+            ("auto-other-sub", json!({ "id_token": jwt(json!({ "sub": "sub-b" })) })),
+            ("auto-bad-id-token", json!({ "id_token": "not-a-jwt" })),
+        ] {
+            let mut io = auto_io(tag);
+            let extra = extra.clone();
+            io.token = Box::new(move |_, _| Ok(token_ok("ya29.a", extra.clone())));
+            assert_eq!(
+                auto_capture_with(&io, &[]).await,
+                Err(CaptureError::AccountMismatch),
+                "{tag}"
+            );
+            assert!(io.writes().is_empty(), "{tag}");
+            assert!(io.items.borrow().is_empty(), "{tag}");
+        }
+        // The manual path still accepts a response without an id_token.
+        let mut io = auto_io("manual-no-id-token");
+        io.token = Box::new(|_, _| Ok(token_ok("ya29.a", json!({}))));
+        assert!(capture_with(&io).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn auto_capture_pauses_on_any_agy_read_but_success_or_not_found() {
+        for code in [Some(1), Some(51), Some(128), None] {
+            let mut io = auto_io("auto-paused");
+            io.agy_read_exit = Some(code);
+            assert_eq!(
+                auto_capture_with(&io, &[]).await,
+                Err(CaptureError::Paused),
+                "{code:?}"
+            );
+            assert_eq!(io.network_calls(), 0);
+            assert!(io.writes().is_empty());
+        }
+        let mut io = auto_io("auto-not-signed-in");
+        io.agy_read_exit = Some(Some(SECURITY_ITEM_NOT_FOUND));
+        assert_eq!(
+            auto_capture_with(&io, &[]).await,
+            Err(CaptureError::NotSignedIn)
+        );
+        assert_eq!(io.security_calls.borrow().len(), 1);
+        assert_eq!(io.network_calls(), 0);
+        assert_eq!(
+            [CaptureError::Paused.code(), CaptureError::NotSignedIn.code()],
+            ["paused", "not_signed_in"]
+        );
+    }
+
+    #[tokio::test]
+    async fn login_marker_runs_the_attributes_only_query() {
+        let mut io = auto_io("marker");
+        io.agy_attributes = "attributes:\n    \"acct\"<blob>=\"antigravity\"\n    \
+            \"mdat\"<timedate>=0x3230  \"20261002101010Z\\000\"\n\
+            password: \"go-keyring-base64:1//rt-a\"\n"
+            .to_string();
+        let marker = login_marker_with(&io).await.unwrap();
+        assert_eq!(marker, "0x3230  \"20261002101010Z\\000\"");
+        assert!(!marker.contains("1//rt-a") && !marker.contains("go-keyring"));
+        let calls = io.security_calls.borrow().clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].argv, security_argv(AGY_KEYCHAIN_QUERY));
+        assert!(!calls[0].argv.iter().any(|arg| arg == "-w" || arg == "-g"));
+        assert_eq!(io.network_calls(), 0);
+
+        io.agy_attributes = "attributes:\n".to_string();
+        assert_eq!(login_marker_with(&io).await.as_deref(), Some("present"));
+        io.agy_item = None;
+        assert_eq!(login_marker_with(&io).await.as_deref(), Some("absent"));
     }
 
     /// The maintainer's real round trip (S2 merge gate). It touches the login

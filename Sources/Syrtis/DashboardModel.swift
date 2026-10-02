@@ -81,12 +81,23 @@ struct AgentUsagePublicationState {
 enum AgentUsagePublicationCoordinator {
     private static var state = AgentUsagePublicationState()
 
-    static var latestPayload: AgentUsagePayload? { state.latest }
+    /// Both accessors return the payload after `AntigravityDedup`, so every
+    /// consumer — the popover (`resolve`) and the tray, the status item and
+    /// the individual client trays (`latestPayload`, via
+    /// `TrayAnimator.publishedQuota`) — draws agy's current account once. The
+    /// stored state keeps the raw payload: the dedup depends on
+    /// `currentAgyKey` at the moment of reading, not at publication.
+    static var latestPayload: AgentUsagePayload? { state.latest.map(antigravityDedup) }
 
     static func resolve(_ candidate: AgentUsagePayload) -> AgentUsagePayload {
         let resolved = state.resolve(candidate)
         GrokBotKeychainConsent.revokeIfAccessWasDenied(resolved)
-        return resolved
+        return antigravityDedup(resolved)
+    }
+
+    private static func antigravityDedup(_ payload: AgentUsagePayload) -> AgentUsagePayload {
+        AntigravityDedup.apply(
+            payload, currentAgyKey: AntigravityAutoCapture.shared.currentAgyKey)
     }
 
     /// Test seam only: back to the state of a process that has published

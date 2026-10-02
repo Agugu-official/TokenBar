@@ -1206,6 +1206,73 @@ pub extern "C" fn tb_antigravity_capture() -> *mut c_char {
     })
 }
 
+/// agy's login marker for automatic capture, from the attributes-only query
+/// `security find-generic-password -s gemini -a antigravity` (no `-w`, no
+/// `-g`: no secret is requested, and no Keychain dialog can appear). Success
+/// data is `{"marker":"<mdat>"}`, `{"marker":"present"}` when the date cannot
+/// be parsed, or `{"marker":"absent"}` when agy has no login. Any other
+/// outcome (timeout, other exit) is the error `marker_unavailable`. Blocking:
+/// call off the main thread.
+#[no_mangle]
+pub extern "C" fn tb_antigravity_login_marker() -> *mut c_char {
+    guarded("tb_antigravity_login_marker", || {
+        envelope(
+            RUNTIME
+                .block_on(agent_antigravity::login_marker())
+                .map(|marker| serde_json::json!({ "marker": marker }))
+                .ok_or_else(|| "marker_unavailable".to_string()),
+        )
+    })
+}
+
+/// One automatic capture of agy's current login, run by the app once per
+/// login-marker change while automatic capture is on. `removed_keys_json` is
+/// a JSON array of the keys the user removed (`["<64 hex>", ...]`); an account
+/// whose key is listed is skipped before any request. Success data is
+/// `{"status":"captured"|"unchanged","key":"<64 hex>","label":"..."}` or
+/// `{"status":"skipped_removed"}`. `unchanged` means Syrtis's own item already
+/// holds this refresh token: nothing was scanned, requested or written.
+/// `captured` requires Google's refresh response to carry an `id_token` with
+/// the stored `sub`. The error is one fixed code: the `tb_antigravity_capture`
+/// codes (except `agy_not_signed_in`), plus `not_signed_in` (agy has no
+/// login), `paused` (agy's item read ended any other way, e.g. a cancelled
+/// Keychain dialog or a timeout) and `invalid_removed_keys`. Blocking
+/// (keychain + network): call off the main thread. Does not register the
+/// account.
+///
+/// # Safety
+/// `removed_keys_json` must be NULL or a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_antigravity_auto_capture(
+    removed_keys_json: *const c_char,
+) -> *mut c_char {
+    guarded("tb_antigravity_auto_capture", || {
+        let removed: Option<Vec<String>> = (!removed_keys_json.is_null())
+            .then(|| unsafe { CStr::from_ptr(removed_keys_json) }.to_str().ok())
+            .flatten()
+            .and_then(|raw| serde_json::from_str(raw).ok());
+        let Some(removed) = removed else {
+            return envelope(Err("invalid_removed_keys".to_string()));
+        };
+        envelope(
+            RUNTIME
+                .block_on(agent_antigravity::auto_capture(&removed))
+                .map(|outcome| match outcome {
+                    agent_antigravity::AutoCaptured::Captured(account) => serde_json::json!({
+                        "status": "captured", "key": account.key, "label": account.label,
+                    }),
+                    agent_antigravity::AutoCaptured::Unchanged(account) => serde_json::json!({
+                        "status": "unchanged", "key": account.key, "label": account.label,
+                    }),
+                    agent_antigravity::AutoCaptured::SkippedRemoved => {
+                        serde_json::json!({ "status": "skipped_removed" })
+                    }
+                })
+                .map_err(|error| error.code().to_string()),
+        )
+    })
+}
+
 /// Delete one captured account's keychain item and its in-memory access
 /// token. `key` must be `^[0-9a-f]{64}$`, otherwise `invalid_key` and no
 /// process is started. An item that is already gone counts as removed.
@@ -2826,6 +2893,13 @@ mod tests {
         let bad = CString::new(format!("{} -w x", &key[..56])).unwrap();
         let s = unsafe { take(tb_antigravity_remove(bad.as_ptr())) };
         assert_eq!(s, r#"{"err":"invalid_key","ok":false}"#);
+
+        // A NULL or non-array removed list is refused before agy's item is read.
+        let s = unsafe { take(tb_antigravity_auto_capture(std::ptr::null())) };
+        assert_eq!(s, r#"{"err":"invalid_removed_keys","ok":false}"#);
+        let bad = CString::new(r#"{"k":1}"#).unwrap();
+        let s = unsafe { take(tb_antigravity_auto_capture(bad.as_ptr())) };
+        assert_eq!(s, r#"{"err":"invalid_removed_keys","ok":false}"#);
     }
 
     #[test]

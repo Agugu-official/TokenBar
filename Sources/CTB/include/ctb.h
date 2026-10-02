@@ -179,6 +179,24 @@ char *tb_antigravity_capture(void);
 // Success data is `{"removed":true}`; `err` is invalid_key or
 // keychain_delete_failed. Does not change the registry.
 char *tb_antigravity_remove(const char *key);
+// agy's login marker for automatic capture, from the attributes-only query
+// `security find-generic-password -s gemini -a antigravity` (no -w/-g: no
+// secret, no Keychain dialog). Success data is `{"marker":"<mdat>"}`,
+// `{"marker":"present"}` when the date cannot be parsed, or
+// `{"marker":"absent"}` without a login; any other outcome is the error
+// `marker_unavailable`. Blocking: call off the main thread.
+char *tb_antigravity_login_marker(void);
+// One automatic capture of agy's current login, run once per marker change
+// while automatic capture is on. `removed_keys_json` is `["<64 hex>", ...]`,
+// the keys the user removed; a listed account is skipped before any request.
+// Success data is `{"status":"captured"|"unchanged","key":"...","label":"..."}`
+// or `{"status":"skipped_removed"}`; `unchanged` = Syrtis's item already holds
+// this refresh token (nothing scanned, requested or written). `captured`
+// requires Google's response id_token to carry the stored sub. `err` is one
+// fixed code: the tb_antigravity_capture codes, plus not_signed_in, paused
+// (agy's item read ended other than exit 0/44, e.g. a cancelled dialog) and
+// invalid_removed_keys. Blocking (keychain + network). Does not register.
+char *tb_antigravity_auto_capture(const char *removed_keys_json);
 // Replace the process-wide registry of macOS Keychain consent — which clients
 // the user has agreed to let this process read a Keychain item for. `json` is
 // `{"<public-client-id>": true|false}`, e.g. `{"grok-bot":true}`, full-replace

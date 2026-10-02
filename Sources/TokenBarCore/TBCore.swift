@@ -111,11 +111,36 @@ public struct AntigravityAccountsResult: Decodable, Equatable, Sendable {
 public struct AntigravityCapturedAccount: Decodable, Equatable, Sendable {
     public let key: String
     public let label: String
+
+    public init(key: String, label: String) {
+        self.key = key
+        self.label = label
+    }
 }
 
 /// Success data of `tb_antigravity_remove`.
 package struct AntigravityRemoved: Decodable {
     package let removed: Bool
+}
+
+/// Success data of `tb_antigravity_login_marker`: the login item's
+/// modification date, `present`, or `absent`. Not a secret.
+package struct AntigravityLoginMarker: Decodable {
+    package let marker: String
+}
+
+/// Success data of `tb_antigravity_auto_capture`. `key` and `label` are
+/// present for `captured` and `unchanged`, absent for `skipped_removed`.
+public struct AntigravityAutoCaptureResult: Decodable, Equatable, Sendable {
+    public let status: String
+    public let key: String?
+    public let label: String?
+
+    public init(status: String, key: String? = nil, label: String? = nil) {
+        self.status = status
+        self.key = key
+        self.label = label
+    }
 }
 
 /// One client id `tb_set_keychain_consent` refused, and why: the core wires
@@ -437,6 +462,26 @@ public enum TBCore {
     /// list and calls `setAntigravityAccounts`.
     public static func antigravityCapture() throws -> AntigravityCapturedAccount {
         try unwrap(tb_antigravity_capture())
+    }
+
+    /// agy's login marker (attributes only, no secret). Blocking (spawns
+    /// `security`): never call on the main thread. Throws
+    /// `bridge("marker_unavailable")` when the query could not be answered.
+    public static func antigravityLoginMarker() throws -> String {
+        let result: AntigravityLoginMarker = try unwrap(tb_antigravity_login_marker())
+        return result.marker
+    }
+
+    /// One automatic capture of agy's current login, skipping `removedKeys`.
+    /// Blocking (spawns `security`, may reach Google): never call on the main
+    /// thread. A failure throws `bridge(<fixed code>)`, including `paused` and
+    /// `not_signed_in`. Does not register the account.
+    public static func antigravityAutoCapture(removedKeys: [String]) throws
+        -> AntigravityAutoCaptureResult
+    {
+        let json = (try? JSONEncoder().encode(removedKeys))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        return try unwrap(json.withCString { tb_antigravity_auto_capture($0) })
     }
 
     /// Delete one captured account's keychain item. Blocking (spawns

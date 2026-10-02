@@ -17754,6 +17754,305 @@ enum SelfTest {
             } catch {}
             expect(code == "invalid_key", "AG-4 remove refuses a malformed key as invalid_key")
         }
+        // AG-5. Automatic capture (S4). Every case runs the real
+        // `AntigravityAutoCapture` and the real tray hook against a counting
+        // fake of the core (`AGAutoFake`) and a throwaway defaults suite; the
+        // real marker query and capture are never called here.
+        let agAutoCurve = runsCurve(cycles: [[0, 40], [0, 45], [0, 50]])
+        let agAutoChecks: [(String, Bool)]? = awaitMainActorValue {
+            var checks: [(String, Bool)] = []
+            func check(_ label: String, _ ok: Bool) { checks.append((label, ok)) }
+            let savedShared = AntigravityAutoCapture.shared
+            defer { AntigravityAutoCapture.shared = savedShared }
+            var suites: [String] = []
+            defer { for name in suites { UserDefaults().removePersistentDomain(forName: name) } }
+            @MainActor func fresh(_ fake: AGAutoFake) -> (AntigravityAutoCapture, UserDefaults) {
+                let name = "Syrtis.SelfTest.AG5.\(UUID().uuidString)"
+                suites.append(name)
+                let defaults = UserDefaults(suiteName: name)!
+                return (AntigravityAutoCapture(io: fake.io(), defaults: defaults), defaults)
+            }
+            @MainActor func until(_ condition: () -> Bool) async {
+                var spins = 0
+                while !condition(), spins < 2_000 {
+                    try? await Task.sleep(nanoseconds: 1_000_000)
+                    spins += 1
+                }
+            }
+            let otherKey = String(repeating: "ef", count: 32)
+
+            // Toggle gate at the call site: off, the hook starts nothing and
+            // the core sees no marker query at all.
+            do {
+                let fake = AGAutoFake(key: agKey, label: agEmail)
+                let (ac, defaults) = fresh(fake)
+                var started = 0
+                for _ in 0..<5 {
+                    if let task = TrayAnimator.pollAntigravityAutoCapture(
+                        defaults: defaults, autoCapture: ac)
+                    {
+                        started += 1
+                        await task.value
+                    }
+                }
+                check("AG-5 toggle off: 5 polls start nothing and make 0 marker calls",
+                      started == 0 && fake.read { $0.markerCalls } == 0)
+                defaults.set(true, forKey: AntigravityAutoCapture.enabledKey)
+                for _ in 0..<3 {
+                    await TrayAnimator.pollAntigravityAutoCapture(
+                        defaults: defaults, autoCapture: ac)?.value
+                }
+                check("AG-5 control, toggle on: one marker call per poll, one attempt for one marker",
+                      fake.read { $0.markerCalls } == 3 && fake.read { $0.attempts } == 1
+                          && ac.currentAgyKey == agKey)
+                fake.write { $0.marker = "m2" }
+                await ac.poll()
+                await ac.poll()
+                check("AG-5 a new marker makes exactly one more attempt",
+                      fake.read { $0.attempts } == 2)
+            }
+
+            // Single flight: a poll while an attempt is in flight neither
+            // queries the marker nor attempts again.
+            do {
+                let fake = AGAutoFake(key: agKey, label: agEmail)
+                let (ac, defaults) = fresh(fake)
+                defaults.set(true, forKey: AntigravityAutoCapture.enabledKey)
+                let hold = DispatchSemaphore(value: 0)
+                fake.write { $0.hold = hold }
+                let first = Task { await ac.poll() }
+                await until { fake.read { $0.attempts } == 1 }
+                fake.write { $0.marker = "m2" }
+                await ac.poll()
+                let duringFlight = (fake.read { $0.markerCalls }, fake.read { $0.attempts })
+                fake.write { $0.hold = nil }
+                hold.signal()
+                await first.value
+                check("AG-5 no marker call and no attempt while one is in flight",
+                      duringFlight == (1, 1))
+            }
+
+            // A failed attempt is not retried for the same marker.
+            do {
+                let fake = AGAutoFake(key: agKey, label: agEmail)
+                let (ac, defaults) = fresh(fake)
+                defaults.set(true, forKey: AntigravityAutoCapture.enabledKey)
+                fake.write { $0.outcome = .failure(.bridge("refresh_unreachable")) }
+                for _ in 0..<3 { await ac.poll() }
+                check("AG-5 a failed attempt is not retried while the marker is unchanged",
+                      fake.read { $0.attempts } == 1 && ac.currentAgyKey == nil)
+            }
+
+            // The marker is recorded BEFORE the attempt: toggling off and on
+            // while it is in flight still owes one new attempt afterwards.
+            do {
+                let fake = AGAutoFake(key: agKey, label: agEmail)
+                let (ac, defaults) = fresh(fake)
+                defaults.set(true, forKey: AntigravityAutoCapture.enabledKey)
+                let hold = DispatchSemaphore(value: 0)
+                fake.write { $0.hold = hold }
+                let first = Task { await ac.poll() }
+                await until { fake.read { $0.attempts } == 1 }
+                await ac.setEnabled(false)
+                await ac.setEnabled(true)
+                fake.write { $0.hold = nil }
+                hold.signal()
+                await first.value
+                await ac.poll()
+                check("AG-5 a toggle off/on during an attempt still gets its new attempt",
+                      fake.read { $0.attempts } == 2 && ac.currentAgyKey == agKey)
+            }
+
+            // Toggle on → attempt → off → on with the same marker: exactly one
+            // new attempt, and the current key is set again.
+            do {
+                let fake = AGAutoFake(key: agKey, label: agEmail)
+                let (ac, _) = fresh(fake)
+                await ac.setEnabled(true)
+                let afterOn = (fake.read { $0.attempts }, ac.currentAgyKey)
+                await ac.setEnabled(false)
+                let afterOff = ac.currentAgyKey
+                await ac.setEnabled(true)
+                await ac.poll()
+                check("AG-5 toggle on attempts at once, off clears the key, on again makes one new attempt",
+                      afterOn == (1, agKey) && afterOff == nil
+                          && fake.read { $0.attempts } == 2 && ac.currentAgyKey == agKey)
+            }
+
+            // Pause → manual Capture with the same marker → pause cleared and
+            // one new attempt.
+            do {
+                let fake = AGAutoFake(key: agKey, label: agEmail)
+                let (ac, _) = fresh(fake)
+                fake.write { $0.outcome = .failure(.bridge("paused")) }
+                await ac.setEnabled(true)
+                await ac.poll()
+                let pausedAttempts = fake.read { $0.attempts }
+                let pausedMarkers = fake.read { $0.markerCalls }
+                let wasPaused = ac.paused
+                fake.write {
+                    $0.outcome = .success(.init(status: "unchanged", key: agKey, label: agEmail))
+                }
+                await ac.manualCapture()
+                check("AG-5 paused: no further marker call or attempt until the user acts",
+                      wasPaused && pausedAttempts == 1 && pausedMarkers == 1)
+                check("AG-5 manual Capture ends the pause and makes one new attempt",
+                      !ac.paused && fake.read { $0.attempts } == 2
+                          && fake.read { $0.captures } == 1 && ac.currentAgyKey == agKey)
+            }
+
+            // Registry: interleaved add and remove keep both effects, and a
+            // Settings copy taken before either is not written back.
+            do {
+                let fake = AGAutoFake(key: agKey, label: agEmail)
+                let (ac, defaults) = fresh(fake)
+                AntigravityAccounts.save([.init(key: otherKey, label: "b@example.com")], defaults: defaults)
+                let staleCopy = AntigravityAccounts.load(defaults: defaults)
+                await ac.setEnabled(true)
+                await ac.remove(staleCopy[0])
+                check("AG-5 an automatic add and a remove from a stale list keep both effects",
+                      AntigravityAccounts.load(defaults: defaults).map(\.key) == [agKey]
+                          && fake.read { $0.removedKeys } == [otherKey])
+                // Removed while on: survives a relaunch (a new instance on the
+                // same suite) and is passed to the core, which skips it.
+                await ac.remove(.init(key: agKey, label: agEmail))
+                let relaunched = AntigravityAutoCapture(io: fake.io(), defaults: defaults)
+                fake.write { $0.outcome = .success(.init(status: "skipped_removed")) }
+                await relaunched.poll()
+                check("AG-5 a key removed while on survives relaunch and reaches the core's skip list",
+                      AntigravityAccounts.removedKeys(defaults: defaults) == [otherKey, agKey]
+                          && fake.read { $0.lastRemoved } == [otherKey, agKey]
+                          && AntigravityAccounts.load(defaults: defaults).isEmpty
+                          && relaunched.currentAgyKey == nil)
+                // Only a manual Capture takes it off the list.
+                fake.write { $0.captureOutcome = .success(.init(key: agKey, label: agEmail)) }
+                await relaunched.manualCapture()
+                check("AG-5 manual Capture takes the key off the removed list",
+                      AntigravityAccounts.removedKeys(defaults: defaults) == [otherKey]
+                          && AntigravityAccounts.load(defaults: defaults).map(\.key) == [agKey])
+            }
+
+            // Dedup through BOTH accessors, gated on the primary's source.
+            func payload(primarySource: String, primaryError: String? = nil, generation: Int = 7)
+                -> AgentUsagePayload
+            {
+                func agent(_ accountKey: String?, _ source: String, _ email: String, _ error: String?) -> String {
+                    let account = accountKey.map { "\"accountKey\":\"\($0)\"," } ?? ""
+                    let error = error.map { ",\"error\":\"\($0)\"" } ?? ""
+                    return """
+                    {"clientId":"antigravity",\(account)"source":"\(source)","updatedAt":"t",
+                     "identity":{"email":"\(email)","plan":"Pro"}\(error),"windows":[
+                     {"cardId":"agy.test.v1","label":"Gemini","usedPercent":40,
+                      "remainingPercent":60,"resetsAt":"\(m3fResetIso)",
+                      "durationSeconds":\(m3nDuration),"windowMinutes":\(m3nDuration / 60),
+                      "paceStatus":{"state":"learningHistory","windowKey":"agy.test.v1",
+                                    "durationSeconds":\(m3nDuration),"durationSource":"provider",
+                                    "completeCycles":1}}]}
+                    """
+                }
+                return try! JSONDecoder().decode(AgentUsagePayload.self, from: Data("""
+                    {"generatedAt":"t","publicationGeneration":\(generation),"agents":[
+                      \(agent(nil, primarySource, "primary@example.com", primaryError)),
+                      \(agent(agKey, "oauth", agEmail, nil))
+                    ]}
+                    """.utf8))
+            }
+            func antigravity(_ p: AgentUsagePayload?) -> [AgentUsageSnapshot] {
+                (p?.agents ?? []).filter { $0.clientId == "antigravity" }
+            }
+            func deduped(_ p: AgentUsagePayload?) -> Bool {
+                let cards = antigravity(p)
+                return cards.count == 1 && cards[0].accountKey == nil
+                    && cards[0].identity?.email == agEmail && cards[0].identity?.plan == "Pro"
+            }
+            func both(_ p: AgentUsagePayload?) -> Bool {
+                let cards = antigravity(p)
+                return cards.count == 2
+                    && cards.first { $0.accountKey == nil }?.identity?.email == "primary@example.com"
+            }
+            do {
+                let fake = AGAutoFake(key: agKey, label: agEmail)
+                let (ac, _) = fresh(fake)
+                AntigravityAutoCapture.shared = ac
+                AgentUsagePublicationCoordinator.resetForTesting()
+                defer { AgentUsagePublicationCoordinator.resetForTesting() }
+                check("AG-5 control: without a current key both cards are drawn",
+                      both(AgentUsagePublicationCoordinator.resolve(payload(primarySource: "agy"))))
+                await ac.setEnabled(true)
+                AgentUsagePublicationCoordinator.resetForTesting()
+                let resolved = AgentUsagePublicationCoordinator.resolve(payload(primarySource: "agy"))
+                check("AG-5 dedup through resolve: one card, primary labelled with the email",
+                      deduped(resolved))
+                check("AG-5 dedup through latestPayload and TrayAnimator.publishedQuota(nil)",
+                      deduped(AgentUsagePublicationCoordinator.latestPayload)
+                          && deduped(TrayAnimator.publishedQuota(nil)))
+                for source in ["cli", "oauth"] {
+                    AgentUsagePublicationCoordinator.resetForTesting()
+                    check("AG-5 primary from \(source): both cards, primary keeps its own email",
+                          both(AgentUsagePublicationCoordinator.resolve(payload(primarySource: source)))
+                              && both(AgentUsagePublicationCoordinator.latestPayload))
+                }
+                AgentUsagePublicationCoordinator.resetForTesting()
+                check("AG-5 an error on the agy primary: both cards",
+                      both(AgentUsagePublicationCoordinator.resolve(
+                          payload(primarySource: "agy", primaryError: "Antigravity CLI failed."))))
+
+                // Key A current, then a new marker: while that attempt is in
+                // flight, and after it returns skipped_removed, the primary is
+                // not labelled A and A's card is drawn.
+                let hold = DispatchSemaphore(value: 0)
+                fake.write {
+                    $0.marker = "m-next"
+                    $0.hold = hold
+                    $0.outcome = .success(.init(status: "skipped_removed"))
+                }
+                let next = Task { await ac.poll() }
+                await until { fake.read { $0.attempts } == 2 }
+                AgentUsagePublicationCoordinator.resetForTesting()
+                let inFlight = AgentUsagePublicationCoordinator.resolve(payload(primarySource: "agy"))
+                fake.write { $0.hold = nil }
+                hold.signal()
+                await next.value
+                AgentUsagePublicationCoordinator.resetForTesting()
+                let afterSkip = AgentUsagePublicationCoordinator.resolve(payload(primarySource: "agy"))
+                check("AG-5 a new marker clears the current key while its attempt is in flight",
+                      both(inFlight))
+                check("AG-5 skipped_removed leaves the current key cleared: both cards",
+                      both(afterSkip) && ac.currentAgyKey == nil)
+            }
+
+            // One strip row and one heatmap row, through the model.
+            @MainActor func lens(currentKey: Bool) async -> (summaries: Int, heatmaps: Int) {
+                let fake = AGAutoFake(key: agKey, label: agEmail)
+                let (ac, _) = fresh(fake)
+                AntigravityAutoCapture.shared = ac
+                if currentKey { await ac.setEnabled(true) }
+                AgentUsagePublicationCoordinator.resetForTesting()
+                defer { AgentUsagePublicationCoordinator.resetForTesting() }
+                let src = WindowScanCountingSource(payload: payload(primarySource: "agy"))
+                src.curve = agAutoCurve
+                let m = DashboardModel(source: src, initialYear: nil)
+                m.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+                let poll = Task { await m.pollAgentUsage() }
+                await until { m.agentUsage?.publicationGeneration != nil }
+                poll.cancel()
+                ClaudeExtraRoots.RegistryChange.signal()
+                await poll.value
+                m.refreshWindowQuotaHalves()
+                let rows = m.quotaWindowSummaries.filter { $0.clientId == "antigravity" }.count
+                let heat = m.quotaHeatmapWindows.filter { $0.clientId == "antigravity" }.count
+                return (rows, heat)
+            }
+            let lensBoth = await lens(currentKey: false)
+            let lensOne = await lens(currentKey: true)
+            check("AG-5 control: without a current key the strip and heatmap have two Antigravity rows",
+                  lensBoth == (2, 2))
+            check("AG-5 dedup: one strip row and one heatmap row", lensOne == (1, 1))
+            return checks
+        }
+        expect(agAutoChecks != nil && agAutoChecks?.isEmpty == false, "AG-5 the automatic-capture cases ran")
+        for (label, ok) in agAutoChecks ?? [] { expect(ok, label) }
+
         // Not a `defer`: `run()` ends in `exit`, which skips it.
         AccountIdentity.antigravityLabel = { _ in nil }
         agDefaults.removePersistentDomain(forName: agSuiteName)
@@ -17875,5 +18174,51 @@ enum SelfTest {
         }
         print("selftest passed")
         exit(0)
+    }
+}
+
+/// Counting fake of the core calls behind `AntigravityAutoCapture` (AG-5).
+/// The closures run on detached tasks, so every field is behind the lock.
+private final class AGAutoFake: @unchecked Sendable {
+    private let lock = NSLock()
+    var marker = "m1"
+    var markerCalls = 0
+    var attempts = 0
+    var captures = 0
+    var lastRemoved: [String] = []
+    var removedKeys: [String] = []
+    var outcome: Result<AntigravityAutoCaptureResult, TBCoreError>
+    var captureOutcome: Result<AntigravityCapturedAccount, TBCoreError> = .failure(.bridge("agy_not_signed_in"))
+    /// While set, an attempt blocks on it: the attempt is "in flight".
+    var hold: DispatchSemaphore?
+
+    init(key: String, label: String) {
+        outcome = .success(.init(status: "captured", key: key, label: label))
+        captureOutcome = .success(.init(key: key, label: label))
+    }
+
+    func read<T>(_ body: (AGAutoFake) -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(self)
+    }
+
+    func write(_ body: (AGAutoFake) -> Void) { read(body) }
+
+    func io() -> AntigravityAutoCapture.IO {
+        .init(
+            marker: { self.read { $0.markerCalls += 1; return $0.marker } },
+            autoCapture: { removed in
+                let (hold, outcome) = self.read { fake -> (DispatchSemaphore?, Result<AntigravityAutoCaptureResult, TBCoreError>) in
+                    fake.attempts += 1
+                    fake.lastRemoved = removed
+                    return (fake.hold, fake.outcome)
+                }
+                hold?.wait()
+                return try outcome.get()
+            },
+            capture: { try self.read { $0.captures += 1; return $0.captureOutcome }.get() },
+            remove: { key in self.write { $0.removedKeys.append(key) } },
+            install: { _ in })
     }
 }

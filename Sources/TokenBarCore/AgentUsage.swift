@@ -869,3 +869,37 @@ package func agentUsageTransportLogEntries(
         )
     }
 }
+
+// Copies for the app's display-only rewrites (Antigravity dedup). Every other
+// field is carried over unchanged.
+extension AgentUsageSnapshot {
+    package func replacingIdentity(_ identity: AgentIdentity?) -> AgentUsageSnapshot {
+        AgentUsageSnapshot(copying: self, identity: identity)
+    }
+
+    private init(copying other: AgentUsageSnapshot, identity: AgentIdentity?) {
+        clientId = other.clientId
+        accountKey = other.accountKey
+        source = other.source
+        updatedAt = other.updatedAt
+        self.identity = identity
+        windows = other.windows
+        credits = other.credits
+        error = other.error
+        transportDiagnostic = other.transportDiagnostic
+    }
+}
+
+extension AgentIdentity {
+    package static func make(email: String?, plan: String?) -> AgentIdentity {
+        AgentIdentity(email: email, plan: plan)
+    }
+}
+
+extension AgentUsagePayload {
+    package func replacingAgents(_ agents: [AgentUsageSnapshot]) -> AgentUsagePayload {
+        AgentUsagePayload(
+            generatedAt: generatedAt, publicationGeneration: publicationGeneration,
+            agents: agents, opencodeSubscriptions: opencodeSubscriptions)
+    }
+}

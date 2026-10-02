@@ -588,6 +588,10 @@ final class TrayAnimator {
                 // network-bound and owns most of the cycle, so a registry change
                 // lands during it far more often than during the sleep.
                 let registryEpoch = ClaudeExtraRoots.RegistryChange.epoch
+                // Not awaited: an attempt may wait on Google, and the quota
+                // fetch must not wait on it. A capture that lands mid-fetch
+                // wakes this loop through `RegistryChange` like any edit.
+                Self.pollAntigravityAutoCapture()
                 let payload = try? await source.agentUsage()
                 guard let self, !Task.isCancelled else { break }
                 // A payload built for the previous account set must not be
@@ -624,6 +628,20 @@ final class TrayAnimator {
                 await ClaudeExtraRoots.RegistryChange.sleep(upTo: 300, since: registryEpoch)
             }
         }
+    }
+
+    /// Automatic capture's trigger, once per quota-poll iteration (the first
+    /// one is the launch check). The toggle is checked HERE, at the call site:
+    /// with it off nothing reaches the core, not even the attributes-only
+    /// marker query. Returns the started check so the selftest can await it.
+    @discardableResult
+    static func pollAntigravityAutoCapture(
+        defaults: UserDefaults = .standard,
+        autoCapture: AntigravityAutoCapture? = nil
+    ) -> Task<Void, Never>? {
+        guard defaults.bool(forKey: AntigravityAutoCapture.enabledKey) else { return nil }
+        let autoCapture = autoCapture ?? .shared
+        return Task { await autoCapture.poll() }
     }
 
     /// The raw tokens/min value from the last load poll — exposed so the
