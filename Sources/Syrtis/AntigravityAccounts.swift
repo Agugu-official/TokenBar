@@ -218,6 +218,8 @@ final class AntigravityAutoCapture: ObservableObject {
         }
     }
     @Published private(set) var busy = false
+    private var checking = false
+    private var pollAgain = false
     @Published private(set) var paused = false
     /// The marker query cannot see a modification date on this Mac, so a
     /// login change cannot be detected.
@@ -237,13 +239,23 @@ final class AntigravityAutoCapture: ObservableObject {
     /// caller gates on the toggle; this only refuses to overlap and to run
     /// while paused.
     func poll() async {
-        guard !busy, !paused else { return }
-        busy = true
-        defer { busy = false }
+        guard !paused else { return }
+        // A poll refused because something is running (the toggle turned on
+        // mid-attempt, say) is owed, and runs when that work ends.
+        guard !busy, !checking else {
+            pollAgain = true
+            return
+        }
+        // The marker check alone is not `busy`: Settings shows "Capturing…"
+        // only for an actual capture, not every five minutes.
+        checking = true
         let io = io
-        guard let marker = try? await Self.detached({ try io.marker() }) else { return }
+        let marker = try? await Self.detached({ try io.marker() })
+        checking = false
+        guard let marker else { return await pollIfOwed() }
         unavailable = marker == "present"
-        guard marker != lastAttemptedMarker else { return }
+        guard marker != lastAttemptedMarker, !busy else { return await pollIfOwed() }
+        busy = true
         // Both before the attempt: the old key may not be agy's account any
         // more, and a failed attempt must not be retried for this marker.
         currentAgyKey = nil
@@ -254,7 +266,7 @@ final class AntigravityAutoCapture: ObservableObject {
         case let .success(outcome):
             guard let key = outcome.key, let label = outcome.label,
                   outcome.status == "captured" || outcome.status == "unchanged"
-            else { return }
+            else { break }
             AntigravityAccounts.mutate(defaults: defaults, install: io.install) { accounts in
                 // `unchanged` keeps a label already listed; only a fresh
                 // capture refreshes it.
@@ -269,6 +281,14 @@ final class AntigravityAutoCapture: ObservableObject {
         case .failure:
             break
         }
+        busy = false
+        await pollIfOwed()
+    }
+
+    private func pollIfOwed() async {
+        guard pollAgain else { return }
+        pollAgain = false
+        await poll()
     }
 
     /// The Settings toggle. On: forget the last marker and try now. Off:
@@ -315,6 +335,7 @@ final class AntigravityAutoCapture: ObservableObject {
         }
         busy = false
         if resume { await poll() }
+        await pollIfOwed()
     }
 
     /// Delete one account's keychain copy and drop it from the list. While
@@ -344,6 +365,8 @@ final class AntigravityAutoCapture: ObservableObject {
         case let .failure(error):
             message = AntigravityAccounts.message(for: error)
         }
+        busy = false
+        await pollIfOwed()
     }
 
     private static func detached<T: Sendable>(
@@ -361,6 +384,8 @@ final class AntigravityAutoCapture: ObservableObject {
         lastAttemptedMarker = nil
         currentAgyKey = nil
         busy = false
+        checking = false
+        pollAgain = false
         paused = false
         unavailable = false
         message = nil

@@ -17844,7 +17844,8 @@ enum SelfTest {
             }
 
             // The marker is recorded BEFORE the attempt: toggling off and on
-            // while it is in flight still owes one new attempt afterwards.
+            // while it is in flight still owes one new attempt afterwards, and
+            // it runs when the held attempt ends, with no further poll.
             do {
                 let fake = AGAutoFake(key: agKey, label: agEmail)
                 let (ac, defaults) = fresh(fake)
@@ -17858,7 +17859,6 @@ enum SelfTest {
                 fake.write { $0.hold = nil }
                 hold.signal()
                 await first.value
-                await ac.poll()
                 check("AG-5 a toggle off/on during an attempt still gets its new attempt",
                       fake.read { $0.attempts } == 2 && ac.currentAgyKey == agKey)
             }
