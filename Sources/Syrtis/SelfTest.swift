@@ -18485,6 +18485,23 @@ enum SelfTest {
                "WCP-golden and with a stored weekly selection; got \(wcpGoldenWeekly)")
         wcpSetSelection(nil)
 
+        // WCP-golden-unreadable (verifier F1). A one-account client whose curve
+        // read throws: base showed "Quota history could not be read" (cycles
+        // empty, attempted, unreadable). The account guard on the history must
+        // not turn that into a spinner. Mutation: compare the history by card
+        // id (nil after a failed read) instead of by account.
+        let wcpUnreadable: [String]? = wcpRun(wcpGoldenPayload, client: "codex", setup: {
+            $0.failCurveRead = true
+        }) { m, _ in
+            m.refreshWindowQuotaHalves()
+            let h = m.cardHistory(for: "codex")
+            return ["unreadable=\(m.quotaCurveUnreadable)", "pending=\(h.pending)",
+                    "cycles=\(h.cycles.count)"]
+        }
+        expect(wcpUnreadable == ["unreadable=true", "pending=false", "cycles=0"],
+               "WCP-golden-unreadable a primary-only failed curve read still reads as unreadable, "
+                   + "not loading; got \(wcpUnreadable ?? [])")
+
         // WCP-two. Two live accounts, loader level: selecting B moves every
         // per-window lookup to B. Mutations: loader filter back to nil; curve
         // read with nil account; modelScope first-agent; primary ids three-part.
@@ -18613,14 +18630,14 @@ enum SelfTest {
                 !wcpIsLoading(m.windowCard(for: "claude"))
                 && m.windowCardAccounts["claude"] == ""
             o["control: the primary's history is served while the primary is resolved"] =
-                !m.cardHistory(for: "claude").pending && m.quotaCyclesCardId != nil
+                !m.cardHistory(for: "claude").pending && m.quotaCyclesAccount == ""
             wcpSetAccount("claude", wcpB)
             // Between the pick and its refresh the model still holds the
             // primary's cycles; they must not be drawn under B.
             let between = m.cardHistory(for: "claude")
             o["the primary's history is not served once B is resolved, and reads as loading"] =
                 between.pending && between.cycles.isEmpty && between.rows.isEmpty
-                && m.quotaCyclesCardId != nil
+                && m.quotaCyclesAccount == ""
             o["the primary's held card is not served once B is resolved"] =
                 wcpIsLoading(m.windowCard(for: "claude"))
                 && m.windowCards["claude"] != nil

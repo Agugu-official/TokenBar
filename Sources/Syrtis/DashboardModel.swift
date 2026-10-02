@@ -1352,21 +1352,27 @@ private struct DashboardSnapshot {
             stored: WindowCardAccount.stored(clientId: clientId))
     }
 
-    /// The cycles and history rows for the open client's card, only while they
-    /// were built for the account and window the card shows NOW. Between an
-    /// account pick and the refresh that rebuilds them, `quotaCycles` still
-    /// holds the previous account's cycles; drawing them under the new account
-    /// is a cross-account history (spec rule 3). `pending` lets the history
-    /// card show its loading state instead of "no earlier windows" meanwhile.
-    /// Same key formula as the writer in `refreshWindowQuotaHalves`.
+    /// The scan slot of the account `quotaCycles` / `quotaHistory` were last
+    /// written for by `refreshWindowQuotaHalves` (both on success and when a
+    /// failed read clears them). Nil until then (including after a reopen
+    /// restore), meaning "not known to belong to another account".
+    @ObservationIgnored private(set) var quotaCyclesAccount: String?
+
+    /// The cycles and history rows for the open client's card, except while
+    /// they belong to ANOTHER account: between an account pick and the refresh
+    /// that rebuilds them, `quotaCycles` still holds the previous account's
+    /// cycles, and drawing them under the new account is a cross-account
+    /// history (spec rule 3). `pending` lets the history card show its loading
+    /// state meanwhile. Compared by account only, not by card id: a failed
+    /// read clears the id to nil, and the card must then keep showing
+    /// "could not be read", not a spinner (verifier F1).
     func cardHistory(for clientId: String)
         -> (cycles: [QuotaCycle], rows: [QuotaHistoryRow], pending: Bool)
     {
-        let account = cardAccountKey(for: clientId)
-        let expected = WindowCardLoader.selectedCardId(
-            payload: agentUsage, clientId: clientId, accountKey: account
-        ).map { WindowCardLoader.historyKey(pick: $0, accountKey: account) }
-        guard quotaCyclesCardId == expected else { return ([], [], true) }
+        if let held = quotaCyclesAccount,
+           held != Self.scanSlot(cardAccountKey(for: clientId)) {
+            return ([], [], true)
+        }
         return (quotaCycles, quotaHistory, false)
     }
 
@@ -1838,6 +1844,7 @@ private struct DashboardSnapshot {
             {
                 quotaCycles = cycles
                 quotaCyclesCardId = selected
+                quotaCyclesAccount = Self.scanSlot(account)
                 quotaCurveUnreadable = false
                 rebuildQuotaHistory()
             } else {
@@ -1855,12 +1862,14 @@ private struct DashboardSnapshot {
                     quotaCycles = []
                     quotaHistory = []
                     quotaCyclesCardId = nil
+                    quotaCyclesAccount = Self.scanSlot(account)
                 }
             }
         } else {
             quotaCycles = []
             quotaHistory = []
             quotaCyclesCardId = nil
+            quotaCyclesAccount = nil
             quotaCurveUnreadable = false
         }
     }
