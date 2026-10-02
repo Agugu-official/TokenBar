@@ -21,7 +21,12 @@ enum AntigravityAccounts {
     static let storageKey = "tokenbar.antigravity.accounts"
 
     static func load(defaults: UserDefaults = .standard) -> [Account] {
-        guard let raw = defaults.string(forKey: storageKey),
+        decode(defaults.string(forKey: storageKey))
+    }
+
+    /// The stored value as a list; `[]` when absent or unreadable.
+    static func decode(_ raw: String?) -> [Account] {
+        guard let raw,
               let accounts = try? JSONDecoder().decode([Account].self, from: Data(raw.utf8))
         else { return [] }
         return accounts
@@ -83,21 +88,6 @@ enum AntigravityAccounts {
     /// Touched only on `applyQueue`.
     nonisolated(unsafe) private static var lastInstalledPayload: String?
 
-    /// Capture agy's current login. Blocking work (a `security` child and a
-    /// request to Google) runs on a detached task, never the main actor.
-    static func capture() async -> Result<AntigravityCapturedAccount, Error> {
-        await Task.detached(priority: .userInitiated) {
-            Result { try TBCore.antigravityCapture() }
-        }.value
-    }
-
-    /// Delete one account's keychain copy, off the main actor.
-    static func remove(key: String) async -> Result<Void, Error> {
-        await Task.detached(priority: .userInitiated) {
-            Result { try TBCore.antigravityRemove(key: key) }
-        }.value
-    }
-
     /// `accounts` with `captured` added, or its label refreshed when the same
     /// Google account was captured before.
     static func adding(_ captured: Account, to accounts: [Account]) -> [Account] {
@@ -139,5 +129,346 @@ enum AntigravityAccounts {
         default:
             return "Something went wrong. Try again."
         }
+    }
+}
+
+// MARK: - Registry mutations and removed keys (S4)
+
+extension AntigravityAccounts {
+    /// Keys (hashes only) the user removed while automatic capture was on.
+    /// Automatic capture skips them before any request; only a manual
+    /// Capture of that account takes a key off this list.
+    static let removedKeysKey = "tokenbar.antigravity.removedKeys"
+
+    static func removedKeys(defaults: UserDefaults = .standard) -> [String] {
+        defaults.stringArray(forKey: removedKeysKey) ?? []
+    }
+
+    /// The one path every registry change goes through. MainActor-isolated and
+    /// synchronous: it re-reads UserDefaults, applies `change`, saves and
+    /// installs with no suspension in between, so two changes cannot
+    /// interleave and none starts from a stale copy (a Settings view's, or a
+    /// capture that finished after a remove).
+    @MainActor
+    static func mutate(
+        defaults: UserDefaults = .standard,
+        install: (UserDefaults) -> Void = { apply(defaults: $0) },
+        _ change: ([Account]) -> [Account]
+    ) {
+        save(change(load(defaults: defaults)), defaults: defaults)
+        install(defaults)
+    }
+}
+
+// MARK: - Automatic capture (S4)
+
+/// Captures every Google account agy signs into, without a button press,
+/// while the Settings toggle `enabledKey` is on (off by default).
+///
+/// Trigger: before each quota fetch, both poll loops await
+/// `TrayAnimator.prepareAntigravityAutoCapture`, which runs `prepareForFetch()`
+/// only when the toggle is on. `poll()` reads agy's login
+/// marker (attributes only, no secret) and, when it differs from the last
+/// marker attempted, runs ONE automatic capture in the core. The marker is
+/// recorded before the attempt, so a failure is not retried until the marker
+/// changes again, the toggle is turned on again, or the user presses Capture.
+///
+/// `currentAgyKey` is the key of the account agy is signed into, as far as
+/// this process verified it. It drives `AntigravityDedup`. It is cleared the
+/// moment a new marker is seen (before the attempt), when the toggle turns
+/// off and on a pause, and set only by a `captured` / `unchanged` attempt or a
+/// successful manual Capture (which reads agy's current login) while on.
+///
+/// MainActor-isolated rather than a plain `actor`: the publication
+/// coordinator reads `currentAgyKey` synchronously on the MainActor. The
+/// blocking core calls run on detached tasks. One operation at a time:
+/// `busy` covers the automatic attempt, manual Capture and Remove, so a
+/// capture can never land between a remove's keychain delete and its
+/// registry change.
+@MainActor
+final class AntigravityAutoCapture: ObservableObject {
+    struct IO {
+        var marker: @Sendable () throws -> String
+        var autoCapture: @Sendable ([String]) throws -> AntigravityAutoCaptureResult
+        var capture: @Sendable () throws -> AntigravityCapturedAccount
+        var remove: @Sendable (String) throws -> Void
+        /// Install the stored list in the core (`AntigravityAccounts.apply`).
+        var install: @MainActor (UserDefaults) -> Void
+
+        static let live = IO(
+            marker: { try TBCore.antigravityLoginMarker() },
+            autoCapture: { try TBCore.antigravityAutoCapture(removedKeys: $0) },
+            capture: { try TBCore.antigravityCapture() },
+            remove: { try TBCore.antigravityRemove(key: $0) },
+            install: { AntigravityAccounts.apply(defaults: $0) })
+    }
+
+    static let enabledKey = "tokenbar.antigravity.autoCapture"
+
+    /// Replaced only by the selftest, with a fake `IO` and a throwaway suite.
+    static var shared = AntigravityAutoCapture(io: .live, defaults: .standard)
+
+    let io: IO
+    let defaults: UserDefaults
+
+    private(set) var lastAttemptedMarker: String?
+    private(set) var currentAgyKey: String? {
+        didSet {
+            // Wake the pollers so the dedup follows now, not a cycle later.
+            if currentAgyKey != oldValue { ClaudeExtraRoots.RegistryChange.signal() }
+        }
+    }
+    @Published private(set) var busy = false
+    private var checking = false
+    private var pollAgain = false
+    @Published private(set) var paused = false
+    /// The marker query cannot see a modification date on this Mac, so a
+    /// login change cannot be detected.
+    @Published private(set) var unavailable = false
+    /// A sentence from `AntigravityAccounts.message(for:)` for the last manual
+    /// Capture or Remove that failed; never a raw code.
+    @Published private(set) var message: String?
+
+    init(io: IO, defaults: UserDefaults) {
+        self.io = io
+        self.defaults = defaults
+    }
+
+    var isEnabled: Bool { defaults.bool(forKey: Self.enabledKey) }
+
+    /// One check, from a quota poll or right after the toggle turns on. The
+    /// caller gates on the toggle; this only refuses to overlap and to run
+    /// while paused.
+    func poll(marker known: String? = nil) async {
+        guard !paused else { return }
+        // A poll refused because something is running (the toggle turned on
+        // mid-attempt, say) is owed, and runs when that work ends.
+        guard !busy, !checking else {
+            pollAgain = true
+            return
+        }
+        // The marker check alone is not `busy`: Settings shows "Capturing…"
+        // only for an actual capture, not every five minutes.
+        let io = io
+        var marker = known
+        if marker == nil {
+            checking = true
+            marker = try? await Self.detached({ try io.marker() })
+            checking = false
+        }
+        guard let marker else { return await pollIfOwed() }
+        unavailable = marker == "present"
+        guard marker != lastAttemptedMarker, !busy else { return await pollIfOwed() }
+        busy = true
+        // Both before the attempt: the old key may not be agy's account any
+        // more, and a failed attempt must not be retried for this marker.
+        currentAgyKey = nil
+        lastAttemptedMarker = marker
+        let removed = AntigravityAccounts.removedKeys(defaults: defaults)
+        let result = await Self.detached { Result { try io.autoCapture(removed) } }
+        switch result {
+        case let .success(outcome):
+            guard let key = outcome.key, let label = outcome.label,
+                  outcome.status == "captured" || outcome.status == "unchanged"
+            else { break }
+            AntigravityAccounts.mutate(defaults: defaults, install: io.install) { accounts in
+                // `unchanged` keeps a label already listed; only a fresh
+                // capture refreshes it.
+                outcome.status == "unchanged" && accounts.contains { $0.key == key }
+                    ? accounts
+                    : AntigravityAccounts.adding(.init(key: key, label: label), to: accounts)
+            }
+            if isEnabled { setCurrent(key, marker: marker) }
+        case .failure(TBCoreError.bridge("paused")):
+            paused = true
+            currentAgyKey = nil
+        case .failure:
+            break
+        }
+        busy = false
+        await pollIfOwed()
+    }
+
+    /// The marker agy's login item carried when `currentAgyKey` was
+    /// confirmed. Dedup also requires the primary card to have been fetched
+    /// under this same marker: a card fetched before an agy sign-in change is
+    /// never labelled as the account signed in after it (observed on the test
+    /// bundle: B's quota shown under A's email right after agy switched to A).
+    private(set) var currentAgyMarker: String?
+
+    private func setCurrent(_ key: String, marker: String?) {
+        currentAgyMarker = marker
+        currentAgyKey = key
+    }
+
+    /// Before a quota fetch, awaited by both poll loops: read agy's login
+    /// marker (attributes only, milliseconds) and, when it differs from the
+    /// last attempt, forget the current account NOW. Without this the fetch
+    /// that follows a login change in agy is drawn as the previous account
+    /// until the next check, up to one tray cycle later: observed on the test
+    /// bundle, where the primary card showed account A's quota under B's email
+    /// and B's own card was hidden as its duplicate. The capture attempt is
+    /// returned, not awaited, so the fetch never waits on Google.
+    func prepareForFetch() async -> Task<Void, Never>? {
+        guard !paused, !checking else { return nil }
+        checking = true
+        let io = io
+        let marker = try? await Self.detached({ try io.marker() })
+        checking = false
+        guard let marker else { return nil }
+        if marker != lastAttemptedMarker { currentAgyKey = nil }
+        return Task { await self.poll(marker: marker) }
+    }
+
+    private func pollIfOwed() async {
+        guard pollAgain else { return }
+        pollAgain = false
+        await poll()
+    }
+
+    /// The Settings toggle. On: forget the last marker and try now. Off:
+    /// forget agy's current account. Either way a pause ends.
+    func setEnabled(_ on: Bool) async {
+        defaults.set(on, forKey: Self.enabledKey)
+        paused = false
+        if on {
+            lastAttemptedMarker = nil
+            await poll()
+        } else {
+            currentAgyKey = nil
+            unavailable = false
+        }
+    }
+
+    /// Capture agy's current login (the Settings button). Takes the account
+    /// off the removed list, ends a pause, and then tries automatic capture
+    /// once more when it is on.
+    func manualCapture() async {
+        guard !busy else { return }
+        busy = true
+        message = nil
+        let io = io
+        let result = await Self.detached { Result { try io.capture() } }
+        var resume = false
+        switch result {
+        case let .success(captured):
+            AntigravityAccounts.mutate(defaults: defaults, install: io.install) {
+                AntigravityAccounts.adding(.init(key: captured.key, label: captured.label), to: $0)
+            }
+            defaults.set(
+                AntigravityAccounts.removedKeys(defaults: defaults).filter { $0 != captured.key },
+                forKey: AntigravityAccounts.removedKeysKey)
+            // This read agy's login as it is now, so the key is agy's account,
+            // under the marker agy's item carries now.
+            if isEnabled {
+                let marker = try? await Self.detached({ try io.marker() })
+                setCurrent(captured.key, marker: marker)
+            }
+            if paused {
+                paused = false
+                lastAttemptedMarker = nil
+                resume = isEnabled
+            }
+        case let .failure(error):
+            message = AntigravityAccounts.message(for: error)
+        }
+        busy = false
+        if resume { await poll() }
+        await pollIfOwed()
+    }
+
+    /// Delete one account's keychain copy and drop it from the list. While
+    /// automatic capture is on, the key also goes on the removed list so the
+    /// next login change does not add it back.
+    func remove(_ account: AntigravityAccounts.Account) async {
+        guard !busy else { return }
+        busy = true
+        message = nil
+        let io = io
+        let key = account.key
+        let result = await Self.detached { Result { try io.remove(key) } }
+        switch result {
+        case .success, .failure(TBCoreError.bridge("invalid_key")):
+            // An invalid key has no keychain item and no card: the core
+            // registry rejects it. Dropping the row is all that is left.
+            AntigravityAccounts.mutate(defaults: defaults, install: io.install) {
+                $0.filter { $0.key != key }
+            }
+            if isEnabled {
+                let removed = AntigravityAccounts.removedKeys(defaults: defaults)
+                if !removed.contains(key) {
+                    defaults.set(removed + [key], forKey: AntigravityAccounts.removedKeysKey)
+                }
+            }
+        case let .failure(error):
+            message = AntigravityAccounts.message(for: error)
+        }
+        busy = false
+        await pollIfOwed()
+    }
+
+    private static func detached<T: Sendable>(
+        _ work: @escaping @Sendable () throws -> T
+    ) async throws -> T {
+        try await Task.detached(priority: .userInitiated) { try work() }.value
+    }
+
+    private static func detached<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+        await Task.detached(priority: .userInitiated) { work() }.value
+    }
+
+    /// Test seam only: a fresh state with nothing attempted.
+    func resetForTesting() {
+        lastAttemptedMarker = nil
+        currentAgyKey = nil
+        busy = false
+        checking = false
+        pollAgain = false
+        paused = false
+        unavailable = false
+        message = nil
+    }
+}
+
+// MARK: - One card for agy's current account (S4)
+
+/// With automatic capture on, the account agy is signed into is usually also a
+/// captured account, so it would be drawn twice: once as the primary card
+/// (the agy route) and once as its captured card. This drops the captured
+/// card and labels the primary with its email, ONLY when all of these hold:
+/// - `currentAgyKey` is set (verified for the current agy login marker);
+/// - the primary Antigravity snapshot (`accountKey == nil`) came from the agy
+///   route (`source == "agy"`) and has no error, so it is agy's account;
+/// - a captured snapshot carries that key.
+/// Otherwise (IDE `cli` or `oauth` source, any error) both are shown.
+///
+/// Display only. `accountKey`, scopes and history are untouched; the captured
+/// account is still fetched and its history still recorded in the core.
+/// Applied to BOTH `AgentUsagePublicationCoordinator.resolve` and
+/// `.latestPayload`, which every quota consumer reads. Idempotent.
+enum AntigravityDedup {
+    static func apply(
+        _ payload: AgentUsagePayload, currentAgyKey: String?, currentAgyMarker: String?
+    ) -> AgentUsagePayload {
+        guard let key = currentAgyKey,
+              let marker = currentAgyMarker, marker != "present",
+              let primaryIndex = payload.agents.firstIndex(where: {
+                  $0.clientId == "antigravity" && $0.accountKey == nil
+              }),
+              payload.agents[primaryIndex].source == "agy",
+              payload.agents[primaryIndex].agyLoginMarker == marker,
+              payload.agents[primaryIndex].error == nil,
+              let capturedIndex = payload.agents.firstIndex(where: {
+                  $0.clientId == "antigravity" && $0.accountKey == key
+              })
+        else { return payload }
+        var agents = payload.agents
+        let primary = agents[primaryIndex]
+        if let label = agents[capturedIndex].identity?.email {
+            agents[primaryIndex] = primary.replacingIdentity(
+                .make(email: label, plan: primary.identity?.plan))
+        }
+        agents.remove(at: capturedIndex)
+        return payload.replacingAgents(agents)
     }
 }

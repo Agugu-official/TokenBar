@@ -588,6 +588,10 @@ final class TrayAnimator {
                 // network-bound and owns most of the cycle, so a registry change
                 // lands during it far more often than during the sleep.
                 let registryEpoch = ClaudeExtraRoots.RegistryChange.epoch
+                // Not awaited: an attempt may wait on Google, and the quota
+                // fetch must not wait on it. A capture that lands mid-fetch
+                // wakes this loop through `RegistryChange` like any edit.
+                await Self.prepareAntigravityAutoCapture()
                 let payload = try? await source.agentUsage()
                 guard let self, !Task.isCancelled else { break }
                 // A payload built for the previous account set must not be
@@ -624,6 +628,34 @@ final class TrayAnimator {
                 await ClaudeExtraRoots.RegistryChange.sleep(upTo: 300, since: registryEpoch)
             }
         }
+    }
+
+    /// Automatic capture's trigger, once per quota-poll iteration (the first
+    /// one is the launch check). The toggle is checked HERE, at the call site:
+    /// with it off nothing reaches the core, not even the attributes-only
+    /// marker query. Returns the started check so the selftest can await it.
+    @discardableResult
+    static func pollAntigravityAutoCapture(
+        defaults: UserDefaults = .standard,
+        autoCapture: AntigravityAutoCapture? = nil
+    ) -> Task<Void, Never>? {
+        guard defaults.bool(forKey: AntigravityAutoCapture.enabledKey) else { return nil }
+        return Task {
+            await prepareAntigravityAutoCapture(defaults: defaults, autoCapture: autoCapture)?.value
+        }
+    }
+
+    /// What both poll loops await before a quota fetch. Off: nothing reaches
+    /// the core. On: the marker is read and a changed login forgets the
+    /// current account before the fetch; the returned capture attempt runs on
+    /// its own.
+    @discardableResult
+    static func prepareAntigravityAutoCapture(
+        defaults: UserDefaults = .standard,
+        autoCapture: AntigravityAutoCapture? = nil
+    ) async -> Task<Void, Never>? {
+        guard defaults.bool(forKey: AntigravityAutoCapture.enabledKey) else { return nil }
+        return await (autoCapture ?? .shared).prepareForFetch()
     }
 
     /// The raw tokens/min value from the last load poll — exposed so the

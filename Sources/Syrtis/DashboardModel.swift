@@ -81,12 +81,24 @@ struct AgentUsagePublicationState {
 enum AgentUsagePublicationCoordinator {
     private static var state = AgentUsagePublicationState()
 
-    static var latestPayload: AgentUsagePayload? { state.latest }
+    /// Both accessors return the payload after `AntigravityDedup`, so every
+    /// consumer — the popover (`resolve`) and the tray, the status item and
+    /// the individual client trays (`latestPayload`, via
+    /// `TrayAnimator.publishedQuota`) — draws agy's current account once. The
+    /// stored state keeps the raw payload: the dedup depends on
+    /// `currentAgyKey` at the moment of reading, not at publication.
+    static var latestPayload: AgentUsagePayload? { state.latest.map(antigravityDedup) }
 
     static func resolve(_ candidate: AgentUsagePayload) -> AgentUsagePayload {
         let resolved = state.resolve(candidate)
         GrokBotKeychainConsent.revokeIfAccessWasDenied(resolved)
-        return resolved
+        return antigravityDedup(resolved)
+    }
+
+    private static func antigravityDedup(_ payload: AgentUsagePayload) -> AgentUsagePayload {
+        AntigravityDedup.apply(
+            payload, currentAgyKey: AntigravityAutoCapture.shared.currentAgyKey,
+            currentAgyMarker: AntigravityAutoCapture.shared.currentAgyMarker)
     }
 
     /// Test seam only: back to the state of a process that has published
@@ -2294,6 +2306,10 @@ private struct DashboardSnapshot {
             // than during the sleep; carrying the epoch across is what stops
             // that change being dropped.
             let registryEpoch = ClaudeExtraRoots.RegistryChange.epoch
+            // A login change in agy must be seen before this fetch, or its
+            // payload is drawn as the previous account (see `prepareForFetch`).
+            await TrayAnimator.prepareAntigravityAutoCapture()
+            if Task.isCancelled { break }
             let payload = try? await source.agentUsage()
             if Task.isCancelled { break }
             // Same guard the tray poll carries, for the same reason and in the

@@ -542,10 +542,13 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
     public let credits: CreditsSnapshot?
     public let error: String?
     public let transportDiagnostic: AgentUsageTransportDiagnostic?
+    /// Antigravity primary on the agy route only: agy's login-item date read
+    /// just before this card was fetched. Display-only (Antigravity dedup).
+    public let agyLoginMarker: String?
 
     private enum CodingKeys: String, CodingKey {
         case clientId, accountKey, source, updatedAt, identity, windows, credits, error,
-            transportDiagnostic
+            transportDiagnostic, agyLoginMarker
     }
 
     public init(from decoder: Decoder) throws {
@@ -560,6 +563,7 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
         self.error = try container.decodeIfPresent(String.self, forKey: .error)
         self.transportDiagnostic = try? container.decode(
             AgentUsageTransportDiagnostic.self, forKey: .transportDiagnostic)
+        self.agyLoginMarker = try container.decodeIfPresent(String.self, forKey: .agyLoginMarker)
     }
 
     /// Backend `source` values that mean "this card is waiting on the user",
@@ -867,5 +871,40 @@ package func agentUsageTransportLogEntries(
             status: status,
             osCode: osCode
         )
+    }
+}
+
+// Copies for the app's display-only rewrites (Antigravity dedup). Every other
+// field is carried over unchanged.
+extension AgentUsageSnapshot {
+    package func replacingIdentity(_ identity: AgentIdentity?) -> AgentUsageSnapshot {
+        AgentUsageSnapshot(copying: self, identity: identity)
+    }
+
+    private init(copying other: AgentUsageSnapshot, identity: AgentIdentity?) {
+        clientId = other.clientId
+        accountKey = other.accountKey
+        source = other.source
+        updatedAt = other.updatedAt
+        self.identity = identity
+        windows = other.windows
+        credits = other.credits
+        error = other.error
+        transportDiagnostic = other.transportDiagnostic
+        agyLoginMarker = other.agyLoginMarker
+    }
+}
+
+extension AgentIdentity {
+    package static func make(email: String?, plan: String?) -> AgentIdentity {
+        AgentIdentity(email: email, plan: plan)
+    }
+}
+
+extension AgentUsagePayload {
+    package func replacingAgents(_ agents: [AgentUsageSnapshot]) -> AgentUsagePayload {
+        AgentUsagePayload(
+            generatedAt: generatedAt, publicationGeneration: publicationGeneration,
+            agents: agents, opencodeSubscriptions: opencodeSubscriptions)
     }
 }
