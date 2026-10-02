@@ -60,6 +60,13 @@ public enum ClientRegistry {
         "gjc": ("gjc", "#e11d48"),
         "grok": ("Grok Build", "#1f2937"),
         "grok-bot": ("Grok Bot", "#000000"),
+        // Names and colors follow upstream tokscale's frontend constants
+        // (packages/frontend/src/lib/constants.ts at fe72e1f9).
+        "zcode": ("ZCode", "#3b5bdb"),
+        "augment": ("Augment Code", "#9333ea"),
+        "hindsight": ("Hindsight", "#0891b2"),
+        "muse": ("Muse Code", "#0064e0"),
+        "reasonix": ("Reasonix", "#6366f1"),
     ]
 
     /// Every registered client id, sorted. Demo fixtures use this canonical

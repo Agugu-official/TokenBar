@@ -4616,6 +4616,17 @@ enum SelfTest {
         expect(ClientRegistry.style("kimi").displayName == "Kimi", "Kimi registry covers CLI and Code")
         expect(ClientRegistry.style("junie").displayName == "Junie", "Junie registry metadata")
         expect(ClientRegistry.style("opencodereview").displayName == "OpenCodeReview", "OpenCodeReview registry metadata")
+        // 2026-10 engine sync: names and colors from upstream's frontend constants.
+        for (id, name, color) in [
+            ("zcode", "ZCode", "#3b5bdb"),
+            ("augment", "Augment Code", "#9333ea"),
+            ("hindsight", "Hindsight", "#0891b2"),
+            ("muse", "Muse Code", "#0064e0"),
+            ("reasonix", "Reasonix", "#6366f1"),
+        ] {
+            let style = ClientRegistry.style(id)
+            expect(style.displayName == name && style.color == color, "\(id) registry metadata")
+        }
         // Sources that are not surface-scoped carry no form-factor suffix:
         // ~/.codex/sessions is majority Codex Desktop, ~/.copilot merges CLI
         // OTel with the desktop app's data.db, and the cursor source is an
@@ -4685,6 +4696,9 @@ enum SelfTest {
                 && officialClientIDs.contains("kilo")
                 && !officialClientIDs.contains("junie"),
             "icon aliases are official while fallback-only clients are not")
+        expect(
+            ["zcode", "augment", "hindsight", "muse", "reasonix"].allSatisfy(officialClientIDs.contains),
+            "the 2026-10 clients ship a loadable brand asset")
         let renderedBrandImageMetrics = MainActor.assumeIsolated {
             let image = AgentIconView.statusItemImage(clientId: "claude")
             let representations = image?.representations.compactMap { $0 as? NSBitmapImageRep } ?? []
