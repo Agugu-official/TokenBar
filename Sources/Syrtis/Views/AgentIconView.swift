@@ -24,6 +24,7 @@ struct AgentIconView: View {
         // 2026-10 engine sync; each asset confirmed by the maintainer.
         // Reasonix borrows upstream's Synthetic mark, as upstream does.
         "zcode", "augment", "hindsight", "muse", "reasonix",
+        "kimchi", "senpi", "omp",
     ]
 
     /// Clients that share another client's brand icon. The Antigravity CLI is

@@ -67,6 +67,11 @@ public enum ClientRegistry {
         "hindsight": ("Hindsight", "#0891b2"),
         "muse": ("Muse Code", "#0064e0"),
         "reasonix": ("Reasonix", "#6366f1"),
+        "kimchi": ("Kimchi", "#14b8a6"),
+        // Upstream labels it "Senpi (OmO Native)"; Syrtis names the client
+        // only, since the engine reads the base client and not OmO's children.
+        "senpi": ("Senpi", "#2f6f63"),
+        "omp": ("Oh My Pi", "#e11d48"),
     ]
 
     /// Every registered client id, sorted. Demo fixtures use this canonical
