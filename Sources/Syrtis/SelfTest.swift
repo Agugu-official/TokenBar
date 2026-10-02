@@ -4622,13 +4622,19 @@ enum SelfTest {
             ("augment", "Augment Code", "#9333ea"),
             ("hindsight", "Hindsight", "#0891b2"),
             ("muse", "Muse Code", "#0064e0"),
-            ("reasonix", "Reasonix", "#6366f1"),
-            ("kimchi", "Kimchi", "#14b8a6"),
+            ("reasonix", "Reasonix", "#808000"),
+            ("kimchi", "Kimchi", "#7f1d1d"),
             ("senpi", "Senpi", "#2f6f63"),
-            ("omp", "Oh My Pi", "#e11d48"),
+            ("omp", "Oh My Pi", "#d946ef"),
         ] {
             let style = ClientRegistry.style(id)
             expect(style.displayName == name && style.color == color, "\(id) registry metadata")
+            // Upstream gave reasonix, kimchi and omp colors already taken here;
+            // a shared color makes two clients indistinguishable in legends.
+            let sharing = ClientRegistry.allIds.filter {
+                $0 != id && ClientRegistry.style($0).color.lowercased() == color
+            }
+            expect(sharing.isEmpty, "\(id) has a color no other client uses (shared with: \(sharing))")
         }
         // Sources that are not surface-scoped carry no form-factor suffix:
         // ~/.codex/sessions is majority Codex Desktop, ~/.copilot merges CLI

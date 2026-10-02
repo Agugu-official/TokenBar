@@ -44,6 +44,10 @@ struct AgentIconView: View {
     private static let backgroundFills: [String: Color] = [
         "cline": .white,
         "hermes": .white,
+        // Dark-gray mark on a mostly transparent canvas: 66.6% of pixels have
+        // alpha 0 and the rest average luminance 82/255, so it vanishes in
+        // dark mode without a disc.
+        "senpi": .white,
         "mux": .black,
         "amp": .black,
     ]
