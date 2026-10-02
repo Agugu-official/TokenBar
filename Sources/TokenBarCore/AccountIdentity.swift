@@ -59,7 +59,7 @@ public struct AccountIdentity: Hashable, Sendable {
             // Never the key: it is derived from the Google account id. A key
             // the registry no longer holds (removed while a payload built
             // before the removal is still on screen) gets a generic label.
-            return Self.antigravityLabel(accountKey) ?? "Antigravity account"
+            return Self.antigravityLabel(accountKey) ?? "Antigravity account".localized
         }
         let name = (accountKey as NSString).lastPathComponent
         return name.isEmpty ? accountKey : name

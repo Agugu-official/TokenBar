@@ -615,6 +615,7 @@
 
 /* ===== 設定：Antigravity 帳號 ===== */
 "Antigravity accounts" = "Antigravity 帳號";
+"Antigravity account" = "Antigravity 帳號";
 "Capture current agy login" = "擷取 agy 目前的登入";
 "Capturing…" = "擷取中…";
 "Remove" = "移除";

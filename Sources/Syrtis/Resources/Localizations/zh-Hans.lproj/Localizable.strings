@@ -614,6 +614,7 @@
 
 /* ===== 设置：Antigravity 账户 ===== */
 "Antigravity accounts" = "Antigravity 账户";
+"Antigravity account" = "Antigravity 账户";
 "Capture current agy login" = "捕获当前 agy 登录";
 "Capturing…" = "捕获中…";
 "Remove" = "移除";
