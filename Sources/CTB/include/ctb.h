@@ -89,6 +89,10 @@ char *tb_tokens_per_min(void);
 // no user data; the single registration point is agent_usage::QUOTA_PROVIDERS.
 char *tb_quota_provider_ids(void);
 
+// Every local client id the engine attributes usage to: {"ids": ["claude", ...]},
+// from ClientId::ALL. Offline, reads no user data.
+char *tb_client_ids(void);
+
 // OAuth quota cards (AgentUsagePayload) for every provider tb_quota_provider_ids
 // lists. Network-bound; per-provider failures are reported inside each snapshot.
 char *tb_agent_usage(void);

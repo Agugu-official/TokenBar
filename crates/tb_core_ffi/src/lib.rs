@@ -1058,6 +1058,22 @@ pub extern "C" fn tb_quota_provider_ids() -> *mut c_char {
     })
 }
 
+/// Every local client id the engine can attribute usage to:
+/// `{"ids": ["claude", ...]}`, read from `ClientId::ALL`. Swift drops usage
+/// whose client id is not in `ClientRegistry.allIds`, so SelfTest checks this
+/// list against the registry; an engine client added without a Swift entry
+/// fails there instead of vanishing from the UI. Offline, reads no user data.
+#[no_mangle]
+pub extern "C" fn tb_client_ids() -> *mut c_char {
+    guarded("tb_client_ids", || {
+        let ids: Vec<&str> = tokscale_core::ClientId::ALL
+            .iter()
+            .map(|client| client.as_str())
+            .collect();
+        envelope(Ok(serde_json::json!({ "ids": ids })))
+    })
+}
+
 /// OAuth quota cards (`AgentUsagePayload` in agentUsage.ts) for every provider
 /// in `agent_usage::QUOTA_PROVIDERS`, fetched concurrently. Network-bound —
 /// call from a background thread. Per-provider failures land in each

@@ -4,7 +4,7 @@ id: kb-index
 kind: index
 scope: repository
 read_when: before any Syrtis task or handoff
-last_verified: 2026-09-27
+last_verified: 2026-10-03
 sources: ["README.md", "CONTRIBUTING.md", "AGENTS.md", "Makefile", "Package.swift", ".github/workflows/ci.yml", ".github/workflows/ci-release.yml", ".github/workflows/pages.yml", ".github/workflows/release.yml", ".github/workflows/update-install-count.yml"]
 ---
 
@@ -85,7 +85,7 @@ docs/knowledge/
 
 | Source | Authority |
 |---|---|
-| Public [`tokscale-core/UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/319ffa8ca75f6cd2bfaf96ae0d295a8fa618ec2c/UPSTREAM.md) | Exact shared-engine upstream baseline, selected changes, reports, and local-patch ledger |
+| Public [`tokscale-core/UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/6712ed8a0ff67bf1b2d0a97c41d2d94821b507fa/UPSTREAM.md) | Exact shared-engine upstream baseline, selected changes, reports, and local-patch ledger |
 | `vendor/README.md` | Syrtis's shared-engine repository and reviewed consumer pin |
 | `.github/workflows/*.yml` | Runtime CI, Pages, release, and install-count gates |
 | `Makefile` | Local build order and stale Rust static-library relink guard |

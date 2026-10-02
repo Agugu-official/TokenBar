@@ -60,6 +60,24 @@ public enum ClientRegistry {
         "gjc": ("gjc", "#e11d48"),
         "grok": ("Grok Build", "#1f2937"),
         "grok-bot": ("Grok Bot", "#000000"),
+        // Names and colors follow upstream tokscale's frontend constants
+        // (packages/frontend/src/lib/constants.ts at fe72e1f9), except where
+        // upstream's color repeats an existing client's here: two clients
+        // with one color are indistinguishable in legends and tabs. Those
+        // take a replacement at least ΔE76 22 from every registered color.
+        "zcode": ("ZCode", "#3b5bdb"),
+        "augment": ("Augment Code", "#9333ea"),
+        "hindsight": ("Hindsight", "#0891b2"),
+        "muse": ("Muse Code", "#0064e0"),
+        // Upstream #6366f1 is antigravity-cli's.
+        "reasonix": ("Reasonix", "#808000"),
+        // Upstream #14b8a6 is goose's.
+        "kimchi": ("Kimchi", "#7f1d1d"),
+        // Upstream labels it "Senpi (OmO Native)"; Syrtis names the client
+        // only, since the engine reads the base client and not OmO's children.
+        "senpi": ("Senpi", "#2f6f63"),
+        // Upstream #e11d48 is gjc's; fuchsia sits near the logo's pink-violet.
+        "omp": ("Oh My Pi", "#d946ef"),
     ]
 
     /// Every registered client id, sorted. Demo fixtures use this canonical

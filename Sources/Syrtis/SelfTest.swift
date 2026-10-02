@@ -4616,6 +4616,26 @@ enum SelfTest {
         expect(ClientRegistry.style("kimi").displayName == "Kimi", "Kimi registry covers CLI and Code")
         expect(ClientRegistry.style("junie").displayName == "Junie", "Junie registry metadata")
         expect(ClientRegistry.style("opencodereview").displayName == "OpenCodeReview", "OpenCodeReview registry metadata")
+        // 2026-10 engine sync: names and colors from upstream's frontend constants.
+        for (id, name, color) in [
+            ("zcode", "ZCode", "#3b5bdb"),
+            ("augment", "Augment Code", "#9333ea"),
+            ("hindsight", "Hindsight", "#0891b2"),
+            ("muse", "Muse Code", "#0064e0"),
+            ("reasonix", "Reasonix", "#808000"),
+            ("kimchi", "Kimchi", "#7f1d1d"),
+            ("senpi", "Senpi", "#2f6f63"),
+            ("omp", "Oh My Pi", "#d946ef"),
+        ] {
+            let style = ClientRegistry.style(id)
+            expect(style.displayName == name && style.color == color, "\(id) registry metadata")
+            // Upstream gave reasonix, kimchi and omp colors already taken here;
+            // a shared color makes two clients indistinguishable in legends.
+            let sharing = ClientRegistry.allIds.filter {
+                $0 != id && ClientRegistry.style($0).color.lowercased() == color
+            }
+            expect(sharing.isEmpty, "\(id) has a color no other client uses (shared with: \(sharing))")
+        }
         // Sources that are not surface-scoped carry no form-factor suffix:
         // ~/.codex/sessions is majority Codex Desktop, ~/.copilot merges CLI
         // OTel with the desktop app's data.db, and the cursor source is an
@@ -4685,6 +4705,10 @@ enum SelfTest {
                 && officialClientIDs.contains("kilo")
                 && !officialClientIDs.contains("junie"),
             "icon aliases are official while fallback-only clients are not")
+        expect(
+            ["zcode", "augment", "hindsight", "muse", "reasonix", "kimchi", "senpi", "omp"]
+                .allSatisfy(officialClientIDs.contains),
+            "the 2026-10 clients ship a loadable brand asset")
         let renderedBrandImageMetrics = MainActor.assumeIsolated {
             let image = AgentIconView.statusItemImage(clientId: "claude")
             let representations = image?.representations.compactMap { $0 as? NSBitmapImageRep } ?? []
@@ -8617,6 +8641,19 @@ enum SelfTest {
         let quota = DemoData.agentUsage
         let quotaClients = Set(quota.agents.map(\.clientId))
         let registryClients = Set(ClientRegistry.allIds)
+        // AppDelegate.effectivePublished and DiscordPresence keep only
+        // registered ids, so an engine client missing here would make its
+        // usage vanish (omp moved out of `pi` in the 2026-10 engine sync).
+        // The ids come from the engine's own `ClientId::ALL` over FFI.
+        let engineClientIds = (try? TBCore.engineClientIds()) ?? []
+        // Control: an empty answer would pass the subset check vacuously.
+        expect(
+            engineClientIds.contains("claude") && engineClientIds.contains("pi"),
+            "the engine lists its local clients")
+        let unregisteredEngineClients = Set(engineClientIds).subtracting(registryClients)
+        expect(
+            unregisteredEngineClients.isEmpty,
+            "every engine client is registered (missing: \(unregisteredEngineClients.sorted()))")
         // Usage is per CLIENT, quota is per SUBSCRIPTION, and the two sets are
         // not the same one. They coincided for every registered id until
         // Antigravity's CLI made the difference visible: it publishes real
