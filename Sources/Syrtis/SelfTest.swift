@@ -478,6 +478,9 @@ private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendab
     /// is "no history", a throw is "could not be read". Conflating them is the
     /// defect the case using this drives.
     var failCurveRead = false
+    /// Account slots ("" = primary) whose window-usage scan throws, so a case
+    /// can fail one account's scan while another's succeeds.
+    var failScanAccounts: Set<String> = []
     /// Which clients throw, as opposed to `failCurveRead` making every client
     /// throw at once. #359 is a defect that only exists when ONE provider fails
     /// permanently while others answer: `antigravity` returns "quota curve
@@ -548,6 +551,7 @@ private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendab
     ) async throws -> WindowUsage {
         scans += 1
         scannedAccounts.append(accountKey)
+        if failScanAccounts.contains(accountKey ?? "") { throw QuotaUnavailable() }
         return WindowUsage(
             messages: messagesByAccount[accountKey ?? ""] ?? [],
             undatedCount: 0, processingTimeMs: 0)
@@ -13436,7 +13440,7 @@ enum SelfTest {
         // unreachable by signature rather than by discipline — the assertion
         // below is that it produces a placed window from memory alone.
         let stage1 = WindowCardLoader.quotaHalf(
-            payload: wPayload, clientId: "codex", attempted: true,
+            payload: wPayload, clientId: "codex", accountKey: nil, attempted: true,
             curve: { _, _, _, _ in wCurve }, nowMs: wNow * 1000)
         var stage1Placed = false
         var stage1Live = false
@@ -13458,7 +13462,7 @@ enum SelfTest {
         // L6a (i). No payload yet — loading, never absent, never unavailable.
         var isLoading = false
         if case .loading = WindowCardLoader.quotaHalf(
-            payload: nil, clientId: "codex", attempted: false,
+            payload: nil, clientId: "codex", accountKey: nil, attempted: false,
             curve: { _, _, _, _ in wCurve }, nowMs: wNow * 1000) { isLoading = true }
         expect(isLoading, "L6a a payload that has not arrived yet is loading")
 
@@ -13467,7 +13471,7 @@ enum SelfTest {
         // chat.v1 is exactly this case on real data.
         var noHistory = false
         if case .noQuotaHistory = WindowCardLoader.quotaHalf(
-            payload: wPayload, clientId: "codex", attempted: true,
+            payload: wPayload, clientId: "codex", accountKey: nil, attempted: true,
             curve: { _, _, _, _ in nil }, nowMs: wNow * 1000) { noHistory = true }
         expect(noHistory,
                "L6a a window with no quota history is terminal, not perpetually loading")
@@ -13482,7 +13486,7 @@ enum SelfTest {
         struct CurveReadFailed: Error {}
         var transientIsLoading = false
         if case .loading = WindowCardLoader.quotaHalf(
-            payload: wPayload, clientId: "codex", attempted: true,
+            payload: wPayload, clientId: "codex", accountKey: nil, attempted: true,
             curve: { _, _, _, _ in throw CurveReadFailed() }, nowMs: wNow * 1000)
         { transientIsLoading = true }
         expect(transientIsLoading,
@@ -13502,17 +13506,17 @@ enum SelfTest {
         }
         expect(
             stateIsLoading(WindowCardLoader.quotaHalf(
-                payload: nil, clientId: "codex", attempted: false,
+                payload: nil, clientId: "codex", accountKey: nil, attempted: false,
                 curve: { _, _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d no payload and no attempt yet is still waiting")
         expect(
             stateIsBlocked(WindowCardLoader.quotaHalf(
-                payload: nil, clientId: "codex", attempted: true,
+                payload: nil, clientId: "codex", accountKey: nil, attempted: true,
                 curve: { _, _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d no payload after the attempt settled is a terminal answer")
         expect(
             stateIsBlocked(WindowCardLoader.quotaHalf(
-                payload: wPayload, clientId: "not-in-payload", attempted: true,
+                payload: wPayload, clientId: "not-in-payload", accountKey: nil, attempted: true,
                 curve: { _, _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d a client the settled payload does not carry is answered, not awaited")
         // The third guard, and the one the "no quota windows" wording was
@@ -13525,17 +13529,17 @@ enum SelfTest {
             from: Data(#"{"generatedAt":"now","agents":[{"clientId":"codex","source":"fixture","updatedAt":"now","windows":[]}]}"#.utf8))
         expect(
             stateIsBlocked(WindowCardLoader.quotaHalf(
-                payload: emptyWindows, clientId: "codex", attempted: true,
+                payload: emptyWindows, clientId: "codex", accountKey: nil, attempted: true,
                 curve: { _, _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d an agent present with no windows is answered once the attempt has settled")
         expect(
             stateIsLoading(WindowCardLoader.quotaHalf(
-                payload: emptyWindows, clientId: "codex", attempted: false,
+                payload: emptyWindows, clientId: "codex", accountKey: nil, attempted: false,
                 curve: { _, _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d and is still a wait before it has")
         expect(
             stateIsLoading(WindowCardLoader.quotaHalf(
-                payload: wPayload, clientId: "not-in-payload", attempted: false,
+                payload: wPayload, clientId: "not-in-payload", accountKey: nil, attempted: false,
                 curve: { _, _, _, _ in nil }, nowMs: wNow * 1000)),
             "L6d a client missing from an unsettled payload is still a wait")
 
@@ -13564,20 +13568,20 @@ enum SelfTest {
         // client" could leave the chart on the window the user navigated away
         // from while the picker highlighted the new one.
         let wSelected = WindowCardLoader.selectedCardId(
-            payload: wPayload, clientId: "codex")
+            payload: wPayload, clientId: "codex", accountKey: nil)
         expect(wSelected == "codex|session.v1",
                "L6f the selected card id names the client AND the window")
         expect(
-            WindowCardLoader.selectedCardId(payload: wPayload, clientId: "absent") == nil,
+            WindowCardLoader.selectedCardId(payload: wPayload, clientId: "absent", accountKey: nil) == nil,
             "L6f and is nil when nothing can be selected, so a retained card cannot match it")
         expect(
             WindowCardLoader.quotaHalf(
-                payload: wPayload, clientId: "codex", attempted: true,
+                payload: wPayload, clientId: "codex", accountKey: nil, attempted: true,
                 curve: { _, _, _, _ in wCurve }, nowMs: wNow * 1000).cardId == wSelected,
             "L6f a resolved card reports the same identity the selection does")
         expect(
             WindowCardLoader.quotaHalf(
-                payload: nil, clientId: "codex", attempted: false,
+                payload: nil, clientId: "codex", accountKey: nil, attempted: false,
                 curve: { _, _, _, _ in nil }, nowMs: wNow * 1000).cardId == nil,
             "L6f while a card about no window reports none, so it is never retained")
 
@@ -13630,12 +13634,12 @@ enum SelfTest {
         // payload is never persisted, so that is every cold start.
         expect(
             WindowCardLoader.cycles(
-                payload: nil, clientId: "codex",
+                payload: nil, clientId: "codex", accountKey: nil,
                 curve: { _, _, _, _ in nil }) == nil,
             "L6c no payload yet is unknown, not an empty history")
         expect(
             WindowCardLoader.cycles(
-                payload: wPayload, clientId: "codex",
+                payload: wPayload, clientId: "codex", accountKey: nil,
                 curve: { _, _, _, _ in nil }) == [],
             "L6c a payload whose curve holds nothing is an empty history")
 
@@ -13757,7 +13761,7 @@ enum SelfTest {
             fromMs: (wNow - 604_800) * 1000, untilMs: wNow * 1000,
             capturedAt: Date(), messages: msMessages)
         let msStage1 = WindowCardLoader.quotaHalf(
-            payload: msPayload, clientId: "codex", attempted: true,
+            payload: msPayload, clientId: "codex", accountKey: nil, attempted: true,
             curve: { _, _, _, _ in
                 windowCurve(resetAtSecs: wNow + 3_600, durationSecs: 604_800,
                             at: [(wNow - 2_000, 4), (wNow - 500, 9)])
@@ -13784,7 +13788,7 @@ enum SelfTest {
                                          resetsAt: msIso, durationSecs: 604_800)]),
         ])
         let msUnscopedStage1 = WindowCardLoader.quotaHalf(
-            payload: msUnscoped, clientId: "codex", attempted: true,
+            payload: msUnscoped, clientId: "codex", accountKey: nil, attempted: true,
             curve: { _, _, _, _ in
                 windowCurve(resetAtSecs: wNow + 3_600, durationSecs: 604_800,
                             at: [(wNow - 2_000, 4), (wNow - 500, 9)])
@@ -13830,7 +13834,7 @@ enum SelfTest {
                                          resetsAt: msIso, durationSecs: 604_800)]),
         ], modelScope: "ghost")
         let msMissStage1 = WindowCardLoader.quotaHalf(
-            payload: msMissPayload, clientId: "codex", attempted: true,
+            payload: msMissPayload, clientId: "codex", accountKey: nil, attempted: true,
             curve: { _, _, _, _ in
                 windowCurve(resetAtSecs: wNow + 3_600, durationSecs: 604_800,
                             at: [(wNow - 2_000, 4), (wNow - 500, 9)])
@@ -15446,11 +15450,11 @@ enum SelfTest {
             (client: "claude", windows: [(card: "session.v1", label: "Session", left: 71)]),
         ], errorOn: "claude")
         expect(
-            WindowCardLoader.select(payload: ratedLimited, clientId: "claude") == nil,
+            WindowCardLoader.select(payload: ratedLimited, clientId: "claude", accountKey: nil) == nil,
             "QS8 a client whose fetch failed cannot supply the CURRENT window")
         expect(
             WindowCardLoader.pickForHistory(
-                payload: ratedLimited, clientId: "claude")?.window.cardId == "session.v1",
+                payload: ratedLimited, clientId: "claude", accountKey: nil)?.window.cardId == "session.v1",
             "QS8 but it can still identify which window the recorded history belongs to")
 
         // Burn warning. Linear mode so the expectation is arithmetic rather
@@ -16588,7 +16592,7 @@ enum SelfTest {
         // extra account is listed FIRST in `m3Payload`, so an accountKey-blind match
         // resolves to its 20%-remaining window instead of the primary's 90%.
         let m3Selected = WindowCardLoader.select(
-            payload: m3Payload, clientId: "claude", chosen: m3StoredSelection)
+            payload: m3Payload, clientId: "claude", accountKey: nil, chosen: m3StoredSelection)
         expect(
             m3Selected?.window.remainingPercent == 90,
             "M3-e an existing \"tokenbar.window.card.selection\" value written before "
@@ -18238,6 +18242,603 @@ enum SelfTest {
             flowWidths.map { $0.bounded <= $0.limit } ?? false,
             "FLOW-WIDTH a legend row longer than the popover reports at most the "
                 + "proposed width instead of pushing the card past its frame")
+
+        // MARK: - WCP (window-card account pills)
+
+        let wcpB = "/Users/x/.claude-work"
+        let wcpAgyKey = String(repeating: "cd", count: 32)
+        func wcpWindowJSON(_ card: String, scope: String?) -> String {
+            let scopeField = scope.map { #","modelScope":"\#($0)""# } ?? ""
+            return """
+            {"cardId":"\(card)","label":"\(card == "session.v1" ? "Session" : "Weekly")",
+             "usedPercent":10,"remainingPercent":90,"resetsAt":"\(wIso)",
+             "durationSeconds":18000,"windowMinutes":300\(scopeField),
+             "paceStatus":{"state":"learningHistory","windowKey":"\(card)",
+                           "durationSeconds":18000,"durationSource":"provider",
+                           "completeCycles":1}}
+            """
+        }
+        func wcpPayload(
+            _ agents: [(client: String, account: String?, error: String?,
+                        windows: [(card: String, scope: String?)])],
+            generation: UInt64 = 7
+        ) -> AgentUsagePayload {
+            let body = agents.map { agent in
+                let windows = agent.windows.map { wcpWindowJSON($0.card, scope: $0.scope) }
+                    .joined(separator: ",")
+                let account = agent.account.map { #""accountKey":"\#($0)","# } ?? ""
+                let error = agent.error.map { #","error":"\#($0)""# } ?? ""
+                return """
+                {"clientId":"\(agent.client)",\(account)"source":"oauth","updatedAt":"t",
+                 "windows":[\(windows)]\(error)}
+                """
+            }.joined(separator: ",")
+            return try! JSONDecoder().decode(AgentUsagePayload.self, from: Data("""
+                {"generatedAt":"t","publicationGeneration":\(generation),"agents":[\(body)]}
+                """.utf8))
+        }
+        let wcpSession = (card: "session.v1", scope: String?.none)
+        let wcpWeeklyA = (card: "weekly.v1", scope: String?.some("A-scope"))
+        let wcpWeeklyB = (card: "weekly.v1", scope: String?.some("B-scope"))
+        func wcpClaude(
+            primary: [(card: String, scope: String?)]? = [wcpSession, wcpWeeklyA],
+            primaryError: String? = nil,
+            extra: [(card: String, scope: String?)]? = [wcpSession, wcpWeeklyB],
+            extraError: String? = nil, generation: UInt64 = 7
+        ) -> AgentUsagePayload {
+            var agents: [(client: String, account: String?, error: String?,
+                          windows: [(card: String, scope: String?)])] = []
+            if let primary {
+                agents.append((client: "claude", account: nil, error: primaryError, windows: primary))
+            }
+            if let extra {
+                agents.append((client: "claude", account: wcpB, error: extraError, windows: extra))
+            }
+            return wcpPayload(agents, generation: generation)
+        }
+        let wcpCurveA = windowCurve(
+            resetAtSecs: wReset, durationSecs: 18_000,
+            at: [(wNow - 3_000, 4), (wNow - 600, 9)], isActive: false)
+        let wcpCurveB = windowCurve(
+            resetAtSecs: wReset, durationSecs: 18_000,
+            at: [(wNow - 3_000, 40), (wNow - 600, 45)], isActive: false)
+
+        // Preferences are staged and restored, as the dashboard-year key is: the
+        // loader reads `.standard` directly.
+        let wcpSelKey = WindowCardLoader.selectionKey
+        let wcpPrefClients = ["codex", "claude", "antigravity"]
+        let wcpSavedSel = UserDefaults.standard.object(forKey: wcpSelKey)
+        let wcpSavedAccounts = wcpPrefClients.map {
+            UserDefaults.standard.object(forKey: WindowCardAccount.prefKey(clientId: $0))
+        }
+        func wcpSetSelection(_ value: String?) {
+            if let value { UserDefaults.standard.set(value, forKey: wcpSelKey) }
+            else { UserDefaults.standard.removeObject(forKey: wcpSelKey) }
+        }
+        func wcpSetAccount(_ client: String, _ value: String?) {
+            let key = WindowCardAccount.prefKey(clientId: client)
+            if let value { UserDefaults.standard.set(value, forKey: key) }
+            else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+        wcpSetSelection(nil)
+        for client in wcpPrefClients { wcpSetAccount(client, nil) }
+
+        // WCP-resolve. Mutations: resolve ignores the stored value; the fallback
+        // stops at the primary.
+        func wcpResolve(_ payload: AgentUsagePayload, _ stored: String?) -> String? {
+            WindowCardAccount.resolve(payload: payload, clientId: "claude", stored: stored)
+        }
+        let wcpTwo = wcpClaude()
+        expect(wcpResolve(wcpTwo, wcpB) == wcpB,
+               "WCP-resolve a stored account that is live is the card's account")
+        expect(wcpResolve(wcpTwo, nil) == nil && wcpResolve(wcpTwo, "") == nil,
+               "WCP-resolve control: nothing stored, or the primary stored, is the primary")
+        expect(wcpResolve(wcpTwo, "/gone") == nil,
+               "WCP-resolve a stored account that is absent falls back to the primary")
+        expect(wcpResolve(wcpClaude(extra: [], extraError: "boom"), wcpB) == nil,
+               "WCP-resolve a stored account that errored with no windows falls back")
+        expect(wcpResolve(wcpClaude(extra: []), wcpB) == nil,
+               "WCP-resolve a stored account with no windows falls back")
+        let wcpPrimaryDead = wcpClaude(primary: [], primaryError: "boom")
+        expect(wcpResolve(wcpPrimaryDead, nil) == wcpB && wcpResolve(wcpPrimaryDead, "") == wcpB,
+               "WCP-resolve a dead primary falls to the first other live account")
+        expect(wcpResolve(wcpClaude(primary: [], primaryError: "boom", extra: nil), nil) == nil
+                   && WindowCardAccount.accounts(
+                       payload: wcpClaude(primary: [], primaryError: "boom", extra: nil),
+                       clientId: "claude").isEmpty,
+               "WCP-resolve no live account at all is the primary's (today's) behaviour")
+        expect(WindowCardAccount.accounts(payload: wcpTwo, clientId: "claude") == [nil, wcpB],
+               "WCP-resolve live accounts come back in payload order")
+        func wcpAgyJSON(_ agents: String) -> AgentUsagePayload {
+            try! JSONDecoder().decode(AgentUsagePayload.self, from: Data("""
+                {"generatedAt":"t","publicationGeneration":3,"agents":[\(agents)]}
+                """.utf8))
+        }
+        let wcpAgyRaw = wcpAgyJSON("""
+            {"clientId":"antigravity","source":"agy","agyLoginMarker":"m1","updatedAt":"t",
+             "windows":[\(wcpWindowJSON("session.v1", scope: nil))]},
+            {"clientId":"antigravity","accountKey":"\(wcpAgyKey)","source":"oauth","updatedAt":"t",
+             "identity":{"email":"x@example.com"},
+             "windows":[\(wcpWindowJSON("session.v1", scope: nil))]}
+            """)
+        let wcpAgyDeduped = AntigravityDedup.apply(
+            wcpAgyRaw, currentAgyKey: wcpAgyKey, currentAgyMarker: "m1")
+        func wcpPills(_ payload: AgentUsagePayload, _ client: String) -> Int {
+            AccountPills.options(
+                clientId: client,
+                accounts: WindowCardAccount.accounts(payload: payload, clientId: client)).count
+        }
+        expect(wcpPills(wcpAgyRaw, "antigravity") == 2,
+               "WCP-resolve control: before the dedup agy's account is two pills")
+        expect(wcpPills(wcpAgyDeduped, "antigravity") == 0,
+               "WCP-resolve after AntigravityDedup the same account is one, so there is no pill row")
+
+        // WCP-golden. Recorded by running the loader on origin/main 62cfc667
+        // (before this change) against this one-account payload; the literals are
+        // that run's output, with the two trailing lines (accessor, pill row)
+        // added for the surfaces this change introduces. Mutations: primary ids
+        // three-part; pill row shown for one account; loader filter back to nil.
+        let wcpGoldenPayload = wcpPayload([
+            (client: "codex", account: nil, error: nil,
+             windows: [wcpSession, (card: "weekly.v1", scope: "fable")]),
+        ])
+        let wcpGoldenCurve = windowCurve(
+            resetAtSecs: wReset, durationSecs: 18_000,
+            at: [(wNow - 3_000, 4), (wNow - 600, 9)], isActive: false)
+        func wcpGoldenFields(stored: String?) -> [String] {
+            wcpSetSelection(stored)
+            var out: [String] = []
+            let nowMs = wNow * 1000
+            let state = WindowCardLoader.quotaHalf(
+                payload: wcpGoldenPayload, clientId: "codex", accountKey: nil, attempted: true,
+                curve: { _, _, _, _ in wcpGoldenCurve }, nowMs: nowMs)
+            switch state {
+            case let .quotaOnly(q, failed):
+                out.append("case=quotaOnly failed=\(failed)")
+                out.append("cardId=\(q.cardId)")
+                out.append("candidates=" + q.candidates.map { "\($0.cardId)/\($0.label)" }
+                    .joined(separator: ","))
+                out.append("windowLabel=\(q.windowLabel)")
+                func fmt(_ sample: QuotaSample?) -> String {
+                    sample.map { "\($0.atMs - nowMs)/\($0.usedPercent)" } ?? "-"
+                }
+                out.append("samples=\(q.samples.count) first=\(fmt(q.samples.first)) last=\(fmt(q.samples.last))")
+                out.append("modelScope=\(q.modelScope ?? "nil")")
+            default: out.append("case=other")
+            }
+            out.append("selectedCardId=\(WindowCardLoader.selectedCardId(payload: wcpGoldenPayload, clientId: "codex", accountKey: nil) ?? "nil")")
+            let history = WindowCardLoader.historyCardId(
+                payload: wcpGoldenPayload, clientId: "codex", accountKey: nil)
+            out.append("historyCardId=\(history ?? "nil")")
+            // The `.id` QuotaView gives the history card is this same value.
+            out.append("viewId=\(history ?? "nil")")
+            out.append("scopeSession=\(WindowCardLoader.modelScope(payload: wcpGoldenPayload, cardId: "codex|session.v1") ?? "nil")")
+            out.append("scopeWeekly=\(WindowCardLoader.modelScope(payload: wcpGoldenPayload, cardId: "codex|weekly.v1") ?? "nil")")
+            let modelOut: [String]? = awaitMainActorValue {
+                AgentUsagePublicationCoordinator.resetForTesting()
+                defer { AgentUsagePublicationCoordinator.resetForTesting() }
+                DashboardModel.invalidateScanDerivedCaches()
+                let src = WindowScanCountingSource(payload: wcpGoldenPayload)
+                src.curve = wcpGoldenCurve
+                let m = DashboardModel(source: src, initialYear: nil)
+                let poll = Task { await m.pollAgentUsage() }
+                var spins = 0
+                while m.agentUsage == nil, spins < 2_000 {
+                    try? await Task.sleep(nanoseconds: 1_000_000)
+                    spins += 1
+                }
+                poll.cancel()
+                _ = await poll.value
+                m.windowCardClients = ["codex"]
+                m.windowUsageClient = "codex"
+                m.refreshWindowQuotaHalves()
+                await m.refreshWindowUsage()
+                var o: [String] = []
+                switch m.windowCards["codex"] {
+                case let .ready(q, _)?: o.append("model case=ready cardId=\(q.cardId)")
+                case let .quotaOnly(q, f)?: o.append("model case=quotaOnly failed=\(f) cardId=\(q.cardId)")
+                default: o.append("model case=other")
+                }
+                o.append("quotaCyclesCardId=\(m.quotaCyclesCardId ?? "nil")")
+                o.append("scanFailed=\(m.windowScanFailed(for: "codex"))")
+                switch m.windowCard(for: "codex") {
+                case .ready?: o.append("accessor=ready")
+                default: o.append("accessor=other")
+                }
+                return o
+            }
+            out += modelOut ?? ["model=nil"]
+            out.append("pillRow=" + (AccountPills.options(
+                clientId: "codex",
+                accounts: WindowCardAccount.accounts(payload: wcpGoldenPayload, clientId: "codex")
+            ).isEmpty ? "none" : "rows"))
+            return out
+        }
+        func wcpGoldenExpected(
+            card: String, label: String, scope: String
+        ) -> [String] {
+            [
+                "case=quotaOnly failed=false",
+                "cardId=codex|\(card)",
+                "candidates=codex|session.v1/Session,codex|weekly.v1/Weekly",
+                "windowLabel=\(label)",
+                "samples=3 first=-3000000/4.0 last=0/10.0",
+                "modelScope=\(scope)",
+                "selectedCardId=codex|\(card)",
+                "historyCardId=codex|\(card)",
+                "viewId=codex|\(card)",
+                "scopeSession=nil",
+                "scopeWeekly=fable",
+                "model case=ready cardId=codex|\(card)",
+                "quotaCyclesCardId=codex|\(card)",
+                "scanFailed=false",
+                "accessor=ready",
+                "pillRow=none",
+            ]
+        }
+        let wcpGoldenDefault = wcpGoldenFields(stored: nil)
+        let wcpGoldenWeekly = wcpGoldenFields(stored: "codex|weekly.v1")
+        expect(wcpGoldenDefault == wcpGoldenExpected(card: "session.v1", label: "Session", scope: "nil"),
+               "WCP-golden a one-account client's card, ids, scope and pill row are exactly what "
+                   + "origin/main produced (default window); got \(wcpGoldenDefault)")
+        expect(wcpGoldenWeekly == wcpGoldenExpected(card: "weekly.v1", label: "Weekly", scope: "fable"),
+               "WCP-golden and with a stored weekly selection; got \(wcpGoldenWeekly)")
+        wcpSetSelection(nil)
+
+        // WCP-two. Two live accounts, loader level: selecting B moves every
+        // per-window lookup to B. Mutations: loader filter back to nil; curve
+        // read with nil account; modelScope first-agent; primary ids three-part.
+        wcpSetSelection("claude|weekly.v1")
+        func wcpHalf(_ account: String?) -> (state: WindowCardState, reads: [String?]) {
+            var reads: [String?] = []
+            let state = WindowCardLoader.quotaHalf(
+                payload: wcpTwo, clientId: "claude", accountKey: account, attempted: true,
+                curve: { _, a, _, _ in reads.append(a); return a == nil ? wcpCurveA : wcpCurveB },
+                nowMs: wNow * 1000)
+            return (state, reads)
+        }
+        let wcpHalfB = wcpHalf(wcpB), wcpHalfA = wcpHalf(nil)
+        expect(wcpHalfA.state.quotaHalf?.modelScope == "A-scope"
+                   && wcpHalfA.state.quotaHalf?.samples.first?.usedPercent == 4
+                   && !wcpHalfA.reads.isEmpty && wcpHalfA.reads.allSatisfy { $0 == nil },
+               "WCP-two control: the primary's card reads the primary's windows and curve")
+        expect(wcpHalfB.state.quotaHalf?.modelScope == "B-scope"
+                   && wcpHalfB.state.quotaHalf?.samples.first?.usedPercent == 40,
+               "WCP-two account B's card shows B's window (scope) and B's curve (samples)")
+        expect(!wcpHalfB.reads.isEmpty && wcpHalfB.reads.allSatisfy { $0 == wcpB },
+               "WCP-two the quota half's curve read is issued for account B")
+        var wcpCycleReads: [String?] = []
+        _ = WindowCardLoader.cycles(
+            payload: wcpTwo, clientId: "claude", accountKey: wcpB,
+            curve: { _, a, _, _ in wcpCycleReads.append(a); return wcpCurveB })
+        expect(!wcpCycleReads.isEmpty && wcpCycleReads.allSatisfy { $0 == wcpB },
+               "WCP-two the cycles' curve read is issued for account B")
+        expect(WindowCardLoader.selectedCardId(payload: wcpTwo, clientId: "claude", accountKey: wcpB)
+                   == "claude|weekly.v1"
+                   && WindowCardLoader.historyCardId(payload: wcpTwo, clientId: "claude", accountKey: wcpB)
+                   == "claude|\(wcpB)|weekly.v1",
+               "WCP-two B's pick stays two-part and its history id is three-part")
+        expect(WindowCardLoader.historyCardId(payload: wcpTwo, clientId: "claude", accountKey: nil)
+                   == "claude|weekly.v1",
+               "WCP-two control: the primary's history id keeps the two-part shape")
+        expect(WindowCardLoader.modelScope(payload: wcpTwo, cardId: "claude|\(wcpB)|weekly.v1") == "B-scope"
+                   && WindowCardLoader.modelScope(payload: wcpTwo, cardId: "claude|weekly.v1") == "A-scope",
+               "WCP-two modelScope reads the account the key names, not the client's first agent")
+        // Stored tab not offered by B: B's session-class window, preference untouched.
+        let wcpChat = (card: "chat.v1", scope: String?.none)
+        let wcpNoWeeklyB = wcpClaude(extra: [wcpSession, wcpChat])
+        let wcpFallbackB = WindowCardLoader.quotaHalf(
+            payload: wcpNoWeeklyB, clientId: "claude", accountKey: wcpB, attempted: true,
+            curve: { _, _, _, _ in wcpCurveB }, nowMs: wNow * 1000)
+        let wcpFallbackA = WindowCardLoader.quotaHalf(
+            payload: wcpNoWeeklyB, clientId: "claude", accountKey: nil, attempted: true,
+            curve: { _, _, _, _ in wcpCurveA }, nowMs: wNow * 1000)
+        expect(wcpFallbackA.cardId == "claude|weekly.v1",
+               "WCP-tab control: the stored weekly tab is honoured where the account offers it")
+        expect(wcpFallbackB.cardId == "claude|session.v1"
+                   && wcpFallbackB.quotaHalf?.candidates.map(\.cardId).contains("claude|session.v1") == true
+                   && UserDefaults.standard.string(forKey: wcpSelKey) == "claude|weekly.v1",
+               "WCP-tab a stored tab B does not offer shows B's session window and leaves the preference alone")
+        wcpSetSelection(nil)
+
+        // Model-level cases. One helper: a model polled onto `payload` with its
+        // window client set, no graph.
+        func wcpRun<T: Sendable>(
+            _ payload: AgentUsagePayload, client: String,
+            setup: @escaping (WindowScanCountingSource) -> Void = { _ in },
+            _ body: @escaping @MainActor (DashboardModel, WindowScanCountingSource) async -> T
+        ) -> T? {
+            awaitMainActorValue {
+                AgentUsagePublicationCoordinator.resetForTesting()
+                defer { AgentUsagePublicationCoordinator.resetForTesting() }
+                DashboardModel.invalidateScanDerivedCaches()
+                defer { DashboardModel.invalidateScanDerivedCaches() }
+                let src = WindowScanCountingSource(payload: payload)
+                src.curveByAccount = [nil: wcpCurveA, wcpB: wcpCurveB, wcpAgyKey: wcpCurveB]
+                setup(src)
+                let m = DashboardModel(source: src, initialYear: nil)
+                let poll = Task { await m.pollAgentUsage() }
+                var spins = 0
+                while m.agentUsage == nil, spins < 2_000 {
+                    try? await Task.sleep(nanoseconds: 1_000_000)
+                    spins += 1
+                }
+                poll.cancel()
+                _ = await poll.value
+                m.windowCardClients = [client]
+                m.windowUsageClient = client
+                return await body(m, src)
+            }
+        }
+        func wcpIsLoading(_ state: WindowCardState?) -> Bool {
+            if case .loading? = state { return true }
+            return state == nil
+        }
+
+        // WCP-1b. Errored primary + one live extra account: the card shows the
+        // extra account, no pill row, and the header carries its label.
+        // Mutation: no header label for a non-primary card.
+        let wcpOnlyB: (resolved: String?, pills: Bool, label: String?, tooltip: String?,
+                       card: String?, primaryLabel: String?)? = wcpRun(
+            wcpClaude(primary: [], primaryError: "boom"), client: "claude"
+        ) { m, _ in
+            m.refreshWindowQuotaHalves()
+            let ctx = m.cardAccountContext(for: "claude")
+            return (ctx?.resolved, ctx?.showsPills ?? true, AccountPills.headerLabel(ctx),
+                    ctx?.tooltip, m.windowCard(for: "claude")?.cardId,
+                    AccountPills.headerLabel(CardAccountContext(
+                        clientId: "claude", accounts: [nil], resolved: nil)))
+        }
+        expect(wcpOnlyB?.resolved == wcpB && wcpOnlyB?.card == "claude|session.v1",
+               "WCP-1b an errored primary with one live extra account shows the extra account's card")
+        expect(wcpOnlyB?.pills == false, "WCP-1b and there is no pill row for one live account")
+        expect(wcpOnlyB?.label == ".claude-work" && wcpOnlyB?.tooltip == wcpB,
+               "WCP-1b and the header carries the account's label, with its path as the tooltip")
+        expect(wcpOnlyB?.primaryLabel == nil,
+               "WCP-1b control: a primary card's header carries no label")
+
+        // WCP-state. A card built for one account is never served for another.
+        // Mutations: ignore the stored account when serving windowCards;
+        // snapshot drops the account.
+        let wcpState: [String: Bool]? = wcpRun(wcpTwo, client: "claude") { m, _ in
+            var o: [String: Bool] = [:]
+            wcpSetAccount("claude", "/gone")
+            o["resolution does not rewrite the stored preference"] =
+                m.cardAccountKey(for: "claude") == nil
+                && UserDefaults.standard.string(
+                    forKey: WindowCardAccount.prefKey(clientId: "claude")) == "/gone"
+            wcpSetAccount("claude", "")
+            m.refreshWindowQuotaHalves()
+            o["control: a card built for the primary is served while the primary is resolved"] =
+                !wcpIsLoading(m.windowCard(for: "claude"))
+                && m.windowCardAccounts["claude"] == ""
+            wcpSetAccount("claude", wcpB)
+            o["the primary's held card is not served once B is resolved"] =
+                wcpIsLoading(m.windowCard(for: "claude"))
+                && m.windowCards["claude"] != nil
+            m.refreshWindowQuotaHalves()
+            o["and B's card is built and served after the refresh"] =
+                !wcpIsLoading(m.windowCard(for: "claude"))
+                && m.windowCardAccounts["claude"] == DashboardModel.scanSlot(wcpB)
+            return o
+        }
+        for (label, passed) in (wcpState ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "WCP-state \(label)")
+        }
+        let wcpReopen: [String: Bool]? = wcpRun(wcpTwo, client: "claude", setup: { _ in }) { _, src in
+            var o: [String: Bool] = [:]
+            // A fresh seeding model that writes the shared reopen cache.
+            DashboardModel.invalidateScanDerivedCaches()
+            let seed = DashboardModel(cachesSnapshot: true, source: src, initialYear: nil)
+            await seed.load()
+            let poll = Task { await seed.pollAgentUsage() }
+            var spins = 0
+            while seed.agentUsage == nil, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            poll.cancel()
+            _ = await poll.value
+            seed.windowCardClients = ["claude"]
+            seed.windowUsageClient = "claude"
+            wcpSetAccount("claude", "")
+            seed.refreshWindowQuotaHalves()
+            await seed.refreshWindowUsage()
+            o["control: the seed built and cached a primary card"] =
+                seed.windowCards["claude"] != nil && seed.windowCardAccounts["claude"] == ""
+            let reopened = DashboardModel(cachesSnapshot: true, source: src, initialYear: nil)
+            o["control: the reopened model restored the card with its account"] =
+                reopened.windowCards["claude"] != nil && reopened.windowCardAccounts["claude"] == ""
+                && !wcpIsLoading(reopened.windowCard(for: "claude"))
+            wcpSetAccount("claude", wcpB)
+            o["a restored card for the primary is not served once B is resolved"] =
+                wcpIsLoading(reopened.windowCard(for: "claude"))
+            wcpSetAccount("claude", "")
+            DashboardModel.invalidateScanDerivedCaches()
+            return o
+        }
+        for (label, passed) in (wcpReopen ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "WCP-state snapshot: \(label)")
+        }
+
+        // WCP-scan. Failure flags are per (client, account). Mutation: by client only.
+        let wcpScanA: [String: Bool]? = wcpRun(
+            wcpTwo, client: "claude", setup: { $0.failScanAccounts = [""] }
+        ) { m, _ in
+            var o: [String: Bool] = [:]
+            wcpSetAccount("claude", "")
+            m.refreshWindowQuotaHalves()
+            await m.refreshWindowUsage()
+            o["control: the primary's scan failed and is marked"] = m.windowScanFailed(for: "claude")
+            wcpSetAccount("claude", wcpB)
+            m.refreshWindowQuotaHalves()
+            o["B, scan not yet run, is not marked failed by the primary's failure"] =
+                !m.windowScanFailed(for: "claude")
+            o["and the primary stays marked"] = m.windowScanFailed(for: "claude", accountKey: nil)
+            if case let .quotaOnly(_, failed)? = m.windowCards["claude"] {
+                o["and B's card says it is still reading, not failed"] = !failed
+            } else { o["and B's card says it is still reading, not failed"] = false }
+            wcpSetAccount("claude", "")
+            return o
+        }
+        for (label, passed) in (wcpScanA ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "WCP-scan \(label)")
+        }
+        let wcpScanB: [String: Bool]? = wcpRun(
+            wcpTwo, client: "claude", setup: { $0.failScanAccounts = [wcpB] }
+        ) { m, _ in
+            var o: [String: Bool] = [:]
+            wcpSetAccount("claude", wcpB)
+            m.refreshWindowQuotaHalves()
+            await m.refreshWindowUsage()
+            o["control: B's scan failed and is marked"] = m.windowScanFailed(for: "claude")
+            wcpSetAccount("claude", "")
+            m.refreshWindowQuotaHalves()
+            o["back on the primary, which never failed, it is not marked"] =
+                !m.windowScanFailed(for: "claude")
+            wcpSetAccount("claude", "")
+            return o
+        }
+        for (label, passed) in (wcpScanB ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "WCP-scan \(label)")
+        }
+
+        // WCP-retain. B selected, then a transient curve read failure: B's held
+        // card stays, and its cardId is one of B's candidates. Mutation:
+        // retention compares the three-part id.
+        let wcpRetain: [String: Bool]? = wcpRun(wcpTwo, client: "claude") { m, src in
+            var o: [String: Bool] = [:]
+            wcpSetAccount("claude", wcpB)
+            m.refreshWindowQuotaHalves()
+            await m.refreshWindowUsage()
+            let held = m.windowCards["claude"]?.cardId
+            let candidates = m.windowCards["claude"]?.quotaHalf?.candidates.map(\.cardId) ?? []
+            o["control: B's card is built before the failure"] = held != nil
+            o["B's cardId is one of its candidates' two-part values"] =
+                held.map { candidates.contains($0) } ?? false
+            src.failCurveRead = true
+            src.payload = wcpClaude(generation: 8)
+            let again = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while m.agentUsage?.publicationGeneration != 8, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            again.cancel()
+            _ = await again.value
+            m.refreshWindowQuotaHalves()
+            o["a throwing curve read keeps B's held card"] =
+                m.windowCards["claude"]?.cardId == held && held != nil
+                && !wcpIsLoading(m.windowCard(for: "claude"))
+            src.failCurveRead = false
+            wcpSetAccount("claude", "")
+            return o
+        }
+        for (label, passed) in (wcpRetain ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "WCP-retain \(label)")
+        }
+
+        // WCP-model. The model's history identity follows the account.
+        let wcpHist: String?? = wcpRun(wcpTwo, client: "claude") { m, _ in
+            wcpSetAccount("claude", wcpB)
+            m.refreshWindowQuotaHalves()
+            let id = m.quotaCyclesCardId
+            wcpSetAccount("claude", "")
+            return id
+        }
+        expect(wcpHist == .some("claude|\(wcpB)|session.v1"),
+               "WCP-model the history identity of B's card is the three-part window key")
+
+        // WCP-usage. Local usage per rule 6 and its amendment.
+        // Mutations: non-primary scan error shows the primary text; captured
+        // Antigravity scans anyway; history spinner for a captured account.
+        let wcpUsageB: [String: Bool]? = wcpRun(wcpTwo, client: "claude") { m, src in
+            var o: [String: Bool] = [:]
+            wcpSetAccount("claude", wcpB)
+            m.refreshWindowQuotaHalves()
+            src.scannedAccounts = []
+            await m.refreshWindowUsage()
+            let ctx = m.cardAccountContext(for: "claude")
+            var ready = false
+            if case .ready? = m.windowCard(for: "claude") { ready = true }
+            o["a Claude config-dir account is scanned with its own key and shows numbers"] =
+                src.scannedAccounts == [wcpB] && ready
+                && CardAccountContext.localUsageSlot(ctx, hasUsage: true, scanFailed: false) == .numbers
+            wcpSetAccount("claude", "")
+            return o
+        }
+        for (label, passed) in (wcpUsageB ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "WCP-usage \(label)")
+        }
+        let wcpUsageBFail: [String: Bool]? = wcpRun(
+            wcpTwo, client: "claude", setup: { $0.failScanAccounts = [wcpB] }
+        ) { m, _ in
+            var o: [String: Bool] = [:]
+            wcpSetAccount("claude", wcpB)
+            m.refreshWindowQuotaHalves()
+            await m.refreshWindowUsage()
+            let ctx = m.cardAccountContext(for: "claude")
+            o["a config-dir account whose scan fails shows the fixed line, on the card and under it"] =
+                m.windowScanFailed(for: "claude")
+                && CardAccountContext.localUsageSlot(ctx, hasUsage: false, scanFailed: true)
+                    == .notAttributable
+            wcpSetAccount("claude", "")
+            return o
+        }
+        for (label, passed) in (wcpUsageBFail ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "WCP-usage \(label)")
+        }
+        let wcpAgy = wcpPayload([
+            (client: "antigravity", account: nil, error: nil, windows: [wcpSession]),
+            (client: "antigravity", account: wcpAgyKey, error: nil, windows: [wcpSession]),
+        ])
+        let wcpUsageAgy: [String: Bool]? = wcpRun(wcpAgy, client: "antigravity") { m, src in
+            var o: [String: Bool] = [:]
+            wcpSetAccount("antigravity", "")
+            m.refreshWindowQuotaHalves()
+            await m.refreshWindowUsage()
+            o["control: the Antigravity primary is scanned"] = src.scans >= 1
+            src.scans = 0
+            src.scannedAccounts = []
+            wcpSetAccount("antigravity", wcpAgyKey)
+            m.refreshWindowQuotaHalves()
+            await m.refreshWindowUsage()
+            let ctx = m.cardAccountContext(for: "antigravity")
+            o["control: the captured account is the one resolved, with a pill row"] =
+                ctx?.resolved == wcpAgyKey && ctx?.showsPills == true
+            o["a captured Antigravity account issues no scan request at all"] = src.scans == 0
+            o["and shows the fixed line on the card and under it, not the spinner"] =
+                CardAccountContext.localUsageSlot(ctx, hasUsage: false, scanFailed: false)
+                    == .notAttributable
+                && !m.windowScanFailed(for: "antigravity")
+            wcpSetAccount("antigravity", "")
+            return o
+        }
+        for (label, passed) in (wcpUsageAgy ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "WCP-usage \(label)")
+        }
+        let wcpPrimaryCtx = CardAccountContext(clientId: "claude", accounts: [nil, wcpB], resolved: nil)
+        let wcpBCtx = CardAccountContext(clientId: "claude", accounts: [nil, wcpB], resolved: wcpB)
+        expect(CardAccountContext.localUsageSlot(wcpPrimaryCtx, hasUsage: false, scanFailed: true) == .unreadable,
+               "WCP-usage a primary whose scan failed keeps \"Local usage could not be read.\"")
+        expect(CardAccountContext.localUsageSlot(wcpPrimaryCtx, hasUsage: false, scanFailed: false) == .spinner
+                   && CardAccountContext.localUsageSlot(wcpBCtx, hasUsage: false, scanFailed: false) == .spinner
+                   && CardAccountContext.localUsageSlot(nil, hasUsage: false, scanFailed: false) == .spinner,
+               "WCP-usage control: a scan still pending is the spinner, so the fixed line is not unconditional")
+        expect(CardAccountContext.localUsageSlot(wcpPrimaryCtx, hasUsage: true, scanFailed: false) == .numbers,
+               "WCP-usage a primary with usage shows its numbers")
+
+        expect([wcpOnlyB != nil, wcpState != nil, wcpReopen != nil, wcpScanA != nil,
+                wcpScanB != nil, wcpRetain != nil, wcpHist != nil, wcpUsageB != nil,
+                wcpUsageBFail != nil, wcpUsageAgy != nil].allSatisfy { $0 },
+               "WCP every model fixture ran to completion (a nil would silently skip its checks)")
+
+        // Restore the staged preferences.
+        if let saved = wcpSavedSel { UserDefaults.standard.set(saved, forKey: wcpSelKey) }
+        for (client, saved) in zip(wcpPrefClients, wcpSavedAccounts) {
+            if let saved { UserDefaults.standard.set(saved, forKey: WindowCardAccount.prefKey(clientId: client)) }
+            else { wcpSetAccount(client, nil) }
+        }
 
         // Dock pin repair: pure decision and write sequence over in-memory
         // arrays only; never the real com.apple.dock domain. Fixtures live in

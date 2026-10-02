@@ -39,6 +39,10 @@ struct PopoverView: View {
     /// The window card's own selection. Rebuilding on change is what makes the
     /// buttons feel like buttons — the quota poll is a minute apart.
     @AppStorage(WindowCardLoader.selectionKey) private var windowSelectionRaw = ""
+    /// Bumped by the account pill row after it writes the per-client account
+    /// preference. That preference is keyed per client, which a property wrapper
+    /// cannot observe, so the write announces itself here instead.
+    @State private var accountPickTick = 0
     @AppStorage("tokenbar.bridge.dismissed") private var bridgeDismissed = false
     /// "overview" or a client id. Persisted so the selection survives the
     /// popover's rootView teardown/rebuild cycle (StatusItemController swaps
@@ -185,6 +189,7 @@ struct PopoverView: View {
 
     private var quotaRefreshID: String {
         [windowSelectionRaw, activeTab, hiddenRaw, attributionRaw,
+         WindowCardAccount.stored(clientId: activeTab) ?? "-", String(accountPickTick),
          effectiveView.rawValue, String(extraRootsGeneration), limitsHiddenRaw, orderRaw,
          displayClients.joined(separator: ","), displayUsageClients.joined(separator: ",")]
             .joined(separator: "|")
@@ -787,7 +792,15 @@ struct PopoverView: View {
                         // curves — so the gate was not saving work, it was blanking
                         // a feature.
                         windowCurves: model.windowCurves,
-                        windowCard: quotaUsageClient.flatMap { model.windowCards[$0] },
+                        windowCard: quotaUsageClient.flatMap { model.windowCard(for: $0) },
+                        accountContext: quotaUsageClient.flatMap { model.cardAccountContext(for: $0) },
+                        onSelectAccount: { account in
+                            if let client = quotaUsageClient {
+                                UserDefaults.standard.set(
+                                    account ?? "", forKey: WindowCardAccount.prefKey(clientId: client))
+                                accountPickTick &+= 1
+                            }
+                        },
                         quotaCycles: model.quotaCycles, quotaHistory: model.quotaHistory,
                         colors: model.colors,
                         // Folded from the series model rather than from the raw

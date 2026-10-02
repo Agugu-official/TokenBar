@@ -11,6 +11,9 @@ import TokenBarCore
 /// front (`V-5`).
 struct WindowUsageCard: View {
     let state: WindowCardState
+    /// Nil on a client with no live account, which draws exactly as before.
+    var account: CardAccountContext?
+    var onSelectAccount: (String?) -> Void = { _ in }
 
     /// Set alongside the geometry so the tooltip can slice the same messages
     /// the bars were built from.
@@ -73,6 +76,9 @@ struct WindowUsageCard: View {
             }
         case let .noQuotaHistory(_, label, candidates, cardId):
             DashCard("%@ window".localized(label.localized), subtitle: "No quota history") {
+                accountHeaderLabel
+            } content: {
+                accountPills
                 windowButtons(candidates: candidates, cardId: cardId)
                 Text("This window has no recorded quota history, so there is no line to draw.".localized)
                     .font(.caption)
@@ -96,10 +102,17 @@ struct WindowUsageCard: View {
         _ quota: WindowQuotaHalf, usage: WindowUsageHalf?, scanFailed: Bool
     ) -> some View {
         DashCard("%@ window".localized(quota.windowLabel.localized), subtitle: stateLine(quota)) {
-            SegmentedPicker(
-                selection: Binding(get: { asUsed }, set: { asUsed = $0 }),
-                options: [(value: false, label: "Remaining"), (value: true, label: "Used")])
+            HStack(spacing: 8) {
+                // Header label of a card showing a non-primary account, so it
+                // cannot be read as the primary's (spec 1b). Absent for the
+                // primary, whose header is unchanged.
+                accountHeaderLabel
+                SegmentedPicker(
+                    selection: Binding(get: { asUsed }, set: { asUsed = $0 }),
+                    options: [(value: false, label: "Remaining"), (value: true, label: "Used")])
+            }
         } content: {
+            accountPills
             windowButtons(candidates: quota.candidates, cardId: quota.cardId)
             if quota.placementPending {
                 placeholder("Placing the window…")
@@ -118,17 +131,28 @@ struct WindowUsageCard: View {
                 undatedNote(usage)
                 scopeNote(usage, label: quota.windowLabel)
                 Group {
-                    if let usage {
-                        equivalenceRow(
-                            quota: quota, mine: usage.mine, interval: interval)
-                    } else if scanFailed {
+                    switch CardAccountContext.localUsageSlot(
+                        account, hasUsage: usage != nil, scanFailed: scanFailed) {
+                    case .notAttributable:
+                        // Rule 6: this account's usage cannot be scoped from
+                        // local logs, or its scan failed. One fixed line, in
+                        // place of numbers that would be another account's.
+                        Text("Local usage can't be attributed to this account yet.".localized)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    case .numbers:
+                        if let usage {
+                            equivalenceRow(
+                                quota: quota, mine: usage.mine, interval: interval)
+                        }
+                    case .unreadable:
                         // A settled failure, not a slow success. The chart above
                         // is drawn from the quota half and stays correct; only
                         // this line has nothing to report.
                         Text("Local usage could not be read.".localized)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
-                    } else {
+                    case .spinner:
                         LoadingLine(title: "Reading local usage…")
                     }
                 }
@@ -155,6 +179,26 @@ struct WindowUsageCard: View {
             .frame(height: Self.chartHeight + Self.legendHeight + Self.footerHeight,
                    alignment: .topLeading)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var accountHeaderLabel: some View {
+        if let label = AccountPills.headerLabel(account) {
+            Text(verbatim: label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .help(account?.tooltip ?? "")
+        }
+    }
+
+    @ViewBuilder
+    private var accountPills: some View {
+        if let account {
+            AccountPills(
+                clientId: account.clientId, accounts: account.accounts,
+                selected: account.resolved, select: onSelectAccount)
+        }
     }
 
     @ViewBuilder

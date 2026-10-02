@@ -224,6 +224,10 @@ private struct DashboardSnapshot {
         let heatmapWindows: [QuotaHeatmapWindow]
         /// The window card at the top of the lens, and its sparkline.
         let windowCards: [String: WindowCardState]
+        /// Which account each card in `windowCards` was built for (scan slot,
+        /// "" = primary). Restored with it: a card is only valid for the
+        /// account it was built for.
+        let windowCardAccounts: [String: String]
         let windowCurves: [String: [QuotaSample]]
         /// "Window history" at the foot of the lens, and the API-value
         /// estimates its rows are annotated with.
@@ -427,6 +431,7 @@ private struct DashboardSnapshot {
             quotaHeatmaps = snap.quotaCards.heatmaps
             quotaHeatmapWindows = snap.quotaCards.heatmapWindows
             windowCards = snap.quotaCards.windowCards
+            windowCardAccounts = snap.quotaCards.windowCardAccounts
             windowCurves = snap.quotaCards.windowCurves
             quotaHistory = snap.quotaCards.history
             quotaEquivalences = snap.quotaCards.equivalences
@@ -1156,7 +1161,8 @@ private struct DashboardSnapshot {
             quotaCards: DashboardSnapshot.QuotaCards(
                 summaries: quotaWindowSummaries, heatmaps: quotaHeatmaps,
                 heatmapWindows: quotaHeatmapWindows,
-                windowCards: windowCards, windowCurves: windowCurves,
+                windowCards: windowCards, windowCardAccounts: windowCardAccounts,
+                windowCurves: windowCurves,
                 history: quotaHistory, equivalences: quotaEquivalences,
                 cycles: quotaCycles, historyCardId: quotaHistoryCardId)))
     }
@@ -1224,7 +1230,8 @@ private struct DashboardSnapshot {
             quotaCards: DashboardSnapshot.QuotaCards(
                 summaries: quotaWindowSummaries, heatmaps: quotaHeatmaps,
                 heatmapWindows: quotaHeatmapWindows,
-                windowCards: windowCards, windowCurves: windowCurves,
+                windowCards: windowCards, windowCardAccounts: windowCardAccounts,
+                windowCurves: windowCurves,
                 history: quotaHistory, equivalences: quotaEquivalences,
                 cycles: quotaCycles, historyCardId: quotaHistoryCardId)))
     }
@@ -1303,6 +1310,19 @@ private struct DashboardSnapshot {
     /// loading case is a state, not a nil.
     var windowCards: [String: WindowCardState] = [:]
 
+    /// The account each `windowCards` entry was built for, as a scan slot
+    /// ("" = primary). Written wherever `windowCards` is.
+    var windowCardAccounts: [String: String] = [:]
+
+    /// The card the views draw for `clientId`: the stored state only while it
+    /// was built for the account now resolved. A held card for account A must
+    /// never flash under account B's pills, so a mismatch is `.loading`.
+    func windowCard(for clientId: String) -> WindowCardState? {
+        guard let held = windowCards[clientId] else { return nil }
+        let slot = Self.scanSlot(cardAccountKey(for: clientId))
+        return windowCardAccounts[clientId] == slot ? held : .loading
+    }
+
     /// The scan for one account, restored from the shared cache so a reopen
     /// renders bars immediately instead of spinning.
     ///
@@ -1323,15 +1343,23 @@ private struct DashboardSnapshot {
     /// empty path, and Settings refuses one too.
     static func scanSlot(_ accountKey: String?) -> String { accountKey ?? "" }
 
-    /// The account a window CARD is about, which is always the primary.
-    ///
-    /// Not a decision made here: `WindowCardLoader` selects
-    /// `accountKey == nil` in `select`, `pickForHistory` and `quotaHalf`, so a
-    /// client tab can only ever show the primary's windows. Named rather than
-    /// written as a bare `nil` at four call sites, so the day an extra account
-    /// gets a tab there is one place that has to change and a grep that finds
-    /// it.
-    static let cardAccountKey: String? = nil
+    /// The account a window CARD is about: `WindowCardAccount.resolve` over
+    /// the published payload and the per-client stored choice. The one place
+    /// that decides it; every read of "which account's card" goes through here.
+    func cardAccountKey(for clientId: String) -> String? {
+        WindowCardAccount.resolve(
+            payload: agentUsage, clientId: clientId,
+            stored: WindowCardAccount.stored(clientId: clientId))
+    }
+
+    /// What the views need for the open client's account pills, header label
+    /// and rule-6 line. Nil when the client has no live account at all.
+    func cardAccountContext(for clientId: String) -> CardAccountContext? {
+        let accounts = WindowCardAccount.accounts(payload: agentUsage, clientId: clientId)
+        guard !accounts.isEmpty else { return nil }
+        return CardAccountContext(
+            clientId: clientId, accounts: accounts, resolved: cardAccountKey(for: clientId))
+    }
 
     /// How long a scan is served before being refreshed. Matched to the
     /// engine's own oneshot age so the two layers do not disagree about what
@@ -1441,6 +1469,7 @@ private struct DashboardSnapshot {
                 windowCardClients.contains($0.key)
                     && !(quotaVisibility?.limits.contains($0.key) ?? false)
             }
+            windowCardAccounts = windowCardAccounts.filter { windowCards[$0.key] != nil }
         }
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         // Deliberately NOT `try?`: swallowing the error here is what let a
@@ -1467,8 +1496,10 @@ private struct DashboardSnapshot {
             }
         }
         for clientId in windowCardClients where !(quotaVisibility?.limits.contains(clientId) ?? false) {
+            let account = cardAccountKey(for: clientId)
+            let slot = Self.scanSlot(account)
             let state = WindowCardLoader.quotaHalf(
-                payload: agentUsage, clientId: clientId,
+                payload: agentUsage, clientId: clientId, accountKey: account,
                 attempted: agentUsageAttempted,
                 curve: readCurve, nowMs: now)
             // Fold in a usage half we already hold, so a stage-1 refresh does
@@ -1488,21 +1519,25 @@ private struct DashboardSnapshot {
             // only ever reached with the flag set, so it stated this same rule
             // more weakly, and a redundant check that can disagree is a second
             // failure mode rather than a second line of defence.
-            if case let .quotaOnly(q, _) = state, !windowScanFailed(for: clientId),
-               let scan = unionScan(for: Self.cardAccountKey),
+            if case let .quotaOnly(q, _) = state,
+               !windowScanFailed(for: clientId, accountKey: account),
+               let scan = unionScan(for: account),
                let (settled, usage) = WindowCardLoader.usageHalf(
                    quota: q, scan: scan, confirmed: UsageAttribution.confirmed().records) {
                 windowCards[clientId] = .ready(settled, usage)
+                windowCardAccounts[clientId] = slot
             } else if case let .quotaOnly(q, _) = state,
-                      windowScanFailed(for: clientId) {
+                      windowScanFailed(for: clientId, accountKey: account) {
                 // The loader cannot know this — it never runs the scan. Carried
                 // in here so the card can say the scan failed instead of
                 // spinning under a chart that is already drawn.
                 windowCards[clientId] = .quotaOnly(q, scanFailed: true)
+                windowCardAccounts[clientId] = slot
             } else if case .loading = state,
                       let held = windowCards[clientId]?.cardId,
+                      windowCardAccounts[clientId] == slot,
                       held == WindowCardLoader.selectedCardId(
-                          payload: agentUsage, clientId: clientId) {
+                          payload: agentUsage, clientId: clientId, accountKey: account) {
                 // A curve read that throws is a transient generation expiry —
                 // `quotaHalf` answers `.loading`, which is right as an answer
                 // and wrong as a replacement. Overwriting sent a drawn card
@@ -1515,6 +1550,8 @@ private struct DashboardSnapshot {
                 // two selections share a client, so retaining by client alone
                 // left the chart and totals on the window the user had just
                 // navigated away from while the picker highlighted the new one.
+                // And only for the same ACCOUNT, for the same reason one level
+                // up: the held card is that account's window, not this one's.
                 continue
             } else {
                 // A card holding a scan that cannot answer for the window it
@@ -1543,6 +1580,7 @@ private struct DashboardSnapshot {
                 // correct itself — a worse claim than "a scan is pending",
                 // which is what is actually happening.
                 windowCards[clientId] = state
+                windowCardAccounts[clientId] = slot
             }
         }
 
@@ -1770,10 +1808,15 @@ private struct DashboardSnapshot {
         // history labelled as another's, which is worse than an empty card and
         // indistinguishable from a correct one.
         if let client = windowUsageClient {
+            let account = cardAccountKey(for: client)
+            // History vocabulary: two-part for the primary, three-part for any
+            // other account, so a switch of account is a different window here.
             let selected = WindowCardLoader.selectedCardId(
-                payload: agentUsage, clientId: client)
+                payload: agentUsage, clientId: client, accountKey: account
+            ).map { WindowCardLoader.historyKey(pick: $0, accountKey: account) }
             if let cycles = WindowCardLoader.cycles(
-                payload: agentUsage, clientId: client, curve: readCurve)
+                payload: agentUsage, clientId: client, accountKey: account,
+                curve: readCurve)
             {
                 quotaCycles = cycles
                 quotaCyclesCardId = selected
@@ -1877,7 +1920,7 @@ private struct DashboardSnapshot {
         // Retained only for the SAME window: the rows are annotated against
         // one window's cycles, so showing them under another is a wrong answer
         // rather than a slow one.
-        guard let scan = unionScan(for: Self.cardAccountKey),
+        guard let scan = unionScan(for: cardAccountKey(for: client)),
               scan.covers(start: oldest.evidenceStartMs)
         else {
             if quotaHistoryCardId != quotaCyclesCardId {
@@ -1930,7 +1973,7 @@ private struct DashboardSnapshot {
     /// not client alone. Two window selections share a client, so a client-only
     /// comparison could keep the previous window's history beneath the newly
     /// selected card. Nil when empty.
-    @ObservationIgnored private var quotaCyclesCardId: String?
+    @ObservationIgnored private(set) var quotaCyclesCardId: String?
 
     /// Whether the persisted curve could not be READ, as distinct from having
     /// no history in it.
@@ -2136,6 +2179,15 @@ private struct DashboardSnapshot {
             refreshSnapshotLiveData()
             return
         }
+        // The account the card shows, resolved once for this whole pass: it
+        // picks the scan slot, the engine call and the failure flag, and they
+        // must not disagree. A captured Antigravity account has no local logs
+        // (`hasLocalUsage`), so asking the engine would look its key up as a
+        // Claude config directory; the card says so instead (rule 6).
+        let account = cardAccountKey(for: client)
+        guard AccountIdentity(clientId: client, accountKey: account).hasLocalUsage
+        else { return }
+        let failureKey = Self.scanFailureKey(client: client, accountKey: account)
         // The history's oldest cycle CONTAINS the active window, so this widens
         // one scan rather than issuing a second. Measured 2026-08-16 on live
         // data: 5.4 days, 45,844 messages, 4.6s — an order of magnitude below
@@ -2172,22 +2224,22 @@ private struct DashboardSnapshot {
         // the engine. Guarding after it left the hole open on the only path
         // that does not need a scan.
         guard from < now else {
-            windowScanFailedClients.insert(client)
+            windowScanFailedClients.insert(failureKey)
             refreshWindowQuotaHalves()
             return
         }
         // Serve the cached scan while it still covers the range and is fresh.
         // Rescanning on every reopen was the whole complaint: the staging made
         // the wait visible, it did not make it rare.
-        if let cached = unionScan(for: Self.cardAccountKey), cached.covers(start: from),
+        if let cached = unionScan(for: account), cached.covers(start: from),
            Date().timeIntervalSince(cached.capturedAt) < Self.unionScanMaxAge {
             // A fresh scan that covers this window IS an answer for it, whoever
             // ran it. Returning without clearing left the card reporting a
             // failure while the model held the very data that refutes it — and
             // refusing to rescan for another 30 seconds.
-            if windowScanFailedClients.contains(client) {
+            if windowScanFailedClients.contains(failureKey) {
                 windowScanFailedClients = Self.scanFailures(
-                    windowScanFailedClients, resolvedBy: client)
+                    windowScanFailedClients, resolvedBy: failureKey)
                 refreshWindowQuotaHalves()
             }
             return
@@ -2198,10 +2250,10 @@ private struct DashboardSnapshot {
         // that will never stop. The token check keeps an overtaken scan's
         // failure from settling a newer request, exactly as its success is.
         guard let usage = try? await source.windowUsage(
-            accountKey: Self.cardAccountKey, from: from, until: now)
+            accountKey: account, from: from, until: now)
         else {
             guard Self.windowScanToken == scanToken else { return }
-            windowScanFailedClients.insert(client)
+            windowScanFailedClients.insert(failureKey)
             refreshWindowQuotaHalves()
             return
         }
@@ -2212,12 +2264,12 @@ private struct DashboardSnapshot {
         // is not tested here. A bare `nil` cleared whichever client was
         // recorded, which is neither of those things.
         windowScanFailedClients = Self.scanFailures(
-            windowScanFailedClients, resolvedBy: client)
+            windowScanFailedClients, resolvedBy: failureKey)
         setUnionScan(
             UnionScan(
                 fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages,
                 undatedCount: usage.undatedCount),
-            for: Self.cardAccountKey)
+            for: account)
         refreshWindowQuotaHalves()
         rebuildQuotaHistory()
         rebuildQuotaEquivalences()
@@ -2269,7 +2321,21 @@ private struct DashboardSnapshot {
     /// Whether the card currently shown for `clientId` should say the scan
     /// failed rather than that it is still running.
     func windowScanFailed(for clientId: String) -> Bool {
-        windowScanFailedClients.contains(clientId)
+        windowScanFailed(for: clientId, accountKey: cardAccountKey(for: clientId))
+    }
+
+    /// For one account's scan slot. Flags are keyed by (client, account): a
+    /// failed primary scan must not mark account B failed while B's own scan is
+    /// still pending, nor B's failure mark the primary.
+    func windowScanFailed(for clientId: String, accountKey: String?) -> Bool {
+        windowScanFailedClients.contains(
+            Self.scanFailureKey(client: clientId, accountKey: accountKey))
+    }
+
+    /// The failure-set member for one card's scan. The bare client id for the
+    /// primary, so a one-account client keeps the key it always had.
+    nonisolated static func scanFailureKey(client: String, accountKey: String?) -> String {
+        accountKey.map { "\(client)\u{1F}\($0)" } ?? client
     }
 
     /// The recorded failures after a scan for `client` succeeds.

@@ -523,6 +523,7 @@
 "Usage recorded, but it carries no token counts." = "有記錄到用量，但沒有附帶 token 數。";
 "Other subscriptions in the same hours: %@" = "同一時段的其他訂閱：%@";
 "Local usage could not be read." = "無法讀取本機用量。";
+"Local usage can't be attributed to this account yet." = "無法將本機用量歸屬到這個帳號。";
 "tokens unavailable, ±%@%%" = "無 token 明細，誤差 ±%@%%";
 "~ %@ – %@ API-equivalent" = "≈ %@ – %@（API 等值）";
 "The allowance did not move in this window" = "這個時間窗內額度沒有變動";

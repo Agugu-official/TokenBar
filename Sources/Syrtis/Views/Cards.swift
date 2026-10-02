@@ -331,6 +331,8 @@ enum TokenKindPalette {
 struct SegmentedPicker<Value: Hashable>: View {
     @Binding var selection: Value
     let options: [(value: Value, label: String)]
+    /// Optional per-option tooltip, keyed by option value.
+    var help: [Value: String] = [:]
 
     @Environment(\.inGlassPanel) private var inGlassPanel
     @Environment(\.colorScheme) private var colorScheme
@@ -352,6 +354,7 @@ struct SegmentedPicker<Value: Hashable>: View {
                             .contentShape(RoundedRectangle(cornerRadius: 4))
                     }
                     .buttonStyle(.plain)
+                    .help(help[option.value] ?? "")
                 }
             }
             .padding(1)
@@ -383,6 +386,7 @@ struct SegmentedPicker<Value: Hashable>: View {
                         .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
+                .help(help[option.value] ?? "")
             }
         }
         .padding(2)
