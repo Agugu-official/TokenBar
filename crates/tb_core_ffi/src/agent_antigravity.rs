@@ -24,12 +24,12 @@ use crate::agent_account_scope::{
 use crate::agent_usage::{
     clean_plan, parse_datetime, percent_encode, provider_http_client_builder, read_response_body,
     request_after_verified_binding, AgentIdentity, ProviderCacheBinding, ProviderFetchFailure,
-    ResponseReadFailure, TransportErrorFacts, TransportPhase, UsageWindow,
+    ResponseReadFailure, SafeTransportDiagnostic, TransportErrorFacts, TransportPhase, UsageWindow,
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, value::RawValue, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -1010,16 +1010,21 @@ struct RemoteContext {
 }
 
 impl RemoteContext {
-    fn finish(self, windows: Vec<UsageWindow>) -> Fetched {
+    /// `history_scope` is the caller's: the primary route passes the
+    /// per-installation constant (`primary_remote_history_scope`), a captured
+    /// account passes the scope of its own key.
+    fn finish(
+        self,
+        windows: Vec<UsageWindow>,
+        history_scope: Result<HistoryScope, AccountScopeError>,
+    ) -> Fetched {
         Fetched {
             source: "oauth".to_string(),
             // google_accounts.active is unrelated local state, not authenticated
             // by the credential that fetched these quotas.
             identity: Some(remote_identity(self.plan)),
             account_scope: Ok(self.account_scope),
-            // Remote OAuth carries no authoritative owner ID today: the stored
-            // Google `id_token` is not read yet (HISTID-B).
-            history_scope: agent_account_scope::resolve_history_scope("antigravity", None),
+            history_scope,
             cache_binding: self.cache_binding,
             windows,
         }
@@ -1040,7 +1045,9 @@ async fn fetch_oauth_primary(now: DateTime<Utc>) -> PrimaryAttempt<RemoteContext
         Err(failure) => return PrimaryAttempt::FinalFailure(failure),
     };
     match fetch_available_models(&context, now).await {
-        PrimaryQuotaAttempt::Success(windows) => PrimaryAttempt::Success(context.finish(windows)),
+        PrimaryQuotaAttempt::Success(windows) => {
+            PrimaryAttempt::Success(context.finish(windows, primary_remote_history_scope()))
+        }
         PrimaryQuotaAttempt::Forbidden => PrimaryAttempt::Forbidden(context),
         PrimaryQuotaAttempt::SchemaContradiction(failure) => {
             PrimaryAttempt::SchemaContradiction { context, failure }
@@ -1055,7 +1062,15 @@ async fn fetch_oauth_secondary(
     now: DateTime<Utc>,
 ) -> Result<Fetched, ProviderFetchFailure> {
     let windows = fetch_user_quota(&context, now).await?;
-    Ok(context.finish(windows))
+    Ok(context.finish(windows, primary_remote_history_scope()))
+}
+
+/// The primary remote route's history scope, resolved at the same point as
+/// before `finish` took it as a parameter: after the quota windows arrived.
+/// Remote OAuth carries no authoritative owner ID today: the stored Google
+/// `id_token` is not read yet (HISTID-B).
+fn primary_remote_history_scope() -> Result<HistoryScope, AccountScopeError> {
+    agent_account_scope::resolve_history_scope("antigravity", None)
 }
 
 async fn prepare_remote_context(now: DateTime<Utc>) -> Result<RemoteContext, ProviderFetchFailure> {
@@ -2190,6 +2205,896 @@ fn gemini_home_from(
         Ok(_) | Err(_) => format!("{}/.gemini", user_home?.to_string_lossy()),
     };
     Some(PathBuf::from(root))
+}
+
+// ── Captured accounts (extra Google accounts copied from agy's login) ─────────
+//
+// A captured account is a second Google login the user signed `agy` into once
+// and asked Syrtis to keep. Capture copies that login's refresh token, plus the
+// OAuth client that issued it, into a login-keychain item Syrtis owns; every
+// later poll refreshes from that item and calls the same Code Assist quota
+// methods as the primary remote route.
+//
+// It deliberately does not reuse the primary's file-bound refresh path
+// (`refresh_access_token_with`): that path exists to share a credential with an
+// external writer, and this item has exactly one writer, Syrtis. So there is no
+// refresh lock, no lineage binding and no compare-and-swap.
+//
+// What crosses each boundary:
+// - agy's own item (`gemini` / `antigravity`) is read once, at capture, through
+//   `/usr/bin/security -w`, and never written.
+// - Syrtis's item (`CAPTURED_SERVICE`, account = key) is written through a
+//   `/usr/bin/security -i` child that receives the command on stdin, so the
+//   secret is never on an argv; reads use `-w` and print only to our pipe.
+// - The raw Google `sub` never leaves `capture_with`. Everything downstream —
+//   the keychain account, the registry, the FFI `accountKey`, the account and
+//   history scopes — uses `captured_key(sub)`.
+// - Every error leaving this section is a fixed code or a literal string: no
+//   token, sub, key, email, `security` stderr, serde text or Google
+//   `error_description`.
+
+/// Keychain service of the items Syrtis writes for captured accounts.
+const CAPTURED_SERVICE: &str = "com.nyanako.tokenbar.antigravity-account";
+const SECURITY_TOOL: &str = "/usr/bin/security";
+/// Domain separator for `captured_key`, so the key cannot collide with a
+/// SHA-256 of the bare `sub` computed anywhere else.
+const CAPTURED_KEY_DOMAIN: &[u8] = b"antigravity-account\0";
+/// An access token is reused until this long before its expiry.
+const CAPTURED_TOKEN_MARGIN_SECS: i64 = 5 * 60;
+/// `security`'s exit status for errSecItemNotFound, measured on macOS.
+const SECURITY_ITEM_NOT_FOUND: i32 = 44;
+/// The agy read may raise a Keychain consent dialog the user has to answer.
+const AGY_ITEM_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const CAPTURED_ITEM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const CAPTURED_FALLBACK_LABEL: &str = "Antigravity account";
+
+/// agy's login item, read with `-w` (the secret). Capture only.
+const AGY_ITEM_READ: &[&str] = &[
+    "find-generic-password",
+    "-s",
+    "gemini",
+    "-a",
+    "antigravity",
+    "-w",
+];
+
+const CAPTURED_REFRESH_RETRY: &str = "Antigravity token refresh failed. Retrying automatically.";
+pub(crate) const CAPTURED_ITEM_MISSING: &str =
+    "Antigravity account credential was not found. Capture the account again.";
+const CAPTURED_ITEM_UNREADABLE: &str =
+    "Antigravity account credential could not be read. Capture the account again.";
+const CAPTURED_REFRESH_REJECTED: &str =
+    "Antigravity account sign-in was rejected. Capture the account again.";
+const CAPTURED_IDENTITY_UNVERIFIED: &str = "Antigravity account identity could not be verified.";
+const CAPTURED_CLIENT_UNAVAILABLE: &str = "Antigravity usage client could not be created.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CapturedAccount {
+    pub key: String,
+    pub label: String,
+}
+
+// ── registry ──
+
+static CAPTURED_ACCOUNTS: std::sync::LazyLock<std::sync::RwLock<Vec<CapturedAccount>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(Vec::new()));
+
+/// Registered captured accounts, in the order Swift listed them. Empty by
+/// default, so a process that never calls the setter fetches the one
+/// Antigravity card it always has. Holds no secret.
+pub(crate) fn captured_accounts() -> Vec<CapturedAccount> {
+    CAPTURED_ACCOUNTS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// Replace the registry from `[{"key","label"}]`. Full-replace (`[]` clears).
+/// A rejected entry is reported by index and a fixed reason, never echoed.
+pub(crate) fn set_captured_accounts_from_json(raw: &str) -> Result<Value, String> {
+    let input: Value =
+        serde_json::from_str(raw).map_err(|_| "invalid_accounts_json".to_string())?;
+    let entries = input
+        .as_array()
+        .ok_or_else(|| "invalid_accounts_json".to_string())?;
+    let mut registered: Vec<CapturedAccount> = Vec::new();
+    let mut rejected: Vec<Value> = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let key = entry.get("key").and_then(Value::as_str);
+        let label = entry.get("label").and_then(Value::as_str);
+        let reason = match (key, label) {
+            (Some(key), Some(_)) if !valid_captured_key(key) => "invalid key",
+            (Some(key), Some(_)) if registered.iter().any(|a| a.key == key) => "duplicate key",
+            (Some(key), Some(label)) => {
+                registered.push(CapturedAccount {
+                    key: key.to_string(),
+                    label: label.to_string(),
+                });
+                continue;
+            }
+            _ => "invalid entry",
+        };
+        rejected.push(json!({ "index": index, "reason": reason }));
+    }
+    let registered_count = registered.len();
+    *CAPTURED_ACCOUNTS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = registered;
+    Ok(json!({ "registeredCount": registered_count, "rejected": rejected }))
+}
+
+#[cfg(test)]
+pub(crate) static CAPTURED_ACCOUNTS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+// ── key, value and command validation ──
+
+/// `hex(SHA-256("antigravity-account\0" + sub))`, 64 lowercase hex.
+pub(crate) fn captured_key(sub: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(CAPTURED_KEY_DOMAIN);
+    hasher.update(sub.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// `^[0-9a-f]{64}$`. Checked before any `security` process is started, since
+/// the key is interpolated into the `security -i` command language.
+fn valid_captured_key(key: &str) -> bool {
+    key.len() == 64 && key.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// `^[A-Za-z0-9+/=]+$`: standard base64, which has no separator, quote or
+/// newline that could end the `-w` argument inside the `security -i` line.
+fn valid_keychain_value(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+}
+
+/// One `/usr/bin/security` invocation. Only the builders below create one for
+/// a captured item, and each validates its inputs first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SecurityCall {
+    argv: Vec<String>,
+    stdin: Option<Vec<u8>>,
+}
+
+fn security_argv(args: &[&str]) -> Vec<String> {
+    args.iter().map(|arg| arg.to_string()).collect()
+}
+
+/// `security -i` with the add command on stdin: the value never reaches argv,
+/// where any same-user process could read it from the process table.
+fn write_item_call(key: &str, value: &str) -> Option<SecurityCall> {
+    if !valid_captured_key(key) || !valid_keychain_value(value) {
+        return None;
+    }
+    Some(SecurityCall {
+        argv: security_argv(&["-i"]),
+        stdin: Some(
+            format!("add-generic-password -U -s {CAPTURED_SERVICE} -a {key} -w {value}\n")
+                .into_bytes(),
+        ),
+    })
+}
+
+fn read_item_call(key: &str) -> Option<SecurityCall> {
+    valid_captured_key(key).then(|| SecurityCall {
+        argv: security_argv(&[
+            "find-generic-password",
+            "-s",
+            CAPTURED_SERVICE,
+            "-a",
+            key,
+            "-w",
+        ]),
+        stdin: None,
+    })
+}
+
+fn delete_item_call(key: &str) -> Option<SecurityCall> {
+    valid_captured_key(key).then(|| SecurityCall {
+        argv: security_argv(&["delete-generic-password", "-s", CAPTURED_SERVICE, "-a", key]),
+        stdin: None,
+    })
+}
+
+// ── stored credential and agy's login ──
+
+/// The value of a captured item, base64 JSON. The client is pinned at
+/// capture so a poll never rescans application binaries.
+#[derive(Clone, PartialEq, Eq)]
+struct StoredCredential {
+    refresh_token: String,
+    client: OAuthClient,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct OAuthClient {
+    id: String,
+    secret: String,
+}
+
+fn encode_stored(credential: &StoredCredential) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(
+        json!({
+            "refresh_token": credential.refresh_token,
+            "client_id": credential.client.id,
+            "client_secret": credential.client.secret,
+        })
+        .to_string(),
+    )
+}
+
+fn non_empty_str<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
+fn decode_stored(stdout: &[u8]) -> Option<StoredCredential> {
+    use base64::Engine as _;
+    let text = std::str::from_utf8(stdout).ok()?.trim();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    Some(StoredCredential {
+        refresh_token: non_empty_str(&value, "refresh_token")?.to_string(),
+        client: OAuthClient {
+            id: non_empty_str(&value, "client_id")?.to_string(),
+            secret: non_empty_str(&value, "client_secret")?.to_string(),
+        },
+    })
+}
+
+/// The claims of a JWT, decoded without verification. Callers use them only
+/// as a label, a client selector, or a value compared with another JWT's.
+fn jwt_claims(token: &str) -> Option<Value> {
+    use base64::Engine as _;
+    let payload = token.split('.').nth(1)?.trim_end_matches('=');
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+struct AgyLogin {
+    refresh_token: String,
+    sub: String,
+    aud: String,
+    email: Option<String>,
+}
+
+/// agy's go-keyring item: `go-keyring-base64:` + base64 JSON
+/// `{token:{refresh_token,…}, id_token, …}`.
+fn parse_agy_login(stdout: &[u8]) -> Result<AgyLogin, CaptureError> {
+    use base64::Engine as _;
+    let text = std::str::from_utf8(stdout)
+        .map_err(|_| CaptureError::AgyLoginUnreadable)?
+        .trim();
+    let encoded = text
+        .strip_prefix("go-keyring-base64:")
+        .ok_or(CaptureError::AgyLoginUnreadable)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| CaptureError::AgyLoginUnreadable)?;
+    let login: Value =
+        serde_json::from_slice(&bytes).map_err(|_| CaptureError::AgyLoginUnreadable)?;
+    let refresh_token = login
+        .get("token")
+        .and_then(|token| non_empty_str(token, "refresh_token"))
+        .ok_or(CaptureError::AgyLoginUnreadable)?
+        .to_string();
+    let claims = non_empty_str(&login, "id_token")
+        .and_then(jwt_claims)
+        .ok_or(CaptureError::AgyLoginMissingIdentity)?;
+    let sub = non_empty_str(&claims, "sub").ok_or(CaptureError::AgyLoginMissingIdentity)?;
+    let aud = non_empty_str(&claims, "aud").ok_or(CaptureError::AgyLoginMissingIdentity)?;
+    Ok(AgyLogin {
+        refresh_token,
+        sub: sub.to_string(),
+        aud: aud.to_string(),
+        email: non_empty_str(&claims, "email").map(str::to_string),
+    })
+}
+
+/// Every client with id `client_id` found in the artifacts, one per secret of
+/// each artifact that contains that id. The id is the token's own `aud`, not
+/// `preferred_client`'s positional pick: S1 measured agy's issuing client
+/// differing from that pick, and a refresh token only refreshes with the
+/// client that issued it.
+fn clients_for_aud<I>(client_id: &str, artifacts: I) -> Vec<OAuthClient>
+where
+    I: IntoIterator<Item = Vec<u8>>,
+{
+    let mut clients: Vec<OAuthClient> = Vec::new();
+    for data in artifacts {
+        if !scan_client_ids(&data).iter().any(|id| id == client_id) {
+            continue;
+        }
+        for secret in scan_client_secrets(&data) {
+            let client = OAuthClient {
+                id: client_id.to_string(),
+                secret,
+            };
+            if !clients.contains(&client) {
+                clients.push(client);
+            }
+        }
+    }
+    clients
+}
+
+// ── token endpoint ──
+
+enum TokenRejection {
+    /// `invalid_client` / `unauthorized_client`: this secret is not the
+    /// issuing client's; capture tries the next candidate.
+    WrongClient,
+    Other,
+}
+
+/// Only the OAuth `error` code is read from a rejection; `error_description`
+/// is never looked at, so it cannot reach a card or the FFI.
+fn token_response(status: u16, body: &str) -> Result<Value, TokenRejection> {
+    let json: Option<Value> = serde_json::from_str(body).ok();
+    if (200..=299).contains(&status) {
+        return json
+            .filter(|json| non_empty_str(json, "access_token").is_some())
+            .ok_or(TokenRejection::Other);
+    }
+    match json.as_ref().and_then(|json| non_empty_str(json, "error")) {
+        Some("invalid_client" | "unauthorized_client") => Err(TokenRejection::WrongClient),
+        _ => Err(TokenRejection::Other),
+    }
+}
+
+// ── I/O seam ──
+
+/// What `security` returned: the exit code (None when killed by a signal)
+/// and stdout. stderr is never captured.
+pub(crate) struct SecurityExit {
+    code: Option<i32>,
+    stdout: Vec<u8>,
+}
+
+/// Everything the captured path does outside this process. Production is
+/// `SystemCapturedIo`; tests substitute every method, so no test starts a
+/// `security` process, touches the login keychain, scans an installed
+/// binary, or reaches the network.
+pub(crate) trait CapturedIo {
+    async fn security(
+        &self,
+        call: SecurityCall,
+        timeout: std::time::Duration,
+    ) -> Option<SecurityExit>;
+    /// The bytes of each Antigravity.app / agy artifact that may embed a
+    /// client. Capture only.
+    async fn client_artifacts(&self) -> Vec<Vec<u8>>;
+    /// POST a refresh-token grant; `Ok((status, body))` for any HTTP answer
+    /// except 429 / 5xx, which are transient failures like every other
+    /// transport failure.
+    async fn token_post(
+        &self,
+        client: &OAuthClient,
+        refresh_token: &str,
+        binding: Option<ProviderCacheBinding>,
+    ) -> Result<(u16, String), ProviderFetchFailure>;
+    fn scopes(
+        &self,
+        key: &str,
+    ) -> (
+        Result<AccountScope, AccountScopeError>,
+        Result<HistoryScope, AccountScopeError>,
+    );
+    async fn quota(
+        &self,
+        access_token: String,
+        account_scope: AccountScope,
+        history_scope: Result<HistoryScope, AccountScopeError>,
+        now: DateTime<Utc>,
+    ) -> Result<Fetched, ProviderFetchFailure>;
+}
+
+/// A captured account's scopes: `OpaqueId` = its key, under the provider
+/// "antigravity". The key differs per `sub`, and the primary's account scope
+/// is credential-derived and its history scope the per-installation constant,
+/// so neither can coincide with a captured account's.
+fn captured_scopes<Auth, History>(
+    key: &str,
+    resolve_authoritative: Auth,
+    resolve_history: History,
+) -> (
+    Result<AccountScope, AccountScopeError>,
+    Result<HistoryScope, AccountScopeError>,
+)
+where
+    Auth: FnOnce(&str, AuthoritativeIdKind, &str) -> Result<AccountScope, AccountScopeError>,
+    History: FnOnce(
+        &str,
+        Option<(AuthoritativeIdKind, &str)>,
+    ) -> Result<HistoryScope, AccountScopeError>,
+{
+    (
+        resolve_authoritative("antigravity", AuthoritativeIdKind::OpaqueId, key),
+        resolve_history("antigravity", Some((AuthoritativeIdKind::OpaqueId, key))),
+    )
+}
+
+/// Both the token and the Code Assist requests of a captured account go
+/// through this client. No redirects: the default policy would resend a POST
+/// body carrying the refresh token or the bearer to wherever a 307/308 points.
+fn captured_http_client() -> Result<reqwest::Client, ProviderFetchFailure> {
+    provider_http_client_builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| ProviderFetchFailure::terminal(CAPTURED_CLIENT_UNAVAILABLE))
+}
+
+pub(crate) struct SystemCapturedIo;
+
+impl CapturedIo for SystemCapturedIo {
+    async fn security(
+        &self,
+        call: SecurityCall,
+        timeout: std::time::Duration,
+    ) -> Option<SecurityExit> {
+        use tokio::io::AsyncWriteExt as _;
+        let mut command = tokio::process::Command::new(SECURITY_TOOL);
+        command
+            .args(&call.argv)
+            .stdin(if call.stdin.is_some() {
+                std::process::Stdio::piped()
+            } else {
+                std::process::Stdio::null()
+            })
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let run = async move {
+            let mut child = command.spawn().ok()?;
+            if let Some(input) = call.stdin {
+                let mut stdin = child.stdin.take()?;
+                stdin.write_all(&input).await.ok()?;
+                // Closing stdin is what ends `security -i`'s read loop.
+                drop(stdin);
+            }
+            let output = child.wait_with_output().await.ok()?;
+            Some(SecurityExit {
+                code: output.status.code(),
+                stdout: output.stdout,
+            })
+        };
+        // A timeout drops `run`, and `kill_on_drop` kills the child with it.
+        tokio::time::timeout(timeout, run).await.ok().flatten()
+    }
+
+    async fn client_artifacts(&self) -> Vec<Vec<u8>> {
+        let mut paths = client_artifact_candidates();
+        paths.extend(agy_cli_artifact_candidates(false).await);
+        paths
+            .into_iter()
+            .filter_map(|path| std::fs::read(path).ok())
+            .collect()
+    }
+
+    async fn token_post(
+        &self,
+        client: &OAuthClient,
+        refresh_token: &str,
+        binding: Option<ProviderCacheBinding>,
+    ) -> Result<(u16, String), ProviderFetchFailure> {
+        let http = captured_http_client()?;
+        let form = format!(
+            "client_id={}&client_secret={}&refresh_token={}&grant_type=refresh_token",
+            percent_encode(&client.id),
+            percent_encode(&client.secret),
+            percent_encode(refresh_token),
+        );
+        let response = http
+            .post(GOOGLE_TOKEN_URL)
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(form)
+            .send()
+            .await
+            .map_err(|error| {
+                ProviderFetchFailure::from_send_error(
+                    CAPTURED_REFRESH_RETRY,
+                    binding.clone(),
+                    &error,
+                )
+            })?;
+        let status = response.status().as_u16();
+        if status == 429 {
+            return Err(ProviderFetchFailure::transient(
+                CAPTURED_REFRESH_RETRY,
+                binding,
+                SafeTransportDiagnostic::rate_limited(status),
+            ));
+        }
+        if (500..=599).contains(&status) {
+            return Err(ProviderFetchFailure::transient(
+                CAPTURED_REFRESH_RETRY,
+                binding,
+                SafeTransportDiagnostic::server_error(status),
+            ));
+        }
+        let body = response.text().await.map_err(|error| {
+            ProviderFetchFailure::transient(
+                CAPTURED_REFRESH_RETRY,
+                binding,
+                SafeTransportDiagnostic::from_facts(TransportErrorFacts::from_reqwest(
+                    &error,
+                    TransportPhase::ResponseBody,
+                )),
+            )
+        })?;
+        Ok((status, body))
+    }
+
+    fn scopes(
+        &self,
+        key: &str,
+    ) -> (
+        Result<AccountScope, AccountScopeError>,
+        Result<HistoryScope, AccountScopeError>,
+    ) {
+        captured_scopes(
+            key,
+            agent_account_scope::resolve_authoritative,
+            agent_account_scope::resolve_history_scope,
+        )
+    }
+
+    /// loadCodeAssist, then fetchAvailableModels with retrieveUserQuota as the
+    /// fallback, with the same precedence as the primary remote route
+    /// (`fetch_with` with no local route).
+    async fn quota(
+        &self,
+        access_token: String,
+        account_scope: AccountScope,
+        history_scope: Result<HistoryScope, AccountScopeError>,
+        now: DateTime<Utc>,
+    ) -> Result<Fetched, ProviderFetchFailure> {
+        let cache_binding = ProviderCacheBinding::primary(account_scope.clone());
+        let client = captured_http_client()?;
+        let code_assist_body = code_assist_post(
+            &client,
+            "loadCodeAssist",
+            &json!({
+                "metadata": { "ideType": "ANTIGRAVITY", "platform": "PLATFORM_UNSPECIFIED", "pluginType": "GEMINI" }
+            }),
+            &access_token,
+            Some(cache_binding.clone()),
+            false,
+        )
+        .await
+        .map_err(|failure| match failure {
+            CodeAssistPostFailure::Forbidden => ProviderFetchFailure::terminal(
+                "Antigravity loadCodeAssist permission was denied.",
+            ),
+            CodeAssistPostFailure::Failure(failure) => failure,
+        })?;
+        let code_assist: Value = serde_json::from_str(&code_assist_body).map_err(|_| {
+            ProviderFetchFailure::terminal(
+                "Antigravity loadCodeAssist response could not be decoded.",
+            )
+        })?;
+        let context = RemoteContext {
+            client,
+            access_token,
+            project: project_id(&code_assist),
+            plan: resolve_remote_plan(&code_assist),
+            account_scope,
+            cache_binding: Some(cache_binding),
+        };
+        let secondary_history = history_scope.clone();
+        fetch_with(
+            || async { LocalAttempt::RouteMiss },
+            || async move {
+                match fetch_available_models(&context, now).await {
+                    PrimaryQuotaAttempt::Success(windows) => {
+                        PrimaryAttempt::Success(context.finish(windows, history_scope))
+                    }
+                    PrimaryQuotaAttempt::Forbidden => PrimaryAttempt::Forbidden(context),
+                    PrimaryQuotaAttempt::SchemaContradiction(failure) => {
+                        PrimaryAttempt::SchemaContradiction { context, failure }
+                    }
+                    PrimaryQuotaAttempt::Transient(failure) => {
+                        PrimaryAttempt::Transient { context, failure }
+                    }
+                    PrimaryQuotaAttempt::Terminal(failure) => PrimaryAttempt::FinalFailure(failure),
+                }
+            },
+            |context: RemoteContext| async move {
+                let windows = fetch_user_quota(&context, now).await?;
+                Ok(context.finish(windows, secondary_history))
+            },
+        )
+        .await
+    }
+}
+
+// ── access tokens ──
+
+pub(crate) struct CachedToken {
+    access_token: String,
+    expires_at: DateTime<Utc>,
+}
+
+/// Access tokens per key, in memory only. Never persisted.
+pub(crate) type CapturedTokenCache = std::sync::Mutex<HashMap<String, CachedToken>>;
+
+static CAPTURED_TOKENS: std::sync::LazyLock<CapturedTokenCache> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn lock_tokens(
+    cache: &CapturedTokenCache,
+) -> std::sync::MutexGuard<'_, HashMap<String, CachedToken>> {
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A cached access token while it has more than five minutes left; otherwise
+/// read the item and refresh once. The item is written only when Google
+/// returns a refresh token different from the stored one.
+///
+/// ponytail: no cross-process lock. Two Syrtis processes refreshing one
+/// captured account both succeed, because Google issues a new access token
+/// without rotating the refresh token (S1: U1 and U2 both unrotated). A lock is
+/// added only if rotation is ever observed, which is a stop condition.
+async fn captured_access_token<I: CapturedIo>(
+    io: &I,
+    cache: &CapturedTokenCache,
+    key: &str,
+    binding: &ProviderCacheBinding,
+    now: DateTime<Utc>,
+) -> Result<String, ProviderFetchFailure> {
+    if let Some(cached) = lock_tokens(cache).get(key).filter(|cached| {
+        cached.expires_at - chrono::Duration::seconds(CAPTURED_TOKEN_MARGIN_SECS) > now
+    }) {
+        return Ok(cached.access_token.clone());
+    }
+    let call = read_item_call(key)
+        .ok_or_else(|| ProviderFetchFailure::terminal(CAPTURED_ITEM_UNREADABLE))?;
+    let stored = match io.security(call, CAPTURED_ITEM_TIMEOUT).await {
+        Some(SecurityExit {
+            code: Some(0),
+            stdout,
+        }) => decode_stored(&stdout),
+        Some(SecurityExit {
+            code: Some(SECURITY_ITEM_NOT_FOUND),
+            ..
+        }) => return Err(ProviderFetchFailure::terminal(CAPTURED_ITEM_MISSING)),
+        _ => None,
+    }
+    .ok_or_else(|| ProviderFetchFailure::terminal(CAPTURED_ITEM_UNREADABLE))?;
+
+    let (status, body) = io
+        .token_post(&stored.client, &stored.refresh_token, Some(binding.clone()))
+        .await?;
+    let json = token_response(status, &body)
+        .map_err(|_| ProviderFetchFailure::terminal(CAPTURED_REFRESH_REJECTED))?;
+    let access_token = non_empty_str(&json, "access_token")
+        .ok_or_else(|| ProviderFetchFailure::terminal(CAPTURED_REFRESH_REJECTED))?
+        .to_string();
+    if let Some(expires_in) = json.get("expires_in").and_then(Value::as_i64) {
+        lock_tokens(cache).insert(
+            key.to_string(),
+            CachedToken {
+                access_token: access_token.clone(),
+                expires_at: now + chrono::Duration::seconds(expires_in),
+            },
+        );
+    }
+    if let Some(rotated) = non_empty_str(&json, "refresh_token") {
+        if rotated != stored.refresh_token {
+            let updated = StoredCredential {
+                refresh_token: rotated.to_string(),
+                client: stored.client.clone(),
+            };
+            // A failed write keeps the token that was just used; the next cold
+            // refresh then tries the old refresh token and reports rejection.
+            if let Some(call) = write_item_call(key, &encode_stored(&updated)) {
+                let _ = io.security(call, CAPTURED_ITEM_TIMEOUT).await;
+            }
+        }
+    }
+    Ok(access_token)
+}
+
+// ── capture, fetch, remove ──
+
+/// Fixed capture/remove outcomes. `code()` is the whole FFI error text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CaptureError {
+    AgyNotSignedIn,
+    AgyLoginUnreadable,
+    AgyLoginMissingIdentity,
+    OAuthClientNotFound,
+    OAuthClientRejected,
+    RefreshRejected,
+    RefreshUnreachable,
+    AccountMismatch,
+    InvalidCredentialFormat,
+    KeychainWriteFailed,
+    InvalidKey,
+    KeychainDeleteFailed,
+}
+
+impl CaptureError {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::AgyNotSignedIn => "agy_not_signed_in",
+            Self::AgyLoginUnreadable => "agy_login_unreadable",
+            Self::AgyLoginMissingIdentity => "agy_login_missing_identity",
+            Self::OAuthClientNotFound => "oauth_client_not_found",
+            Self::OAuthClientRejected => "oauth_client_rejected",
+            Self::RefreshRejected => "refresh_rejected",
+            Self::RefreshUnreachable => "refresh_unreachable",
+            Self::AccountMismatch => "account_mismatch",
+            Self::InvalidCredentialFormat => "invalid_credential_format",
+            Self::KeychainWriteFailed => "keychain_write_failed",
+            Self::InvalidKey => "invalid_key",
+            Self::KeychainDeleteFailed => "keychain_delete_failed",
+        }
+    }
+}
+
+/// Copy agy's current login into a Syrtis-owned item and return its key and
+/// label. Nothing is written unless the token refreshed with its own issuing
+/// client and any `id_token` in that response names the same `sub`.
+async fn capture_with<I: CapturedIo>(io: &I) -> Result<CapturedAccount, CaptureError> {
+    let agy_item = io
+        .security(
+            SecurityCall {
+                argv: security_argv(AGY_ITEM_READ),
+                stdin: None,
+            },
+            AGY_ITEM_READ_TIMEOUT,
+        )
+        .await
+        .filter(|exit| exit.code == Some(0))
+        .ok_or(CaptureError::AgyNotSignedIn)?;
+    let login = parse_agy_login(&agy_item.stdout)?;
+    drop(agy_item);
+
+    let clients = clients_for_aud(&login.aud, io.client_artifacts().await);
+    if clients.is_empty() {
+        return Err(CaptureError::OAuthClientNotFound);
+    }
+    let mut accepted = None;
+    for client in clients {
+        let (status, body) = io
+            .token_post(&client, &login.refresh_token, None)
+            .await
+            .map_err(|_| CaptureError::RefreshUnreachable)?;
+        match token_response(status, &body) {
+            Ok(json) => {
+                accepted = Some((client, json));
+                break;
+            }
+            Err(TokenRejection::WrongClient) => continue,
+            Err(TokenRejection::Other) => return Err(CaptureError::RefreshRejected),
+        }
+    }
+    let (client, json) = accepted.ok_or(CaptureError::OAuthClientRejected)?;
+
+    // The stored id_token is local and untrusted; Google's answer is not.
+    if let Some(id_token) = json.get("id_token") {
+        let sub = id_token
+            .as_str()
+            .and_then(jwt_claims)
+            .and_then(|claims| non_empty_str(&claims, "sub").map(str::to_string));
+        if sub.as_deref() != Some(login.sub.as_str()) {
+            return Err(CaptureError::AccountMismatch);
+        }
+    }
+
+    let credential = StoredCredential {
+        refresh_token: non_empty_str(&json, "refresh_token")
+            .unwrap_or(&login.refresh_token)
+            .to_string(),
+        client,
+    };
+    let key = captured_key(&login.sub);
+    let call = write_item_call(&key, &encode_stored(&credential))
+        .ok_or(CaptureError::InvalidCredentialFormat)?;
+    match io.security(call, CAPTURED_ITEM_TIMEOUT).await {
+        Some(SecurityExit { code: Some(0), .. }) => {}
+        _ => return Err(CaptureError::KeychainWriteFailed),
+    }
+    Ok(CapturedAccount {
+        key,
+        label: login
+            .email
+            .unwrap_or_else(|| CAPTURED_FALLBACK_LABEL.to_string()),
+    })
+}
+
+/// Delete one captured item and its cached access token. Never revokes: the
+/// refresh token stays valid at Google until the user revokes it there.
+async fn remove_with<I: CapturedIo>(
+    io: &I,
+    cache: &CapturedTokenCache,
+    key: &str,
+) -> Result<(), CaptureError> {
+    let call = delete_item_call(key).ok_or(CaptureError::InvalidKey)?;
+    lock_tokens(cache).remove(key);
+    match io.security(call, CAPTURED_ITEM_TIMEOUT).await {
+        Some(SecurityExit {
+            code: Some(0 | SECURITY_ITEM_NOT_FOUND),
+            ..
+        }) => Ok(()),
+        _ => Err(CaptureError::KeychainDeleteFailed),
+    }
+}
+
+/// One captured account's quota. Every failure is a per-account
+/// `ProviderFetchFailure`; none is provider-wide.
+pub(crate) async fn fetch_captured_with<I: CapturedIo>(
+    io: &I,
+    cache: &CapturedTokenCache,
+    key: &str,
+    label: &str,
+    now: DateTime<Utc>,
+) -> Result<Fetched, ProviderFetchFailure> {
+    if !valid_captured_key(key) {
+        return Err(ProviderFetchFailure::terminal(CAPTURED_ITEM_UNREADABLE));
+    }
+    let (account_scope, history_scope) = io.scopes(key);
+    let account_scope =
+        account_scope.map_err(|_| ProviderFetchFailure::terminal(CAPTURED_IDENTITY_UNVERIFIED))?;
+    let binding = ProviderCacheBinding::primary(account_scope.clone());
+    let access_token = captured_access_token(io, cache, key, &binding, now).await?;
+    let mut fetched = match io
+        .quota(access_token, account_scope, history_scope, now)
+        .await
+    {
+        Ok(fetched) => fetched,
+        Err(failure) => {
+            // A rejected token is not reused for the rest of its lifetime.
+            if matches!(failure, ProviderFetchFailure::Terminal { .. }) {
+                lock_tokens(cache).remove(key);
+            }
+            return Err(failure);
+        }
+    };
+    fetched.identity = Some(AgentIdentity {
+        email: Some(label.to_string()),
+        plan: fetched.identity.and_then(|identity| identity.plan),
+    });
+    Ok(fetched)
+}
+
+pub(crate) async fn capture() -> Result<CapturedAccount, CaptureError> {
+    capture_with(&SystemCapturedIo).await
+}
+
+pub(crate) async fn remove(key: &str) -> Result<(), CaptureError> {
+    remove_with(&SystemCapturedIo, &CAPTURED_TOKENS, key).await
+}
+
+pub(crate) async fn fetch_captured(
+    key: &str,
+    label: &str,
+    now: DateTime<Utc>,
+) -> Result<Fetched, ProviderFetchFailure> {
+    fetch_captured_with(&SystemCapturedIo, &CAPTURED_TOKENS, key, label, now).await
 }
 
 #[cfg(test)]
@@ -3906,5 +4811,888 @@ mod tests {
                 now,
             )],
         }
+    }
+}
+
+/// Fakes for every captured-account boundary: `security`, the artifacts, the
+/// token endpoint, the scope store and the quota calls. Shared with
+/// `agent_usage`'s tests, which compose captured accounts into cards.
+#[cfg(test)]
+pub(crate) mod captured_test_support {
+    use super::*;
+    use crate::agent_account_scope::test_support::TestRefreshScope;
+    use base64::Engine as _;
+    use std::cell::{Cell, RefCell};
+
+    pub(crate) const AUD: &str = "111111111111-agy.apps.googleusercontent.com";
+    pub(crate) const OTHER: &str = "222222222222-other.apps.googleusercontent.com";
+
+    pub(crate) fn secret(fill: char) -> String {
+        format!("GOCSPX-{}", fill.to_string().repeat(28))
+    }
+
+    pub(crate) fn jwt(claims: Value) -> String {
+        format!(
+            "e30.{}.sig",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
+        )
+    }
+
+    pub(crate) fn agy_item(refresh_token: &str, claims: Option<Value>) -> Vec<u8> {
+        let mut login = json!({
+            "token": {
+                "access_token": "ya29.stored",
+                "token_type": "Bearer",
+                "refresh_token": refresh_token,
+                "expiry": "2026-10-02T00:00:00Z",
+            },
+            "auth_method": "oauth",
+        });
+        if let Some(claims) = claims {
+            login["id_token"] = Value::String(jwt(claims));
+        }
+        format!(
+            "go-keyring-base64:{}\n",
+            base64::engine::general_purpose::STANDARD.encode(login.to_string())
+        )
+        .into_bytes()
+    }
+
+    pub(crate) fn stored_value(
+        refresh_token: &str,
+        client_id: &str,
+        client_secret: &str,
+    ) -> String {
+        encode_stored(&StoredCredential {
+            refresh_token: refresh_token.to_string(),
+            client: OAuthClient {
+                id: client_id.to_string(),
+                secret: client_secret.to_string(),
+            },
+        })
+    }
+
+    /// `(refresh_token, client_id, client_secret)` of a stored value.
+    pub(crate) fn decode_value(value: &str) -> (String, String, String) {
+        let stored = decode_stored(value.as_bytes()).expect("a decodable stored value");
+        (stored.refresh_token, stored.client.id, stored.client.secret)
+    }
+
+    pub(crate) fn token_ok(access_token: &str, extra: Value) -> (u16, String) {
+        let mut body =
+            json!({ "access_token": access_token, "expires_in": 3599, "token_type": "Bearer" });
+        if let (Some(body), Some(extra)) = (body.as_object_mut(), extra.as_object()) {
+            body.extend(extra.clone());
+        }
+        (200, body.to_string())
+    }
+
+    type TokenFn = Box<dyn Fn(&OAuthClient, &str) -> Result<(u16, String), ProviderFetchFailure>>;
+
+    pub(crate) struct FakeIo {
+        pub agy_item: Option<Vec<u8>>,
+        pub artifacts: Vec<Vec<u8>>,
+        /// The fake keychain: account (key) → value.
+        pub items: RefCell<BTreeMap<String, String>>,
+        pub write_status: i32,
+        pub token: TokenFn,
+        pub security_calls: RefCell<Vec<SecurityCall>>,
+        /// `(client_id, client_secret, refresh_token)` per token request.
+        pub token_calls: RefCell<Vec<(String, String, String)>>,
+        pub artifact_calls: Cell<usize>,
+        pub quota_calls: Cell<usize>,
+        pub scope: TestRefreshScope,
+    }
+
+    impl FakeIo {
+        pub(crate) fn new(tag: &str) -> Self {
+            Self {
+                agy_item: None,
+                artifacts: Vec::new(),
+                items: RefCell::new(BTreeMap::new()),
+                write_status: 0,
+                token: Box::new(|_, _| Ok(token_ok("ya29.fresh", json!({})))),
+                security_calls: RefCell::new(Vec::new()),
+                token_calls: RefCell::new(Vec::new()),
+                artifact_calls: Cell::new(0),
+                quota_calls: Cell::new(0),
+                scope: TestRefreshScope::new("antigravity", tag),
+            }
+        }
+
+        pub(crate) fn writes(&self) -> Vec<SecurityCall> {
+            self.security_calls
+                .borrow()
+                .iter()
+                .filter(|call| call.argv == ["-i"])
+                .cloned()
+                .collect()
+        }
+
+        pub(crate) fn reads_of_captured_items(&self) -> usize {
+            self.security_calls
+                .borrow()
+                .iter()
+                .filter(|call| {
+                    call.argv.first().map(String::as_str) == Some("find-generic-password")
+                        && call.argv.get(2).map(String::as_str) == Some(CAPTURED_SERVICE)
+                })
+                .count()
+        }
+
+        pub(crate) fn network_calls(&self) -> usize {
+            self.token_calls.borrow().len() + self.quota_calls.get()
+        }
+    }
+
+    impl Drop for FakeIo {
+        fn drop(&mut self) {
+            self.scope.cleanup();
+        }
+    }
+
+    fn exit(code: i32, stdout: Vec<u8>) -> Option<SecurityExit> {
+        Some(SecurityExit {
+            code: Some(code),
+            stdout,
+        })
+    }
+
+    impl CapturedIo for FakeIo {
+        async fn security(
+            &self,
+            call: SecurityCall,
+            _timeout: std::time::Duration,
+        ) -> Option<SecurityExit> {
+            self.security_calls.borrow_mut().push(call.clone());
+            let argv: Vec<&str> = call.argv.iter().map(String::as_str).collect();
+            match argv.as_slice() {
+                ["-i"] => {
+                    let line = String::from_utf8(call.stdin.expect("stdin")).unwrap();
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    assert_eq!(
+                        parts[..5],
+                        ["add-generic-password", "-U", "-s", CAPTURED_SERVICE, "-a"]
+                    );
+                    assert_eq!(parts[6], "-w");
+                    assert_eq!(parts.len(), 8);
+                    if self.write_status == 0 {
+                        self.items
+                            .borrow_mut()
+                            .insert(parts[5].to_string(), parts[7].to_string());
+                    }
+                    exit(self.write_status, Vec::new())
+                }
+                ["find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"] => {
+                    match &self.agy_item {
+                        Some(item) => exit(0, item.clone()),
+                        None => exit(SECURITY_ITEM_NOT_FOUND, Vec::new()),
+                    }
+                }
+                ["find-generic-password", "-s", service, "-a", key, "-w"]
+                    if *service == CAPTURED_SERVICE =>
+                {
+                    match self.items.borrow().get(*key) {
+                        Some(value) => exit(0, format!("{value}\n").into_bytes()),
+                        None => exit(SECURITY_ITEM_NOT_FOUND, Vec::new()),
+                    }
+                }
+                ["delete-generic-password", "-s", service, "-a", key]
+                    if *service == CAPTURED_SERVICE =>
+                {
+                    match self.items.borrow_mut().remove(*key) {
+                        Some(_) => exit(0, Vec::new()),
+                        None => exit(SECURITY_ITEM_NOT_FOUND, Vec::new()),
+                    }
+                }
+                other => panic!("unexpected security call {other:?}"),
+            }
+        }
+
+        async fn client_artifacts(&self) -> Vec<Vec<u8>> {
+            self.artifact_calls.set(self.artifact_calls.get() + 1);
+            self.artifacts.clone()
+        }
+
+        async fn token_post(
+            &self,
+            client: &OAuthClient,
+            refresh_token: &str,
+            _binding: Option<ProviderCacheBinding>,
+        ) -> Result<(u16, String), ProviderFetchFailure> {
+            self.token_calls.borrow_mut().push((
+                client.id.clone(),
+                client.secret.clone(),
+                refresh_token.to_string(),
+            ));
+            (self.token)(client, refresh_token)
+        }
+
+        fn scopes(
+            &self,
+            key: &str,
+        ) -> (
+            Result<AccountScope, AccountScopeError>,
+            Result<HistoryScope, AccountScopeError>,
+        ) {
+            captured_scopes(
+                key,
+                |provider, kind, id| self.scope.resolve_authoritative(provider, kind, id),
+                |provider, authoritative| self.scope.resolve_history(provider, authoritative),
+            )
+        }
+
+        async fn quota(
+            &self,
+            _access_token: String,
+            account_scope: AccountScope,
+            history_scope: Result<HistoryScope, AccountScopeError>,
+            now: DateTime<Utc>,
+        ) -> Result<Fetched, ProviderFetchFailure> {
+            self.quota_calls.set(self.quota_calls.get() + 1);
+            let window = quota_window(
+                "Gemini".to_string(),
+                0.5,
+                Some(now + chrono::Duration::hours(1)),
+                now,
+                "agy.test.v1".to_string(),
+                Some("agy.test.v1".to_string()),
+            )
+            .expect("a valid window");
+            Ok(Fetched {
+                source: "oauth".to_string(),
+                identity: Some(remote_identity(Some("Paid".to_string()))),
+                account_scope: Ok(account_scope.clone()),
+                history_scope,
+                cache_binding: Some(ProviderCacheBinding::primary(account_scope)),
+                windows: vec![window],
+            })
+        }
+    }
+
+    pub(crate) fn new_token_cache() -> CapturedTokenCache {
+        std::sync::Mutex::new(HashMap::new())
+    }
+
+    pub(crate) fn cached_keys(cache: &CapturedTokenCache) -> Vec<String> {
+        lock_tokens(cache).keys().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod captured_account_tests {
+    use super::captured_test_support::*;
+    use super::*;
+
+    fn claims(sub: &str, aud: &str, email: &str) -> Value {
+        json!({ "sub": sub, "aud": aud, "email": email })
+    }
+
+    fn now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-10-02T06:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    /// One artifact naming the token's client and another, with ONE secret:
+    /// `preferred_client` pairs that secret with the LAST id (OTHER), so a
+    /// positional pick would refresh with the wrong client.
+    fn artifacts_where_positional_pick_differs() -> Vec<Vec<u8>> {
+        vec![
+            format!("ide\0{AUD}\0{OTHER}\0{}\0", secret('a')).into_bytes(),
+            format!("agy\0{OTHER}\0{}\0", secret('b')).into_bytes(),
+        ]
+    }
+
+    #[test]
+    fn parses_go_keyring_agy_login() {
+        let login = parse_agy_login(&agy_item(
+            "1//rt-a",
+            Some(claims("sub-a", AUD, "a@example.com")),
+        ))
+        .unwrap_or_else(|_| panic!("parse"));
+        assert_eq!(login.refresh_token, "1//rt-a");
+        assert_eq!(login.sub, "sub-a");
+        assert_eq!(login.aud, AUD);
+        assert_eq!(login.email.as_deref(), Some("a@example.com"));
+
+        assert_eq!(
+            parse_agy_login(b"{\"token\":{}}").err(),
+            Some(CaptureError::AgyLoginUnreadable),
+            "without the go-keyring prefix"
+        );
+        assert_eq!(
+            parse_agy_login(&agy_item("", Some(claims("s", AUD, "e")))).err(),
+            Some(CaptureError::AgyLoginUnreadable),
+            "without a refresh token"
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_without_sub_or_aud_fails_without_write() {
+        for claims in [
+            Some(json!({ "aud": AUD, "email": "a@example.com" })),
+            Some(json!({ "sub": "sub-a", "email": "a@example.com" })),
+            None,
+        ] {
+            let mut io = FakeIo::new("capture-missing-identity");
+            io.agy_item = Some(agy_item("1//rt-a", claims));
+            io.artifacts = artifacts_where_positional_pick_differs();
+            assert_eq!(
+                capture_with(&io).await.err(),
+                Some(CaptureError::AgyLoginMissingIdentity)
+            );
+            assert_eq!(
+                io.security_calls.borrow().len(),
+                1,
+                "only agy's item was read"
+            );
+            assert!(io.writes().is_empty());
+            assert!(io.items.borrow().is_empty());
+            assert_eq!(io.network_calls(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_refreshes_with_the_client_named_by_aud() {
+        let ids = scan_client_ids(&artifacts_where_positional_pick_differs()[0]);
+        let secrets = scan_client_secrets(&artifacts_where_positional_pick_differs()[0]);
+        assert_eq!(
+            preferred_client(&ids, &secrets)
+                .map(|client| client.0)
+                .as_deref(),
+            Some(OTHER),
+            "the fixture must make the positional pick differ from aud"
+        );
+
+        let mut io = FakeIo::new("capture-by-aud");
+        io.agy_item = Some(agy_item(
+            "1//rt-a",
+            Some(claims("sub-a", AUD, "a@example.com")),
+        ));
+        io.artifacts = artifacts_where_positional_pick_differs();
+        let issuing = secret('a');
+        io.token = Box::new(move |client, _| {
+            if client.id == AUD && client.secret == issuing {
+                Ok(token_ok(
+                    "ya29.a",
+                    json!({ "id_token": jwt(json!({ "sub": "sub-a" })) }),
+                ))
+            } else {
+                Ok((401, r#"{"error":"invalid_client"}"#.to_string()))
+            }
+        });
+        let account = capture_with(&io).await.unwrap();
+        assert_eq!(account.key, captured_key("sub-a"));
+        assert_eq!(account.label, "a@example.com");
+        assert_eq!(
+            *io.token_calls.borrow(),
+            vec![(AUD.to_string(), secret('a'), "1//rt-a".to_string())]
+        );
+        let items = io.items.borrow();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            decode_value(&items[&account.key]),
+            ("1//rt-a".to_string(), AUD.to_string(), secret('a'))
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_tries_the_next_secret_only_for_a_wrong_client() {
+        let artifact = format!("ide\0{AUD}\0{}\0{}\0", secret('a'), secret('b')).into_bytes();
+
+        let mut io = FakeIo::new("capture-fallthrough");
+        io.agy_item = Some(agy_item(
+            "1//rt-a",
+            Some(claims("sub-a", AUD, "a@example.com")),
+        ));
+        io.artifacts = vec![artifact.clone()];
+        let second = secret('b');
+        io.token = Box::new(move |client, _| {
+            if client.secret == second {
+                Ok(token_ok("ya29.a", json!({})))
+            } else {
+                Ok((401, r#"{"error":"unauthorized_client"}"#.to_string()))
+            }
+        });
+        let account = capture_with(&io).await.unwrap();
+        assert_eq!(io.token_calls.borrow().len(), 2);
+        assert_eq!(
+            decode_value(&io.items.borrow()[&account.key]).2,
+            secret('b')
+        );
+
+        let mut io = FakeIo::new("capture-stops");
+        io.agy_item = Some(agy_item(
+            "1//rt-a",
+            Some(claims("sub-a", AUD, "a@example.com")),
+        ));
+        io.artifacts = vec![artifact];
+        io.token = Box::new(|_, _| Ok((400, r#"{"error":"invalid_grant"}"#.to_string())));
+        assert_eq!(
+            capture_with(&io).await.err(),
+            Some(CaptureError::RefreshRejected)
+        );
+        assert_eq!(io.token_calls.borrow().len(), 1, "any other error stops");
+        assert!(io.writes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn capture_rejects_a_refresh_for_another_account() {
+        for id_token in [
+            Value::String(jwt(json!({ "sub": "sub-b" }))),
+            Value::String("not-a-jwt".to_string()),
+            Value::Null,
+        ] {
+            let mut io = FakeIo::new("capture-mismatch");
+            io.agy_item = Some(agy_item(
+                "1//rt-a",
+                Some(claims("sub-a", AUD, "a@example.com")),
+            ));
+            io.artifacts = artifacts_where_positional_pick_differs();
+            let id_token = id_token.clone();
+            io.token = Box::new(move |_, _| {
+                Ok(token_ok("ya29.a", json!({ "id_token": id_token.clone() })))
+            });
+            assert_eq!(
+                capture_with(&io).await.err(),
+                Some(CaptureError::AccountMismatch)
+            );
+            assert!(io.writes().is_empty());
+        }
+    }
+
+    #[test]
+    fn keychain_write_keeps_the_secret_off_argv() {
+        let key = captured_key("sub-a");
+        let value = stored_value("1//rt-a", AUD, &secret('a'));
+        let call = write_item_call(&key, &value).unwrap();
+        assert_eq!(call.argv, vec!["-i".to_string()]);
+        assert!(call.argv.iter().all(|arg| !arg.contains(&value)));
+        let stdin = String::from_utf8(call.stdin.unwrap()).unwrap();
+        assert_eq!(
+            stdin,
+            format!("add-generic-password -U -s {CAPTURED_SERVICE} -a {key} -w {value}\n")
+        );
+        assert_eq!(stdin.matches('\n').count(), 1, "exactly one command line");
+    }
+
+    #[tokio::test]
+    async fn no_security_argv_carries_a_secret_during_capture() {
+        let mut io = FakeIo::new("capture-argv");
+        io.agy_item = Some(agy_item(
+            "1//rt-a",
+            Some(claims("sub-a", AUD, "a@example.com")),
+        ));
+        io.artifacts = artifacts_where_positional_pick_differs();
+        let account = capture_with(&io).await.unwrap();
+        let value = io.items.borrow()[&account.key].clone();
+        for call in io.security_calls.borrow().iter() {
+            for arg in &call.argv {
+                assert!(
+                    !arg.contains("1//rt-a") && !arg.contains(&value) && !arg.contains("GOCSPX-")
+                );
+                assert!(!arg.contains("sub-a"), "the raw sub never reaches argv");
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_key_or_value_builds_no_command() {
+        let key = captured_key("sub-a");
+        let value = stored_value("1//rt-a", AUD, &secret('a'));
+        let bad_keys = [
+            String::new(),
+            format!("{} ", &key[..63]),
+            format!("{}\"", &key[..63]),
+            format!("{}\n", &key[..63]),
+            key.to_uppercase(),
+            key[..63].to_string(),
+            format!("{key}0"),
+            format!("{} -w x", &key[..58]),
+        ];
+        for bad in &bad_keys {
+            assert!(write_item_call(bad, &value).is_none(), "{bad:?}");
+            assert!(read_item_call(bad).is_none(), "{bad:?}");
+            assert!(delete_item_call(bad).is_none(), "{bad:?}");
+        }
+        for bad in ["", "a b", "a\"b", "a\nb", "a'b", "a-b_c"] {
+            assert!(write_item_call(&key, bad).is_none(), "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_key_starts_no_process() {
+        let io = FakeIo::new("malformed-key");
+        let cache = new_token_cache();
+        for bad in ["a b", "a\"b", "a\nb", "ZZ"] {
+            assert_eq!(
+                remove_with(&io, &cache, bad).await.err(),
+                Some(CaptureError::InvalidKey)
+            );
+            assert!(fetch_captured_with(&io, &cache, bad, "label", now())
+                .await
+                .is_err());
+        }
+        assert!(io.security_calls.borrow().is_empty());
+        assert_eq!(io.network_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn polls_within_a_token_lifetime_refresh_once_and_never_write() {
+        let mut io = FakeIo::new("polls");
+        let key = captured_key("sub-a");
+        io.items
+            .borrow_mut()
+            .insert(key.clone(), stored_value("1//rt-a", AUD, &secret('a')));
+        // Google echoing the same refresh token is not a rotation.
+        io.token = Box::new(|_, _| Ok(token_ok("ya29.a", json!({ "refresh_token": "1//rt-a" }))));
+        let cache = new_token_cache();
+        for minutes in [0, 10, 20, 30, 40, 54] {
+            let fetched = fetch_captured_with(
+                &io,
+                &cache,
+                &key,
+                "a@example.com",
+                now() + chrono::Duration::minutes(minutes),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                fetched.identity.as_ref().and_then(|id| id.email.as_deref()),
+                Some("a@example.com")
+            );
+        }
+        assert_eq!(io.token_calls.borrow().len(), 1);
+        assert_eq!(io.reads_of_captured_items(), 1);
+        assert!(io.writes().is_empty());
+        assert_eq!(io.quota_calls.get(), 6);
+
+        // Inside the five-minute margin the token is refreshed again.
+        fetch_captured_with(
+            &io,
+            &cache,
+            &key,
+            "a",
+            now() + chrono::Duration::minutes(56),
+        )
+        .await
+        .unwrap();
+        assert_eq!(io.token_calls.borrow().len(), 2);
+        assert!(io.writes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_rotated_refresh_token_is_written_once_to_its_own_item() {
+        let mut io = FakeIo::new("rotation");
+        let key_a = captured_key("sub-a");
+        let key_b = captured_key("sub-b");
+        let stored_b = stored_value("1//rt-b", AUD, &secret('b'));
+        io.items
+            .borrow_mut()
+            .insert(key_a.clone(), stored_value("1//rt-a", AUD, &secret('a')));
+        io.items
+            .borrow_mut()
+            .insert(key_b.clone(), stored_b.clone());
+        io.token = Box::new(|_, refresh_token| {
+            if refresh_token == "1//rt-a" {
+                Ok(token_ok("ya29.a", json!({ "refresh_token": "1//rt-a2" })))
+            } else {
+                Ok(token_ok("ya29.other", json!({})))
+            }
+        });
+        let cache = new_token_cache();
+        fetch_captured_with(&io, &cache, &key_a, "a", now())
+            .await
+            .unwrap();
+        fetch_captured_with(&io, &cache, &key_b, "b", now())
+            .await
+            .unwrap();
+
+        let writes = io.writes();
+        assert_eq!(writes.len(), 1);
+        let line = String::from_utf8(writes[0].stdin.clone().unwrap()).unwrap();
+        assert!(line.contains(&format!(" -a {key_a} ")));
+        let items = io.items.borrow();
+        assert_eq!(
+            decode_value(&items[&key_a]),
+            ("1//rt-a2".to_string(), AUD.to_string(), secret('a'))
+        );
+        assert_eq!(
+            items[&key_b], stored_b,
+            "the other account's item is untouched"
+        );
+    }
+
+    #[test]
+    fn captured_accounts_get_their_own_scopes() {
+        let io = FakeIo::new("scopes");
+        let key_a = captured_key("sub-a");
+        let key_b = captured_key("sub-b");
+        assert_ne!(key_a, key_b);
+        assert!(valid_captured_key(&key_a) && !key_a.contains("sub"));
+
+        let (account_a, history_a) = io.scopes(&key_a);
+        let (account_b, history_b) = io.scopes(&key_b);
+        let (account_a, history_a) = (account_a.unwrap(), history_a.unwrap());
+        let (account_b, history_b) = (account_b.unwrap(), history_b.unwrap());
+        assert_ne!(account_a, account_b);
+        assert_ne!(history_a, history_b);
+
+        let primary_history = io.scope.resolve_history("antigravity", None).unwrap();
+        let primary_account = io
+            .scope
+            .resolve_current(
+                "google-oauth-creds",
+                "/x/.gemini/oauth_creds.json\0refresh_token",
+                b"1//rt-a",
+            )
+            .unwrap();
+        for history in [&history_a, &history_b] {
+            assert_ne!(*history, primary_history);
+        }
+        for account in [&account_a, &account_b] {
+            assert_ne!(*account, primary_account);
+        }
+
+        // Stable across polls: the same key resolves to the same scopes.
+        let (again_account, again_history) = io.scopes(&key_a);
+        assert_eq!(again_account.unwrap(), account_a);
+        assert_eq!(again_history.unwrap(), history_a);
+    }
+
+    #[tokio::test]
+    async fn remove_makes_no_network_call_and_clears_the_token_cache() {
+        let io = FakeIo::new("remove");
+        let key = captured_key("sub-a");
+        io.items
+            .borrow_mut()
+            .insert(key.clone(), stored_value("1//rt-a", AUD, &secret('a')));
+        let cache = new_token_cache();
+        fetch_captured_with(&io, &cache, &key, "a", now())
+            .await
+            .unwrap();
+        assert_eq!(cached_keys(&cache), vec![key.clone()]);
+        let network_before = io.network_calls();
+
+        remove_with(&io, &cache, &key).await.unwrap();
+        assert_eq!(
+            io.network_calls(),
+            network_before,
+            "remove makes no network call"
+        );
+        assert_eq!(io.artifact_calls.get(), 0);
+        assert!(io.items.borrow().is_empty());
+        assert!(cached_keys(&cache).is_empty());
+        // Already gone counts as removed.
+        remove_with(&io, &cache, &key).await.unwrap();
+
+        // A later poll no longer has a token for the removed account.
+        let failure = fetch_captured_with(&io, &cache, &key, "a", now())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            failure,
+            ProviderFetchFailure::Terminal { ref display } if display == CAPTURED_ITEM_MISSING
+        ));
+    }
+
+    /// Every capture failure is a fixed code: seeded with sentinel token, sub,
+    /// email and error_description values, none of them reaches the FFI JSON.
+    #[tokio::test]
+    async fn capture_failures_carry_no_secret_or_identity() {
+        const SENTINELS: [&str; 5] = [
+            "SENTINELTOKEN",
+            "SENTINELSUB",
+            "SENTINELMAIL",
+            "SENTINELDESC",
+            "SENTINELOTHERSUB",
+        ];
+        let login = || {
+            agy_item(
+                "1//SENTINELTOKEN",
+                Some(claims("SENTINELSUB", AUD, "SENTINELMAIL@example.com")),
+            )
+        };
+        let mut cases: Vec<FakeIo> = Vec::new();
+
+        cases.push(FakeIo::new("sentinel-absent"));
+        let mut io = FakeIo::new("sentinel-unreadable");
+        io.agy_item = Some(b"go-keyring-base64:SENTINELTOKEN!!".to_vec());
+        cases.push(io);
+        let mut io = FakeIo::new("sentinel-identity");
+        io.agy_item = Some(agy_item(
+            "1//SENTINELTOKEN",
+            Some(json!({ "sub": "SENTINELSUB", "email": "SENTINELMAIL@example.com" })),
+        ));
+        cases.push(io);
+        let mut io = FakeIo::new("sentinel-client");
+        io.agy_item = Some(login());
+        cases.push(io);
+        let mut io = FakeIo::new("sentinel-rejected");
+        io.agy_item = Some(login());
+        io.artifacts = artifacts_where_positional_pick_differs();
+        io.token = Box::new(|_, _| {
+            Ok((
+                400,
+                r#"{"error":"invalid_grant","error_description":"SENTINELDESC 1//SENTINELTOKEN"}"#
+                    .to_string(),
+            ))
+        });
+        cases.push(io);
+        let mut io = FakeIo::new("sentinel-wrong-client");
+        io.agy_item = Some(login());
+        io.artifacts = artifacts_where_positional_pick_differs();
+        io.token = Box::new(|_, _| {
+            Ok((
+                401,
+                r#"{"error":"invalid_client","error_description":"SENTINELDESC"}"#.to_string(),
+            ))
+        });
+        cases.push(io);
+        let mut io = FakeIo::new("sentinel-transient");
+        io.agy_item = Some(login());
+        io.artifacts = artifacts_where_positional_pick_differs();
+        io.token = Box::new(|_, _| {
+            Err(ProviderFetchFailure::transient(
+                "SENTINELDESC",
+                None,
+                SafeTransportDiagnostic::server_error(503),
+            ))
+        });
+        cases.push(io);
+        let mut io = FakeIo::new("sentinel-mismatch");
+        io.agy_item = Some(login());
+        io.artifacts = artifacts_where_positional_pick_differs();
+        io.token = Box::new(|_, _| {
+            Ok(token_ok(
+                "ya29.SENTINELTOKEN",
+                json!({ "id_token": jwt(json!({ "sub": "SENTINELOTHERSUB" })) }),
+            ))
+        });
+        cases.push(io);
+        let mut io = FakeIo::new("sentinel-write");
+        io.agy_item = Some(login());
+        io.artifacts = artifacts_where_positional_pick_differs();
+        io.write_status = 1;
+        cases.push(io);
+
+        let mut codes = Vec::new();
+        for io in &cases {
+            let error = capture_with(io).await.expect_err("every case fails");
+            let ffi = json!({ "ok": false, "err": error.code() }).to_string();
+            let debug = format!("{error:?}");
+            for sentinel in SENTINELS {
+                assert!(
+                    !ffi.contains(sentinel) && !debug.contains(sentinel),
+                    "{ffi}"
+                );
+            }
+            codes.push(error.code());
+        }
+        assert_eq!(
+            codes,
+            vec![
+                "agy_not_signed_in",
+                "agy_login_unreadable",
+                "agy_login_missing_identity",
+                "oauth_client_not_found",
+                "refresh_rejected",
+                "oauth_client_rejected",
+                "refresh_unreachable",
+                "account_mismatch",
+                "keychain_write_failed",
+            ]
+        );
+    }
+
+    #[test]
+    fn registry_accepts_only_hex_keys_and_reports_by_index() {
+        let _guard = CAPTURED_ACCOUNTS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key_a = captured_key("sub-a");
+        let key_b = captured_key("sub-b");
+        let raw = json!([
+            { "key": key_a, "label": "a@example.com" },
+            { "key": "sub-raw value", "label": "x" },
+            { "key": key_a, "label": "dup" },
+            { "label": "no key" },
+            "not an object",
+            { "key": key_b, "label": "b@example.com" },
+        ])
+        .to_string();
+        let result = set_captured_accounts_from_json(&raw).unwrap();
+        assert_eq!(result["registeredCount"], 2);
+        assert_eq!(
+            result["rejected"],
+            json!([
+                { "index": 1, "reason": "invalid key" },
+                { "index": 2, "reason": "duplicate key" },
+                { "index": 3, "reason": "invalid entry" },
+                { "index": 4, "reason": "invalid entry" },
+            ])
+        );
+        assert!(
+            !result.to_string().contains("sub-raw"),
+            "a rejected key is never echoed"
+        );
+        assert_eq!(
+            captured_accounts(),
+            vec![
+                CapturedAccount {
+                    key: key_a.clone(),
+                    label: "a@example.com".to_string()
+                },
+                CapturedAccount {
+                    key: key_b,
+                    label: "b@example.com".to_string()
+                },
+            ]
+        );
+
+        assert_eq!(
+            set_captured_accounts_from_json("{not json SENTINEL").unwrap_err(),
+            "invalid_accounts_json"
+        );
+        assert_eq!(
+            captured_accounts().len(),
+            2,
+            "malformed JSON changes nothing"
+        );
+        set_captured_accounts_from_json("[]").unwrap();
+        assert!(captured_accounts().is_empty());
+    }
+
+    /// The maintainer's real round trip (S2 merge gate). It touches the login
+    /// keychain and the network, so it never runs in CI:
+    /// `cargo test -p tb_core_ffi --lib real_capture_fetch_remove_round_trip -- --ignored --nocapture`
+    /// with Syrtis quit and agy signed into an account not captured in
+    /// production. Prints only the key prefix, the window count and pass/fail.
+    #[tokio::test]
+    #[ignore = "reads agy's login and writes the login keychain; run by the maintainer"]
+    async fn real_capture_fetch_remove_round_trip() {
+        let account = match capture().await {
+            Ok(account) => {
+                println!("capture: pass (key {})", &account.key[..8]);
+                account
+            }
+            Err(error) => panic!("capture: fail ({})", error.code()),
+        };
+        let fetched = fetch_captured(&account.key, &account.label, Utc::now()).await;
+        match &fetched {
+            Ok(fetched) => println!("fetch: pass ({} windows)", fetched.windows.len()),
+            Err(_) => println!("fetch: fail"),
+        }
+        let removed = remove(&account.key).await;
+        println!(
+            "remove: {}",
+            match removed {
+                Ok(()) => "pass",
+                Err(error) => error.code(),
+            }
+        );
+        assert!(fetched.is_ok_and(|fetched| !fetched.windows.is_empty()));
+        assert!(removed.is_ok());
     }
 }

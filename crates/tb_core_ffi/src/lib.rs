@@ -1163,6 +1163,76 @@ pub unsafe extern "C" fn tb_set_claude_config_dirs(json: *const c_char) -> *mut 
     })
 }
 
+/// Replace the process-wide registry of captured Antigravity accounts. `json`
+/// is `[{"key":"<64 lowercase hex>","label":"<display label>"}]`, full-replace
+/// semantics (`[]` clears it). Each entry is fetched as its own Antigravity
+/// card after the primary, with `accountKey` = `key`. Success data is
+/// `{"registeredCount":N,"rejected":[{"index":i,"reason":"..."}]}`; an entry is
+/// rejected when it is not an object with string `key` and `label`, when its
+/// key is not `^[0-9a-f]{64}$`, or when it repeats a key. Malformed JSON is the
+/// error `invalid_accounts_json` and leaves the registry unchanged. The
+/// registry holds no secret; the credentials live in the login keychain.
+///
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_set_antigravity_accounts(json: *const c_char) -> *mut c_char {
+    guarded("tb_set_antigravity_accounts", || {
+        envelope(unsafe { set_antigravity_accounts_from_c(json) })
+    })
+}
+
+/// Copy agy's current Google login into a Syrtis-owned login-keychain item
+/// (service `com.nyanako.tokenbar.antigravity-account`, account = key). Reads
+/// agy's item once through `/usr/bin/security` and never writes it; proves the
+/// token with one refresh at Google using the client named by its `aud`.
+/// Success data is `{"key":"<64 hex>","label":"<email or fallback>"}`. The
+/// error text is exactly one fixed code: `agy_not_signed_in`,
+/// `agy_login_unreadable`, `agy_login_missing_identity`,
+/// `oauth_client_not_found`, `oauth_client_rejected`, `refresh_rejected`,
+/// `refresh_unreachable`, `account_mismatch`, `invalid_credential_format`,
+/// `keychain_write_failed`. Blocking (keychain + network): call off the main
+/// thread. Does not register the account; the caller adds `{key,label}` to its
+/// list and calls `tb_set_antigravity_accounts`.
+#[no_mangle]
+pub extern "C" fn tb_antigravity_capture() -> *mut c_char {
+    guarded("tb_antigravity_capture", || {
+        envelope(
+            RUNTIME
+                .block_on(agent_antigravity::capture())
+                .map(|account| serde_json::json!({ "key": account.key, "label": account.label }))
+                .map_err(|error| error.code().to_string()),
+        )
+    })
+}
+
+/// Delete one captured account's keychain item and its in-memory access
+/// token. `key` must be `^[0-9a-f]{64}$`, otherwise `invalid_key` and no
+/// process is started. An item that is already gone counts as removed.
+/// Never revokes the token at Google. Success data is `{"removed":true}`;
+/// errors are `invalid_key` or `keychain_delete_failed`. Does not change the
+/// registry.
+///
+/// # Safety
+/// `key` must be NULL or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_antigravity_remove(key: *const c_char) -> *mut c_char {
+    guarded("tb_antigravity_remove", || {
+        let key = if key.is_null() {
+            None
+        } else {
+            unsafe { CStr::from_ptr(key) }.to_str().ok()
+        };
+        envelope(match key {
+            Some(key) => RUNTIME
+                .block_on(agent_antigravity::remove(key))
+                .map(|()| serde_json::json!({ "removed": true }))
+                .map_err(|error| error.code().to_string()),
+            None => Err(agent_antigravity::CaptureError::InvalidKey.code().to_string()),
+        })
+    })
+}
+
 /// Replace the process-wide registry of macOS Keychain consent (see the
 /// `keychain_consent` module doc). `json` is an object of
 /// `{"<public-client-id>": true|false}`, e.g. `{"grok-bot":true}`;
@@ -1206,6 +1276,20 @@ unsafe fn set_keychain_consent_from_c(json: *const c_char) -> Result<serde_json:
         .to_str()
         .map_err(|_| "Keychain consent payload is not valid UTF-8".to_string())?;
     keychain_consent::set_from_json(raw)
+}
+
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated UTF-8 string.
+unsafe fn set_antigravity_accounts_from_c(
+    json: *const c_char,
+) -> Result<serde_json::Value, String> {
+    if json.is_null() {
+        return Err("invalid_accounts_json".to_string());
+    }
+    let raw = unsafe { CStr::from_ptr(json) }
+        .to_str()
+        .map_err(|_| "invalid_accounts_json".to_string())?;
+    agent_antigravity::set_captured_accounts_from_json(raw)
 }
 
 /// # Safety
@@ -2715,6 +2799,33 @@ mod tests {
         let s = unsafe { take(p) };
         assert!(s.contains(r#""ok":false"#), "got: {s}");
         assert!(s.contains("tb_test panicked: boom"), "got: {s}");
+    }
+
+    #[test]
+    fn antigravity_account_exports_return_fixed_codes_and_validate_before_any_process() {
+        let _guard = agent_antigravity::CAPTURED_ACCOUNTS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = agent_antigravity::captured_key("sub-a");
+        let json =
+            CString::new(format!(r#"[{{"key":"{key}","label":"a@example.com"}}]"#)).unwrap();
+        let s = unsafe { take(tb_set_antigravity_accounts(json.as_ptr())) };
+        assert!(
+            s.contains(r#""ok":true"#) && s.contains(r#""registeredCount":1"#),
+            "got: {s}"
+        );
+        let s = unsafe { take(tb_set_antigravity_accounts(std::ptr::null())) };
+        assert_eq!(s, r#"{"err":"invalid_accounts_json","ok":false}"#);
+        let clear = CString::new("[]").unwrap();
+        unsafe { take(tb_set_antigravity_accounts(clear.as_ptr())) };
+        assert!(agent_antigravity::captured_accounts().is_empty());
+
+        // A NULL or malformed key is refused before `security` could start.
+        let s = unsafe { take(tb_antigravity_remove(std::ptr::null())) };
+        assert_eq!(s, r#"{"err":"invalid_key","ok":false}"#);
+        let bad = CString::new(format!("{} -w x", &key[..56])).unwrap();
+        let s = unsafe { take(tb_antigravity_remove(bad.as_ptr())) };
+        assert_eq!(s, r#"{"err":"invalid_key","ok":false}"#);
     }
 
     #[test]
