@@ -2305,6 +2305,9 @@ private struct DashboardSnapshot {
             // than during the sleep; carrying the epoch across is what stops
             // that change being dropped.
             let registryEpoch = ClaudeExtraRoots.RegistryChange.epoch
+            // A login change in agy must be seen before this fetch, or its
+            // payload is drawn as the previous account (see `prepareForFetch`).
+            await TrayAnimator.prepareAntigravityAutoCapture()
             let payload = try? await source.agentUsage()
             if Task.isCancelled { break }
             // Same guard the tray poll carries, for the same reason and in the

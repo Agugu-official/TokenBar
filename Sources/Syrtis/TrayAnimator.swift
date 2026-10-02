@@ -591,7 +591,7 @@ final class TrayAnimator {
                 // Not awaited: an attempt may wait on Google, and the quota
                 // fetch must not wait on it. A capture that lands mid-fetch
                 // wakes this loop through `RegistryChange` like any edit.
-                Self.pollAntigravityAutoCapture()
+                await Self.prepareAntigravityAutoCapture()
                 let payload = try? await source.agentUsage()
                 guard let self, !Task.isCancelled else { break }
                 // A payload built for the previous account set must not be
@@ -640,8 +640,22 @@ final class TrayAnimator {
         autoCapture: AntigravityAutoCapture? = nil
     ) -> Task<Void, Never>? {
         guard defaults.bool(forKey: AntigravityAutoCapture.enabledKey) else { return nil }
-        let autoCapture = autoCapture ?? .shared
-        return Task { await autoCapture.poll() }
+        return Task {
+            await prepareAntigravityAutoCapture(defaults: defaults, autoCapture: autoCapture)?.value
+        }
+    }
+
+    /// What both poll loops await before a quota fetch. Off: nothing reaches
+    /// the core. On: the marker is read and a changed login forgets the
+    /// current account before the fetch; the returned capture attempt runs on
+    /// its own.
+    @discardableResult
+    static func prepareAntigravityAutoCapture(
+        defaults: UserDefaults = .standard,
+        autoCapture: AntigravityAutoCapture? = nil
+    ) async -> Task<Void, Never>? {
+        guard defaults.bool(forKey: AntigravityAutoCapture.enabledKey) else { return nil }
+        return await (autoCapture ?? .shared).prepareForFetch()
     }
 
     /// The raw tokens/min value from the last load poll — exposed so the

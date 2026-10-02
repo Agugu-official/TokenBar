@@ -17843,6 +17843,29 @@ enum SelfTest {
                       fake.read { $0.attempts } == 1 && ac.currentAgyKey == nil)
             }
 
+            // A login change is seen BEFORE the fetch that follows it: the
+            // current account is forgotten while the capture is still running,
+            // so that fetch is never drawn as the previous account (observed
+            // on the test bundle before this check existed).
+            do {
+                let fake = AGAutoFake(key: agKey, label: agEmail)
+                let (ac, defaults) = fresh(fake)
+                defaults.set(true, forKey: AntigravityAutoCapture.enabledKey)
+                await TrayAnimator.pollAntigravityAutoCapture(defaults: defaults, autoCapture: ac)?.value
+                let wasCurrent = ac.currentAgyKey == agKey
+                let hold = DispatchSemaphore(value: 0)
+                fake.write { $0.hold = hold; $0.marker = "m-switched" }
+                let attempt = await TrayAnimator.prepareAntigravityAutoCapture(
+                    defaults: defaults, autoCapture: ac)
+                let clearedBeforeFetch = ac.currentAgyKey == nil
+                fake.write { $0.hold = nil }
+                hold.signal()
+                await attempt?.value
+                check("AG-5 a login change forgets the current account before the next fetch",
+                      wasCurrent && attempt != nil && clearedBeforeFetch
+                          && fake.read { $0.markerCalls } == 2)
+            }
+
             // The marker is recorded BEFORE the attempt: toggling off and on
             // while it is in flight still owes one new attempt afterwards, and
             // it runs when the held attempt ends, with no further poll.

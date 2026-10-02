@@ -165,8 +165,9 @@ extension AntigravityAccounts {
 /// Captures every Google account agy signs into, without a button press,
 /// while the Settings toggle `enabledKey` is on (off by default).
 ///
-/// Trigger: `TrayAnimator.pollAntigravityAutoCapture` calls `poll()` once per
-/// quota poll, and only when the toggle is on. `poll()` reads agy's login
+/// Trigger: before each quota fetch, both poll loops await
+/// `TrayAnimator.prepareAntigravityAutoCapture`, which runs `prepareForFetch()`
+/// only when the toggle is on. `poll()` reads agy's login
 /// marker (attributes only, no secret) and, when it differs from the last
 /// marker attempted, runs ONE automatic capture in the core. The marker is
 /// recorded before the attempt, so a failure is not retried until the marker
@@ -238,7 +239,7 @@ final class AntigravityAutoCapture: ObservableObject {
     /// One check, from a quota poll or right after the toggle turns on. The
     /// caller gates on the toggle; this only refuses to overlap and to run
     /// while paused.
-    func poll() async {
+    func poll(marker known: String? = nil) async {
         guard !paused else { return }
         // A poll refused because something is running (the toggle turned on
         // mid-attempt, say) is owed, and runs when that work ends.
@@ -248,10 +249,13 @@ final class AntigravityAutoCapture: ObservableObject {
         }
         // The marker check alone is not `busy`: Settings shows "Capturing…"
         // only for an actual capture, not every five minutes.
-        checking = true
         let io = io
-        let marker = try? await Self.detached({ try io.marker() })
-        checking = false
+        var marker = known
+        if marker == nil {
+            checking = true
+            marker = try? await Self.detached({ try io.marker() })
+            checking = false
+        }
         guard let marker else { return await pollIfOwed() }
         unavailable = marker == "present"
         guard marker != lastAttemptedMarker, !busy else { return await pollIfOwed() }
@@ -283,6 +287,25 @@ final class AntigravityAutoCapture: ObservableObject {
         }
         busy = false
         await pollIfOwed()
+    }
+
+    /// Before a quota fetch, awaited by both poll loops: read agy's login
+    /// marker (attributes only, milliseconds) and, when it differs from the
+    /// last attempt, forget the current account NOW. Without this the fetch
+    /// that follows a login change in agy is drawn as the previous account
+    /// until the next check, up to one tray cycle later: observed on the test
+    /// bundle, where the primary card showed account A's quota under B's email
+    /// and B's own card was hidden as its duplicate. The capture attempt is
+    /// returned, not awaited, so the fetch never waits on Google.
+    func prepareForFetch() async -> Task<Void, Never>? {
+        guard !paused, !checking else { return nil }
+        checking = true
+        let io = io
+        let marker = try? await Self.detached({ try io.marker() })
+        checking = false
+        guard let marker else { return nil }
+        if marker != lastAttemptedMarker { currentAgyKey = nil }
+        return Task { await self.poll(marker: marker) }
     }
 
     private func pollIfOwed() async {
