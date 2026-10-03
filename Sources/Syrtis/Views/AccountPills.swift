@@ -85,7 +85,8 @@ struct AccountPills: View {
                     accounts.compactMap { account in
                         AccountIdentity(clientId: clientId, accountKey: account).accountTooltip
                             .map { (account ?? "", $0) }
-                    }, uniquingKeysWith: { first, _ in first }))
+                    }, uniquingKeysWith: { first, _ in first }),
+                wraps: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }

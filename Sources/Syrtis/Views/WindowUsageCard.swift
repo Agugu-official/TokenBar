@@ -242,7 +242,8 @@ struct WindowUsageCard: View {
                             ? selection : cardId
                     },
                     set: { selection = $0 }),
-                options: candidates.map { (value: $0.cardId, label: Self.shortLabel($0.label)) })
+                options: candidates.map { (value: $0.cardId, label: Self.shortLabel($0.label)) },
+                wraps: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }

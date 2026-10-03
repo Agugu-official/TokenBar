@@ -343,15 +343,63 @@ struct SegmentedPicker<Value: Hashable>: View {
     let options: [(value: Value, label: String)]
     /// Optional per-option tooltip, keyed by option value.
     var help: [Value: String] = [:]
+    /// When the options do not fit on one line, wrap them onto further lines
+    /// instead of running past the card (Antigravity's four grouped windows,
+    /// maintainer 2026-10-03). A row that fits is drawn exactly as before.
+    var wraps = false
 
     @Environment(\.inGlassPanel) private var inGlassPanel
     @Environment(\.colorScheme) private var colorScheme
     @Namespace private var thumb
 
     var body: some View {
+        if wraps {
+            ViewThatFits(in: .horizontal) {
+                singleLine
+                wrapped
+            }
+        } else {
+            singleLine
+        }
+    }
+
+    @ViewBuilder
+    private var singleLine: some View {
         if inGlassPanel {
             panelBody
         } else {
+            plainBody
+        }
+    }
+
+    /// The same buttons in a wrapping row, on a rounded track (a capsule does
+    /// not hold more than one line).
+    private var wrapped: some View {
+        FlowLayout(hSpacing: 2, vSpacing: 2) {
+            buttons
+        }
+        .padding(2)
+        .background(Color.primary.opacity(inGlassPanel ? GlassPanelStyle.segmentTrack : 0.07),
+                    in: RoundedRectangle(cornerRadius: 8))
+        .panelSelectionSlide(selection)
+    }
+
+    private var buttons: some View {
+        ForEach(options, id: \.value) { option in
+            let on = selection == option.value
+            Button { selection = option.value } label: {
+                label(option.label, on: on)
+                    .background(
+                        on ? AnyShapeStyle(Color.primary.opacity(0.16)) : AnyShapeStyle(.clear),
+                        in: RoundedRectangle(cornerRadius: 6))
+                    .contentShape(RoundedRectangle(cornerRadius: 6))
+            }
+            .buttonStyle(.plain)
+            .help(help[option.value] ?? "")
+        }
+    }
+
+    private var plainBody: some View {
             HStack(spacing: 2) {
                 ForEach(options, id: \.value) { option in
                     let on = selection == option.value
@@ -369,7 +417,6 @@ struct SegmentedPicker<Value: Hashable>: View {
             }
             .padding(1)
             .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
-        }
     }
 
     /// Under the glass panel: the macOS 26 segmented shape — a capsule track
