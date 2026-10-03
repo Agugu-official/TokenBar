@@ -17976,6 +17976,23 @@ enum SelfTest {
                           && AntigravityAutoCapture(io: fake.io(), defaults: defaults).currentAgyKey == nil)
             }
 
+            // A sign-in lands while the manual capture runs: the captured key
+            // must not be bound to the next login's marker. Mutation: bind the
+            // marker read after the capture without comparing it.
+            do {
+                let fake = AGAutoFake(key: agKey, label: agEmail)
+                fake.write { $0.markerAfterCapture = "m2" }
+                let (ac, _) = fresh(fake)
+                await ac.manualCapture()
+                check("AG-5 a marker change during manual Capture binds nothing",
+                      ac.currentAgyKey == nil && fake.read { $0.captures } == 1)
+                let fake2 = AGAutoFake(key: agKey, label: agEmail)
+                let (ac2, _) = fresh(fake2)
+                await ac2.manualCapture()
+                check("AG-5 control: an unchanged marker during manual Capture binds the key",
+                      ac2.currentAgyKey == agKey && ac2.currentAgyMarker == "m1")
+            }
+
             // Pause → manual Capture with the same marker → pause cleared and
             // one new attempt.
             do {
@@ -18299,6 +18316,9 @@ private final class AGAutoFake: @unchecked Sendable {
     private let lock = NSLock()
     var marker = "m1"
     var markerCalls = 0
+    /// When set, the marker changes during `capture`, as if agy finished a
+    /// sign-in while the Capture button's work was running.
+    var markerAfterCapture: String?
     var attempts = 0
     var captures = 0
     var lastRemoved: [String] = []
@@ -18333,7 +18353,14 @@ private final class AGAutoFake: @unchecked Sendable {
                 hold?.wait()
                 return try outcome.get()
             },
-            capture: { try self.read { $0.captures += 1; return $0.captureOutcome }.get() },
+            capture: {
+                try self.read { fake in
+                    fake.captures += 1
+                    // A sign-in that lands while the capture runs.
+                    if let next = fake.markerAfterCapture { fake.marker = next }
+                    return fake.captureOutcome
+                }.get()
+            },
             remove: { key in self.write { $0.removedKeys.append(key) } },
             install: { _ in })
     }

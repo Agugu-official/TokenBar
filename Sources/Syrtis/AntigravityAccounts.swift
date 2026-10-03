@@ -173,11 +173,15 @@ extension AntigravityAccounts {
 /// recorded before the attempt, so a failure is not retried until the marker
 /// changes again, the toggle is turned on again, or the user presses Capture.
 ///
-/// `currentAgyKey` is the key of the account agy is signed into, as far as
-/// this process verified it. It drives `AntigravityDedup`. It is cleared the
-/// moment a new marker is seen (before the attempt), when the toggle turns
-/// off and on a pause, and set only by a `captured` / `unchanged` attempt or a
-/// successful manual Capture (which reads agy's current login) while on.
+/// `currentAgyKey` is the key of the account agy is signed into, bound to the
+/// login marker it was confirmed under. It drives `AntigravityDedup`, which
+/// also requires the primary card's marker to match, so a binding never
+/// labels a card fetched under another login. While automatic capture is on
+/// it is cleared the moment a new marker is seen (before the attempt) and on
+/// a pause, and set by a `captured` / `unchanged` attempt. A successful
+/// manual Capture sets it whether or not the toggle is on, when agy's marker
+/// did not change during the capture. Turning the toggle off keeps it; Remove
+/// of that account clears it. It is persisted (`currentKey`) across relaunch.
 ///
 /// MainActor-isolated rather than a plain `actor`: the publication
 /// coordinator reads `currentAgyKey` synchronously on the MainActor. The
@@ -370,6 +374,12 @@ final class AntigravityAutoCapture: ObservableObject {
         busy = true
         message = nil
         let io = io
+        // The marker before AND after the capture: the Settings steps say to
+        // sign agy back in right after pressing Capture, and a sign-in that
+        // lands while the capture runs would otherwise bind the captured key
+        // to the NEXT login's marker, labelling that account's card with this
+        // one's email (verifier advisory, 2026-10-03). Bound only if equal.
+        let markerBefore = try? await Self.detached({ try io.marker() })
         let result = await Self.detached { Result { try io.capture() } }
         var resume = false
         switch result {
@@ -385,8 +395,12 @@ final class AntigravityAutoCapture: ObservableObject {
             // capture is on (maintainer decision 2026-10-03): the button is the
             // consent, and no further secret is read for it. When agy signs in
             // elsewhere the marker moves and dedup stops by itself.
-            let marker = try? await Self.detached({ try io.marker() })
-            setCurrent(captured.key, marker: marker)
+            let markerAfter = try? await Self.detached({ try io.marker() })
+            if let markerBefore, markerBefore == markerAfter {
+                setCurrent(captured.key, marker: markerAfter)
+            } else {
+                currentAgyKey = nil
+            }
             if paused {
                 paused = false
                 lastAttemptedMarker = nil
@@ -456,8 +470,8 @@ final class AntigravityAutoCapture: ObservableObject {
 
 // MARK: - One card for agy's current account (S4)
 
-/// With automatic capture on, the account agy is signed into is usually also a
-/// captured account, so it would be drawn twice: once as the primary card
+/// Once agy's current account is known (automatic capture, or a manual
+/// Capture), the account agy is signed into is also a captured account, so it would be drawn twice: once as the primary card
 /// (the agy route) and once as its captured card. This drops the captured
 /// card and labels the primary with its email, ONLY when all of these hold:
 /// - `currentAgyKey` is set (verified for the current agy login marker);
