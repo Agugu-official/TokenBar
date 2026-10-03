@@ -1,0 +1,8 @@
+Features:
+- The window card can switch between accounts. With two or more accounts with live windows (extra Claude config folders, captured Antigravity accounts), a row of account buttons switches the card's windows, curve and history; the choice is remembered. The main account's button shows its email. Window names are shorter, and button rows wrap when they do not fit.
+- Antigravity has a window card and window history. Its local usage area reads "Local usage can't be attributed to this account yet." When agy is signed in to a captured account, the main card shows that account's curve and history. Weekly and 5-hour windows draw a curve from their first reading.
+
+Fixes:
+- With automatic capture off, capturing the account agy is using merges it into one card until agy next refreshes its sign-in, usually within an hour. Turn automatic capture on to keep it merged.
+- The Antigravity card could stay on "not logged in" after one slow agy run. A timeout is now retried after 15 minutes, and the card shows agy's own error.
+- Claude's Designs and Daily Routines windows no longer show an empty history if Anthropic reports them in its newer limits format.
