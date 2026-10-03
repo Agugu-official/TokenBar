@@ -545,6 +545,14 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
     /// Antigravity primary on the agy route only: agy's login-item date read
     /// just before this card was fetched. Display-only (Antigravity dedup).
     public let agyLoginMarker: String?
+    /// Swift-only, never decoded: the captured account whose recorded history
+    /// this card's windows answer from. Set only by `adoptingHistory(of:)`
+    /// (Antigravity dedup merging the agy-route primary with its captured
+    /// account). Every identity, key and storage slot stays on `accountKey`;
+    /// only the account handed to a curve read is `historyReadAccountKey`.
+    public private(set) var historyAccountKey: String?
+    /// The account to read this card's quota curves under.
+    public var historyReadAccountKey: String? { historyAccountKey ?? accountKey }
 
     private enum CodingKeys: String, CodingKey {
         case clientId, accountKey, source, updatedAt, identity, windows, credits, error,
@@ -881,17 +889,90 @@ extension AgentUsageSnapshot {
         AgentUsageSnapshot(copying: self, identity: identity)
     }
 
-    private init(copying other: AgentUsageSnapshot, identity: AgentIdentity?) {
+    /// The agy-route primary merged with captured account `captured`: this
+    /// card keeps its own windows and values (usage, reset, label), takes
+    /// `captured`'s pace status, historical pace and duration per matching card
+    /// id (so its windows carry history keys), and records `captured` as the account to read curves under.
+    ///
+    /// Only when `captured` has no error and offers windows; otherwise this
+    /// card is returned untouched. A window `captured` lacks keeps its own pace
+    /// status. Never traps: see `UsageWindow.replacingPace(from:)`.
+    package func adoptingHistory(of captured: AgentUsageSnapshot) -> AgentUsageSnapshot {
+        guard captured.error == nil, let key = captured.accountKey,
+              !captured.windows.isEmpty
+        else { return self }
+        let theirs = captured.rawCardWindows
+        let merged = windows.map { window in
+            theirs.first { $0.cardId == window.cardId }
+                .map { window.replacingPace(from: $0) } ?? window
+        }
+        return AgentUsageSnapshot(
+            copying: self, identity: identity, windows: merged, historyAccountKey: key)
+    }
+
+    private init(
+        copying other: AgentUsageSnapshot, identity: AgentIdentity?,
+        windows: [UsageWindow]? = nil, historyAccountKey: String? = nil
+    ) {
         clientId = other.clientId
         accountKey = other.accountKey
         source = other.source
         updatedAt = other.updatedAt
         self.identity = identity
-        windows = other.windows
+        self.windows = windows ?? other.windows
         credits = other.credits
         error = other.error
         transportDiagnostic = other.transportDiagnostic
         agyLoginMarker = other.agyLoginMarker
+        self.historyAccountKey = historyAccountKey ?? other.historyAccountKey
+    }
+}
+
+extension UsageWindow {
+    /// This window with `other`'s pace status AND historical pace (they are one
+    /// backend result and travel together) and the duration they describe;
+    /// usage, reset and label are kept.
+    ///
+    /// The duration guard: this window's own duration must be absent or equal
+    /// `other`'s. Absent is the real shape of the window this exists for: the
+    /// engine's `unavailable("accountScope")` clears `durationSeconds` and
+    /// `windowMinutes` (agent_usage.rs `unavailable`), so a primary that
+    /// required equality would never be merged. A different duration is a
+    /// different cycle length, whose pace and history must not be borrowed.
+    ///
+    /// Returns `self` unchanged unless the result passes the same pace
+    /// validation the initializers apply. They `precondition` those
+    /// invariants, so building the copy directly could trap on a payload that
+    /// merely disagrees with itself; this never does.
+    package func replacingPace(from other: UsageWindow) -> UsageWindow {
+        guard durationSeconds == nil || durationSeconds == other.durationSeconds,
+              other.durationSeconds == other.paceStatus.durationSeconds,
+              !cardId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              Self.v3ValidationError(
+                  paceStatus: other.paceStatus, windowMinutes: other.windowMinutes,
+                  durationSeconds: other.durationSeconds,
+                  historicalPace: other.historicalPace) == nil
+        else { return self }
+        return UsageWindow(
+            copying: self, paceStatus: other.paceStatus, historicalPace: other.historicalPace,
+            durationSeconds: other.durationSeconds, windowMinutes: other.windowMinutes)
+    }
+
+    private init(
+        copying other: UsageWindow, paceStatus: PaceStatus, historicalPace: HistoricalPace?,
+        durationSeconds: Int64?, windowMinutes: Int64?
+    ) {
+        cardId = other.cardId
+        label = other.label
+        usedPercent = other.usedPercent
+        remainingPercent = other.remainingPercent
+        resetsAt = other.resetsAt
+        resetText = other.resetText
+        self.windowMinutes = windowMinutes
+        self.durationSeconds = durationSeconds
+        self.paceStatus = paceStatus
+        self.historicalPace = historicalPace
+        modelScope = other.modelScope
     }
 }
 

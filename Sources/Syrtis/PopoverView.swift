@@ -143,15 +143,26 @@ struct PopoverView: View {
             present: model.stats?.presentClients ?? [], hiddenRaw: hiddenRaw, orderRaw: orderRaw)
     }
 
-    /// Detailed usage joins require actual local records. Quota-only providers
-    /// still get curves, summaries and heatmaps through the quota publication.
-    private var quotaUsageClient: String? {
-        let excluded = ClientRegistry.quotaExcludedClients(
-            tabHidden: ClientRegistry.parseIdSet(hiddenRaw),
-            limitsHidden: ClientRegistry.parseIdSet(limitsHiddenRaw))
-        return effectiveView == .quota && displayUsageClients.contains(activeTab)
-            && !excluded.contains(activeTab) ? activeTab : nil
+    /// The open tab's two window-card roles (`WindowCardGate`): `card` is the
+    /// client whose card, cycles and history are drawn (quota-only tabs
+    /// included), `scan` the client whose local messages are scanned (only a
+    /// tab with local records). The quota client list is computed here from the
+    /// same inputs the model uses for `windowCardClients`, so the first body
+    /// pass cannot see a stale empty list.
+    private var quotaGate: (card: String?, scan: String?) {
+        guard effectiveView == .quota else { return (nil, nil) }
+        let present = model.stats?.presentClients ?? []
+        return WindowCardGate.clients(
+            tab: activeTab, presentClients: present,
+            quotaClients: ClientRegistry.quotaClients(
+                present: present, quotaIds: model.agentUsage?.configuredClientIds ?? [],
+                tabHidden: ClientRegistry.parseIdSet(hiddenRaw), orderRaw: orderRaw),
+            excluded: ClientRegistry.quotaExcludedClients(
+                tabHidden: ClientRegistry.parseIdSet(hiddenRaw),
+                limitsHidden: ClientRegistry.parseIdSet(limitsHiddenRaw)))
     }
+    private var quotaUsageClient: String? { quotaGate.scan }
+    private var quotaCardClient: String? { quotaGate.card }
 
     /// Years shown in the picker: `knownYears` minus years in which ONLY hidden
     /// clients had activity. Best-effort — derivable only from an all-time
@@ -190,6 +201,7 @@ struct PopoverView: View {
     private var quotaRefreshID: String {
         [windowSelectionRaw, activeTab, hiddenRaw, attributionRaw,
          WindowCardAccount.stored(clientId: activeTab) ?? "-", String(accountPickTick),
+         quotaCardClient ?? "-", quotaUsageClient ?? "-",
          effectiveView.rawValue, String(extraRootsGeneration), limitsHiddenRaw, orderRaw,
          displayClients.joined(separator: ","), displayUsageClients.joined(separator: ",")]
             .joined(separator: "|")
@@ -336,6 +348,9 @@ struct PopoverView: View {
             // Gated on the lens too: the window card and its history live only
             // here now, so no other lens can make the app pay for a scan.
             model.windowUsageClient = quotaUsageClient
+            // After the scan client (setting it moves the card client too): a
+            // quota-only tab has a card and no scan.
+            model.cardClient = quotaCardClient
             // The all-agent Quota lens is the only surface that wants the
             // equivalence scan, and only while it is on screen.
             model.quotaLensAllAgents =
@@ -792,18 +807,18 @@ struct PopoverView: View {
                         // curves — so the gate was not saving work, it was blanking
                         // a feature.
                         windowCurves: model.windowCurves,
-                        windowCard: quotaUsageClient.flatMap { model.windowCard(for: $0) },
-                        accountContext: quotaUsageClient.flatMap { model.cardAccountContext(for: $0) },
+                        windowCard: quotaCardClient.flatMap { model.windowCard(for: $0) },
+                        accountContext: quotaCardClient.flatMap { model.cardAccountContext(for: $0) },
                         onSelectAccount: { account in
-                            if let client = quotaUsageClient {
+                            if let client = quotaCardClient {
                                 UserDefaults.standard.set(
                                     account ?? "", forKey: WindowCardAccount.prefKey(clientId: client))
                                 accountPickTick &+= 1
                             }
                         },
-                        quotaCycles: quotaUsageClient.map { model.cardHistory(for: $0).cycles } ?? model.quotaCycles,
-                        quotaHistory: quotaUsageClient.map { model.cardHistory(for: $0).rows } ?? model.quotaHistory,
-                        historyPending: quotaUsageClient.map { model.cardHistory(for: $0).pending } ?? false,
+                        quotaCycles: quotaCardClient.map { model.cardHistory(for: $0).cycles } ?? model.quotaCycles,
+                        quotaHistory: quotaCardClient.map { model.cardHistory(for: $0).rows } ?? model.quotaHistory,
+                        historyPending: quotaCardClient.map { model.cardHistory(for: $0).pending } ?? false,
                         colors: model.colors,
                         // Folded from the series model rather than from the raw
                         // payload: that model refuses to publish day buckets built

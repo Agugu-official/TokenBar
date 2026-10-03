@@ -442,8 +442,17 @@ final class AntigravityAutoCapture: ObservableObject {
 /// - a captured snapshot carries that key.
 /// Otherwise (IDE `cli` or `oauth` source, any error) both are shown.
 ///
-/// Display only. `accountKey`, scopes and history are untouched; the captured
-/// account is still fetched and its history still recorded in the core.
+/// The primary keeps its own windows and values (gauge, tray, selection), but
+/// the agy route has no trusted history identity, so its windows carry no
+/// history key. When the captured account's snapshot has no error, the merged
+/// primary adopts that account's pace status, historical pace and the window
+/// duration they describe (the engine clears the agy primary's duration with
+/// the `accountScope` mark) per matching card id, and records it as
+/// `historyAccountKey`, so the card's curve, cycles
+/// and strip are read under the captured account's own scope
+/// (`AgentUsageSnapshot.adoptingHistory(of:)`). `accountKey` stays nil and no
+/// scope is rewritten; the captured account is still fetched and recorded in
+/// the core. If it errored or has no windows the primary is left as it was.
 /// Applied to BOTH `AgentUsagePublicationCoordinator.resolve` and
 /// `.latestPayload`, which every quota consumer reads. Idempotent.
 enum AntigravityDedup {
@@ -464,10 +473,12 @@ enum AntigravityDedup {
         else { return payload }
         var agents = payload.agents
         let primary = agents[primaryIndex]
-        if let label = agents[capturedIndex].identity?.email {
-            agents[primaryIndex] = primary.replacingIdentity(
-                .make(email: label, plan: primary.identity?.plan))
+        let captured = agents[capturedIndex]
+        var merged = primary
+        if let label = captured.identity?.email {
+            merged = merged.replacingIdentity(.make(email: label, plan: primary.identity?.plan))
         }
+        agents[primaryIndex] = merged.adoptingHistory(of: captured)
         agents.remove(at: capturedIndex)
         return payload.replacingAgents(agents)
     }

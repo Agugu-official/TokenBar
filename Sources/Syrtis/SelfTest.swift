@@ -499,11 +499,15 @@ private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendab
     var curveByAccount: [String?: QuotaCurve] = [:]
     var curveByClient: [String: QuotaCurve] = [:]
     var curveReads: [(client: String, generation: UInt64)] = []
+    /// Every curve read with the account and window key it was issued for
+    /// (WCP2: which account a read is made under is the whole point).
+    var curveReadLog: [(client: String, account: String?, key: String)] = []
 
     func quotaCurveSync(
         clientId: String, accountKey: String?, windowKey: String, generation: UInt64
     ) throws -> QuotaCurve? {
         curveReads.append((clientId, generation))
+        curveReadLog.append((clientId, accountKey, windowKey))
         if failCurveRead || failCurveReadClients.contains(clientId) { throw QuotaUnavailable() }
         if let byAccount = curveByAccount[accountKey] { return byAccount }
         if let byClient = curveByClient[clientId] { return byClient }
@@ -18562,6 +18566,7 @@ enum SelfTest {
         // window client set, no graph.
         func wcpRun<T: Sendable>(
             _ payload: AgentUsagePayload, client: String,
+            scan: Bool = true,
             setup: @escaping (WindowScanCountingSource) -> Void = { _ in },
             _ body: @escaping @MainActor (DashboardModel, WindowScanCountingSource) async -> T
         ) -> T? {
@@ -18583,7 +18588,9 @@ enum SelfTest {
                 poll.cancel()
                 _ = await poll.value
                 m.windowCardClients = [client]
-                m.windowUsageClient = client
+                // WCP2: a quota-only tab has a card and no scan.
+                m.windowUsageClient = scan ? client : nil
+                m.cardClient = client
                 return await body(m, src)
             }
         }
@@ -18862,9 +18869,298 @@ enum SelfTest {
         expect(CardAccountContext.localUsageSlot(wcpPrimaryCtx, hasUsage: true, scanFailed: false) == .numbers,
                "WCP-usage a primary with usage shows its numbers")
 
+
+        // MARK: - WCP2 (window card on quota-only tabs; merged agy primary history)
+
+        // Gate. Mutations: gate back to raw `displayUsageClients` (the card
+        // needs a present client); scan issued for a quota-only tab; the
+        // tab-has-records test ignores tab members.
+        func wcpGate(_ tab: String, present: [String], quota: [String],
+                     excluded: Set<String> = []) -> String {
+            let g = WindowCardGate.clients(
+                tab: tab, presentClients: present, quotaClients: quota, excluded: excluded)
+            return "\(g.card ?? "nil")/\(g.scan ?? "nil")"
+        }
+        expect(wcpGate("antigravity", present: [], quota: ["antigravity"]) == "antigravity/nil",
+               "WCP2-gate a quota-only Antigravity tab gets a card and no scan")
+        expect(wcpGate("antigravity", present: ["antigravity-cli"],
+                       quota: ["antigravity-cli", "antigravity"]) == "antigravity/antigravity",
+               "WCP2-gate a grouped tab with only a member's local records has records: card and scan")
+        expect(wcpGate("grok", present: [], quota: ["grok-bot"]) == "nil/nil",
+               "WCP2-gate a Grok Bot-only tab gets no card and no scan (strip and heatmap stay)")
+        expect(wcpGate("claude", present: ["claude"], quota: ["claude"]) == "claude/claude",
+               "WCP2-gate control: a tab with local records gets both, the same id")
+        expect(wcpGate("claude", present: ["claude"], quota: ["claude"], excluded: ["claude"]) == "nil/nil"
+                   && wcpGate("copilot", present: [], quota: ["claude"]) == "nil/nil",
+               "WCP2-gate a hidden tab and a client the model builds no card for get none")
+
+        // localUsageSlot with no local records. Mutation: quota-only primary
+        // shows numbers (the tab-records line dropped).
+        let wcpQuotaOnlyCtx = CardAccountContext(
+            clientId: "antigravity", accounts: [nil, wcpAgyKey], resolved: nil,
+            tabHasLocalRecords: false)
+        let wcpRecordsCtx = CardAccountContext(
+            clientId: "antigravity", accounts: [nil, wcpAgyKey], resolved: nil)
+        expect(CardAccountContext.localUsageSlot(wcpQuotaOnlyCtx, hasUsage: false, scanFailed: false) == .notAttributable
+                   && CardAccountContext.localUsageSlot(wcpQuotaOnlyCtx, hasUsage: true, scanFailed: false) == .notAttributable
+                   && CardAccountContext.localUsageSlot(wcpQuotaOnlyCtx, hasUsage: false, scanFailed: true) == .notAttributable,
+               "WCP2-slot a primary on a tab with no local records shows the fixed line, never numbers or a spinner")
+        expect(CardAccountContext.localUsageSlot(wcpRecordsCtx, hasUsage: false, scanFailed: false) == .spinner
+                   && CardAccountContext.localUsageSlot(wcpRecordsCtx, hasUsage: true, scanFailed: false) == .numbers
+                   && CardAccountContext.localUsageSlot(wcpRecordsCtx, hasUsage: false, scanFailed: true) == .unreadable,
+               "WCP2-slot control: with local records the primary keeps spinner, numbers and its own failure text")
+
+        // Model, quota-only tab: card client set, scan client nil, captured B
+        // resolved. Mutations: the cycles block reads `windowUsageClient`.
+        let wcpAgyWindow = (card: "session.v1", scope: String?.none)
+        let wcpQuotaOnlyPayload = wcpPayload([
+            (client: "antigravity", account: nil, error: nil, windows: [wcpAgyWindow]),
+            (client: "antigravity", account: wcpAgyKey, error: nil, windows: [wcpAgyWindow]),
+        ])
+        let wcpQuotaOnly: [String: Bool]? = wcpRun(
+            wcpQuotaOnlyPayload, client: "antigravity", scan: false
+        ) { m, src in
+            var o: [String: Bool] = [:]
+            wcpSetAccount("antigravity", wcpAgyKey)
+            m.refreshWindowQuotaHalves()
+            await m.refreshWindowUsage()
+            let ctx = m.cardAccountContext(for: "antigravity")
+            o["control: the scan client is nil and the card client is the tab"] =
+                m.windowUsageClient == nil && m.cardClient == "antigravity"
+            o["B is the resolved account, with a pill row"] =
+                ctx?.resolved == wcpAgyKey && ctx?.showsPills == true
+            o["the card's cycles are B's, recorded under account B"] =
+                !m.quotaCycles.isEmpty && m.quotaCyclesAccount == DashboardModel.scanSlot(wcpAgyKey)
+            o["and the history is served, not pending"] = !m.cardHistory(for: "antigravity").pending
+            o["and its identity is the three-part window key"] =
+                m.quotaCyclesCardId == "antigravity|\(wcpAgyKey)|session.v1"
+            o["no window-usage call is made"] = src.scans == 0 && src.scannedAccounts.isEmpty
+            o["the context says the tab has no local records, so the fixed line stands"] =
+                ctx?.tabHasLocalRecords == false
+                && CardAccountContext.localUsageSlot(ctx, hasUsage: false, scanFailed: false)
+                    == .notAttributable
+            o["and no scan failure is recorded for the tab"] = !m.windowScanFailed(for: "antigravity")
+            // The primary on the same quota-only tab: same fixed line, no scan.
+            wcpSetAccount("antigravity", "")
+            m.refreshWindowQuotaHalves()
+            await m.refreshWindowUsage()
+            let primary = m.cardAccountContext(for: "antigravity")
+            o["the primary on a quota-only tab shows the fixed line too, with no scan"] =
+                primary?.isPrimary == true && src.scans == 0
+                && CardAccountContext.localUsageSlot(primary, hasUsage: false, scanFailed: false)
+                    == .notAttributable
+            wcpSetAccount("antigravity", "")
+            return o
+        }
+        for (label, passed) in (wcpQuotaOnly ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "WCP2-model \(label)")
+        }
+        // Control: the same payload on a tab WITH local records scans the primary.
+        let wcpRecordsTab: [String: Bool]? = wcpRun(wcpQuotaOnlyPayload, client: "antigravity") { m, src in
+            wcpSetAccount("antigravity", "")
+            m.refreshWindowQuotaHalves()
+            await m.refreshWindowUsage()
+            let ctx = m.cardAccountContext(for: "antigravity")
+            return ["control: a tab with local records scans its primary and keeps numbers":
+                        src.scans >= 1 && ctx?.tabHasLocalRecords == true
+                        && m.windowUsageClient == "antigravity" && m.cardClient == "antigravity"]
+        }
+        for (label, passed) in (wcpRecordsTab ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "WCP2-model \(label)")
+        }
+
+        // Antigravity primary on the agy route: accountScope, no history key,
+        // no duration (the engine's `unavailable` clears it). The card is
+        // "no recorded quota history" across refreshes, never `.loading`.
+        func wcpAgyPaceJSON(card: String, state: String, duration: Int64?,
+                            historical: Bool = false, reason: String? = nil) -> String {
+            let dur = duration.map { #","durationSeconds":\#($0),"durationSource":"provider""# } ?? ""
+            let why = reason.map { #","reason":"\#($0)""# } ?? ""
+            let hist = historical ? #","historicalPace":{"expectedUsedPercent":30,"willLastToReset":true}"# : ""
+            let minutes = duration.map { #","windowMinutes":\#($0 / 60)"# } ?? ""
+            return """
+            {"cardId":"\(card)","label":"\(card)","usedPercent":10,"remainingPercent":90,
+             "resetsAt":"\(wIso)"\(minutes)\(hist),
+             "paceStatus":{"state":"\(state)","windowKey":"\(card)","completeCycles":2\(dur)\(why)}}
+            """
+        }
+        func wcpAgyPayload(
+            primary: [String], captured: [String]?, capturedError: String? = nil,
+            marker: String = "m1", generation: UInt64 = 9
+        ) -> AgentUsagePayload {
+            var agents = ["""
+            {"clientId":"antigravity","source":"agy","updatedAt":"t","agyLoginMarker":"\(marker)",
+             "windows":[\(primary.joined(separator: ","))]}
+            """]
+            if let captured {
+                let err = capturedError.map { #","error":"\#($0)""# } ?? ""
+                agents.append("""
+                {"clientId":"antigravity","accountKey":"\(wcpAgyKey)","source":"oauth","updatedAt":"t",
+                 "identity":{"email":"k@example.com"},
+                 "windows":[\(captured.joined(separator: ","))]\(err)}
+                """)
+            }
+            return try! JSONDecoder().decode(AgentUsagePayload.self, from: Data("""
+                {"generatedAt":"t","publicationGeneration":\(generation),"agents":[\(agents.joined(separator: ","))]}
+                """.utf8))
+        }
+        func wcpMerge(_ payload: AgentUsagePayload) -> AgentUsagePayload {
+            AntigravityDedup.apply(payload, currentAgyKey: wcpAgyKey, currentAgyMarker: "m1")
+        }
+        func wcpPrimary(_ payload: AgentUsagePayload) -> AgentUsageSnapshot? {
+            payload.agents.first { $0.clientId == "antigravity" && $0.accountKey == nil }
+        }
+        let wcpAgyUnscoped = wcpAgyPaceJSON(
+            card: "agy.b1.v1", state: "unavailable", duration: nil, reason: "accountScope")
+        let wcpAgyUnscoped2 = wcpAgyPaceJSON(
+            card: "agy.b2.v1", state: "unavailable", duration: nil, reason: "accountScope")
+        let wcpAgyKAvailable = wcpAgyPaceJSON(
+            card: "agy.b1.v1", state: "available", duration: 18_000, historical: true)
+        let wcpAgyKLearning = wcpAgyPaceJSON(card: "agy.b1.v1", state: "learningHistory", duration: 18_000)
+
+        let wcpUnmerged = wcpAgyPayload(primary: [wcpAgyUnscoped], captured: nil)
+        let wcpNoHistory: [String: Bool]? = wcpRun(wcpUnmerged, client: "antigravity", scan: false) { m, src in
+            var o: [String: Bool] = [:]
+            var cases: [String] = []
+            for _ in 0..<2 {
+                m.refreshWindowQuotaHalves()
+                switch m.windowCards["antigravity"] {
+                case .noQuotaHistory?: cases.append("noQuotaHistory")
+                case .loading?: cases.append("loading")
+                default: cases.append("other")
+                }
+            }
+            o["the accountScope primary is \"no recorded quota history\" on both refreshes, never loading"] =
+                cases == ["noQuotaHistory", "noQuotaHistory"]
+            o["and no curve read is issued for it"] = src.curveReadLog.isEmpty
+            o["and its history is empty and served"] =
+                m.quotaCycles.isEmpty && !m.cardHistory(for: "antigravity").pending
+            return o
+        }
+        for (label, passed) in (wcpNoHistory ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "WCP2-agy \(label)")
+        }
+
+        // Item 6: the dedup's merged primary.
+        let wcpMergedRaw = wcpAgyPayload(
+            primary: [wcpAgyUnscoped, wcpAgyUnscoped2], captured: [wcpAgyKAvailable])
+        let wcpMerged = wcpMerge(wcpMergedRaw)
+        let wcpMergedPrimary = wcpPrimary(wcpMerged)
+        let wcpMergedW1 = wcpMergedPrimary?.windows.first { $0.cardId == "agy.b1.v1" }
+        let wcpMergedW2 = wcpMergedPrimary?.windows.first { $0.cardId == "agy.b2.v1" }
+        expect(wcpMerged.agents.count == 1 && wcpMergedPrimary?.historyAccountKey == wcpAgyKey
+                   && wcpMergedPrimary?.accountKey == nil,
+               "WCP2-merge the captured account is removed and the primary records it as its history account")
+        expect(wcpMergedW1?.paceStatus.state == .available
+                   && wcpMergedW1?.paceStatus.historyKey == "agy.b1.v1"
+                   && wcpMergedW1?.historicalPace?.expectedUsedPercent == 30
+                   && wcpMergedW1?.usedPercent == 10 && wcpMergedW1?.remainingPercent == 90
+                   && wcpMergedW1?.durationSeconds == 18_000,
+               "WCP2-merge the merged window has K's pace status and historical pace together, and the primary's own usage")
+        expect(wcpMergedPrimary?.windows.map(\.cardId) == ["agy.b1.v1", "agy.b2.v1"]
+                   && wcpMergedW2?.paceStatus.reason == .accountScope
+                   && wcpMergedW2?.paceStatus.historyKey == nil,
+               "WCP2-merge a card K lacks stays on the primary and keeps its own pace status")
+        expect(wcpMerge(wcpMerged).agents.count == 1
+                   && wcpPrimary(wcpMerge(wcpMerged))?.historyAccountKey == wcpAgyKey,
+               "WCP2-merge the dedup stays idempotent")
+        for (name, raw) in [
+            ("K errored", wcpAgyPayload(primary: [wcpAgyUnscoped], captured: [wcpAgyKAvailable],
+                                        capturedError: "boom")),
+            ("K has no windows", wcpAgyPayload(primary: [wcpAgyUnscoped], captured: [])),
+        ] {
+            let primary = wcpPrimary(wcpMerge(raw))
+            let w = primary?.windows.first
+            expect(primary?.historyAccountKey == nil && w?.paceStatus.reason == .accountScope
+                       && w?.paceStatus.historyKey == nil && w?.historicalPace == nil
+                       && wcpMerge(raw).agents.count == 1,
+                   "WCP2-merge \(name): the primary is untouched and records no history account")
+        }
+        // Duration guard: a K window of a different cycle length is not borrowed.
+        let wcpAgyPrimary3600 = wcpAgyPaceJSON(
+            card: "agy.b1.v1", state: "unavailable", duration: 3_600, reason: "accountScope")
+        let wcpDiffDur = wcpPrimary(wcpMerge(
+            wcpAgyPayload(primary: [wcpAgyPrimary3600], captured: [wcpAgyKAvailable])))?.windows.first
+        expect(wcpDiffDur?.paceStatus.reason == .accountScope && wcpDiffDur?.durationSeconds == 3_600
+                   && wcpDiffDur?.historicalPace == nil,
+               "WCP2-merge a K window with a different durationSeconds leaves the primary window unchanged")
+        let wcpSameDur = wcpPrimary(wcpMerge(
+            wcpAgyPayload(primary: [wcpAgyPaceJSON(card: "agy.b1.v1", state: "unavailable",
+                                                   duration: 18_000, reason: "accountScope")],
+                          captured: [wcpAgyKAvailable])))?.windows.first
+        expect(wcpSameDur?.paceStatus.state == .available && wcpSameDur?.historicalPace != nil,
+               "WCP2-merge control: the same duration is merged")
+        // learningHistory without historicalPace is valid and must not trap.
+        let wcpLearning = wcpPrimary(wcpMerge(
+            wcpAgyPayload(primary: [wcpAgyUnscoped], captured: [wcpAgyKLearning])))?.windows.first
+        expect(wcpLearning?.paceStatus.state == .learningHistory && wcpLearning?.historicalPace == nil
+                   && wcpLearning?.paceStatus.historyKey == "agy.b1.v1",
+               "WCP2-merge a K window still learning is adopted without a historical pace and without a trap")
+        // Never traps: pairing a window with a pace that would violate an init
+        // invariant (historicalPace on a non-available state cannot be built by
+        // decoding, so the helper is driven directly with a contradicting pair).
+        let wcpBad = try? JSONDecoder().decode(UsageWindow.self, from: Data(wcpAgyKAvailable.utf8))
+        let wcpOwn = try? JSONDecoder().decode(UsageWindow.self, from: Data(wcpAgyPrimary3600.utf8))
+        expect(wcpOwn.flatMap { own in wcpBad.map { own.replacingPace(from: $0).paceStatus.state } }
+                   == .unavailable,
+               "WCP2-merge the validating copy returns the window unchanged instead of trapping")
+
+        // Model: the merged primary on a quota-only tab reads K's history.
+        // Mutations: curve read with `accountKey` instead of `historyAccountKey`
+        // (card half, cycles, window curves, strip loop); K-error guard dropped.
+        let wcpMergedRun: [String: Bool]? = wcpRun(wcpMerged, client: "antigravity", scan: false) { m, src in
+            var o: [String: Bool] = [:]
+            wcpSetAccount("antigravity", "")
+            m.refreshWindowQuotaHalves()
+            let reads = src.curveReadLog.filter { $0.client == "antigravity" }
+            o["control: reads were issued"] = !reads.isEmpty
+            o["every curve read for the merged primary is issued under account K"] =
+                reads.allSatisfy { $0.account == wcpAgyKey }
+            o["and none is issued with no account for an agy card"] =
+                !reads.contains { $0.account == nil && $0.key.hasPrefix("agy.") }
+            o["the unreadable flag does not name Antigravity"] =
+                !m.quotaUnreadableClients.contains("antigravity")
+            o["the card is drawn from K's curve, not a no-history card"] = {
+                if case let .quotaOnly(q, _)? = m.windowCards["antigravity"] {
+                    return q.samples.first?.usedPercent == 40
+                }
+                return false
+            }()
+            o["the card is stored under the primary's own slot"] =
+                m.windowCardAccounts["antigravity"] == "" && m.cardAccountKey(for: "antigravity") == nil
+            let id = "antigravity|agy.b1.v1"
+            o["the window curve is K's, stored under the primary's key"] =
+                m.windowCurves[id]?.first?.usedPercent == 40
+            o["a strip summary and a heatmap exist under the primary's key"] =
+                m.quotaWindowSummaries.contains { $0.id == id } && m.quotaHeatmaps[id] != nil
+            let h = m.cardHistory(for: "antigravity")
+            o["the history is served and non-empty, with the primary's identity"] =
+                !h.pending && !h.cycles.isEmpty && m.quotaCyclesCardId == id
+                && m.quotaCyclesAccount == ""
+            o["the card's account stays the primary's (no pill row, no header label)"] = {
+                let ctx = m.cardAccountContext(for: "antigravity")
+                return ctx?.resolved == nil && ctx?.showsPills == false && ctx?.label == nil
+            }()
+            return o
+        }
+        for (label, passed) in (wcpMergedRun ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "WCP2-merge-model \(label)")
+        }
+        // K missing one bucket: the primary still lists every agy card id.
+        let wcpMissing: [String: Bool]? = wcpRun(wcpMerge(wcpMergedRaw), client: "antigravity", scan: false) { m, _ in
+            m.refreshWindowQuotaHalves()
+            return ["the primary's candidates still list every agy card id":
+                        m.windowCards["antigravity"]?.quotaHalf?.candidates.map(\.cardId)
+                        == ["antigravity|agy.b1.v1", "antigravity|agy.b2.v1"]]
+        }
+        for (label, passed) in (wcpMissing ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "WCP2-merge-model \(label)")
+        }
+
         expect([wcpOnlyB != nil, wcpState != nil, wcpReopen != nil, wcpScanA != nil,
                 wcpScanB != nil, wcpRetain != nil, wcpHist != nil, wcpUsageB != nil,
-                wcpUsageBFail != nil, wcpUsageAgy != nil].allSatisfy { $0 },
+                wcpUsageBFail != nil, wcpUsageAgy != nil, wcpQuotaOnly != nil, wcpRecordsTab != nil,
+                wcpNoHistory != nil, wcpMergedRun != nil, wcpMissing != nil].allSatisfy { $0 },
                "WCP every model fixture ran to completion (a nil would silently skip its checks)")
 
         // Restore the staged preferences.

@@ -11,6 +11,10 @@ struct CardAccountContext: Equatable, Sendable {
     let accounts: [String?]
     /// The account the card shows. Nil is the primary.
     let resolved: String?
+    /// Whether the tab has local records at all (`WindowCardGate`). A quota-only
+    /// tab has none: a scan there returns zeros that read as "nothing used", so
+    /// no account on it, the primary included, shows local usage.
+    var tabHasLocalRecords = true
 
     var identity: AccountIdentity { AccountIdentity(clientId: clientId, accountKey: resolved) }
     var isPrimary: Bool { identity.isPrimary }
@@ -32,6 +36,7 @@ struct CardAccountContext: Equatable, Sendable {
     static func localUsageSlot(
         _ context: CardAccountContext?, hasUsage: Bool, scanFailed: Bool
     ) -> LocalUsageSlot {
+        if let context, !context.tabHasLocalRecords { return .notAttributable }
         if let context, !context.isPrimary,
            !context.localUsageAttributable || scanFailed {
             return .notAttributable

@@ -203,9 +203,12 @@ enum WindowCardLoader {
         // between the two. Rendering that as a terminal "no quota history" is
         // the same mistake as the one this file's `noQuotaHistory` comment
         // warns about, in the other direction.
+        // The read account, not the card's: a merged Antigravity primary reads
+        // its captured account's history (`historyAccountKey`), while the card
+        // identity everywhere else stays `accountKey`.
         guard let samples = curveSamples(
-            payload: payload, clientId: clientId, accountKey: accountKey, window: window,
-            curve: curve, nowMs: nowMs)
+            payload: payload, clientId: clientId, accountKey: agent.historyReadAccountKey,
+            window: window, curve: curve, nowMs: nowMs)
         else { return .loading }
         guard !samples.isEmpty else {
             return .noQuotaHistory(
@@ -365,8 +368,12 @@ enum WindowCardLoader {
               let key = selected.window.paceStatus.historyKey,
               let generation = payload.publicationGeneration
         else { return [] }
+        // History read account: see `AgentUsageSnapshot.historyReadAccountKey`.
+        let readAccount = payload.agents.first {
+            $0.clientId == clientId && $0.accountKey == accountKey
+        }?.historyReadAccountKey ?? accountKey
         let attempt: QuotaCurve?
-        do { attempt = try read(clientId, accountKey, key, generation) } catch { return nil }
+        do { attempt = try read(clientId, readAccount, key, generation) } catch { return nil }
         guard let curve = attempt else { return [] }
         // Capped: this list is what the history card draws AND what bounds the
         // union scan, through its oldest entry's `evidenceStartMs`.
@@ -580,5 +587,32 @@ enum WindowCardAccount {
         }
         if live.contains(where: { $0 == nil }) { return nil }
         return live.first ?? nil
+    }
+}
+
+/// Which client's window card (and which client's local scan) a tab gets. One
+/// pure function so the popover and the selftest cannot disagree.
+///
+/// Two roles, deliberately separate: `card` is the client whose window card,
+/// cycles and history are on screen; `scan` is the client whose local messages
+/// are scanned. A tab with local records gets both (the same id, so it behaves
+/// exactly as before); a quota-only tab gets a card and no scan, because a scan
+/// of a client with no local records returns zeros that read as "nothing used".
+enum WindowCardGate {
+    /// A tab has local records iff any member of its slice is present (so the
+    /// grouped Antigravity tab counts `antigravity-cli` records).
+    static func tabHasLocalRecords(tab: String, presentClients: [String]) -> Bool {
+        ClientRegistry.tabSlice(tab).contains { presentClients.contains($0) }
+    }
+
+    /// `quotaClients` is what the model builds cards for
+    /// (`DashboardModel.windowCardClients`); `excluded` the tab/limits-hidden
+    /// set. A grouped tab whose id is not itself a card client (a Grok Bot-only
+    /// install) gets no card and keeps its strip and heatmap.
+    static func clients(
+        tab: String, presentClients: [String], quotaClients: [String], excluded: Set<String>
+    ) -> (card: String?, scan: String?) {
+        guard quotaClients.contains(tab), !excluded.contains(tab) else { return (nil, nil) }
+        return (tab, tabHasLocalRecords(tab: tab, presentClients: presentClients) ? tab : nil)
     }
 }
