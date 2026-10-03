@@ -17948,9 +17948,32 @@ enum SelfTest {
                 let afterOff = ac.currentAgyKey
                 await ac.setEnabled(true)
                 await ac.poll()
-                check("AG-5 toggle on attempts at once, off clears the key, on again makes one new attempt",
-                      afterOn == (1, agKey) && afterOff == nil
+                check("AG-5 toggle on attempts at once, off keeps the key (marker-bound), on again makes one new attempt",
+                      afterOn == (1, agKey) && afterOff == agKey
                           && fake.read { $0.attempts } == 2 && ac.currentAgyKey == agKey)
+            }
+
+            // Maintainer decision 2026-10-03: with automatic capture OFF, a
+            // manual Capture still binds agy's current account to its marker
+            // (dedup without auto), it survives a relaunch, and Remove clears
+            // it. Mutations: manual capture sets the key only when on; the
+            // binding is not persisted.
+            do {
+                let fake = AGAutoFake(key: agKey, label: agEmail)
+                let (ac, defaults) = fresh(fake)
+                let before = ac.currentAgyKey
+                await ac.manualCapture()
+                let marker = ac.currentAgyMarker
+                let relaunched = AntigravityAutoCapture(io: fake.io(), defaults: defaults)
+                check("AG-5 toggle off: manual Capture binds agy's current account to its marker",
+                      before == nil && !ac.isEnabled && ac.currentAgyKey == agKey && marker == "m1")
+                check("AG-5 the manual binding survives a relaunch, with its marker",
+                      relaunched.currentAgyKey == agKey && relaunched.currentAgyMarker == "m1"
+                          && fake.read { $0.attempts } == 0)
+                await relaunched.remove(.init(key: agKey, label: agEmail))
+                check("AG-5 Remove of agy's current account clears the binding, also on disk",
+                      relaunched.currentAgyKey == nil
+                          && AntigravityAutoCapture(io: fake.io(), defaults: defaults).currentAgyKey == nil)
             }
 
             // Pause → manual Capture with the same marker → pause cleared and

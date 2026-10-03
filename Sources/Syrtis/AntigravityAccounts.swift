@@ -214,8 +214,24 @@ final class AntigravityAutoCapture: ObservableObject {
     private(set) var lastAttemptedMarker: String?
     private(set) var currentAgyKey: String? {
         didSet {
+            persistCurrent()
             // Wake the pollers so the dedup follows now, not a cycle later.
             if currentAgyKey != oldValue { ClaudeExtraRoots.RegistryChange.signal() }
+        }
+    }
+
+    /// `currentAgyKey` with the marker it was confirmed under, kept across
+    /// relaunches: a hash and a keychain modification date, no secret. Safe to
+    /// restore without re-reading agy's login, because dedup also requires the
+    /// primary card to have been fetched under that same marker, and any agy
+    /// sign-in change since moves the marker.
+    static let currentKey = "tokenbar.antigravity.currentAgy"
+
+    private func persistCurrent() {
+        if let key = currentAgyKey {
+            defaults.set(["key": key, "marker": currentAgyMarker ?? ""], forKey: Self.currentKey)
+        } else {
+            defaults.removeObject(forKey: Self.currentKey)
         }
     }
     @Published private(set) var busy = false
@@ -232,6 +248,11 @@ final class AntigravityAutoCapture: ObservableObject {
     init(io: IO, defaults: UserDefaults) {
         self.io = io
         self.defaults = defaults
+        if let stored = defaults.dictionary(forKey: Self.currentKey) as? [String: String],
+           let key = stored["key"], let marker = stored["marker"], !marker.isEmpty {
+            currentAgyMarker = marker
+            currentAgyKey = key
+        }
     }
 
     var isEnabled: Bool { defaults.bool(forKey: Self.enabledKey) }
@@ -326,8 +347,10 @@ final class AntigravityAutoCapture: ObservableObject {
         await poll()
     }
 
-    /// The Settings toggle. On: forget the last marker and try now. Off:
-    /// forget agy's current account. Either way a pause ends.
+    /// The Settings toggle. On: forget the last marker and try now. Off: stop
+    /// watching agy's login; the current account stays, still bound to its
+    /// marker, so a manual capture's dedup survives (maintainer decision
+    /// 2026-10-03). Either way a pause ends.
     func setEnabled(_ on: Bool) async {
         defaults.set(on, forKey: Self.enabledKey)
         paused = false
@@ -335,7 +358,6 @@ final class AntigravityAutoCapture: ObservableObject {
             lastAttemptedMarker = nil
             await poll()
         } else {
-            currentAgyKey = nil
             unavailable = false
         }
     }
@@ -359,11 +381,12 @@ final class AntigravityAutoCapture: ObservableObject {
                 AntigravityAccounts.removedKeys(defaults: defaults).filter { $0 != captured.key },
                 forKey: AntigravityAccounts.removedKeysKey)
             // This read agy's login as it is now, so the key is agy's account,
-            // under the marker agy's item carries now.
-            if isEnabled {
-                let marker = try? await Self.detached({ try io.marker() })
-                setCurrent(captured.key, marker: marker)
-            }
+            // under the marker agy's item carries now. Whether or not automatic
+            // capture is on (maintainer decision 2026-10-03): the button is the
+            // consent, and no further secret is read for it. When agy signs in
+            // elsewhere the marker moves and dedup stops by itself.
+            let marker = try? await Self.detached({ try io.marker() })
+            setCurrent(captured.key, marker: marker)
             if paused {
                 paused = false
                 lastAttemptedMarker = nil
@@ -394,6 +417,7 @@ final class AntigravityAutoCapture: ObservableObject {
             AntigravityAccounts.mutate(defaults: defaults, install: io.install) {
                 $0.filter { $0.key != key }
             }
+            if currentAgyKey == key { currentAgyKey = nil }
             if isEnabled {
                 let removed = AntigravityAccounts.removedKeys(defaults: defaults)
                 if !removed.contains(key) {

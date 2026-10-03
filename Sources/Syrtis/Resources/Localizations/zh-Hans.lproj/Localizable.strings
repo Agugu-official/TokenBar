@@ -619,7 +619,6 @@
 "Capturing…" = "捕获中…";
 "Remove" = "移除";
 "To add another Google account:\n1. Sign agy in to that account.\n2. Press Capture current agy login.\n3. Sign agy back in to your main account." = "要添加另一个 Google 账户：\n1. 让 agy 登录该账户。\n2. 点按“捕获当前 agy 登录”。\n3. 让 agy 重新登录你的主账户。";
-"With automatic capture off, capture only accounts other than the one agy uses now." = "自动捕获关闭时，只捕获 agy 当前登录以外的账户。";
 "Capture reads agy's saved Google login once when you press the button, and once each time agy's sign-in changes while automatic capture is on. The copy is kept in this Mac's login keychain. Syrtis uses it only with Google's token service and Cloud Code quota service, and its requests identify as Antigravity." = "捕获会在你点按按钮时读取一次 agy 保存的 Google 登录；自动捕获开启时，agy 的登录每次改变也会读一次。副本保存在这台 Mac 的登录钥匙串。Syrtis 只会把它用在 Google 的令牌服务和 Cloud Code 额度服务，请求会以 Antigravity 的身份发出。";
 "Capture accounts agy signs into automatically" = "自动捕获 agy 登录的账户";
 "When on, Syrtis copies the sign-in of each account agy signs into to this Mac's login keychain: once when you turn this on, then whenever agy's sign-in changes. Turning it off keeps the copies. An account you remove stays removed until you press Capture." = "开启后，agy 登录的每个账户，Syrtis 都会把它的登录复制到这台 Mac 的登录钥匙串：开启时一次，之后 agy 的登录每次改变时一次。关闭后已有的副本会保留。你移除的账户不会再被自动加回，除非你点按“捕获”。";
