@@ -19041,8 +19041,11 @@ enum SelfTest {
         // gate reads the year-independent union instead. Mutation: return
         // `stats.presentClients` alone from `localRecordClients`.
         do {
-            let name = "Syrtis.SelfTest.WCP2Year.\(UUID().uuidString)"
+            // Fixed name: repeated runs reuse one plist instead of leaving one
+            // per run; cleared first so a crashed earlier run cannot leak in.
+            let name = "Syrtis.SelfTest.WCP2Year"
             let suite = UserDefaults(suiteName: name)!
+            suite.removePersistentDomain(forName: name)
             defer { suite.removePersistentDomain(forName: name) }
             DashboardModel.recordLocalRecordClients(["codex"], defaults: suite)
             let yearView: [String]? = wcpRun(wcpQuotaOnlyPayload, client: "antigravity") { m, _ in
