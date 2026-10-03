@@ -1194,6 +1194,20 @@ enum SelfTest {
                     && AppLanguage.localizedString(
                         "OAuth quota", locale: "zh-Hant", bundle: bundle) == "OAuth 額度",
                 "Traditional Chinese carries the keys zh-Hans added, from the \(bundleName)")
+
+            // Settings renders each hideable Overview card as `card.label.localized`.
+            // A label that is not a catalog key falls back to English silently,
+            // which is how "Quota Summary" (key: "Quota summary") went untranslated.
+            let untranslatedCards = OverviewCard.toggleable.filter { card in
+                ["zh-Hant", "zh-Hans"].contains { locale in
+                    let value = AppLanguage.localizedString(
+                        card.label, locale: locale, bundle: bundle)
+                    return value == nil || value == card.label
+                }
+            }
+            expect(
+                untranslatedCards.isEmpty,
+                "Every hideable Overview card label is translated in zh-Hant and zh-Hans, from the \(bundleName); untranslated: \(untranslatedCards.map(\.label))")
         }
 
         let popoverResizeResult = MainActor.assumeIsolated { () -> (Bool, Bool) in
