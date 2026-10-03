@@ -600,9 +600,21 @@ enum WindowCardAccount {
 /// of a client with no local records returns zeros that read as "nothing used".
 enum WindowCardGate {
     /// A tab has local records iff any member of its slice is present (so the
-    /// grouped Antigravity tab counts `antigravity-cli` records).
-    static func tabHasLocalRecords(tab: String, presentClients: [String]) -> Bool {
-        ClientRegistry.tabSlice(tab).contains { presentClients.contains($0) }
+    /// grouped Antigravity tab counts `antigravity-cli` records), or a present
+    /// client's usage is confirmed as belonging to a member through the same
+    /// `UsageAttribution` records the card's "Mine" fold uses. Without the
+    /// second half a Codex used only through OpenCode (confirmed
+    /// opencode·openai → codex) read as quota-only and hid that usage (#462
+    /// review, Windows lane F).
+    static func tabHasLocalRecords(
+        tab: String, presentClients: [String], confirmed: [UsageAttribution.Record]
+    ) -> Bool {
+        let slice = ClientRegistry.tabSlice(tab)
+        if slice.contains(where: { presentClients.contains($0) }) { return true }
+        return confirmed.contains { record in
+            presentClients.contains(record.client)
+                && slice.contains { record.state == .assigned($0) }
+        }
     }
 
     /// `quotaClients` is what the model builds cards for
@@ -610,9 +622,12 @@ enum WindowCardGate {
     /// set. A grouped tab whose id is not itself a card client (a Grok Bot-only
     /// install) gets no card and keeps its strip and heatmap.
     static func clients(
-        tab: String, presentClients: [String], quotaClients: [String], excluded: Set<String>
+        tab: String, presentClients: [String], quotaClients: [String], excluded: Set<String>,
+        confirmed: [UsageAttribution.Record]
     ) -> (card: String?, scan: String?) {
         guard quotaClients.contains(tab), !excluded.contains(tab) else { return (nil, nil) }
-        return (tab, tabHasLocalRecords(tab: tab, presentClients: presentClients) ? tab : nil)
+        let records = tabHasLocalRecords(
+            tab: tab, presentClients: presentClients, confirmed: confirmed)
+        return (tab, records ? tab : nil)
     }
 }
