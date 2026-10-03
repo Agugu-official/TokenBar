@@ -1,0 +1,16 @@
+Features:
+- Eight more agents are tracked: ZCode, Augment Code, Hindsight, Muse Code, Reasonix, Kimchi, Senpi and Oh My Pi. Hindsight usage appears only after you run tokscale hindsight sync from the upstream tokscale CLI. Kimi Work sessions now count toward Kimi.
+- Oh My Pi is counted on its own instead of as Pi. Its usage moves from Pi to Oh My Pi and totals stay the same, except that a record present in both ~/.pi and ~/.omp now counts once for each.
+- More Antigravity accounts, each with its own quota card labeled by email: Settings -> General -> Antigravity accounts -> "Capture current agy login". The copy is kept in this Mac's login keychain; Remove deletes only that copy. Capturing each account agy signs into automatically is off by default.
+- Less memory on scans with a warm cache: peak 329.0 to 301.9 MiB (-8.2%) for all agents on the maintainer's usage, and 88% less for Cursor alone, 32% less for Claude, 29% less for Codex. Results are the same.
+
+Fixes:
+- Long GPT-5.4 to GPT-6 requests (input and cached input over 272K tokens) are now priced at the long-context rate for the whole request, as OpenAI bills them. On the maintainer's usage: Codex gpt-5.6-sol $5,901.37 to $6,397.37, Codex gpt-6-astra $196.53 to $320.60, Claude Code gpt-5.6-sol $355.25 to $449.17, OpenCode gpt-5.4 $79.94 to $86.29. Token counts did not change.
+- OpenRouter prices were taken from the half-price Flex tier for 32 Gemini 3.x, GPT-5.x and GPT-6.x models; they now use the listed rate, from the next price refresh. gpt-5.6-sol-pro is now priced at OpenRouter's Fast tier, twice its standard rate.
+- Kiro requests that report credits are now priced at $0.04 per credit.
+- kimi-for-coding is priced as Kimi K2.7 Code instead of K2.5, Kimi Work's k2d6-agent and k3-agent no longer take Grok 4.20's rates, and k3, k3-256k and claude-opus-41 now have a price.
+- A Pi session file that begins with a byte-order mark is now read instead of skipped.
+- Grok and Antigravity tabs now end with the window history table, like the other tabs.
+- The "Quota summary" switch under Settings' Overview cards is now translated in Chinese.
+
+The first scan after updating takes longer if you use Kiro or Pi, while their sessions are read again.
