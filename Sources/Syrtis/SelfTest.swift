@@ -18968,6 +18968,34 @@ enum SelfTest {
         for (label, passed) in (wcpRecordsTab ?? [:]).sorted(by: { $0.key < $1.key }) {
             expect(passed, "WCP2-model \(label)")
         }
+        // The union scan cache is keyed by account alone, so a primary scan
+        // taken for a tab WITH records must not be joined into the history of
+        // a quota-only card for the same account slot (another client's
+        // messages under this client's cycles). Mutation: drop the
+        // `windowUsageClient == client` guard in `rebuildQuotaHistory`.
+        let wcpTwoClientPayload = wcpPayload([
+            (client: "codex", account: nil, error: nil, windows: [wcpAgyWindow]),
+            (client: "antigravity", account: nil, error: nil, windows: [wcpAgyWindow]),
+        ])
+        let wcpNoJoin: [String: Bool]? = wcpRun(wcpTwoClientPayload, client: "codex") { m, src in
+            var o: [String: Bool] = [:]
+            wcpSetAccount("codex", "")
+            wcpSetAccount("antigravity", "")
+            m.refreshWindowQuotaHalves()
+            await m.refreshWindowUsage()
+            o["control: codex's primary scan is joined into codex's history rows"] =
+                src.scans >= 1 && !m.quotaHistory.isEmpty
+            m.windowUsageClient = nil
+            m.cardClient = "antigravity"
+            m.refreshWindowQuotaHalves()
+            o["a quota-only antigravity card never joins codex's cached scan into its rows"] =
+                !m.quotaCycles.isEmpty && m.quotaHistory.isEmpty
+                && m.quotaCyclesCardId == "antigravity|session.v1"
+            return o
+        }
+        for (label, passed) in (wcpNoJoin ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "WCP2-model \(label)")
+        }
 
         // Antigravity primary on the agy route: accountScope, no history key,
         // no duration (the engine's `unavailable` clears it). The card is
