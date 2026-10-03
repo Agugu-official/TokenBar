@@ -11,11 +11,17 @@ public enum OverviewCard: String, CaseIterable, Sendable {
     /// and said so in its message; the pinned order below is what caught it.
     case quotaSummary, chart, limits, trace, models, streaks
 
-    /// Title-cased id as the translation key, matching `AppView.label`.
+    /// Sentence-cased id as the translation key: `quotaSummary` is
+    /// "Quota summary", the key the string catalogs carry. Title case
+    /// ("Quota Summary") matched no key and rendered untranslated.
     public var label: String {
         let spaced = rawValue.reduce(into: "") { out, character in
-            if character.isUppercase, !out.isEmpty { out.append(" ") }
-            out.append(character)
+            if character.isUppercase, !out.isEmpty {
+                out.append(" ")
+                out.append(contentsOf: character.lowercased())
+            } else {
+                out.append(character)
+            }
         }
         return spaced.prefix(1).uppercased() + spaced.dropFirst()
     }
