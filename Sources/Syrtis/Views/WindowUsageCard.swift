@@ -23,6 +23,31 @@ struct WindowUsageCard: View {
         return "\(ClientRegistry.style(q.clientId).displayName) · \(q.windowLabel.localized)"
     }
 
+    /// The window card's title and window pills are narrow; Antigravity's
+    /// grouped buckets arrive as "Gemini Models · Weekly Limit Remaining",
+    /// which overflowed the pill row (maintainer, 2026-10-03). Shortens only
+    /// the "<group> · <bucket>" shape: "Gemini · Weekly", "Claude/GPT · 5h"
+    /// (localized). Any other label is returned localized and unchanged, and
+    /// the Agent-limits card keeps the full name.
+    static func shortLabel(_ label: String) -> String {
+        let parts = label.components(separatedBy: " · ")
+        guard parts.count == 2, parts[1].hasSuffix(" Limit Remaining") else {
+            return label.localized
+        }
+        var group = parts[0]
+        for suffix in [" Models", " models"] where group.hasSuffix(suffix) {
+            group = String(group.dropLast(suffix.count))
+        }
+        group = group.replacingOccurrences(of: " and ", with: "/")
+        let bucket = String(parts[1].dropLast(" Limit Remaining".count))
+        let window = switch bucket {
+        case "Weekly": "Weekly".localized
+        case "Five Hour": "5h".localized
+        default: bucket.localized
+        }
+        return "\(group) · \(window)"
+    }
+
     @AppStorage("tokenbar.limits.asUsed") private var asUsed = false
     @AppStorage(WindowCardLoader.selectionKey) private var selection = ""
     /// The whole card's frame, not the chart's. The tooltip is clamped to this
@@ -75,7 +100,7 @@ struct WindowUsageCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         case let .noQuotaHistory(_, label, candidates, cardId):
-            DashCard("%@ window".localized(label.localized), subtitle: "No quota history",
+            DashCard("%@ window".localized(Self.shortLabel(label)), subtitle: "No quota history",
                      titleAccessory: accountHeaderLabel) {
                 accountPills
                 windowButtons(candidates: candidates, cardId: cardId)
@@ -103,7 +128,7 @@ struct WindowUsageCard: View {
         // Header label of a card showing a non-primary account, so it cannot be
         // read as the primary's (spec 1b): directly after the title, the
         // placement both platforms agreed (2026-10-03); absent for the primary.
-        DashCard("%@ window".localized(quota.windowLabel.localized), subtitle: stateLine(quota),
+        DashCard("%@ window".localized(Self.shortLabel(quota.windowLabel)), subtitle: stateLine(quota),
                  titleAccessory: accountHeaderLabel) {
             SegmentedPicker(
                 selection: Binding(get: { asUsed }, set: { asUsed = $0 }),
@@ -217,7 +242,7 @@ struct WindowUsageCard: View {
                             ? selection : cardId
                     },
                     set: { selection = $0 }),
-                options: candidates.map { (value: $0.cardId, label: $0.label) })
+                options: candidates.map { (value: $0.cardId, label: Self.shortLabel($0.label)) })
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }

@@ -18543,6 +18543,14 @@ enum SelfTest {
                "WCP-golden and with a stored weekly selection; got \(wcpGoldenWeekly)")
         wcpSetSelection(nil)
 
+        // Window card label shortening (maintainer, 2026-10-03). The English
+        // run pins the shapes; other labels pass through unchanged.
+        expect(WindowUsageCard.shortLabel("Gemini Models · Weekly Limit Remaining") == "Gemini · Weekly"
+                   && WindowUsageCard.shortLabel("Claude and GPT models · Five Hour Limit Remaining") == "Claude/GPT · 5h"
+                   && WindowUsageCard.shortLabel("Session") == "Session"
+                   && WindowUsageCard.shortLabel("Codex Spark · 5h") == "Codex Spark · 5h",
+               "WCP-label grouped Antigravity window names are shortened; other labels are unchanged")
+
         // WCP-golden-unreadable (verifier F1). A one-account client whose curve
         // read throws: base showed "Quota history could not be read" (cycles
         // empty, attempted, unreadable). The account guard on the history must
