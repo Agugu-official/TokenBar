@@ -161,7 +161,9 @@ struct PopoverView: View {
                 tabHidden: ClientRegistry.parseIdSet(hiddenRaw), orderRaw: orderRaw),
             excluded: ClientRegistry.quotaExcludedClients(
                 tabHidden: ClientRegistry.parseIdSet(hiddenRaw),
-                limitsHidden: ClientRegistry.parseIdSet(limitsHiddenRaw)))
+                limitsHidden: ClientRegistry.parseIdSet(limitsHiddenRaw)),
+            // The same confirmed records the card's "Mine" fold uses.
+            confirmed: UsageAttribution.parseRaw(attributionRaw).records)
     }
     private var quotaUsageClient: String? { quotaGate.scan }
     private var quotaCardClient: String? { quotaGate.card }

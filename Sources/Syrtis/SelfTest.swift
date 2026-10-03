@@ -18945,7 +18945,7 @@ enum SelfTest {
         func wcpGate(_ tab: String, present: [String], quota: [String],
                      excluded: Set<String> = []) -> String {
             let g = WindowCardGate.clients(
-                tab: tab, presentClients: present, quotaClients: quota, excluded: excluded)
+                tab: tab, presentClients: present, quotaClients: quota, excluded: excluded, confirmed: [])
             return "\(g.card ?? "nil")/\(g.scan ?? "nil")"
         }
         expect(wcpGate("antigravity", present: [], quota: ["antigravity"]) == "antigravity/nil",
@@ -19035,6 +19035,29 @@ enum SelfTest {
         for (label, passed) in (wcpRecordsTab ?? [:]).sorted(by: { $0.key < $1.key }) {
             expect(passed, "WCP2-model \(label)")
         }
+        // Attribution (#462 review, Windows lane F): Codex used only through
+        // OpenCode, with opencode·openai confirmed as Codex's. The tab has no
+        // own records but its "Mine" fold has usage, so it must scan.
+        // Mutation: drop the attribution half of `tabHasLocalRecords`.
+        do {
+            let toCodex = [UsageAttribution.Record(
+                client: "opencode", provider: "openai", state: .assigned("codex"))]
+            let attributed = WindowCardGate.clients(
+                tab: "codex", presentClients: ["opencode"], quotaClients: ["codex"],
+                excluded: [], confirmed: toCodex)
+            let unattributed = WindowCardGate.clients(
+                tab: "codex", presentClients: ["opencode"], quotaClients: ["codex"],
+                excluded: [], confirmed: [])
+            let excludedOnly = WindowCardGate.clients(
+                tab: "codex", presentClients: ["opencode"], quotaClients: ["codex"],
+                excluded: [], confirmed: [UsageAttribution.Record(
+                    client: "opencode", provider: "openai", state: .excluded)])
+            expect(attributed.scan == "codex",
+                   "WCP2-attr usage confirmed as the tab's own (opencode·openai → codex) keeps its scan")
+            expect(unattributed.scan == nil && excludedOnly.scan == nil,
+                   "WCP2-attr control: no confirmed attribution to the tab (none, or excluded) means no scan")
+        }
+
         // Year filter (#462 review, Windows lane F): `stats.presentClients`
         // holds only the selected year's clients. A year with no Codex records
         // must not turn Codex's window card into "can't be attributed": the
@@ -19053,9 +19076,9 @@ enum SelfTest {
             }
             let union = yearView ?? []
             let gate = WindowCardGate.clients(
-                tab: "codex", presentClients: union, quotaClients: ["codex"], excluded: [])
+                tab: "codex", presentClients: union, quotaClients: ["codex"], excluded: [], confirmed: [])
             let yearOnly = WindowCardGate.clients(
-                tab: "codex", presentClients: [], quotaClients: ["codex"], excluded: [])
+                tab: "codex", presentClients: [], quotaClients: ["codex"], excluded: [], confirmed: [])
             expect(union.contains("codex") && gate.scan == "codex",
                    "WCP2-year a client seen in any loaded year keeps its local scan when the selected year has none")
             expect(yearOnly.scan == nil,
