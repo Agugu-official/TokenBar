@@ -3,6 +3,35 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>2.3.0</title>
+            <pubDate>Sat, 03 Oct 2026 02:36:40 +0000</pubDate>
+            <link>https://github.com/Nanako0129/syrtis/releases/tag/v2.3.0</link>
+            <sparkle:version>1442</sparkle:version>
+            <sparkle:shortVersionString>2.3.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>Features:</b>
+<ul>
+<li>Eight more agents are tracked: ZCode, Augment Code, Hindsight, Muse Code, Reasonix, Kimchi, Senpi and Oh My Pi. Hindsight usage appears only after you run tokscale hindsight sync from the upstream tokscale CLI. Kimi Work sessions now count toward Kimi.</li>
+<li>Oh My Pi is counted on its own instead of as Pi. Its usage moves from Pi to Oh My Pi and totals stay the same, except that a record present in both ~/.pi and ~/.omp now counts once for each.</li>
+<li>More Antigravity accounts, each with its own quota card labeled by email: Settings -&gt; General -&gt; Antigravity accounts -&gt; "Capture current agy login". The copy is kept in this Mac's login keychain; Remove deletes only that copy. Capturing each account agy signs into automatically is off by default.</li>
+<li>Less memory on scans with a warm cache: peak 329.0 to 301.9 MiB (-8.2%) for all agents on the maintainer's usage, and 88% less for Cursor alone, 32% less for Claude, 29% less for Codex. Results are the same.</li>
+</ul>
+<b>Fixes:</b>
+<ul>
+<li>Long GPT-5.4 to GPT-6 requests (input and cached input over 272K tokens) are now priced at the long-context rate for the whole request, as OpenAI bills them. On the maintainer's usage: Codex gpt-5.6-sol $5,901.37 to $6,397.37, Codex gpt-6-astra $196.53 to $320.60, Claude Code gpt-5.6-sol $355.25 to $449.17, OpenCode gpt-5.4 $79.94 to $86.29. Token counts did not change.</li>
+<li>OpenRouter prices were taken from the half-price Flex tier for 32 Gemini 3.x, GPT-5.x and GPT-6.x models; they now use the listed rate, from the next price refresh. gpt-5.6-sol-pro is now priced at OpenRouter's Fast tier, twice its standard rate.</li>
+<li>Kiro requests that report credits are now priced at $0.04 per credit.</li>
+<li>kimi-for-coding is priced as Kimi K2.7 Code instead of K2.5, Kimi Work's k2d6-agent and k3-agent no longer take Grok 4.20's rates, and k3, k3-256k and claude-opus-41 now have a price.</li>
+<li>A Pi session file that begins with a byte-order mark is now read instead of skipped.</li>
+<li>Grok and Antigravity tabs now end with the window history table, like the other tabs.</li>
+<li>The "Quota summary" switch under Settings' Overview cards is now translated in Chinese.</li>
+</ul>
+<p>The first scan after updating takes longer if you use Kiro or Pi, while their sessions are read again.</p>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/syrtis/releases/download/v2.3.0/Syrtis.app.tar.gz" length="13582364" type="application/octet-stream" sparkle:edSignature="frdMze9L2cyZjjd1lnHXM+TMfrPcCVua+jcD3b41eVhLBFdvfidLQfUvJhw/RCNUgHz9DG+3AxBQe9uFKK+nAQ=="/>
+        </item>
+        <item>
             <title>2.2.0</title>
             <pubDate>Mon, 28 Sep 2026 15:00:41 +0000</pubDate>
             <link>https://github.com/Nanako0129/syrtis/releases/tag/v2.2.0</link>
@@ -102,21 +131,6 @@
 <p>Thanks: @mvanhorn, @snowman12320</p>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/syrtis/releases/download/v2.0.0/Syrtis.app.tar.gz" length="11057568" type="application/octet-stream" sparkle:edSignature="WXuw7zM9/4z/a2eFwSbYvyYj0YLtxaFowld8wofEMfRO8ia0Del7OIn4yKNjnYy0JUxDY1yRuSVfD6+LOetpCQ=="/>
-        </item>
-        <item>
-            <title>1.20.2</title>
-            <pubDate>Thu, 24 Sep 2026 02:27:15 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.20.2</link>
-            <sparkle:version>1171</sparkle:version>
-            <sparkle:shortVersionString>1.20.2</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>Fixes:</b>
-<ul>
-<li>With the Antigravity CLI signed out, TokenBar could open a Google sign-in page on every refresh. When the Antigravity IDE is closed and no Gemini CLI login is available, TokenBar asks the agy CLI for quota instead. Signed out, that command opens a browser tab for Google sign-in and waits, and TokenBar ran it on every refresh: once a minute with the popover open. TokenBar now checks that agy's login item exists in the Keychain before running it, and skips the CLI when it does not. Only the item's presence and modification date are read, never the token. If agy runs and still fails, it is not run again until you sign in to agy again or restart TokenBar; until then the Antigravity card shows the error from the other routes.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.20.2/TokenBar.app.tar.gz" length="10610828" type="application/octet-stream" sparkle:edSignature="V5Ad7443omy3/TpUJ0aszZFaMZV55rDFI5BcX3mbNPVtS43C3ROaCyzlyFmGJhDvxog8jD+nKHtnKkCrNsfqBQ=="/>
         </item>
         <item>
             <title>1.1.1</title>
