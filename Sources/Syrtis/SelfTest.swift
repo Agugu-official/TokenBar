@@ -18428,6 +18428,11 @@ enum SelfTest {
         }
         expect(wcpPills(wcpAgyRaw, "antigravity") == 2,
                "WCP-resolve control: before the dedup agy's account is two pills")
+        expect(AccountPills.options(clientId: "antigravity", accounts: [nil, wcpAgyKey],
+                                    primaryEmail: "a@example.com").first?.label == "a@example.com"
+                   && AccountPills.options(clientId: "antigravity", accounts: [nil, wcpAgyKey]).first?.label
+                       == ClientRegistry.tabDisplayName("antigravity"),
+               "WCP-label the primary's pill names its email when the payload has one, else the client")
         expect(wcpPills(wcpAgyDeduped, "antigravity") == 0,
                "WCP-resolve after AntigravityDedup the same account is one, so there is no pill row")
 

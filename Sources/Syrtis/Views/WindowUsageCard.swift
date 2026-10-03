@@ -218,6 +218,7 @@ struct WindowUsageCard: View {
         if let account {
             AccountPills(
                 clientId: account.clientId, accounts: account.accounts,
+                primaryEmail: account.primaryEmail,
                 selected: account.resolved, select: onSelectAccount)
         }
     }

@@ -15,6 +15,10 @@ struct CardAccountContext: Equatable, Sendable {
     /// tab has none: a scan there returns zeros that read as "nothing used", so
     /// no account on it, the primary included, shows local usage.
     var tabHasLocalRecords = true
+    /// The primary snapshot's own email (the IDE route's, or the captured
+    /// account's when `AntigravityDedup` merged them), so the primary's pill
+    /// names the account rather than the client (maintainer, 2026-10-03).
+    var primaryEmail: String? = nil
 
     var identity: AccountIdentity { AccountIdentity(clientId: clientId, accountKey: resolved) }
     var isPrimary: Bool { identity.isPrimary }
@@ -22,7 +26,7 @@ struct CardAccountContext: Equatable, Sendable {
     var label: String? { identity.accountLabel }
     var tooltip: String? { identity.accountTooltip }
     var showsPills: Bool {
-        !AccountPills.options(clientId: clientId, accounts: accounts).isEmpty
+        !AccountPills.options(clientId: clientId, accounts: accounts, primaryEmail: primaryEmail).isEmpty
     }
     var localUsageAttributable: Bool { identity.hasLocalUsage }
 
@@ -45,10 +49,17 @@ struct CardAccountContext: Equatable, Sendable {
         return scanFailed ? .unreadable : .spinner
     }
 
-    /// The label a pill shows: the account's own, else the client's name.
-    static func pillLabel(clientId: String, account: String?) -> String {
-        AccountIdentity(clientId: clientId, accountKey: account).accountLabel
-            ?? ClientRegistry.tabDisplayName(clientId)
+    /// The label a pill shows: the account's own; for the primary its email
+    /// when the payload carries one; else the client's name.
+    static func pillLabel(clientId: String, account: String?, primaryEmail: String? = nil) -> String {
+        if let label = AccountIdentity(clientId: clientId, accountKey: account).accountLabel {
+            return label
+        }
+        if account == nil, let email = primaryEmail?.trimmingCharacters(in: .whitespaces),
+           !email.isEmpty {
+            return email
+        }
+        return ClientRegistry.tabDisplayName(clientId)
     }
 }
 
@@ -58,17 +69,19 @@ struct CardAccountContext: Equatable, Sendable {
 struct AccountPills: View {
     let clientId: String
     let accounts: [String?]
+    var primaryEmail: String? = nil
     let selected: String?
     let select: (String?) -> Void
 
     /// The pills, or none: rule 1 says a row only with at least two accounts, so
     /// this is the one statement of that threshold. Value "" is the primary.
     static func options(
-        clientId: String, accounts: [String?]
+        clientId: String, accounts: [String?], primaryEmail: String? = nil
     ) -> [(value: String, label: String)] {
         guard accounts.count >= 2 else { return [] }
         return accounts.map {
-            (value: $0 ?? "", label: CardAccountContext.pillLabel(clientId: clientId, account: $0))
+            (value: $0 ?? "", label: CardAccountContext.pillLabel(
+                clientId: clientId, account: $0, primaryEmail: primaryEmail))
         }
     }
 
@@ -76,7 +89,7 @@ struct AccountPills: View {
     static func headerLabel(_ context: CardAccountContext?) -> String? { context?.label }
 
     var body: some View {
-        let options = Self.options(clientId: clientId, accounts: accounts)
+        let options = Self.options(clientId: clientId, accounts: accounts, primaryEmail: primaryEmail)
         if !options.isEmpty {
             SegmentedPicker(
                 selection: Binding(get: { selected ?? "" }, set: { select($0.isEmpty ? nil : $0) }),

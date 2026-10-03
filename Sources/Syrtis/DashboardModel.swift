@@ -1392,7 +1392,10 @@ private struct DashboardSnapshot {
             clientId: clientId, accounts: accounts, resolved: cardAccountKey(for: clientId),
             // The scan client is set exactly when the tab has local records
             // (`WindowCardGate`): no scan means no local usage to attribute.
-            tabHasLocalRecords: windowUsageClient == clientId)
+            tabHasLocalRecords: windowUsageClient == clientId,
+            primaryEmail: agentUsage?.agents.first {
+                $0.clientId == clientId && $0.accountKey == nil
+            }?.identity?.email)
     }
 
     /// How long a scan is served before being refreshed. Matched to the
