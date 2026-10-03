@@ -175,6 +175,18 @@ where
         Ok(fetched) => Ok(fetched),
         Err(primary_failure) if should_try_agy_fallback(&primary_failure) => match agy().await {
             Ok(fetched) => Ok(fetched),
+            // When the other routes simply found no login, agy is the route
+            // that actually ran, so its failure is the real answer. Showing
+            // "not logged in" over an agy timeout hid the cause (observed
+            // 2026-10-03). agy itself missing or signed out keeps the
+            // primary's message, which says what to do.
+            Err(ProviderFetchFailure::Terminal { display })
+                if matches!(&primary_failure, ProviderFetchFailure::Terminal { display: primary } if primary == ANTIGRAVITY_UNCONFIGURED_ERROR)
+                    && display != AGY_NOT_FOUND
+                    && display != AGY_NOT_SIGNED_IN =>
+            {
+                Err(ProviderFetchFailure::terminal(display))
+            }
             Err(_) => Err(primary_failure),
         },
         Err(primary_failure) => Err(primary_failure),
@@ -264,9 +276,7 @@ where
         ));
     }
     let Some(marker) = marker else {
-        return Err(ProviderFetchFailure::terminal(
-            "Antigravity CLI is not signed in.",
-        ));
+        return Err(ProviderFetchFailure::terminal(AGY_NOT_SIGNED_IN));
     };
     {
         // Scoped so the guard is released before the await below: polls can
@@ -279,12 +289,20 @@ where
                     "Antigravity CLI usage is already running.",
                 ));
             }
-            AgyLatch::Failed(failed) if *failed == marker => {
-                return Err(ProviderFetchFailure::terminal(
-                    "Antigravity CLI usage is paused after a failed attempt.",
-                ));
+            AgyLatch::Failed { marker: failed, retry_at } if *failed == marker => {
+                match retry_at {
+                    Some(at) if now >= *at => *state = AgyLatch::InFlight,
+                    Some(_) => {
+                        return Err(ProviderFetchFailure::terminal(AGY_TIMED_OUT_RETRYING));
+                    }
+                    None => {
+                        return Err(ProviderFetchFailure::terminal(
+                            "Antigravity CLI usage is paused after a failed attempt.",
+                        ));
+                    }
+                }
             }
-            AgyLatch::Idle | AgyLatch::Failed(_) => *state = AgyLatch::InFlight,
+            AgyLatch::Idle | AgyLatch::Failed { .. } => *state = AgyLatch::InFlight,
         }
     }
     // Created with no await between it and the InFlight write, so a panic in
@@ -301,7 +319,18 @@ where
         }
         Err(AgyRunError { failure, spawned }) => {
             if spawned {
-                release.next = AgyLatch::Failed(marker);
+                // A timeout is transient (agy slow right after an update was
+                // observed 2026-10-03, and the route then stayed latched for
+                // the rest of the process): retry it after a cooldown. Any
+                // other failure of a run that started may be agy asking for
+                // re-authentication, which can open a browser, so it stays
+                // latched until the login marker changes, as before.
+                let timed_out =
+                    matches!(&failure, ProviderFetchFailure::Terminal { display } if display == AGY_TIMED_OUT);
+                release.next = AgyLatch::Failed {
+                    marker,
+                    retry_at: timed_out.then(|| now + chrono::Duration::seconds(AGY_RETRY_SECS)),
+                };
             }
             Err(failure)
         }
@@ -315,8 +344,21 @@ where
 enum AgyLatch {
     Idle,
     InFlight,
-    Failed(String),
+    /// `retry_at` is set only for a timeout: the route re-arms at that time
+    /// for the same login. Nil keeps it latched until the marker changes.
+    Failed {
+        marker: String,
+        retry_at: Option<DateTime<Utc>>,
+    },
 }
+
+const AGY_TIMED_OUT: &str = "Antigravity CLI usage timed out.";
+const AGY_NOT_FOUND: &str = "Antigravity CLI was not found.";
+const AGY_NOT_SIGNED_IN: &str = "Antigravity CLI is not signed in.";
+const AGY_TIMED_OUT_RETRYING: &str =
+    "Antigravity CLI usage timed out. Retrying automatically.";
+/// Cooldown after a timed-out `agy /usage`, three tray cycles.
+const AGY_RETRY_SECS: i64 = 15 * 60;
 
 #[cfg(target_os = "macos")]
 static AGY_LATCH: std::sync::Mutex<AgyLatch> = std::sync::Mutex::new(AgyLatch::Idle);
@@ -436,7 +478,7 @@ async fn run_agy_cli_candidates(now: DateTime<Utc>) -> Result<Fetched, AgyRunErr
             spawned: true,
         },
         None => AgyRunError {
-            failure: ProviderFetchFailure::terminal("Antigravity CLI was not found."),
+            failure: ProviderFetchFailure::terminal(AGY_NOT_FOUND),
             spawned: false,
         },
     })
@@ -469,7 +511,7 @@ async fn fetch_agy_cli_from(
         .output();
     let output = tokio::time::timeout(std::time::Duration::from_secs(35), future)
         .await
-        .map_err(|_| ProviderFetchFailure::terminal("Antigravity CLI usage timed out."))?
+        .map_err(|_| ProviderFetchFailure::terminal(AGY_TIMED_OUT))?
         .map_err(|_| ProviderFetchFailure::terminal("Antigravity CLI usage failed."))?;
     if !output.status.success() {
         return Err(ProviderFetchFailure::terminal(
@@ -5075,7 +5117,7 @@ mod tests {
             .await
             .is_err());
         assert_eq!(runs.get(), 1);
-        assert_eq!(latch_state(&latch), AgyLatch::Failed("m1".to_string()));
+        assert_eq!(latch_state(&latch), AgyLatch::Failed { marker: "m1".to_string(), retry_at: None });
 
         let paused = run_gate(&latch, marker("m1"), &runs, Ok(())).await;
         assert_eq!(
@@ -5084,12 +5126,80 @@ mod tests {
             "the same login must not respawn a failed agy"
         );
         assert!(matches!(paused, Err(ProviderFetchFailure::Terminal { .. })));
-        assert_eq!(latch_state(&latch), AgyLatch::Failed("m1".to_string()));
+        assert_eq!(latch_state(&latch), AgyLatch::Failed { marker: "m1".to_string(), retry_at: None });
 
         // A rewritten Keychain item (re-login) re-arms the route.
         assert!(run_gate(&latch, marker("m2"), &runs, Ok(())).await.is_ok());
         assert_eq!(runs.get(), 2, "a new login must spawn agy again");
         assert_eq!(latch_state(&latch), AgyLatch::Idle);
+    }
+
+    /// A timed-out run is transient: it re-arms after the cooldown for the same
+    /// login, while another failure of a started run stays latched (it may be
+    /// agy asking for re-authentication, which can open a browser).
+    #[tokio::test]
+    async fn a_timed_out_run_retries_after_the_cooldown() {
+        let latch = std::sync::Mutex::new(AgyLatch::Idle);
+        let runs = std::cell::Cell::new(0);
+        let t0 = agy_now();
+        let (latch, runs) = (&latch, &runs);
+        let gate = |at: DateTime<Utc>, display: Option<&'static str>| {
+            fetch_agy_cli_gated(at, true, marker("m1"), latch, move |now| {
+                runs.set(runs.get() + 1);
+                async move {
+                    match display {
+                        None => Ok(unreachable_probe_fetched(now)),
+                        Some(text) => Err(AgyRunError {
+                            failure: ProviderFetchFailure::terminal(text),
+                            spawned: true,
+                        }),
+                    }
+                }
+            })
+        };
+        assert!(gate(t0, Some(AGY_TIMED_OUT)).await.is_err());
+        assert_eq!(runs.get(), 1);
+        let early = gate(t0 + chrono::Duration::seconds(AGY_RETRY_SECS - 1), None).await;
+        assert_eq!(runs.get(), 1, "inside the cooldown the same login is not respawned");
+        assert!(matches!(early, Err(ProviderFetchFailure::Terminal { display }) if display == AGY_TIMED_OUT_RETRYING));
+        assert!(gate(t0 + chrono::Duration::seconds(AGY_RETRY_SECS), None).await.is_ok());
+        assert_eq!(runs.get(), 2, "after the cooldown the timed-out route runs again");
+        assert_eq!(latch_state(latch), AgyLatch::Idle);
+
+        // Control: a non-timeout failure stays latched past the cooldown.
+        assert!(gate(t0, Some("Antigravity CLI usage failed.")).await.is_err());
+        assert!(gate(t0 + chrono::Duration::hours(6), None).await.is_err());
+        assert_eq!(runs.get(), 3, "a non-timeout failure waits for a new login");
+    }
+
+    /// With no other route configured, the agy failure is what the card shows;
+    /// agy missing or signed out keeps the primary's "not logged in".
+    #[tokio::test]
+    async fn the_agy_failure_replaces_not_logged_in_when_agy_actually_ran() {
+        let unconfigured = || Err(ProviderFetchFailure::terminal(ANTIGRAVITY_UNCONFIGURED_ERROR));
+        let shown = |r: Result<Fetched, ProviderFetchFailure>| match r {
+            Err(ProviderFetchFailure::Terminal { display }) => display,
+            _ => String::new(),
+        };
+        let timed = with_agy_fallback(unconfigured(), || async {
+            Err(ProviderFetchFailure::terminal(AGY_TIMED_OUT_RETRYING))
+        })
+        .await;
+        assert_eq!(shown(timed), AGY_TIMED_OUT_RETRYING);
+        for quiet in [AGY_NOT_FOUND, AGY_NOT_SIGNED_IN] {
+            let kept = with_agy_fallback(unconfigured(), move || async move {
+                Err(ProviderFetchFailure::terminal(quiet))
+            })
+            .await;
+            assert_eq!(shown(kept), ANTIGRAVITY_UNCONFIGURED_ERROR);
+        }
+        // Control: another primary failure keeps its own message.
+        let other = with_agy_fallback(
+            Err(ProviderFetchFailure::terminal("Antigravity loadCodeAssist permission was denied.")),
+            || async { Err(ProviderFetchFailure::terminal(AGY_TIMED_OUT_RETRYING)) },
+        )
+        .await;
+        assert_eq!(shown(other), "Antigravity loadCodeAssist permission was denied.");
     }
 
     #[tokio::test]
