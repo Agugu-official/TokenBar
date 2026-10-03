@@ -19035,6 +19035,30 @@ enum SelfTest {
         for (label, passed) in (wcpRecordsTab ?? [:]).sorted(by: { $0.key < $1.key }) {
             expect(passed, "WCP2-model \(label)")
         }
+        // Year filter (#462 review, Windows lane F): `stats.presentClients`
+        // holds only the selected year's clients. A year with no Codex records
+        // must not turn Codex's window card into "can't be attributed": the
+        // gate reads the year-independent union instead. Mutation: return
+        // `stats.presentClients` alone from `localRecordClients`.
+        do {
+            let name = "Syrtis.SelfTest.WCP2Year.\(UUID().uuidString)"
+            let suite = UserDefaults(suiteName: name)!
+            defer { suite.removePersistentDomain(forName: name) }
+            DashboardModel.recordLocalRecordClients(["codex"], defaults: suite)
+            let yearView: [String]? = wcpRun(wcpQuotaOnlyPayload, client: "antigravity") { m, _ in
+                m.localRecordClients(defaults: suite)
+            }
+            let union = yearView ?? []
+            let gate = WindowCardGate.clients(
+                tab: "codex", presentClients: union, quotaClients: ["codex"], excluded: [])
+            let yearOnly = WindowCardGate.clients(
+                tab: "codex", presentClients: [], quotaClients: ["codex"], excluded: [])
+            expect(union.contains("codex") && gate.scan == "codex",
+                   "WCP2-year a client seen in any loaded year keeps its local scan when the selected year has none")
+            expect(yearOnly.scan == nil,
+                   "WCP2-year control: with no record of the client at all, a quota-only card makes no scan")
+        }
+
         // The union scan cache is keyed by account alone, so a primary scan
         // taken for a tab WITH records must not be joined into the history of
         // a quota-only card for the same account slot (another client's

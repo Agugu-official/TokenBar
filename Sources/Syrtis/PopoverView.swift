@@ -152,8 +152,10 @@ struct PopoverView: View {
     private var quotaGate: (card: String?, scan: String?) {
         guard effectiveView == .quota else { return (nil, nil) }
         let present = model.stats?.presentClients ?? []
+        // Year-independent: the card's scan covers quota history, not the
+        // selected year (see `DashboardModel.localRecordClients`).
         return WindowCardGate.clients(
-            tab: activeTab, presentClients: present,
+            tab: activeTab, presentClients: model.localRecordClients(),
             quotaClients: ClientRegistry.quotaClients(
                 present: present, quotaIds: model.agentUsage?.configuredClientIds ?? [],
                 tabHidden: ClientRegistry.parseIdSet(hiddenRaw), orderRaw: orderRaw),

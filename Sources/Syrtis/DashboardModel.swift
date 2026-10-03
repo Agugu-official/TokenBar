@@ -520,6 +520,29 @@ private struct DashboardSnapshot {
     /// Union of `payload.years` across loads — a year-filtered payload only
     /// reports the selected year, so remember the rest for the picker.
     private(set) var knownYears: [String] = []
+
+    /// Clients that have had local usage records in ANY payload this install
+    /// has loaded, persisted across launches. `stats.presentClients` covers
+    /// only the selected year, while a window card's local scan covers its
+    /// quota history whatever the year: gating the scan on the year's clients
+    /// turned a Codex card into "can't be attributed" on a year with no Codex
+    /// records (#462 review, Windows lane F). Client ids only; it only grows,
+    /// which errs toward scanning (a scan of a client with no records shows
+    /// zero rather than hiding real usage).
+    static let localRecordClientsKey = "tokenbar.localRecordClients"
+
+    static func recordLocalRecordClients(_ ids: [String], defaults: UserDefaults = .standard) {
+        let known = Set(defaults.stringArray(forKey: localRecordClientsKey) ?? [])
+        let union = known.union(ids)
+        if union != known { defaults.set(union.sorted(), forKey: localRecordClientsKey) }
+    }
+
+    /// The year-independent "has local records" set the window-card gate reads:
+    /// the persisted union plus whatever the current payload shows.
+    func localRecordClients(defaults: UserDefaults = .standard) -> [String] {
+        Array(Set(defaults.stringArray(forKey: Self.localRecordClientsKey) ?? [])
+            .union(stats?.presentClients ?? [])).sorted()
+    }
     private(set) var payload: UsagePayload?
     private(set) var stats: UsageStats?
     private(set) var modelReport: ModelReport?
@@ -1116,6 +1139,7 @@ private struct DashboardSnapshot {
         graphFetchFailed = false
         stats = UsageStats(payload: payload, selectedClients: Set(payload.summary.clients))
         knownYears = Set(knownYears + payload.years.map(\.year)).sorted(by: >)
+        Self.recordLocalRecordClients(payload.summary.clients)
         phase = .ready
         payloadCapturedAt = Date()
         restoredSnapshot = nil
