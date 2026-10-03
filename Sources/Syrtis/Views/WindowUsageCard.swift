@@ -11,6 +11,9 @@ import TokenBarCore
 /// front (`V-5`).
 struct WindowUsageCard: View {
     let state: WindowCardState
+    /// Nil on a client with no live account, which draws exactly as before.
+    var account: CardAccountContext?
+    var onSelectAccount: (String?) -> Void = { _ in }
 
     /// Set alongside the geometry so the tooltip can slice the same messages
     /// the bars were built from.
@@ -18,6 +21,31 @@ struct WindowUsageCard: View {
     private var hoverSubtitle: String {
         guard let q = state.quotaHalf else { return "" }
         return "\(ClientRegistry.style(q.clientId).displayName) · \(q.windowLabel.localized)"
+    }
+
+    /// The window card's title and window pills are narrow; Antigravity's
+    /// grouped buckets arrive as "Gemini Models · Weekly Limit Remaining",
+    /// which overflowed the pill row (maintainer, 2026-10-03). Shortens only
+    /// the "<group> · <bucket>" shape: "Gemini · Weekly", "Claude/GPT · 5h"
+    /// (localized). Any other label is returned localized and unchanged, and
+    /// the Agent-limits card keeps the full name.
+    static func shortLabel(_ label: String) -> String {
+        let parts = label.components(separatedBy: " · ")
+        guard parts.count == 2, parts[1].hasSuffix(" Limit Remaining") else {
+            return label.localized
+        }
+        var group = parts[0]
+        for suffix in [" Models", " models"] where group.hasSuffix(suffix) {
+            group = String(group.dropLast(suffix.count))
+        }
+        group = group.replacingOccurrences(of: " and ", with: "/")
+        let bucket = String(parts[1].dropLast(" Limit Remaining".count))
+        let window = switch bucket {
+        case "Weekly": "Weekly".localized
+        case "Five Hour": "5h".localized
+        default: bucket.localized
+        }
+        return "\(group) · \(window)"
     }
 
     @AppStorage("tokenbar.limits.asUsed") private var asUsed = false
@@ -72,7 +100,9 @@ struct WindowUsageCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         case let .noQuotaHistory(_, label, candidates, cardId):
-            DashCard("%@ window".localized(label.localized), subtitle: "No quota history") {
+            DashCard("%@ window".localized(Self.shortLabel(label)), subtitle: "No quota history",
+                     titleAccessory: accountHeaderLabel) {
+                accountPills
                 windowButtons(candidates: candidates, cardId: cardId)
                 Text("This window has no recorded quota history, so there is no line to draw.".localized)
                     .font(.caption)
@@ -95,11 +125,16 @@ struct WindowUsageCard: View {
     private func card(
         _ quota: WindowQuotaHalf, usage: WindowUsageHalf?, scanFailed: Bool
     ) -> some View {
-        DashCard("%@ window".localized(quota.windowLabel.localized), subtitle: stateLine(quota)) {
+        // Header label of a card showing a non-primary account, so it cannot be
+        // read as the primary's (spec 1b): directly after the title, the
+        // placement both platforms agreed (2026-10-03); absent for the primary.
+        DashCard("%@ window".localized(Self.shortLabel(quota.windowLabel)), subtitle: stateLine(quota),
+                 titleAccessory: accountHeaderLabel) {
             SegmentedPicker(
                 selection: Binding(get: { asUsed }, set: { asUsed = $0 }),
                 options: [(value: false, label: "Remaining"), (value: true, label: "Used")])
         } content: {
+            accountPills
             windowButtons(candidates: quota.candidates, cardId: quota.cardId)
             if quota.placementPending {
                 placeholder("Placing the window…")
@@ -118,17 +153,28 @@ struct WindowUsageCard: View {
                 undatedNote(usage)
                 scopeNote(usage, label: quota.windowLabel)
                 Group {
-                    if let usage {
-                        equivalenceRow(
-                            quota: quota, mine: usage.mine, interval: interval)
-                    } else if scanFailed {
+                    switch CardAccountContext.localUsageSlot(
+                        account, hasUsage: usage != nil, scanFailed: scanFailed) {
+                    case .notAttributable:
+                        // Rule 6: this account's usage cannot be scoped from
+                        // local logs, or its scan failed. One fixed line, in
+                        // place of numbers that would be another account's.
+                        Text("Local usage can't be attributed to this account yet.".localized)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    case .numbers:
+                        if let usage {
+                            equivalenceRow(
+                                quota: quota, mine: usage.mine, interval: interval)
+                        }
+                    case .unreadable:
                         // A settled failure, not a slow success. The chart above
                         // is drawn from the quota half and stays correct; only
                         // this line has nothing to report.
                         Text("Local usage could not be read.".localized)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
-                    } else {
+                    case .spinner:
                         LoadingLine(title: "Reading local usage…")
                     }
                 }
@@ -157,6 +203,26 @@ struct WindowUsageCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var accountHeaderLabel: AnyView? {
+        AccountPills.headerLabel(account).map { label in
+            AnyView(Text(verbatim: label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .help(account?.tooltip ?? ""))
+        }
+    }
+
+    @ViewBuilder
+    private var accountPills: some View {
+        if let account {
+            AccountPills(
+                clientId: account.clientId, accounts: account.accounts,
+                primaryEmail: account.primaryEmail,
+                selected: account.resolved, select: onSelectAccount)
+        }
+    }
+
     @ViewBuilder
     private func windowButtons(
         candidates: [(cardId: String, label: String)], cardId: String
@@ -177,7 +243,8 @@ struct WindowUsageCard: View {
                             ? selection : cardId
                     },
                     set: { selection = $0 }),
-                options: candidates.map { (value: $0.cardId, label: $0.label) })
+                options: candidates.map { (value: $0.cardId, label: Self.shortLabel($0.label)) },
+                wraps: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }

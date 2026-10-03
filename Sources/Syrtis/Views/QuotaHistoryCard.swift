@@ -35,6 +35,9 @@ struct QuotaHistoryCard: View {
     /// history: both leave `cycles` empty after the fetch has settled, and only
     /// one of them is the card's fault to report as an absence.
     var curveUnreadable = false
+    /// The open client's account, deciding which line stands in for local
+    /// usage that is not there (rule 6). Nil behaves as the primary.
+    var account: CardAccountContext?
 
     /// Observed, not read once: `span` above is accumulated only for messages
     /// assigned to THIS subscription, so with nothing declared every cycle
@@ -544,13 +547,21 @@ struct QuotaHistoryCard: View {
                         .foregroundStyle(.tertiary)
                         .padding(.top, 1)
                 }
-            } else if scanFailed {
-                Text("Local usage could not be read.".localized)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
             } else {
-                LoadingLine(title: "Reading local usage…")
-                    .scaleEffect(0.85, anchor: .leading)
+                switch CardAccountContext.localUsageSlot(
+                    account, hasUsage: false, scanFailed: scanFailed) {
+                case .notAttributable:
+                    Text("Local usage can't be attributed to this account yet.".localized)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                case .unreadable:
+                    Text("Local usage could not be read.".localized)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                case .spinner, .numbers:
+                    LoadingLine(title: "Reading local usage…")
+                        .scaleEffect(0.85, anchor: .leading)
+                }
             }
         }
         .padding(.leading, 16)

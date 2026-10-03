@@ -64,14 +64,14 @@ enum WindowCardLoader {
     /// otherwise prefer a session-class window — that is the question the card
     /// was built to answer — and fall back to the most depleted window there is.
     static func select(
-        payload: AgentUsagePayload, clientId: String, chosen explicit: String? = nil
+        payload: AgentUsagePayload, clientId: String, accountKey: String?,
+        chosen explicit: String? = nil
     ) -> (clientId: String, window: UsageWindow)? {
-        // Primary account only: a client tab is a single detail card with a
-        // single stored selection and no account component, so it can only
-        // ever show one account's windows. An extra account has no tab of its
-        // own — it surfaces as its own row in the Agent-limits overview.
+        // One account per card: `accountKey` is the account the card resolved
+        // (`WindowCardAccount.resolve`), nil for the primary. The stored window
+        // selection stays two-part and applies to whichever account is shown.
         guard let agent = payload.agents.first(where: {
-            $0.clientId == clientId && $0.accountKey == nil
+            $0.clientId == clientId && $0.accountKey == accountKey
         }), agent.error == nil
         else { return nil }
         return pick(windows: agent.uniqueCardWindows, clientId: clientId, chosen: explicit)
@@ -86,11 +86,12 @@ enum WindowCardLoader {
     /// window they belong to is not time-sensitive — so refusing here reported
     /// "no earlier windows recorded" about a subscription with weeks of them.
     static func pickForHistory(
-        payload: AgentUsagePayload, clientId: String, chosen explicit: String? = nil
+        payload: AgentUsagePayload, clientId: String, accountKey: String?,
+        chosen explicit: String? = nil
     ) -> (clientId: String, window: UsageWindow)? {
-        // Primary account only — see `select`.
+        // One account per card — see `select`.
         guard let agent = payload.agents.first(where: {
-            $0.clientId == clientId && $0.accountKey == nil
+            $0.clientId == clientId && $0.accountKey == accountKey
         })
         else { return nil }
         return pick(windows: agent.uniqueCardWindows, clientId: clientId, chosen: explicit)
@@ -142,7 +143,7 @@ enum WindowCardLoader {
     /// value that is already in memory — it never fetches one, which is the
     /// whole reason this half is instant.
     static func quotaHalf(
-        payload: AgentUsagePayload?, clientId: String, attempted: Bool,
+        payload: AgentUsagePayload?, clientId: String, accountKey: String?, attempted: Bool,
         curve: (String, String?, String, UInt64) throws -> QuotaCurve?, nowMs: Int64
     ) -> WindowCardState {
         // `attempted` decides whether an absence is a wait or an answer. Both
@@ -156,9 +157,9 @@ enum WindowCardLoader {
                            reason: "Quota could not be loaded.".localized)
                 : .loading
         }
-        // Primary account only — see `select`.
+        // One account per card — see `select`.
         guard let agent = payload.agents.first(where: {
-            $0.clientId == clientId && $0.accountKey == nil
+            $0.clientId == clientId && $0.accountKey == accountKey
         })
         else {
             // Not "reported no windows" — this agent is not in the report at
@@ -178,7 +179,7 @@ enum WindowCardLoader {
         // window the picker can settle on. The wire format allows an empty
         // `windows` array, so this is a real answer, not a wait.
         guard let selected = select(
-            payload: payload, clientId: clientId,
+            payload: payload, clientId: clientId, accountKey: accountKey,
             chosen: UserDefaults.standard.string(forKey: selectionKey))
         else {
             return attempted
@@ -202,9 +203,12 @@ enum WindowCardLoader {
         // between the two. Rendering that as a terminal "no quota history" is
         // the same mistake as the one this file's `noQuotaHistory` comment
         // warns about, in the other direction.
+        // The read account, not the card's: a merged Antigravity primary reads
+        // its captured account's history (`historyAccountKey`), while the card
+        // identity everywhere else stays `accountKey`.
         guard let samples = curveSamples(
-            payload: payload, clientId: clientId, accountKey: nil, window: window,
-            curve: curve, nowMs: nowMs)
+            payload: payload, clientId: clientId, accountKey: agent.historyReadAccountKey,
+            window: window, curve: curve, nowMs: nowMs)
         else { return .loading }
         guard !samples.isEmpty else {
             return .noQuotaHistory(
@@ -350,7 +354,7 @@ enum WindowCardLoader {
     /// obtained and there is no history — the same distinction, for the same
     /// reason, as `curveSamples`.
     static func cycles(
-        payload: AgentUsagePayload?, clientId: String,
+        payload: AgentUsagePayload?, clientId: String, accountKey: String?,
         curve read: (String, String?, String, UInt64) throws -> QuotaCurve?
     ) -> [QuotaCycle]? {
         // Split, not one guard: no payload is "could not be obtained" and must
@@ -359,14 +363,17 @@ enum WindowCardLoader {
         // before the first fetch had returned.
         guard let payload else { return nil }
         guard let selected = pickForHistory(
-                  payload: payload, clientId: clientId,
+                  payload: payload, clientId: clientId, accountKey: accountKey,
                   chosen: UserDefaults.standard.string(forKey: selectionKey)),
               let key = selected.window.paceStatus.historyKey,
               let generation = payload.publicationGeneration
         else { return [] }
+        // History read account: see `AgentUsageSnapshot.historyReadAccountKey`.
+        let readAccount = payload.agents.first {
+            $0.clientId == clientId && $0.accountKey == accountKey
+        }?.historyReadAccountKey ?? accountKey
         let attempt: QuotaCurve?
-        // Primary account only — see `select`.
-        do { attempt = try read(clientId, nil, key, generation) } catch { return nil }
+        do { attempt = try read(clientId, readAccount, key, generation) } catch { return nil }
         guard let curve = attempt else { return [] }
         // Capped: this list is what the history card draws AND what bounds the
         // union scan, through its oldest entry's `evidenceStartMs`.
@@ -375,39 +382,60 @@ enum WindowCardLoader {
     }
 
     /// The model scope of one window, addressed the way every other surface
-    /// addresses a window: by its `"<clientId>|<cardId>"`.
+    /// addresses a window: by `AccountIdentity.windowKey(cardId:)`, which is
+    /// `"<clientId>|<cardId>"` for the primary and
+    /// `"<clientId>|<accountKey>|<cardId>"` for any other account.
     ///
     /// The history rows and the equivalence estimate are keyed that way and
     /// have no `UsageWindow` in hand, so without this they would each re-derive
     /// the scope from the window key string — three parsers for one fact, which
-    /// is how they drift.
+    /// is how they drift. Client is the first segment, card the last, and the
+    /// account whatever lies between; the agent must match the account too, or
+    /// an extra account would answer with the primary's scope.
     static func modelScope(payload: AgentUsagePayload?, cardId: String?) -> String? {
         guard let payload, let cardId,
-              let separator = cardId.firstIndex(of: "|")
+              let first = cardId.firstIndex(of: "|"),
+              let last = cardId.lastIndex(of: "|")
         else { return nil }
-        let clientId = String(cardId[cardId.startIndex..<separator])
-        let card = String(cardId[cardId.index(after: separator)...])
+        let clientId = String(cardId[cardId.startIndex..<first])
+        let card = String(cardId[cardId.index(after: last)...])
+        let account: String? = first == last
+            ? nil : String(cardId[cardId.index(after: first)..<last])
         return payload.agents
-            .first { $0.clientId == clientId }?
+            .first { $0.clientId == clientId && $0.accountKey == account }?
             .uniqueCardWindows
             .first { $0.cardId == card }?
             .modelScope
     }
 
+    /// A two-part `"<clientId>|<cardId>"` window pick in the vocabulary of the
+    /// account it was resolved for: unchanged for the primary, three-part
+    /// otherwise. The only place a pick crosses into the history vocabulary.
+    static func historyKey(pick: String, accountKey: String?) -> String {
+        guard accountKey != nil, let sep = pick.firstIndex(of: "|") else { return pick }
+        return AccountIdentity(
+            clientId: String(pick[pick.startIndex..<sep]), accountKey: accountKey
+        ).windowKey(cardId: String(pick[pick.index(after: sep)...]))
+    }
+
     /// The `"<clientId>|<cardId>"` the card is currently showing, or nil when
     /// nothing can be selected. One statement of "which window is on screen",
     /// so retention decisions elsewhere compare against the same answer the
-    /// card itself resolves.
-    static func selectedCardId(payload: AgentUsagePayload?, clientId: String) -> String? {
+    /// card itself resolves. Always the two-part window-pick vocabulary: the
+    /// account travels beside it, never inside it.
+    static func selectedCardId(
+        payload: AgentUsagePayload?, clientId: String, accountKey: String?
+    ) -> String? {
         guard let payload,
               let selected = select(
-                  payload: payload, clientId: clientId,
+                  payload: payload, clientId: clientId, accountKey: accountKey,
                   chosen: UserDefaults.standard.string(forKey: selectionKey))
         else { return nil }
         return "\(clientId)|\(selected.window.cardId)"
     }
 
-    /// The `"<clientId>|<cardId>"` whose history `cycles` above returns.
+    /// The window key whose history `cycles` above returns, in the history
+    /// vocabulary (`AccountIdentity.windowKey`): two-part for the primary.
     ///
     /// Deliberately NOT `selectedCardId`: that one resolves through `select`,
     /// this and `cycles` resolve through `pickForHistory`, and the two differ
@@ -421,13 +449,16 @@ enum WindowCardLoader {
     /// choice saved for another client leaves this client's window untouched,
     /// and a window disappearing from the payload changes this without the
     /// preference moving at all.
-    static func historyCardId(payload: AgentUsagePayload?, clientId: String) -> String? {
+    static func historyCardId(
+        payload: AgentUsagePayload?, clientId: String, accountKey: String?
+    ) -> String? {
         guard let payload,
               let selected = pickForHistory(
-                  payload: payload, clientId: clientId,
+                  payload: payload, clientId: clientId, accountKey: accountKey,
                   chosen: UserDefaults.standard.string(forKey: selectionKey))
         else { return nil }
-        return "\(clientId)|\(selected.window.cardId)"
+        return AccountIdentity(clientId: clientId, accountKey: accountKey)
+            .windowKey(cardId: selected.window.cardId)
     }
 
     /// Not private: `AgentLimitsCard`'s sparkline needs the same series for
@@ -514,5 +545,74 @@ enum WindowCardLoader {
             return []
         }
         return [QuotaSample(atMs: nowMs, usedPercent: used)]
+    }
+}
+
+/// Which account a client's window card shows. One function, so the card, the
+/// scan, the history and the pills cannot resolve it differently.
+enum WindowCardAccount {
+    /// Per-client, value is the accountKey and "" the primary. Written only by
+    /// the pill row; a fallback never rewrites it (spec rules 4 and 5).
+    static func prefKey(clientId: String) -> String {
+        "tokenbar.window.card.account.\(clientId)"
+    }
+
+    static func stored(clientId: String) -> String? {
+        UserDefaults.standard.string(forKey: prefKey(clientId: clientId))
+    }
+
+    /// Accounts of `clientId` with live windows in the published payload, in
+    /// payload order. Pills show iff there are at least two.
+    static func accounts(payload: AgentUsagePayload?, clientId: String) -> [String?] {
+        guard let payload else { return [] }
+        var out: [String?] = []
+        for agent in payload.agents
+        where agent.clientId == clientId && agent.error == nil
+            && !agent.uniqueCardWindows.isEmpty
+            && !out.contains(where: { $0 == agent.accountKey }) {
+            out.append(agent.accountKey)
+        }
+        return out
+    }
+
+    /// The stored account when it is live, else the primary when it is, else
+    /// the first other live account; nil (the primary, as before) when none is.
+    static func resolve(
+        payload: AgentUsagePayload?, clientId: String, stored: String?
+    ) -> String? {
+        let live = accounts(payload: payload, clientId: clientId)
+        if let stored {
+            let key: String? = stored.isEmpty ? nil : stored
+            if live.contains(where: { $0 == key }) { return key }
+        }
+        if live.contains(where: { $0 == nil }) { return nil }
+        return live.first ?? nil
+    }
+}
+
+/// Which client's window card (and which client's local scan) a tab gets. One
+/// pure function so the popover and the selftest cannot disagree.
+///
+/// Two roles, deliberately separate: `card` is the client whose window card,
+/// cycles and history are on screen; `scan` is the client whose local messages
+/// are scanned. A tab with local records gets both (the same id, so it behaves
+/// exactly as before); a quota-only tab gets a card and no scan, because a scan
+/// of a client with no local records returns zeros that read as "nothing used".
+enum WindowCardGate {
+    /// A tab has local records iff any member of its slice is present (so the
+    /// grouped Antigravity tab counts `antigravity-cli` records).
+    static func tabHasLocalRecords(tab: String, presentClients: [String]) -> Bool {
+        ClientRegistry.tabSlice(tab).contains { presentClients.contains($0) }
+    }
+
+    /// `quotaClients` is what the model builds cards for
+    /// (`DashboardModel.windowCardClients`); `excluded` the tab/limits-hidden
+    /// set. A grouped tab whose id is not itself a card client (a Grok Bot-only
+    /// install) gets no card and keeps its strip and heatmap.
+    static func clients(
+        tab: String, presentClients: [String], quotaClients: [String], excluded: Set<String>
+    ) -> (card: String?, scan: String?) {
+        guard quotaClients.contains(tab), !excluded.contains(tab) else { return (nil, nil) }
+        return (tab, tabHasLocalRecords(tab: tab, presentClients: presentClients) ? tab : nil)
     }
 }

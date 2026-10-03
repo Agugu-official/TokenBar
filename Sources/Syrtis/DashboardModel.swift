@@ -224,6 +224,10 @@ private struct DashboardSnapshot {
         let heatmapWindows: [QuotaHeatmapWindow]
         /// The window card at the top of the lens, and its sparkline.
         let windowCards: [String: WindowCardState]
+        /// Which account each card in `windowCards` was built for (scan slot,
+        /// "" = primary). Restored with it: a card is only valid for the
+        /// account it was built for.
+        let windowCardAccounts: [String: String]
         let windowCurves: [String: [QuotaSample]]
         /// "Window history" at the foot of the lens, and the API-value
         /// estimates its rows are annotated with.
@@ -240,6 +244,10 @@ private struct DashboardSnapshot {
         /// rebuild on a reopened model can tell "the same window, scan not back
         /// yet" from "a different window", and retain only the former.
         let historyCardId: String?
+        /// The scan slot of the account `cycles` belong to, so a reopened
+        /// model whose resolved account has changed since does not draw them
+        /// (spec rule 3). Nil only for a snapshot that recorded none.
+        var cyclesAccount: String? = nil
     }
 }
 
@@ -427,10 +435,12 @@ private struct DashboardSnapshot {
             quotaHeatmaps = snap.quotaCards.heatmaps
             quotaHeatmapWindows = snap.quotaCards.heatmapWindows
             windowCards = snap.quotaCards.windowCards
+            windowCardAccounts = snap.quotaCards.windowCardAccounts
             windowCurves = snap.quotaCards.windowCurves
             quotaHistory = snap.quotaCards.history
             quotaEquivalences = snap.quotaCards.equivalences
             quotaCycles = snap.quotaCards.cycles
+            quotaCyclesAccount = snap.quotaCards.cyclesAccount
             quotaHistoryCardId = snap.quotaCards.historyCardId
             // Seeded from the SAME id, because two separate checks compare
             // against it and both read a nil as "a different window". A
@@ -510,6 +520,29 @@ private struct DashboardSnapshot {
     /// Union of `payload.years` across loads — a year-filtered payload only
     /// reports the selected year, so remember the rest for the picker.
     private(set) var knownYears: [String] = []
+
+    /// Clients that have had local usage records in ANY payload this install
+    /// has loaded, persisted across launches. `stats.presentClients` covers
+    /// only the selected year, while a window card's local scan covers its
+    /// quota history whatever the year: gating the scan on the year's clients
+    /// turned a Codex card into "can't be attributed" on a year with no Codex
+    /// records (#462 review, Windows lane F). Client ids only; it only grows,
+    /// which errs toward scanning (a scan of a client with no records shows
+    /// zero rather than hiding real usage).
+    static let localRecordClientsKey = "tokenbar.localRecordClients"
+
+    static func recordLocalRecordClients(_ ids: [String], defaults: UserDefaults = .standard) {
+        let known = Set(defaults.stringArray(forKey: localRecordClientsKey) ?? [])
+        let union = known.union(ids)
+        if union != known { defaults.set(union.sorted(), forKey: localRecordClientsKey) }
+    }
+
+    /// The year-independent "has local records" set the window-card gate reads:
+    /// the persisted union plus whatever the current payload shows.
+    func localRecordClients(defaults: UserDefaults = .standard) -> [String] {
+        Array(Set(defaults.stringArray(forKey: Self.localRecordClientsKey) ?? [])
+            .union(stats?.presentClients ?? [])).sorted()
+    }
     private(set) var payload: UsagePayload?
     private(set) var stats: UsageStats?
     private(set) var modelReport: ModelReport?
@@ -1106,6 +1139,7 @@ private struct DashboardSnapshot {
         graphFetchFailed = false
         stats = UsageStats(payload: payload, selectedClients: Set(payload.summary.clients))
         knownYears = Set(knownYears + payload.years.map(\.year)).sorted(by: >)
+        Self.recordLocalRecordClients(payload.summary.clients)
         phase = .ready
         payloadCapturedAt = Date()
         restoredSnapshot = nil
@@ -1156,9 +1190,11 @@ private struct DashboardSnapshot {
             quotaCards: DashboardSnapshot.QuotaCards(
                 summaries: quotaWindowSummaries, heatmaps: quotaHeatmaps,
                 heatmapWindows: quotaHeatmapWindows,
-                windowCards: windowCards, windowCurves: windowCurves,
+                windowCards: windowCards, windowCardAccounts: windowCardAccounts,
+                windowCurves: windowCurves,
                 history: quotaHistory, equivalences: quotaEquivalences,
-                cycles: quotaCycles, historyCardId: quotaHistoryCardId)))
+                cycles: quotaCycles, historyCardId: quotaHistoryCardId,
+                cyclesAccount: quotaCyclesAccount)))
     }
 
     /// Submit the DISK capture. Deliberately separate from `cacheSnapshot()`
@@ -1224,9 +1260,11 @@ private struct DashboardSnapshot {
             quotaCards: DashboardSnapshot.QuotaCards(
                 summaries: quotaWindowSummaries, heatmaps: quotaHeatmaps,
                 heatmapWindows: quotaHeatmapWindows,
-                windowCards: windowCards, windowCurves: windowCurves,
+                windowCards: windowCards, windowCardAccounts: windowCardAccounts,
+                windowCurves: windowCurves,
                 history: quotaHistory, equivalences: quotaEquivalences,
-                cycles: quotaCycles, historyCardId: quotaHistoryCardId)))
+                cycles: quotaCycles, historyCardId: quotaHistoryCardId,
+                cyclesAccount: quotaCyclesAccount)))
     }
 
     /// Periodically re-derive every loaded lens so the popover advances while
@@ -1303,6 +1341,19 @@ private struct DashboardSnapshot {
     /// loading case is a state, not a nil.
     var windowCards: [String: WindowCardState] = [:]
 
+    /// The account each `windowCards` entry was built for, as a scan slot
+    /// ("" = primary). Written wherever `windowCards` is.
+    var windowCardAccounts: [String: String] = [:]
+
+    /// The card the views draw for `clientId`: the stored state only while it
+    /// was built for the account now resolved. A held card for account A must
+    /// never flash under account B's pills, so a mismatch is `.loading`.
+    func windowCard(for clientId: String) -> WindowCardState? {
+        guard let held = windowCards[clientId] else { return nil }
+        let slot = Self.scanSlot(cardAccountKey(for: clientId))
+        return windowCardAccounts[clientId] == slot ? held : .loading
+    }
+
     /// The scan for one account, restored from the shared cache so a reopen
     /// renders bars immediately instead of spinning.
     ///
@@ -1323,15 +1374,53 @@ private struct DashboardSnapshot {
     /// empty path, and Settings refuses one too.
     static func scanSlot(_ accountKey: String?) -> String { accountKey ?? "" }
 
-    /// The account a window CARD is about, which is always the primary.
-    ///
-    /// Not a decision made here: `WindowCardLoader` selects
-    /// `accountKey == nil` in `select`, `pickForHistory` and `quotaHalf`, so a
-    /// client tab can only ever show the primary's windows. Named rather than
-    /// written as a bare `nil` at four call sites, so the day an extra account
-    /// gets a tab there is one place that has to change and a grep that finds
-    /// it.
-    static let cardAccountKey: String? = nil
+    /// The account a window CARD is about: `WindowCardAccount.resolve` over
+    /// the published payload and the per-client stored choice. The one place
+    /// that decides it; every read of "which account's card" goes through here.
+    func cardAccountKey(for clientId: String) -> String? {
+        WindowCardAccount.resolve(
+            payload: agentUsage, clientId: clientId,
+            stored: WindowCardAccount.stored(clientId: clientId))
+    }
+
+    /// The scan slot of the account `quotaCycles` / `quotaHistory` were last
+    /// written for by `refreshWindowQuotaHalves` (both on success and when a
+    /// failed read clears them). Nil until then (including after a reopen
+    /// restore), meaning "not known to belong to another account".
+    @ObservationIgnored private(set) var quotaCyclesAccount: String?
+
+    /// The cycles and history rows for the open client's card, except while
+    /// they belong to ANOTHER account: between an account pick and the refresh
+    /// that rebuilds them, `quotaCycles` still holds the previous account's
+    /// cycles, and drawing them under the new account is a cross-account
+    /// history (spec rule 3). `pending` lets the history card show its loading
+    /// state meanwhile. Compared by account only, not by card id: a failed
+    /// read clears the id to nil, and the card must then keep showing
+    /// "could not be read", not a spinner (verifier F1).
+    func cardHistory(for clientId: String)
+        -> (cycles: [QuotaCycle], rows: [QuotaHistoryRow], pending: Bool)
+    {
+        if let held = quotaCyclesAccount,
+           held != Self.scanSlot(cardAccountKey(for: clientId)) {
+            return ([], [], true)
+        }
+        return (quotaCycles, quotaHistory, false)
+    }
+
+    /// What the views need for the open client's account pills, header label
+    /// and rule-6 line. Nil when the client has no live account at all.
+    func cardAccountContext(for clientId: String) -> CardAccountContext? {
+        let accounts = WindowCardAccount.accounts(payload: agentUsage, clientId: clientId)
+        guard !accounts.isEmpty else { return nil }
+        return CardAccountContext(
+            clientId: clientId, accounts: accounts, resolved: cardAccountKey(for: clientId),
+            // The scan client is set exactly when the tab has local records
+            // (`WindowCardGate`): no scan means no local usage to attribute.
+            tabHasLocalRecords: windowUsageClient == clientId,
+            primaryEmail: agentUsage?.agents.first {
+                $0.clientId == clientId && $0.accountKey == nil
+            }?.identity?.email)
+    }
 
     /// How long a scan is served before being refreshed. Matched to the
     /// engine's own oneshot age so the two layers do not disagree about what
@@ -1441,6 +1530,7 @@ private struct DashboardSnapshot {
                 windowCardClients.contains($0.key)
                     && !(quotaVisibility?.limits.contains($0.key) ?? false)
             }
+            windowCardAccounts = windowCardAccounts.filter { windowCards[$0.key] != nil }
         }
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         // Deliberately NOT `try?`: swallowing the error here is what let a
@@ -1456,8 +1546,12 @@ private struct DashboardSnapshot {
                     // A failed read keeps whatever the row already had. Blanking
                     // it would drop a drawn sparkline to a bar for one refresh
                     // and put it back on the next — a flicker that says nothing.
+                    // Read under the history account (a merged Antigravity
+                    // primary reads its captured account's curve); the row is
+                    // still stored under the snapshot's own accountKey.
                     guard let samples = WindowCardLoader.curveSamples(
-                        payload: payload, clientId: agent.clientId, accountKey: agent.accountKey,
+                        payload: payload, clientId: agent.clientId,
+                        accountKey: agent.historyReadAccountKey,
                         window: window, curve: readCurve, nowMs: now)
                     else { continue }
                     windowCurves[WindowCardLoader.curveKey(
@@ -1467,8 +1561,10 @@ private struct DashboardSnapshot {
             }
         }
         for clientId in windowCardClients where !(quotaVisibility?.limits.contains(clientId) ?? false) {
+            let account = cardAccountKey(for: clientId)
+            let slot = Self.scanSlot(account)
             let state = WindowCardLoader.quotaHalf(
-                payload: agentUsage, clientId: clientId,
+                payload: agentUsage, clientId: clientId, accountKey: account,
                 attempted: agentUsageAttempted,
                 curve: readCurve, nowMs: now)
             // Fold in a usage half we already hold, so a stage-1 refresh does
@@ -1488,21 +1584,25 @@ private struct DashboardSnapshot {
             // only ever reached with the flag set, so it stated this same rule
             // more weakly, and a redundant check that can disagree is a second
             // failure mode rather than a second line of defence.
-            if case let .quotaOnly(q, _) = state, !windowScanFailed(for: clientId),
-               let scan = unionScan(for: Self.cardAccountKey),
+            if case let .quotaOnly(q, _) = state,
+               !windowScanFailed(for: clientId, accountKey: account),
+               let scan = unionScan(for: account),
                let (settled, usage) = WindowCardLoader.usageHalf(
                    quota: q, scan: scan, confirmed: UsageAttribution.confirmed().records) {
                 windowCards[clientId] = .ready(settled, usage)
+                windowCardAccounts[clientId] = slot
             } else if case let .quotaOnly(q, _) = state,
-                      windowScanFailed(for: clientId) {
+                      windowScanFailed(for: clientId, accountKey: account) {
                 // The loader cannot know this — it never runs the scan. Carried
                 // in here so the card can say the scan failed instead of
                 // spinning under a chart that is already drawn.
                 windowCards[clientId] = .quotaOnly(q, scanFailed: true)
+                windowCardAccounts[clientId] = slot
             } else if case .loading = state,
                       let held = windowCards[clientId]?.cardId,
+                      windowCardAccounts[clientId] == slot,
                       held == WindowCardLoader.selectedCardId(
-                          payload: agentUsage, clientId: clientId) {
+                          payload: agentUsage, clientId: clientId, accountKey: account) {
                 // A curve read that throws is a transient generation expiry —
                 // `quotaHalf` answers `.loading`, which is right as an answer
                 // and wrong as a replacement. Overwriting sent a drawn card
@@ -1515,6 +1615,8 @@ private struct DashboardSnapshot {
                 // two selections share a client, so retaining by client alone
                 // left the chart and totals on the window the user had just
                 // navigated away from while the picker highlighted the new one.
+                // And only for the same ACCOUNT, for the same reason one level
+                // up: the held card is that account's window, not this one's.
                 continue
             } else {
                 // A card holding a scan that cannot answer for the window it
@@ -1543,6 +1645,7 @@ private struct DashboardSnapshot {
                 // correct itself — a worse claim than "a scan is pending",
                 // which is what is actually happening.
                 windowCards[clientId] = state
+                windowCardAccounts[clientId] = slot
             }
         }
 
@@ -1585,7 +1688,7 @@ private struct DashboardSnapshot {
                     else { continue }
                     windowsToRead += 1
                     let attempt: QuotaCurve?
-                    do { attempt = try readCurve(agent.clientId, agent.accountKey, key, generation) }
+                    do { attempt = try readCurve(agent.clientId, agent.historyReadAccountKey, key, generation) }
                     catch {
                         // #359. WHICH window could not be read, not merely that
                         // one could not. A single flag made every provider share
@@ -1760,8 +1863,10 @@ private struct DashboardSnapshot {
             })
         }
 
-        // Cycles follow the scan's client, not every displayed one: the history
-        // is a per-subscription list and only the open tab shows it.
+        // Cycles follow the card's client, not every displayed one: the history
+        // is a per-subscription list and only the open tab shows it. The card
+        // client, not the scan client: a quota-only tab has a card and history
+        // and no scan.
         //
         // The client the published cycles belong to is tracked, because "keep
         // what we had" is only safe while the question has not changed. A
@@ -1769,14 +1874,20 @@ private struct DashboardSnapshot {
         // `QuotaView` then drew them under B's name — one subscription's
         // history labelled as another's, which is worse than an empty card and
         // indistinguishable from a correct one.
-        if let client = windowUsageClient {
+        if let client = cardClient {
+            let account = cardAccountKey(for: client)
+            // History vocabulary: two-part for the primary, three-part for any
+            // other account, so a switch of account is a different window here.
             let selected = WindowCardLoader.selectedCardId(
-                payload: agentUsage, clientId: client)
+                payload: agentUsage, clientId: client, accountKey: account
+            ).map { WindowCardLoader.historyKey(pick: $0, accountKey: account) }
             if let cycles = WindowCardLoader.cycles(
-                payload: agentUsage, clientId: client, curve: readCurve)
+                payload: agentUsage, clientId: client, accountKey: account,
+                curve: readCurve)
             {
                 quotaCycles = cycles
                 quotaCyclesCardId = selected
+                quotaCyclesAccount = Self.scanSlot(account)
                 quotaCurveUnreadable = false
                 rebuildQuotaHistory()
             } else {
@@ -1794,12 +1905,14 @@ private struct DashboardSnapshot {
                     quotaCycles = []
                     quotaHistory = []
                     quotaCyclesCardId = nil
+                    quotaCyclesAccount = Self.scanSlot(account)
                 }
             }
         } else {
             quotaCycles = []
             quotaHistory = []
             quotaCyclesCardId = nil
+            quotaCyclesAccount = nil
             quotaCurveUnreadable = false
         }
     }
@@ -1863,7 +1976,7 @@ private struct DashboardSnapshot {
     private func rebuildQuotaHistory() {
         // Genuinely nothing to show: no window selected, or the window has no
         // cycles. Clearing is the right answer to both.
-        guard let client = windowUsageClient, let oldest = quotaCycles.last else {
+        guard let client = cardClient, let oldest = quotaCycles.last else {
             quotaHistory = []
             quotaHistoryCardId = nil
             return
@@ -1877,7 +1990,11 @@ private struct DashboardSnapshot {
         // Retained only for the SAME window: the rows are annotated against
         // one window's cycles, so showing them under another is a wrong answer
         // rather than a slow one.
-        guard let scan = unionScan(for: Self.cardAccountKey),
+        // A card with no scan (quota-only tab) lists its cycles without usage
+        // rows: the static scan cache is keyed by account alone, so another
+        // client's scan must never be joined here.
+        guard windowUsageClient == client,
+              let scan = unionScan(for: cardAccountKey(for: client)),
               scan.covers(start: oldest.evidenceStartMs)
         else {
             if quotaHistoryCardId != quotaCyclesCardId {
@@ -1913,7 +2030,18 @@ private struct DashboardSnapshot {
     /// — 67s cold — on a tab that displays none of it. The version before the
     /// two-stage split returned early here whenever no agent tab was open;
     /// this restores that bound without giving up the shared scan.
-    var windowUsageClient: String?
+    var windowUsageClient: String? {
+        // A tab with local records has both roles on the same id. Setting the
+        // scan client keeps the card client in step; the popover then sets
+        // `cardClient` explicitly, which is how a quota-only tab has a card
+        // and no scan.
+        didSet { cardClient = windowUsageClient }
+    }
+
+    /// The client whose window card, cycles and history are on screen, or nil
+    /// when no card is. Separate from `windowUsageClient` (whose local messages
+    /// are scanned): a quota-only tab has a card and no scan.
+    var cardClient: String?
 
     /// Recorded reset cycles of `windowUsageClient`'s selected window, newest
     /// first. Derived from the persisted curve alone, so it lands with stage 1.
@@ -1930,7 +2058,7 @@ private struct DashboardSnapshot {
     /// not client alone. Two window selections share a client, so a client-only
     /// comparison could keep the previous window's history beneath the newly
     /// selected card. Nil when empty.
-    @ObservationIgnored private var quotaCyclesCardId: String?
+    @ObservationIgnored private(set) var quotaCyclesCardId: String?
 
     /// Whether the persisted curve could not be READ, as distinct from having
     /// no history in it.
@@ -2136,6 +2264,15 @@ private struct DashboardSnapshot {
             refreshSnapshotLiveData()
             return
         }
+        // The account the card shows, resolved once for this whole pass: it
+        // picks the scan slot, the engine call and the failure flag, and they
+        // must not disagree. A captured Antigravity account has no local logs
+        // (`hasLocalUsage`), so asking the engine would look its key up as a
+        // Claude config directory; the card says so instead (rule 6).
+        let account = cardAccountKey(for: client)
+        guard AccountIdentity(clientId: client, accountKey: account).hasLocalUsage
+        else { return }
+        let failureKey = Self.scanFailureKey(client: client, accountKey: account)
         // The history's oldest cycle CONTAINS the active window, so this widens
         // one scan rather than issuing a second. Measured 2026-08-16 on live
         // data: 5.4 days, 45,844 messages, 4.6s — an order of magnitude below
@@ -2172,22 +2309,22 @@ private struct DashboardSnapshot {
         // the engine. Guarding after it left the hole open on the only path
         // that does not need a scan.
         guard from < now else {
-            windowScanFailedClients.insert(client)
+            windowScanFailedClients.insert(failureKey)
             refreshWindowQuotaHalves()
             return
         }
         // Serve the cached scan while it still covers the range and is fresh.
         // Rescanning on every reopen was the whole complaint: the staging made
         // the wait visible, it did not make it rare.
-        if let cached = unionScan(for: Self.cardAccountKey), cached.covers(start: from),
+        if let cached = unionScan(for: account), cached.covers(start: from),
            Date().timeIntervalSince(cached.capturedAt) < Self.unionScanMaxAge {
             // A fresh scan that covers this window IS an answer for it, whoever
             // ran it. Returning without clearing left the card reporting a
             // failure while the model held the very data that refutes it — and
             // refusing to rescan for another 30 seconds.
-            if windowScanFailedClients.contains(client) {
+            if windowScanFailedClients.contains(failureKey) {
                 windowScanFailedClients = Self.scanFailures(
-                    windowScanFailedClients, resolvedBy: client)
+                    windowScanFailedClients, resolvedBy: failureKey)
                 refreshWindowQuotaHalves()
             }
             return
@@ -2198,10 +2335,10 @@ private struct DashboardSnapshot {
         // that will never stop. The token check keeps an overtaken scan's
         // failure from settling a newer request, exactly as its success is.
         guard let usage = try? await source.windowUsage(
-            accountKey: Self.cardAccountKey, from: from, until: now)
+            accountKey: account, from: from, until: now)
         else {
             guard Self.windowScanToken == scanToken else { return }
-            windowScanFailedClients.insert(client)
+            windowScanFailedClients.insert(failureKey)
             refreshWindowQuotaHalves()
             return
         }
@@ -2212,12 +2349,12 @@ private struct DashboardSnapshot {
         // is not tested here. A bare `nil` cleared whichever client was
         // recorded, which is neither of those things.
         windowScanFailedClients = Self.scanFailures(
-            windowScanFailedClients, resolvedBy: client)
+            windowScanFailedClients, resolvedBy: failureKey)
         setUnionScan(
             UnionScan(
                 fromMs: from, untilMs: now, capturedAt: Date(), messages: usage.messages,
                 undatedCount: usage.undatedCount),
-            for: Self.cardAccountKey)
+            for: account)
         refreshWindowQuotaHalves()
         rebuildQuotaHistory()
         rebuildQuotaEquivalences()
@@ -2269,7 +2406,21 @@ private struct DashboardSnapshot {
     /// Whether the card currently shown for `clientId` should say the scan
     /// failed rather than that it is still running.
     func windowScanFailed(for clientId: String) -> Bool {
-        windowScanFailedClients.contains(clientId)
+        windowScanFailed(for: clientId, accountKey: cardAccountKey(for: clientId))
+    }
+
+    /// For one account's scan slot. Flags are keyed by (client, account): a
+    /// failed primary scan must not mark account B failed while B's own scan is
+    /// still pending, nor B's failure mark the primary.
+    func windowScanFailed(for clientId: String, accountKey: String?) -> Bool {
+        windowScanFailedClients.contains(
+            Self.scanFailureKey(client: clientId, accountKey: accountKey))
+    }
+
+    /// The failure-set member for one card's scan. The bare client id for the
+    /// primary, so a one-account client keeps the key it always had.
+    nonisolated static func scanFailureKey(client: String, accountKey: String?) -> String {
+        accountKey.map { "\(client)\u{1F}\($0)" } ?? client
     }
 
     /// The recorded failures after a scan for `client` succeeds.

@@ -25,10 +25,18 @@ struct QuotaView: View {
     var windowCurves: [String: [QuotaSample]] = [:]
     /// The selected window's card state on a single-client tab.
     var windowCard: WindowCardState?
+    /// The open client's accounts: pill row, header label, and which local-usage
+    /// line the card and its history show. Nil when no account has live windows.
+    var accountContext: CardAccountContext?
+    /// Called with the account the reader picked (nil = primary).
+    var onSelectAccount: (String?) -> Void = { _ in }
     /// Recorded reset cycles of that window, newest first.
     var quotaCycles: [QuotaCycle] = []
     /// Those cycles joined to local usage; empty while the scan is out.
     var quotaHistory: [QuotaHistoryRow] = []
+    /// The cycles above belong to another account or window than the card
+    /// shows now (an account pick before its refresh landed); draw loading.
+    var historyPending = false
     /// Shared model palette, so a model keeps one colour across the app.
     var colors: ModelColorMap = ModelColorMap(entries: [])
     /// Daily spend stacked by declared subscription, for the all-agent view.
@@ -52,7 +60,9 @@ struct QuotaView: View {
                 if let windowCard {
                     // Above its siblings: a `zIndex` set inside the card orders
                     // that card's children, not the card among these.
-                    WindowUsageCard(state: windowCard).zIndex(1)
+                    WindowUsageCard(
+                        state: windowCard, account: accountContext,
+                        onSelectAccount: onSelectAccount).zIndex(1)
                 }
                 if limitsEnabled {
                     AgentLimitsCard(
@@ -83,8 +93,10 @@ struct QuotaView: View {
                 } else {
                     QuotaHistoryCard(
                         clientId: singleClient, cycles: quotaCycles,
-                        rows: quotaHistory, colors: colors, attempted: usageAttempted,
-                        scanFailed: scanFailed, curveUnreadable: curveUnreadable)
+                        rows: quotaHistory, colors: colors,
+                        attempted: usageAttempted && !historyPending,
+                        scanFailed: scanFailed, curveUnreadable: curveUnreadable,
+                        account: accountContext)
                         // The card holds per-window state — how many rows the
                         // reader has grown the list to, and which row is open — and
                         // switching windows inside one client does not by itself
@@ -95,8 +107,13 @@ struct QuotaView: View {
                         // Same resolution the cycle list itself went through, so
                         // the key cannot name a window other than the one the rows
                         // came from.
+                        // The account is part of the identity (history vocabulary:
+                        // three-part for a non-primary account), so switching
+                        // account rebuilds the card instead of keeping the
+                        // other account's expanded rows.
                         .id(WindowCardLoader.historyCardId(
-                            payload: agentUsage, clientId: singleClient))
+                            payload: agentUsage, clientId: singleClient,
+                            accountKey: accountContext?.resolved))
                 }
             } else {
                 // Trend first: it answers "where is my spend going" across
